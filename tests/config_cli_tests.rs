@@ -420,17 +420,23 @@ fn write_windows_editor_script(root: &Path) -> std::path::PathBuf {
   script
 }
 
-/// Issue #415: `gwm config validate` still exits 0 for a customised
-/// `worktree.branch_pattern` — it is a valid config — but it says on stderr
-/// that structured parsing will not follow it.
+/// Issue #415: `gwm config validate` still exits 0 for a `worktree.branch_pattern`
+/// gwm cannot fully read back — it is a valid config — but it says on stderr
+/// which features go without.
+///
+/// Issue #417 changed the vehicle, not the contract. `{type}-{issue}-{desc}`
+/// used to be the example here and round-trips now that the parser is derived
+/// from the pattern, so the test uses a pattern that genuinely drops a
+/// segment: a frozen issue number is absent from every branch the pattern
+/// writes, whatever the parser does.
 #[test]
-fn config_validate_warns_when_branch_pattern_is_customised() {
+fn config_validate_warns_when_branch_pattern_carries_no_issue() {
   let (dir, _repo) = init_repo();
   fs::write(
     dir.path().join(".gwm.toml"),
     r#"
 [worktree]
-branch_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#1-{desc}"
 "#,
   )
   .unwrap();
@@ -484,7 +490,7 @@ fn config_validate_warns_for_a_globally_set_branch_pattern() {
     gwm_dir.join("config.toml"),
     r#"
 [worktree]
-branch_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#1-{desc}"
 "#,
   )
   .unwrap();

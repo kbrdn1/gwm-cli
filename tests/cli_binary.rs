@@ -6780,3 +6780,108 @@ fn create_name_rejects_a_name_git_would_refuse() {
     .failure()
     .stderr(predicate::str::contains("has space"));
 }
+
+#[test]
+fn commit_prefix_reads_a_branch_written_with_a_custom_pattern() {
+  // Issue #417. `worktree.branch_pattern` drives `BranchSpec::branch_name`,
+  // so a repo configured with `{type}-{issue}-{desc}` creates
+  // `feat-41-foo` and every gwm surface that re-reads the branch has to
+  // recognise it. The parser matched a hardcoded `<type>/#<issue>-<desc>`
+  // instead, so the branch this very repo told gwm to create came back
+  // unreadable: no gitmoji, no issue in the prefix.
+  //
+  // Slash-less is the point, not an edge case — `-` sits in neither the
+  // type charset (`[a-z]+`) nor the issue charset (`\d+`), so the split is
+  // unambiguous and there is no reason for it to fail.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"{type}-{issue}-{desc}\"\n",
+  )
+  .expect("seed .gwm.toml");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat-41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":sparkles: feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_never_echoes_control_bytes_from_the_branch_pattern() {
+  // Codex review on PR #476. `branch_pattern` comes from a repo's `.gwm.toml`
+  // and `gwm commit-prefix` does not go through the TOFU trust gate, so
+  // running it inside a repo you have not vetted must stay safe. Both errors
+  // #417 added quote the pattern, and quoting it raw hands an unvetted config
+  // the same terminal escape channel (OSC 52 clipboard write, screen clear)
+  // that `branch_pattern_warning` already neutralises.
+  let (dir, _repo) = init_repo();
+  // OSC 52 clipboard-write shape: ESC ] 52 ; c ; <payload> BEL
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    // TOML basic-string escapes: `\u001B` is ESC, `\u0007` is BEL. Written this
+    // way rather than as raw bytes because TOML forbids control characters
+    // inside a string, and a config that fails to parse would fall back to the
+    // default pattern and quietly make this test vacuous.
+    "[worktree]\nbranch_pattern = \"{type}/{desc}\\u001B]52;c;cHduZWQ=\\u0007\"\n",
+  )
+  .expect("seed .gwm.toml");
+
+  // A branch that does not match, so the "does not match this pattern" error
+  // fires and quotes the pattern.
+  let assert = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "nothing-like-it"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+  assert!(
+    !stderr.chars().any(|c| c.is_control() && c != '\n'),
+    "no control character may reach the terminal: {:?}",
+    stderr
+  );
+
+  // …and the "carries no {issue}" error, which quotes it too.
+  let assert = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/x"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+  assert!(
+    !stderr.chars().any(|c| c.is_control() && c != '\n'),
+    "the second error quotes the pattern too: {:?}",
+    stderr
+  );
+}
+
+#[test]
+fn pr_falls_back_to_chore_when_the_pattern_carries_no_type() {
+  // Codex review on PR #476, second pass. Before #417 the parser either
+  // matched or returned `None`, so `unwrap_or_else(|| "chore")` covered every
+  // branch with no readable type. #417 let a partial pattern parse and report
+  // the segments it *does* carry, which hands `gwm pr` a `Some` holding an
+  // empty type — and an empty type selects no `[pr_template.by_type]` entry
+  // and renders `{type}` blank. The fallback has to survive the loosening.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"{issue}-{desc}\"\n\n\
+     [pr_template.by_type.chore]\nbody = \"chore body for {desc} (#{issue})\\n\"\n",
+  )
+  .expect("seed .gwm.toml");
+  make_feature_branch_with_commit(&repo, dir.path(), "42-tidy-up", "note.md", "x\n", "🔧 chore: tidy");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("chore body for tidy-up (#42)"));
+}

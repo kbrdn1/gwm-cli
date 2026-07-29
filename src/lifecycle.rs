@@ -116,7 +116,12 @@ impl HookContext {
 
   pub fn for_worktree(repo: &Repository, main_repo: &Path, cwd: &Path, path: &Path, branch: Option<&str>) -> Self {
     let meta = RepoMeta::from_repo(repo);
-    let parsed = branch.and_then(crate::naming::parse_branch);
+    // Issue #417: the remove / bootstrap hook context rebuilds `{type}` /
+    // `{issue}` / `{desc}` by re-reading the branch, so it reads it with the
+    // pattern that wrote it. `for_create` does not come through here — it
+    // carries the original `BranchSpec` straight through.
+    let parser = crate::naming::BranchParser::for_repo(repo);
+    let parsed = branch.and_then(|b| parser.parse(b));
     Self {
       main_repo: main_repo.to_path_buf(),
       cwd: cwd.to_path_buf(),

@@ -9053,12 +9053,18 @@ fn request_pull_refuses_while_another_mutation_runs() {
 
 #[test]
 fn enter_edit_worktree_refuses_unconfigured_branch_type() {
-  // Codex review on PR #292: a branch whose parsed type is not in branch_types
-  // must refuse to open the rename modal rather than silently preselecting the
+  // Codex review on PR #292: a branch whose type is not in branch_types must
+  // refuse to open the rename modal rather than silently preselecting the
   // first configured type (which Enter would then rename the branch to).
+  //
+  // Issue #417 left this path alone on purpose. Compiling `{type}` into an
+  // alternation of the configured types would have made `zzz/#7-thing` fail to
+  // parse, collapsing this precise refusal into the generic "does not match
+  // the pattern" one and taking the same branch away from `doctor` and
+  // `commit-prefix`, which read it fine in the previous release.
   let (_dir, mut app) = make_app();
   let mut wt = worktree_fixture("foo");
-  // `zzz` is a well-formed <type>/#<issue>-<desc> but not a configured type.
+  // `zzz` looks like a <type>/#<issue>-<desc> but is not a configured type.
   wt.branch = Some("zzz/#7-thing".into());
   app.worktrees = vec![wt];
   app.list_state.select(Some(0));
@@ -9068,8 +9074,8 @@ fn enter_edit_worktree_refuses_unconfigured_branch_type() {
   assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
   assert!(app.edit_original_branch.is_none());
   assert!(
-    app.status.contains("not configured"),
-    "status must explain: {}",
+    app.status.contains("not configured") && app.status.contains("zzz"),
+    "status must name the type and the reason: {}",
     app.status
   );
 }
@@ -10573,5 +10579,382 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
   assert!(
     !url.contains("github.com"),
     "the old tenant's cached URL survived the move: {url}"
+  );
+}
+
+#[test]
+fn enter_edit_worktree_refuses_a_pattern_that_carries_no_issue() {
+  // Codex review on PR #476. Before #417 a branch written by `{type}/{desc}`
+  // did not parse at all, so the rename modal refused to open. Deriving the
+  // parser made it parse with `issue == ""`, which opened a form the user
+  // cannot submit: `submit_edit_worktree` runs `BranchSpec::new_with_types`,
+  // which rejects an empty issue, and inventing one would not help either
+  // since the pattern has no `{issue}` to write it into.
+  //
+  // Refuse up front and name what is missing, the same shape as
+  // `gwm commit-prefix`.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "an unsubmittable form must not open");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("{issue}") && app.status.contains("branch pattern"),
+    "status must name the missing placeholder: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_edit_worktree_opens_when_the_pattern_freezes_a_segment() {
+  // The other side of the same guard: `feat/#{issue}-{desc}` hardcodes the
+  // type, and #417 recovers it as a constant, so every segment has a value and
+  // the rename is perfectly submittable. Refusing here would take the modal
+  // away from a repo where it works.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "a fully-supplied triple must open the form");
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "my-desc");
+}
+
+#[test]
+fn submit_edit_worktree_refuses_to_change_a_segment_no_pattern_writes() {
+  // Codex review on PR #476, fourth pass, narrowed by Kylian afterwards. The
+  // refusal is about there being **nowhere to put the new value**, so it asks
+  // both patterns, not just `branch_pattern`: a segment the branch freezes but
+  // the *path* still writes has a real destination, and changing it genuinely
+  // renames the directory (see the test below).
+  //
+  // Here neither writes the issue: `{type}-1-{desc}` on both sides. Editing
+  // `1` to `2` would produce the same branch and the same directory, so the
+  // submit would close the form having changed nothing at all. Saying no is
+  // better than a silent no-op.
+  //
+  // The refusal is scoped to a frozen segment the user actually changed:
+  // `feat/#{issue}-{desc}` freezes the type and its rename worked in 1.5.0, so
+  // editing the issue or the description there must stay possible.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}-1-{desc}".into();
+  app.config.worktree.path_pattern = "{type}-1-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat-1-my-desc".into());
+  wt.path = app.workdir.join("feat-1-my-desc");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the frozen issue is supplied, so the form opens");
+  assert_eq!(app.create_form.issue, "1");
+
+  app.create_form.issue = "2".into();
+  app
+    .submit_edit_worktree()
+    .expect("the refusal is a form failure, not an error");
+
+  assert_eq!(app.view, View::Edit, "the form stays open on a refusal");
+  let failure = app
+    .edit_failure
+    .clone()
+    .expect("the refusal must be reported in the form");
+  assert!(
+    failure.contains("{issue}"),
+    "the message must name the placeholder the pattern cannot write: {}",
+    failure
+  );
+  // Deliberately value-free: `LoaderWidget` renders one unwrapped line, so a
+  // message whose length follows user input clips at an arbitrary point. The
+  // value is on screen anyway, in the modal's `From :` row.
+  assert!(
+    !failure.contains('1'),
+    "the frozen value belongs on screen, not in a message of variable length: {}",
+    failure
+  );
+}
+
+#[test]
+fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
+  // The other side of the same guard, and the reason it is scoped to the
+  // segment rather than to the pattern: `feat/#{issue}-{desc}` freezes the
+  // type, and renaming the issue or the description under it worked before
+  // #417. It has to keep working.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.create_form.desc = "other-desc".into();
+  app.submit_edit_worktree().expect("submits");
+
+  assert_eq!(
+    app.edit_failure, None,
+    "editing a segment the pattern writes is not a frozen-segment change"
+  );
+}
+
+#[test]
+fn submit_edit_worktree_lets_the_directory_carry_what_the_branch_cannot() {
+  // Kylian's call, validating by hand on #476. `feat/#{issue}-{desc}` freezes
+  // the type, so the branch will say `feat` whatever the form holds — but
+  // `path_pattern` writes `{type}`, so the directory is where the type of this
+  // worktree actually lives. Refusing to edit it meant a worktree created as
+  // `fix` could never become `docs`, under a config that puts the type in the
+  // path on purpose.
+  //
+  // What made the refusal look right was a preview that lied: it showed
+  // `docs/#42-…` for a submit that writes `feat/#42-…`. With the preview
+  // expanding the real patterns, the modal states plainly that the branch is
+  // unchanged and the directory moves, so there is nothing left to protect the
+  // user from. `rename_worktree` already handles this exact shape as a
+  // path-only edit: same branch, so it skips every ref mutation, local and
+  // remote alike.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-login".into());
+  wt.path = app.workdir.join("fix-42-login");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+  assert_eq!(
+    app.create_form.type_index,
+    app
+      .branch_types
+      .iter()
+      .position(|t| t.name == "fix")
+      .expect("`fix` is a built-in branch type"),
+    "issue #478: the type comes from the directory, the only place it exists"
+  );
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("`docs` is a built-in branch type");
+  app.submit_edit_worktree().expect("submits");
+
+  assert_eq!(
+    app.edit_failure, None,
+    "`path_pattern` writes {{type}}, so there is somewhere to put `docs`: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
+fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
+  // Issue #478. `branch_pattern` freezes the type, `path_pattern` still writes
+  // it, so `gwm create fix 42 x` produces the branch `feat/#42-x` and the
+  // directory `fix-42-x` — and `fix` exists nowhere else. Rebuilding the
+  // triple from the branch alone read the type as `feat`, so renaming the
+  // description also moved the directory to `feat-42-…` and dropped what the
+  // worktree was created with.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-x".into());
+  wt.path = std::path::PathBuf::from("/tmp/gwm-test/fix-42-x");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+  assert_eq!(
+    app.branch_types[app.create_form.type_index].name, "fix",
+    "the form must show the type the worktree was created with, not the frozen literal"
+  );
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "x");
+
+  // Renaming the description leaves the type where the directory had it, so
+  // the rename renames only what was edited.
+  app.create_form.desc = "other".into();
+  app.submit_edit_worktree().expect("submits");
+  assert_eq!(
+    app.edit_failure, None,
+    "an untouched type read from the directory is not a change: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
+fn submit_edit_worktree_counts_worktree_base_as_a_destination() {
+  // Codex review on PR #476, tenth pass. `[worktree].base` is expanded with the
+  // triple too — `BranchSpec::worktree_path` feeds it `{type}` / `{issue}` /
+  // `{desc}` before joining the dirname — so a `base` of `.../{type}` sorts
+  // worktrees into per-type directories and changing the type moves the
+  // worktree between them. That is a real rename, so the guard has to look
+  // there as well: asking only `branch_pattern` and `path_pattern` refused an
+  // edit that had a perfectly good destination one level up the path.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}-{desc}".into();
+  app.config.worktree.base = format!("{}/{{type}}", app.workdir.display());
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-login".into());
+  wt.path = app.workdir.join("fix").join("42-login");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("`docs` is a built-in branch type");
+  app.submit_edit_worktree().expect("submits");
+
+  assert_eq!(
+    app.edit_failure, None,
+    "`base` writes {{type}}, so the worktree moves from `fix/` to `docs/`: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
+fn the_rename_form_still_refuses_to_change_what_neither_pattern_writes() {
+  // The other side of #478: reading the type from the directory does not by
+  // itself make it editable. Here the *path* freezes it too — `fix-` is a
+  // literal, not `{type}` — so the type is a constant on both sides and there
+  // is nowhere to write `docs`. Contrast with
+  // `submit_edit_worktree_lets_the_directory_carry_what_the_branch_cannot`,
+  // where `path_pattern` writes `{type}` and the edit goes through.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "fix-{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-x".into());
+  wt.path = std::path::PathBuf::from("/tmp/gwm-test/fix-42-x");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("docs is configured");
+  app
+    .submit_edit_worktree()
+    .expect("the refusal is a form failure, not an error");
+  assert!(
+    app.edit_failure.as_deref().is_some_and(|e| e.contains("{type}")),
+    "changing a type the branch pattern cannot write must be refused: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
+fn the_rename_form_reads_a_branch_with_the_same_repo_name_it_writes_one_with() {
+  // Codex review on PR #476, eighth pass. In a workspace, two repos whose
+  // directories share a basename are disambiguated for display — the second
+  // becomes `api-2` (#304) — and `App::repo_name` holds that name. Every
+  // formatter call in the rename flow already expands `{repo}` with it, so the
+  // parser has to be compiled with it too; deriving it from the *real*
+  // basename instead meant a `{repo}` pattern read a branch this repo could
+  // never have written, and the form refused to open on a worktree it owns.
+  //
+  // Which name is right for `{repo}` is a separate question, and an older one:
+  // `spec.branch_name(..., &self.repo_name)` predates #417. What matters here
+  // is that one name is used, since parser and formatter agreeing is the whole
+  // point of the issue.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{repo}/{type}/#{issue}-{desc}".into();
+  app.repo_name = "api-2".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("api-2/feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(
+    app.view,
+    View::Edit,
+    "the form must open on a branch this repo writes: {}",
+    app.status
+  );
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "my-desc");
+}
+
+#[test]
+fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
+  // Codex review on PR #476, seventh pass. A frozen description does not have
+  // to be canonical: `DESC_RE` accepts `fixed-`, and since the previous pass
+  // the recovery reads it whole rather than trimming the trailing dash — which
+  // is what 1.5.0 did. But the form's value goes through
+  // `BranchSpec::new_with_types`, and `kebab` strips that dash, so comparing
+  // the *spec* against the constant found a difference on every submit and the
+  // form could never be submitted at all.
+  //
+  // The guard is about what the user typed, so it compares what the user
+  // typed.
+  //
+  // Both patterns freeze the description, so the guard is the one that fires
+  // here: with only `branch_pattern` freezing it, `path_pattern` would give the
+  // new value a destination and the edit would be allowed.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/#{issue}-fixed-".into();
+  app.config.worktree.path_pattern = "{type}-{issue}-fixed-".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-fixed-".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(
+    app.view,
+    View::Edit,
+    "the frozen description is supplied, so the form opens"
+  );
+  assert_eq!(
+    app.create_form.desc, "fixed-",
+    "the constant is read whole, trailing dash and all"
+  );
+
+  // Change only the issue — the frozen description is untouched.
+  app.create_form.issue = "43".into();
+  app.submit_edit_worktree().expect("submits");
+  assert_eq!(
+    app.edit_failure, None,
+    "an untouched frozen description must not read as a change"
+  );
+
+  // …and the guard still fires when the frozen description really is edited.
+  app.enter_edit_worktree();
+  app.create_form.desc = "something-else".into();
+  app
+    .submit_edit_worktree()
+    .expect("the refusal is a form failure, not an error");
+  assert!(
+    app.edit_failure.as_deref().is_some_and(|e| e.contains("{desc}")),
+    "editing the frozen description must still be refused: {:?}",
+    app.edit_failure
   );
 }

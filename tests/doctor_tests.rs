@@ -1227,16 +1227,21 @@ fn the_forge_cli_probe_honours_the_gwm_gh_override() {
   );
 }
 
-/// Issue #415: `worktree.branch_pattern` drives the formatter but not the
-/// parser, so customising it silently disables every feature that re-parses
-/// a branch name. Until the parser is derived from the pattern (#417),
-/// `gwm doctor` states the limitation instead of leaving it silent.
+/// Issue #415: a `worktree.branch_pattern` gwm cannot read back silently
+/// disables every feature that re-parses a branch name, so `gwm doctor`
+/// states the limitation instead of leaving it silent.
+///
+/// Issue #417 derived the parser from the pattern, which shrank the set this
+/// applies to: `{type}-{issue}-{desc}` was the example here and round-trips
+/// now. A `~`-leading pattern is what still reaches the "everything inactive"
+/// verdict, because the writer ends with a tilde expansion the reader cannot
+/// undo.
 #[test]
-fn custom_branch_pattern_warns_that_the_parser_ignores_it() {
+fn a_branch_pattern_nothing_reads_back_warns_that_the_parser_is_blind() {
   let (dir, repo) = init_repo();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[worktree]\nbranch_pattern = \"{type}-{issue}-{desc}\"\n",
+    "[worktree]\nbranch_pattern = \"~/{type}/#{issue}-{desc}\"\n",
   )
   .unwrap();
   let config = Config::default();
@@ -1287,7 +1292,7 @@ fn branch_pattern_check_reads_the_on_disk_config_not_the_lenient_fallback() {
   let (dir, repo) = init_repo();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[worktree]\nbranch_pattern = \"{type}-{issue}-{desc}\"\n",
+    "[worktree]\nbranch_pattern = \"~/{type}/#{issue}-{desc}\"\n",
   )
   .unwrap();
   // What `repo_context_lenient` would have handed us after a load failure.

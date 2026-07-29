@@ -1786,10 +1786,13 @@ impl Config {
 
   /// Validate `[[branch_types]]` entries on load so a malformed config
   /// surfaces a clear error at startup instead of failing downstream in
-  /// `parse_branch` / git itself with a cryptic message. Rules:
+  /// [`crate::naming::BranchParser`] / git itself with a cryptic message.
+  /// Rules:
   ///   - `name` must be non-empty
-  ///   - `name` must match `^[a-z]+$` (the regex `parse_branch` uses
-  ///     for the type segment of a gwm-style branch name)
+  ///   - `name` must match `^[a-z]+$`. `{type}` compiles into an alternation
+  ///     of these names (issue #417), and a name outside that charset is one
+  ///     `gwm create` refuses anyway, so the parser drops it rather than
+  ///     claiming branches that cannot exist
   ///   - `name`s must be unique across the table — duplicates would
   ///     silently override each other under `serde`'s `Vec` decoding
   ///     and make the resolved list non-deterministic
@@ -1805,7 +1808,7 @@ impl Config {
       if !name_re.is_match(&entry.name) {
         return Err(GwmError::Config(format!(
           "branch_types: invalid `name = \"{}\"`; must match ^[a-z]+$ to be a valid branch-prefix \
-           (lowercase letters only, no digits, no dashes — git refs and `parse_branch` rely on this)",
+           (lowercase letters only, no digits, no dashes — git refs and the branch parser rely on this)",
           entry.name
         )));
       }

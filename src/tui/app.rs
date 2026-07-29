@@ -3859,17 +3859,57 @@ impl App {
       self.status = "no branch to rename (detached HEAD or nothing selected)".into();
       return;
     };
-    let Some(spec) = crate::naming::parse_branch(&branch) else {
+    // Issue #417: the form rebuilds the triple this repo's own
+    // `worktree.branch_pattern` writes, so the branch is read back with it.
+    // `self.repo_name`, not the workdir basename: in a workspace, two repos
+    // sharing a basename are disambiguated for display (#304) and every
+    // formatter call in this flow expands `{repo}` with that name. Parser and
+    // formatter agreeing is the whole of #417, so they read the same name.
+    //
+    // Issue #478: the directory is read too. A segment `branch_pattern`
+    // freezes is not in the branch, and `path_pattern` may still carry what
+    // `gwm create` was given — rebuilding from the branch alone renamed the
+    // directory's own components on every edit.
+    let Some(spec) = crate::naming::worktree_spec(
+      &self.config,
+      &self.repo_name,
+      &branch,
+      path.file_name().and_then(|name| name.to_str()),
+    ) else {
       // Issue #416: a free-form worktree lands here by design, not by
       // mistake. The edit form rebuilds a `<type>/#<issue>-<desc>` triple,
       // which a name the user chose on purpose has none of — so state that
       // this form does not apply rather than implying a malformed branch.
+      //
+      // Issue #417 deliberately did NOT fold "type not configured" into this
+      // arm: `{type}` stays `[a-z]+`, so `zzz/#7-thing` still parses and the
+      // type-index lookup below refuses it with the precise reason.
       self.status = format!(
         "'{}' is a free-form branch — the edit form rebuilds <type>/#<issue>-<desc>; rename it with git",
         branch
       );
       return;
     };
+    // A pattern that neither writes nor freezes a segment leaves it empty, and
+    // the form cannot be submitted without it: `submit_edit_worktree` runs
+    // `BranchSpec::new_with_types`, which rejects an empty issue or desc, and
+    // supplying one by hand would not help since the pattern has nowhere to
+    // write it. Refuse up front and name the placeholder, the same shape as
+    // `gwm commit-prefix` (Codex review on PR #476).
+    if let Some(missing) = ["type", "issue", "desc"].into_iter().find(|segment| match *segment {
+      "type" => spec.type_.is_empty(),
+      "issue" => spec.issue.is_empty(),
+      _ => spec.desc.is_empty(),
+    }) {
+      self.status = format!(
+        "neither branch pattern '{}' nor path pattern '{}' carries {{{}}}, so this form cannot rebuild '{}' — add it to worktree.branch_pattern, or rename with git",
+        crate::naming::sanitise_for_terminal(&self.config.worktree.branch_pattern),
+        crate::naming::sanitise_for_terminal(&self.config.worktree.path_pattern),
+        missing,
+        branch
+      );
+      return;
+    }
     // Refuse rather than silently preselect type index 0: a branch whose
     // parsed type isn't configured (config change, manual branch) would
     // otherwise be renamed to the first configured type on Enter (Codex
@@ -3917,6 +3957,83 @@ impl App {
       .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
+    // Issue #417 / Codex review on PR #476: a segment **nothing writes** is not
+    // editable here, because there is nowhere to put the new value. The submit
+    // would rebuild the same branch at the same path and close the form having
+    // changed nothing, so say no instead.
+    //
+    // The question is the *formatter's*, not the parser's — asking the parser
+    // is what made the first two versions of this guard wrong. It is not "can a
+    // new value be read back", it is "will a new value be written anywhere", and
+    // `expand_placeholders` writes a token wherever it appears. So the test is
+    // whether any of the three patterns it expands carries that token:
+    //
+    // - `branch_pattern`, the obvious one;
+    // - `path_pattern` (Kylian, validating by hand): `feat/#{issue}-{desc}` will
+    //   say `feat` whatever the form holds, so under that config the *directory*
+    //   is where this worktree's type lives, and refusing meant a worktree
+    //   created as `fix` could never become `docs`;
+    // - `[worktree].base` (Codex review, tenth pass): `worktree_path` feeds it
+    //   the triple too, so a `base` of `.../{type}` sorts worktrees into
+    //   per-type directories and changing the type moves the worktree between
+    //   them.
+    //
+    // In the last two cases the branch does not change at all, which
+    // `rename_worktree` handles as a path-only edit — it skips every ref
+    // mutation, local and remote — and the preview states it on screen by
+    // showing the branch unchanged.
+    //
+    // Scoped to a segment the user actually changed, so `feat/#{issue}-{desc}`,
+    // whose rename worked before #417, keeps renaming its issue and description.
+    //
+    // Compared against what the form was **opened with**, not against the
+    // pattern's literal (#478): that value may have come from the worktree's
+    // directory rather than from the pattern. And against the *form's* fields
+    // rather than the `BranchSpec`, because a frozen description need not be
+    // canonical — `DESC_RE` accepts `fixed-`, and `kebab` would strip that
+    // trailing dash on the way into the spec, making every submit look like a
+    // change and locking the form shut.
+    let writes = |segment: &str| {
+      let token = format!("{{{}}}", segment);
+      let wt = &self.config.worktree;
+      wt.branch_pattern.contains(&token) || wt.path_pattern.contains(&token) || wt.base.contains(&token)
+    };
+    let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
+      crate::naming::worktree_spec(
+        &self.config,
+        &self.repo_name,
+        branch,
+        self
+          .edit_original_path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .and_then(|name| name.to_str()),
+      )
+    });
+    if let Some(opened_with) = opened_with.as_ref() {
+      for segment in ["type", "issue", "desc"] {
+        if writes(segment) {
+          continue;
+        }
+        let (submitted, was) = match segment {
+          "type" => (type_.as_str(), opened_with.type_.as_str()),
+          "issue" => (self.create_form.issue.as_str(), opened_with.issue.as_str()),
+          _ => (self.create_form.desc.as_str(), opened_with.desc.as_str()),
+        };
+        if submitted != was {
+          // No value in the message, on purpose: `LoaderWidget` renders one
+          // unwrapped line, so a message whose length follows a user-supplied
+          // value clips at an arbitrary point. This one is a fixed 36
+          // characters whatever the branch holds, and the value it would have
+          // quoted is on screen anyway, in the `From :` row above (found
+          // validating by hand).
+          let _ = was;
+          self.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
+          return Ok(());
+        }
+      }
+    }
+
     let spec = match BranchSpec::new_with_types(
       type_,
       self.create_form.issue.clone(),
@@ -3929,6 +4046,7 @@ impl App {
         return Ok(());
       }
     };
+
     let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
     let new_path = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;

@@ -18,7 +18,7 @@ use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::{parse_branch, BranchSpec, WorktreeName};
+use crate::naming::{BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
 use crate::review;
@@ -2903,11 +2903,19 @@ const PR_FILES_CHANGED_MAX_LINES: usize = 30;
 fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context(None)?;
   let head_name = current_branch(&repo)?;
-  let branch_spec = parse_branch(&head_name);
+  // Issue #417: `[pr_template.by_type]` selection and the body placeholders
+  // read the branch back, so they read it with this repo's own pattern.
+  let branch_spec = crate::naming::BranchParser::from_config(&config, &worktree::repo_name(&repo)).parse(&head_name);
 
+  // `.filter` and not just `.map`: since #417 a pattern with no `{type}` still
+  // parses, reporting the segments it *does* carry, so the type comes back
+  // empty rather than as a failed parse. An empty type selects no
+  // `[pr_template.by_type]` entry and renders `{type}` blank, which is exactly
+  // what this fallback exists to prevent.
   let branch_type = branch_spec
     .as_ref()
     .map(|s| s.type_.clone())
+    .filter(|t| !t.is_empty())
     .unwrap_or_else(|| "chore".into());
   let issue = branch_spec.as_ref().map(|s| s.issue.clone()).unwrap_or_default();
   let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();
@@ -3516,9 +3524,10 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
 fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<()> {
   // Two resolution paths: an explicit `--branch <name>` (no repo
   // *required* — useful for scripted contexts outside a repo) and
-  // the implicit "use HEAD" branch (requires a repo). Both go
-  // through `parse_branch` so the prefix shape stays canonical
-  // regardless of entry point.
+  // the implicit "use HEAD" branch (requires a repo). Both go through the
+  // same parser so the prefix shape stays canonical regardless of entry
+  // point — the repo's own where there is a repo, the built-in pattern
+  // otherwise (issue #417).
   //
   // For BOTH paths we still attempt repo discovery so the workdir
   // handle is fed into `gitmoji::load` — this is what makes
@@ -3528,38 +3537,84 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
   // are silently downgraded to "no workdir" so the `--branch` form
   // still works outside a git checkout — that's the whole point of
   // the explicit-branch entry point.
-  let (workdir, branch_name) = match branch_override {
+  // `repo_name` rides along for issue #417: `{repo}` is a legal token in
+  // `worktree.branch_pattern`, so compiling the parser needs the same name
+  // the formatter used.
+  let (workdir, repo_name, branch_name) = match branch_override {
     Some(name) => {
       // Best-effort discovery: outside a repo the user passed
       // `--branch` precisely because there's no HEAD to read; we
       // must not fail here. Inside a repo we want the workdir so
       // `.gwm.toml` overrides apply.
-      let workdir = worktree::discover_repo(None)
-        .ok()
-        .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
-      (workdir, name)
+      let repo = worktree::discover_repo(None).ok();
+      let workdir = repo.as_ref().and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+      (workdir, repo.as_ref().map(worktree::repo_name), name)
     }
     None => {
       let repo = worktree::discover_repo(None)?;
       let wd = repo.workdir().map(|w| w.to_path_buf());
       let name = current_branch(&repo)?;
-      (wd, name)
+      (wd, Some(worktree::repo_name(&repo)), name)
     }
   };
 
+  // Issue #417: the branch was written by expanding this repo's
+  // `worktree.branch_pattern`, so it is read back by a parser compiled from
+  // that same pattern — otherwise a repo that customised it gets no prefix
+  // for branches gwm itself created. Outside a checkout there is no config to
+  // consult and the built-in shape is all `--branch` can mean.
+  let config = workdir.as_deref().and_then(|wd| Config::load_for_repo(wd).ok());
+  let parser = match (config.as_ref(), repo_name.as_deref()) {
+    (Some(cfg), Some(repo)) => crate::naming::BranchParser::from_config(cfg, repo),
+    _ => crate::naming::BranchParser::builtin().clone(),
+  };
+  // Neutralised before it is ever quoted: `branch_pattern` is repo-supplied
+  // and this command does not go through the trust gate, so an unvetted
+  // `.gwm.toml` must not get a terminal escape channel out of an error message
+  // (Codex review on PR #476).
+  let pattern = crate::naming::sanitise_for_terminal(
+    &config
+      .as_ref()
+      .map(|c| c.worktree.branch_pattern.clone())
+      .unwrap_or_else(crate::config::default_branch_pattern),
+  );
+
   // Issue #416: a free-form branch reaches here legitimately. This command
-  // exists solely to derive a prefix from the branch *type*, and a name the
-  // user chose has none — there is no honest default to fall back to, so it
-  // stays an error. The message says the shape is unavailable rather than
-  // implying the branch is wrong.
-  let spec = parse_branch(&branch_name).ok_or_else(|| {
+  // exists solely to derive a prefix from the branch *type* and issue, and a
+  // name the user chose has neither — there is no honest default to fall back
+  // to, so it stays an error. The message says the shape is unavailable
+  // rather than implying the branch is wrong.
+  let spec = parser.parse(&branch_name).ok_or_else(|| {
     GwmError::Other(format!(
-      "branch '{}' carries no <type>/#<issue>-<slug> to read — a commit prefix is derived from the \
-       branch type, so a free-form branch has none. Pass --branch <structured-name>, or write the \
-       prefix by hand",
-      branch_name
+      "branch '{}' does not match this repo's branch pattern `{}`, so it carries no branch type to \
+       read — a commit prefix is derived from one, and a free-form branch has none. Pass --branch \
+       <name written by the pattern>, or write the prefix by hand",
+      branch_name, pattern
     ))
   })?;
+
+  // Issue #417: a pattern that carries no `{type}` or `{issue}` *and* freezes
+  // neither as a literal — `{type}/{desc}`, `{issue}-{desc}` — parses
+  // perfectly and yields an empty segment. Rendering `resolve_prefix` from
+  // that prints ` (#):`, a broken prefix shipped as a success straight into a
+  // commit message. A pattern that hardcodes one (`feat/#{issue}-{desc}`) does
+  // not land here: the literal is recovered, so the prefix is right.
+  if spec.type_.is_empty() || spec.issue.is_empty() {
+    let want = match (spec.type_.is_empty(), spec.issue.is_empty()) {
+      // `and`, not `or`: a prefix needs both, so adding one placeholder on the
+      // strength of this message would leave the command failing (Codex review
+      // on PR #476).
+      (true, true) => "`{type}` and `{issue}`",
+      (true, false) => "`{type}`",
+      _ => "`{issue}`",
+    };
+    return Err(GwmError::Other(format!(
+      "this repo's branch pattern `{}` carries no {}, so branch '{}' has none to read — a commit \
+       prefix is built from the branch type and issue number. Add {} to worktree.branch_pattern, \
+       or write the prefix by hand",
+      pattern, want, branch_name, want
+    )));
+  }
 
   let map = gitmoji::load(workdir.as_deref())?;
   let prefix = gitmoji::resolve_prefix(&map, &spec, unicode);

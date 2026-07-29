@@ -4,7 +4,7 @@
 
 use crate::config::{expand_placeholders, Config, CONFIG_FILE};
 use crate::error::Result;
-use crate::naming::{branch_pattern_warning, parse_branch};
+use crate::naming::branch_pattern_warning;
 use crate::worktree;
 use git2::BranchType;
 use std::collections::BTreeSet;
@@ -458,7 +458,10 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
     Some(detail) => Check::warning(name, detail).with_hint(
       "restore the default `{type}/#{issue}-{desc}`, or keep the pattern and accept exactly the loss named above",
     ),
-    None => Check::ok(name, "`parse_branch` reads back the segments `branch_name` writes"),
+    None => Check::ok(
+      name,
+      "the parser compiled from this pattern reads back the segments it writes",
+    ),
   }
 }
 
@@ -657,12 +660,18 @@ fn check_orphan_branches(ctx: &DoctorCtx<'_>, trees: &[worktree::WorktreeInfo]) 
     Err(e) => return Check::failed(name, format!("could not list local branches: {}", e)),
   };
 
+  // Issue #417: "did gwm create this branch?" is a question about this repo's
+  // `worktree.branch_pattern`, so it is asked with a parser compiled from it.
+  // Against the built-in shape, every branch in a repo with a custom pattern
+  // read as user-managed and no orphan was ever reported.
+  let parser = crate::naming::BranchParser::from_config(ctx.config, &worktree::repo_name(ctx.repo));
+
   let mut orphans: Vec<String> = Vec::new();
   let mut merged_count: usize = 0;
   for entry in branches.flatten() {
     let (branch, _) = entry;
     let Ok(Some(branch_name)) = branch.name() else { continue };
-    if parse_branch(branch_name).is_none() {
+    if parser.parse(branch_name).is_none() {
       continue; // user-managed branch, leave it alone
     }
     if claimed.contains(branch_name) {

@@ -83,9 +83,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `!` check, so that command exits `1` like any other Warning). The
   config-supplied pattern is neutralised for control characters before it is
   echoed — neither command goes through the trust gate, so an unvetted
-  `.gwm.toml` must not get a terminal escape channel out of a health check. This states the limitation, it
-  does not remove it — deriving the parser from the pattern is tracked by #417.
+  `.gwm.toml` must not get a terminal escape channel out of a health check.
+  This states the limitation; the entry below removes its cause, so the set of
+  patterns it has anything to say about is much smaller than it was.
   ([#415](https://github.com/kbrdn1/gwm-cli/issues/415))
+
+- `worktree.branch_pattern` is now read back by a parser compiled from that
+  same pattern, so customising it no longer disables the features that re-read
+  a branch name. The pattern drove how a branch was *written* while a hardcoded
+  `^([a-z]+)/#(\d+)-([a-z0-9-]+)$` decided how one was *read*, so a repo that
+  set `branch_pattern = "{type}-{issue}-{desc}"` created `feat-41-foo` and then
+  failed to recognise the branch it had just created: no issue auto-linking, no
+  gitmoji, `gwm commit-prefix` erroring, empty hook placeholders on the
+  remove / bootstrap paths, a rename modal that refused to open, and a `doctor`
+  orphan check that skipped every branch as user-managed. One source of truth
+  now, so the conventions people actually use keep all of it: `{type}-{issue}-{desc}`,
+  `{type}_{issue}_{desc}`, `{type}/{issue}-{desc}`, `wt/{type}/#{issue}-{desc}`,
+  `{desc}/#{issue}-{type}` and a literal wedged anywhere all round-trip.
+
+  A pattern whose split can move is refused rather than compiled into a parser
+  that reads back the wrong thing. The test is never "is there a separator" but
+  "can the boundary between two placeholders land in more than one place":
+  `{issue}{desc}` reads `42123-x` as `4212` + `3-x`, `{desc}{issue}` is
+  ambiguous outright since `a12` is what both `a` + `12` and `a1` + `2`
+  produce, and a non-empty separator guarantees nothing either:
+  `{type}-{issue}9{desc}` writes `feat-42919x` from issue `42` and desc `19x`,
+  and the greedy `\d+` slides right across the `9` to read issue `4291`.
+
+  Both halves of the rule are narrower than they look, so patterns that read
+  back perfectly well are not refused along the way. Adjacency is fine when the
+  alphabets are disjoint (`{type}{issue}` writes `feat42`, and `[a-z]+` stops
+  at the first digit while `\d+` stops at the first letter). A separator inside
+  the left placeholder's charset is fine when the right one cannot supply it
+  back, which is why `{desc}-{issue}` stays legal. And a multi-character
+  separator only counts when the left side can eat a *repeating* prefix of it,
+  which is why `{type}-{issue}9-{desc}` works where `{type}-{issue}9{desc}`
+  does not. The same placeholder twice is refused too. `gwm doctor` and
+  `gwm config validate` report every refusal with the fix in it.
+
+  The parser is checked against the formatter rather than argued to mirror it:
+  `compile` writes one probe branch with `expand_placeholders` and refuses the
+  pattern when it cannot read that back. `{repo}` / `{home}` expansions are
+  substituted again by the formatter, so a repo directory named `{type}` (or
+  named `type` under a `{{repo}}` pattern) made every read-back feature go
+  quiet with nothing saying why; the check closes that class rather than its
+  two known instances. A `~` prefix stays out of it, because `shellexpand::tilde` is a
+  divergence no parser can undo, and `gwm doctor` already names every feature
+  it takes down.
+
+  The rule is pinned by enumeration rather than by examples: a test generates
+  every pattern over the three placeholders and a set of separators, decides
+  independently whether each one round-trips, and requires the compiler to
+  accept exactly those, so neither a silent mis-split nor an over-strict
+  refusal can survive.
+
+  A pattern that **freezes** a segment as a literal instead of writing it from
+  a placeholder keeps working exactly as before. `feat/#{issue}-{desc}` and
+  `{type}/#1-{desc}` were readable in 1.5.0 only because the hardcoded regex
+  happened to have a group where the literal sits; the derived parser recovers
+  the literal on purpose, so gitmoji, `gwm commit-prefix` and auto-linking
+  still work on those repos. The recovery is an exact match rather than a
+  guess. It is positional first, in that a literal is only read as a segment if it
+  sits where that segment goes, before `{issue}` for a type and after it for a
+  description, and then an exact match, a branch type being looked up in the
+  repo's configured list (so `feature/#{issue}-{desc}` recovers nothing, since
+  `feature` names a namespace), an issue number being all digits, and a
+  description being whatever `DESC_RE` accepts. Position has to come first:
+  `feat/#{issue}-fix` freezes both, and `feat` and `fix` are each a configured
+  branch type, so an oracle asked to pick a globally unique candidate found two
+  and dropped the pair. What is left over after position is decided per
+  segment: a segment is recovered when every reading of the pattern names it
+  with the same value, so `feat/feat/#{issue}-{desc}` freezes the type its two
+  readings agree on, and `feat/#{issue}-fix/done` freezes the type while
+  leaving the description its readings disagree about alone.
+  The whole obligation is enumerated rather than sampled:
+  1.5.0 read a branch iff it matched one hardcoded regex, so a test runs that
+  regex over every pattern in the family it accepts and requires the same triple
+  back. One divergence in that family is deliberate: 1.5.0's description group
+  was `[a-z0-9-]+`, looser than `DESC_RE`, so `{type}/#{issue}---fix` handed
+  back `--fix`, a description its own `BranchSpec::validate` rejects, which the
+  rename form could not submit and `gwm create` could never have produced. The
+  leading dashes are dropped, and a leading `-` is in any case what #416 banned
+  from a name, since `gwm remove` and `git branch -d` read it as a flag. `{repo}` is deliberately not a source, so a repo called `docs` does
+  not type its own branches. What such a pattern costs is reported separately
+  and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
+  writes a `feat/` branch, so the type you asked for is not the one anyone
+  reads back. The TUI rename form shows a frozen segment, and whether it can
+  be changed depends on where the new value could go. That is the formatter's
+  question, so all three patterns it expands are asked: `branch_pattern`,
+  `path_pattern` and `[worktree].base`. The path pattern writing the segment
+  means editing it renames the directory; `base` writing it means the worktree
+  moves between base directories, which is what a `base` of `.../{type}` is
+  for. Either way the branch is left alone, which is a real rename, and the
+  preview says so by showing the branch unchanged. Only when none of the three
+  writes the segment is the edit refused, since the submit would rebuild the
+  same branch at the same path. Segments `branch_pattern` writes are always
+  editable, so the rename that worked on `feat/#{issue}-{desc}` before #417
+  still works.
+
+  Both live previews expand this repo's own patterns too. They hardcoded
+  `<type>/#<issue>-<desc>` and `<type>-<issue>-<desc>`, so under a custom
+  pattern they promised names the repo would never create: with
+  `feat/#{issue}-{desc}`, picking `docs` in the rename type selector previewed
+  `docs/#42-x` while submitting wrote `feat/#42-x`. A preview that disagrees
+  with what submitting does is worse than no preview at all.
+
+  The value that form shows comes from the worktree's **directory** when
+  `path_pattern` carries the segment and `branch_pattern` does not. The two
+  patterns need not carry the same segments, and when they do not, neither
+  name holds the whole triple: under `feat/#{issue}-{desc}` with the default
+  `path_pattern`, `gwm create fix 42 x` writes the branch `feat/#42-x` and the
+  directory `fix-42-x`, and `fix` exists nowhere else. Rebuilding from the
+  branch alone read the type as `feat`, so renaming the description also moved
+  the directory to `feat-42-…` and dropped what the worktree was created with.
+  The branch still wins for every segment it writes itself, being the
+  worktree's identity, and a directory renamed by hand must not rewrite it.
+  ([#478](https://github.com/kbrdn1/gwm-cli/issues/478))
+
+  `{type}` matches `[a-z]+`, not an alternation of the configured branch types,
+  which is what the issue proposed. The alternation would have stopped
+  recognising a branch created before a type was retired from `.gwm.toml`,
+  taking `doctor`'s orphan check and `gwm commit-prefix` away from a name the
+  previous release read fine. Nothing needs it either: once adjacent
+  placeholders are refused, `[a-z]+` splits every pattern in the documented
+  table, and the TUI rename, which does require a configured type, checks the
+  resolved list itself and says so precisely.
+  ([#417](https://github.com/kbrdn1/gwm-cli/issues/417))
 
 ### Docs
 

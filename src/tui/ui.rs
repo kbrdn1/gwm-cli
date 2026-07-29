@@ -3739,6 +3739,39 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
+/// The branch and directory a structured form would produce, expanded from
+/// **this repo's own** `branch_pattern` / `path_pattern`.
+///
+/// Issue #417: those patterns are what `gwm create` and the rename actually
+/// write, so a live preview has to come from them. Both modals hardcoded the
+/// default `<type>/#<issue>-<desc>` shape instead, and under a custom pattern
+/// they promised names the repo would never create. The rename case was the
+/// loud one: with `feat/#{issue}-{desc}`, picking `docs` in the type selector
+/// previewed `docs/#42-x` while submitting wrote `feat/#42-x`, because the
+/// pattern has no `{type}` to write into.
+///
+/// The form's fields are expanded exactly as they stand, mid-typing and all,
+/// so this never validates and never refuses: an empty issue expands to
+/// nothing, which is what a preview should show. An expansion that cannot be
+/// resolved at all yields an empty string rather than a stale or invented one.
+fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
+  let expand = |pattern: &str| {
+    crate::config::expand_placeholders(
+      pattern,
+      &app.repo_name,
+      Some(type_str),
+      Some(&app.create_form.issue),
+      Some(&app.create_form.desc),
+      None,
+    )
+    .unwrap_or_default()
+  };
+  (
+    expand(&app.config.worktree.branch_pattern),
+    expand(&app.config.worktree.path_pattern),
+  )
+}
+
 fn draw_create(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -3769,10 +3802,7 @@ fn draw_create(f: &mut Frame, app: &App) {
   let (branch_raw, dir_raw) = if freeform {
     (app.create_form.name.clone(), app.create_form.name.replace('/', "-"))
   } else {
-    (
-      format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-      format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    )
+    pattern_preview(app, type_str)
   };
   let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
   let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
@@ -5194,14 +5224,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
     .unwrap_or("(none)");
   let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From   : ".len()));
-  let branch = ellipsize_middle(
-    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Branch : ".len()),
-  );
-  let dirname = ellipsize_middle(
-    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Dir    : ".len()),
-  );
+  let (branch_raw, dir_raw) = pattern_preview(app, type_str);
+  let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
+  let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
   let mut lines = overlay_title_lines("Rename Worktree", clean);
   lines.push(Line::from(vec![

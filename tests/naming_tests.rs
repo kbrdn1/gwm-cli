@@ -1,20 +1,23 @@
-use gwm::config::{BranchType, WorktreeConfig};
+use gwm::config::{BranchType, Config, WorktreeConfig};
 use gwm::naming::{
-  branch_pattern_warning, default_branch_types, kebab, parse_branch, BranchSpec, WorktreeName, BRANCH_TYPES,
+  branch_pattern_warning, default_branch_types, kebab, worktree_spec, BranchParser, BranchSpec, WorktreeName,
+  BRANCH_TYPES,
 };
 
 #[test]
 fn naming_regexes_compile_at_first_use() {
-  // Issue #97. The three regexes in `src/naming.rs` are lifted to
+  // Issue #97. The literal regexes in `src/naming.rs` are lifted to
   // module statics via `LazyLock`. The `expect("static <NAME> compiles")`
   // inside each `LazyLock::new` makes a developer-introduced regex typo
   // surface AT THIS TEST instead of in an unrelated downstream call
   // site (which historically used `Regex::new(...).unwrap()` per call
   // and would have shifted the blast radius to the user). Each line
-  // below forces the init path for one of the three statics — a panic
-  // here is a developer bug in `naming.rs`, not a user error.
+  // below forces one init path — a panic here is a developer bug in
+  // `naming.rs`, not a user error. Since #417 the branch parser is no
+  // longer a literal static, so the second line forces the built-in
+  // pattern's *compilation* instead, which carries the same `expect`.
   let _ = BranchSpec::new("feat", "1", "x"); // ISSUE_RE + DESC_RE via validate
-  let _ = parse_branch("feat/#1-x"); // BRANCH_RE via parse_branch
+  let _ = BranchParser::builtin().parse("feat/#1-x"); // the built-in parser, compiled from the default pattern
 }
 
 #[test]
@@ -65,7 +68,7 @@ fn description_normalized_before_validation() {
 
 #[test]
 fn parse_roundtrip() {
-  let parsed = parse_branch("feat/#42-cool-feature").unwrap();
+  let parsed = BranchParser::builtin().parse("feat/#42-cool-feature").unwrap();
   assert_eq!(parsed.type_, "feat");
   assert_eq!(parsed.issue, "42");
   assert_eq!(parsed.desc, "cool-feature");
@@ -73,9 +76,9 @@ fn parse_roundtrip() {
 
 #[test]
 fn parse_rejects_garbage() {
-  assert!(parse_branch("garbage").is_none());
-  assert!(parse_branch("feat/no-issue").is_none());
-  assert!(parse_branch("FEAT/#1-x").is_none()); // uppercase type
+  assert!(BranchParser::builtin().parse("garbage").is_none());
+  assert!(BranchParser::builtin().parse("feat/no-issue").is_none());
+  assert!(BranchParser::builtin().parse("FEAT/#1-x").is_none()); // uppercase type
 }
 
 #[test]
@@ -194,10 +197,18 @@ fn the_default_pattern_round_trips_so_no_warning() {
   );
 }
 
+/// A pattern the compiler cannot mirror. `expand_placeholders` ends with
+/// `shellexpand::tilde`, which the reader has no way to undo, so a pattern
+/// starting with `~` writes `/Users/…/feat/#7-probe` and nothing reads it
+/// back. This is the one shape that still reaches the "everything inactive"
+/// verdict, and it is the reason the probe survives #417 as a backstop rather
+/// than being replaced by a purely syntactic check.
+const UNREADABLE: &str = "~/{type}/#{issue}-{desc}";
+
 #[test]
-fn an_unparseable_pattern_warns_that_everything_is_inactive() {
-  let w = branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli", &default_branch_types())
-    .expect("an unparseable pattern must warn");
+fn a_pattern_the_compiler_cannot_mirror_warns_that_everything_is_inactive() {
+  let w = branch_pattern_warning(UNREADABLE, "gwm-cli", &default_branch_types())
+    .expect("a pattern nothing reads back must warn");
   assert!(w.contains("branch_pattern"), "the warning must name the key: {}", w);
   for expected in ["auto-linking", "gitmoji", "branch-convention"] {
     assert!(
@@ -209,24 +220,35 @@ fn an_unparseable_pattern_warns_that_everything_is_inactive() {
   }
 }
 
-/// The finding that killed the string-equality version: this pattern
-/// differs from the default, yet `feat/#42-…` still matches `BRANCH_RE`,
-/// so `type` and `issue` ARE recovered. Only `desc` comes back wrong.
-/// Claiming auto-linking and gitmoji are inactive here would be false.
+/// Issue #417 flipping #415's findings. Every pattern below was documented as
+/// broken while the parser was hardcoded, and each one is a convention someone
+/// actually uses. They round-trip now, so the warning has nothing to say about
+/// them — asserting `None` is asserting the feature.
 #[test]
-fn a_pattern_whose_type_and_issue_survive_warns_only_about_desc() {
-  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}", "gwm-cli", &default_branch_types())
-    .expect("a lossy pattern must still warn");
-  assert!(
-    w.contains("desc"),
-    "the warning must name the segment that breaks: {}",
-    w
-  );
-  assert!(
-    !w.contains("auto-linking") && !w.contains("gitmoji"),
-    "type and issue are recovered from this pattern — the warning must not claim otherwise: {}",
-    w
-  );
+fn the_patterns_415_called_broken_now_round_trip() {
+  for pattern in [
+    // "matches nothing at all": the whole `<type>/#<issue>-<desc>` skeleton
+    // was load-bearing for the hardcoded regex, and now none of it is.
+    "{type}-{issue}-{desc}",
+    "{type}/{issue}-{desc}",
+    "{type}/#{issue}_{desc}",
+    "{type}_{issue}_{desc}",
+    "{repo}/{type}/#{issue}-{desc}",
+    "wt/{type}/#{issue}-{desc}",
+    // "parses, wrong desc": a literal wedged in, or anything after `{desc}`.
+    "{type}/#{issue}-prefix-{desc}",
+    "{type}/#{issue}-{desc}-{repo}",
+    // "partially parseable": segment order is the user's business.
+    "{desc}/#{issue}-{type}",
+    "{type}/#{desc}-{issue}",
+  ] {
+    assert_eq!(
+      branch_pattern_warning(pattern, "gwm-cli", &default_branch_types()),
+      None,
+      "`{}` round-trips since #417 and must not warn",
+      pattern
+    );
+  }
 }
 
 #[test]
@@ -240,20 +262,30 @@ fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
   );
 }
 
-/// A single probe value collides with a pattern that hardcodes that same
-/// value: `feat/#{issue}-{desc}` formats `feat/#42-…` and parses back
-/// `type = "feat"`, which matches a probe that also used `feat`. But
-/// `gwm create fix 42 …` writes a `feat/` branch and reads back the wrong
-/// type. Two probes with distinct values close that false negative.
+/// Issue #415 (Codex review): a type gwm would refuse to create must not
+/// produce a warning about branches that cannot exist. With `[[branch_types]]`
+/// narrowed to `feat`, `feat/#{issue}-{desc}` writes what every branch of this
+/// repo *is*, so there is nothing to warn about — and #417's constant recovery
+/// reads that frozen `feat` back, so gitmoji and `gwm commit-prefix` work.
 #[test]
-fn a_pattern_that_hardcodes_the_type_is_not_a_false_negative() {
-  let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types())
-    .expect("a hardcoded type must warn");
-  assert!(
-    w.contains("type"),
-    "the warning must name `type` as the broken segment: {}",
-    w
+fn a_hardcoded_type_is_fine_when_it_is_the_only_configured_type() {
+  let only_feat = vec![BranchType {
+    name: "feat".into(),
+    description: "New feature implementation".into(),
+  }];
+  assert_eq!(
+    branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &only_feat),
+    None
   );
+  let spec = BranchParser::compile("feat/#{issue}-{desc}", "gwm-cli", &only_feat)
+    .expect("compiles")
+    .parse("feat/#42-x")
+    .expect("parses");
+  assert_eq!(spec.type_, "feat", "the frozen type is what every branch here is");
+
+  // …and it is still a real loss once a second type can be created, because
+  // `gwm create fix 42 x` writes a branch that reads back as `feat`.
+  assert!(branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types()).is_some());
 }
 
 #[test]
@@ -281,179 +313,222 @@ fn the_warning_names_every_consumer_of_a_broken_segment() {
   );
 }
 
-/// Issue #415 (Codex review): `{repo}` is a supported placeholder, so the
-/// probe has to expand it with the real repo name. A dummy value makes the
-/// verdict repo-dependent: `{repo}/#{issue}-{desc}` parses fine as `repo/…`
-/// but produces `gwm-cli/#42-…`, which `BRANCH_RE` rejects outright because
-/// `[a-z]+` does not match a name carrying a dash.
+/// Issue #415 (Codex review), still load-bearing after #417: `{repo}` is a
+/// supported placeholder, so it has to be resolved with the *real* repo name
+/// on both sides. The parser compiles it into a literal, so feeding the probe
+/// a dummy would build a regex expecting `repo/…` while the formatter writes
+/// `gwm-cli/…`, and a pattern that works would be reported as reading nothing.
 #[test]
 fn the_probe_expands_repo_with_the_real_repo_name() {
-  let w = branch_pattern_warning("{repo}/#{issue}-{desc}", "gwm-cli", &default_branch_types())
-    .expect("must warn for this repo");
-  assert!(
-    w.contains("match nothing at all"),
-    "in a repo whose name has a dash this pattern parses back to nothing: {}",
-    w
-  );
-  assert!(
-    w.contains("auto-linking"),
-    "so every consumer is inactive, not just type: {}",
-    w
-  );
-}
-
-/// Issue #415 (Codex review): a type gwm would refuse to create must not
-/// produce a warning about branches that cannot exist. With
-/// `[[branch_types]]` narrowed to `feat`, `feat/#{issue}-{desc}` round-trips
-/// for every branch gwm accepts, so there is nothing to warn about.
-#[test]
-fn a_hardcoded_type_is_fine_when_it_is_the_only_configured_type() {
-  let only_feat = vec![BranchType {
-    name: "feat".into(),
-    description: "New feature implementation".into(),
-  }];
   assert_eq!(
-    branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &only_feat),
-    None
+    branch_pattern_warning("{repo}/{type}/#{issue}-{desc}", "gwm-cli", &default_branch_types()),
+    None,
+    "both sides must resolve `{{repo}}` to the same name"
   );
-  // …and it is still a real problem once a second type can be created.
-  assert!(branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types()).is_some());
-}
-
-/// Issue #415 (Codex review): parsability is value-dependent. With
-/// `{desc}/#{issue}-{type}` a desc carrying a `-` yields
-/// `probe-desc/#42-feat`, which `[a-z]+` rejects, while a plain `probe`
-/// yields `probe/#42-feat`, which parses and keeps the issue. Reporting
-/// "everything is inactive on this pattern" would be false for half the
-/// branches it produces.
-#[test]
-fn a_partially_parseable_pattern_is_not_generalised_to_every_branch() {
-  let w = branch_pattern_warning("{desc}/#{issue}-{type}", "gwm-cli", &default_branch_types())
-    .expect("a lossy pattern must warn");
+  // A dash in the repo name used to break outright: the hardcoded `[a-z]+`
+  // could not match `gwm-cli` in the type position, so the whole pattern read
+  // back as nothing. It is an escaped literal now, so the only thing this
+  // pattern loses is the `{type}` it never had.
+  let w = branch_pattern_warning("{repo}-{issue}-{desc}", "gwm-cli", &default_branch_types())
+    .expect("this pattern carries no `{type}`");
   assert!(
-    w.contains("match nothing at all") && w.contains("parse but read back"),
-    "both outcomes occur here, so both must be reported: {}",
-    w
-  );
-}
-
-/// Issue #415 (Codex review): `DESC_RE` accepts an all-digits desc, and it
-/// is the only desc class `BRANCH_RE`'s `\d+` issue group can swallow. With
-/// `{type}/#{desc}-{issue}` a word desc never parses while `123` yields
-/// `feat/#123-42`, which parses with the segments swapped — a partial
-/// round-trip, not a total loss.
-#[test]
-fn a_digits_only_desc_is_probed_so_the_verdict_stays_partial() {
-  let w = branch_pattern_warning("{type}/#{desc}-{issue}", "gwm-cli", &default_branch_types())
-    .expect("a swapped pattern must warn");
-  assert!(
-    w.contains("match nothing at all") && w.contains("parse but read back"),
-    "a digits-only desc parses, so the verdict carries both counts, not a total loss: {}",
+    w.contains("carries no `{type}`") && !w.contains("match nothing at all"),
+    "a dashed repo name is a literal now, not a parse failure: {}",
     w
   );
 }
 
 /// Issue #415 (Codex review): the per-segment flags accumulate across probes,
-/// so reporting them as if they held for every parsed branch over-claims.
-/// `feat/#{issue}-{desc}` round-trips for the `feat` probes and loses the
-/// type for every other configured type — the verdict has to be quantified,
-/// not universal.
+/// so reporting them as if they held for every parsed branch over-claims. Any
+/// verdict derived from probing must carry its count.
+///
+/// The `missing` verdict is deliberately exempt and is checked separately
+/// below: a placeholder the pattern does not contain is absent from every name
+/// it will ever write, so quantifying it over a probe set would understate a
+/// fact that needs no probing.
 #[test]
-fn a_partly_lossy_pattern_quantifies_instead_of_generalising() {
-  let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types())
-    .expect("a hardcoded type must warn");
+fn every_probe_derived_verdict_is_scoped_to_the_shapes_actually_probed() {
+  let w = branch_pattern_warning(UNREADABLE, "gwm-cli", &default_branch_types()).expect("must warn");
   assert!(
     w.contains("of the ") && w.contains("branch shapes probed"),
-    "the warning must count the shapes it probed, not claim all branches lose something: {}",
+    "a probe-derived verdict must count the shapes it probed: {}",
+    w
+  );
+
+  // `{type}/{desc}` has no `{issue}` and no digits to freeze one from, so the
+  // absence is total and needs no probing to state.
+  let w = branch_pattern_warning("{type}/{desc}", "gwm-cli", &default_branch_types()).expect("must warn");
+  assert!(
+    !w.contains("branch shapes probed") && w.contains("carries no `{issue}`"),
+    "a segment the pattern cannot supply at all is not a probe result and must not borrow its hedging: {}",
     w
   );
 }
 
-/// The verdict is observational in *every* shape. No message may claim
-/// anything about branches outside the probe set: which values matter
-/// depends on the pattern, so that set cannot be closed without deriving
-/// the parser from the pattern (#417). A class the probes miss can only
-/// make the counts smaller — never make the statement false.
+/// Issue #417: the two patterns no parser can read are refused by the compiler
+/// rather than reported by the probe, so the warning is the compile error and
+/// it names the fix.
 #[test]
-fn every_verdict_is_scoped_to_the_shapes_actually_probed() {
-  for pattern in [
-    "{type}-{issue}-{desc}",
-    "{type}/#{issue}-prefix-{desc}",
-    "feat/#{issue}-{desc}",
-    "{desc}/#{issue}-{type}",
-    "{type}/#{issue}{desc}",
-  ] {
-    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
-      .unwrap_or_else(|| panic!("`{}` must warn", pattern));
-    assert!(
-      w.contains("of the ") && w.contains("branch shapes probed"),
-      "`{}` produced an unquantified verdict: {}",
-      pattern,
-      w
-    );
-  }
+fn an_ambiguous_pattern_is_reported_as_refused_not_as_lossy() {
+  let w = branch_pattern_warning("{type}/#{issue}{desc}", "gwm-cli", &default_branch_types())
+    .expect("adjacent placeholders must warn");
+  assert!(
+    w.contains("nothing between them") && w.contains("separate them with a literal"),
+    "the warning must say what is wrong and how to fix it: {}",
+    w
+  );
 }
 
-/// Guard for the "which patterns actually work today" table in
+/// Guard for the "which patterns work" table in
 /// `docs/4.configuration/1.gwm-toml.md` (EN + FR). The docs make concrete
-/// promises about specific patterns; this pins them so the table cannot
-/// drift away from the code. Every expectation below was read off the real
+/// promises about specific patterns; this pins them so the table cannot drift
+/// away from the code. Every expectation below was read off the real
 /// `branch_pattern_warning` output, not assumed.
 #[test]
 fn the_documented_pattern_table_matches_reality() {
-  // Round-trips: the default, for any set of configured types.
-  assert_eq!(
-    branch_pattern_warning("{type}/#{issue}-{desc}", "gwm-cli", &default_branch_types()),
-    None
-  );
-
-  // Round-trips: a literal type, but only when it is the *only* configured
-  // branch type — `BRANCH_RE` reads the literal back as the type.
-  let only_feat = vec![BranchType {
-    name: "feat".into(),
-    description: "New feature implementation".into(),
-  }];
-  assert_eq!(
-    branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &only_feat),
-    None
-  );
-
-  // Documented as "nothing parses": any change to the `<type>/#<issue>-<desc>`
-  // skeleton the hardcoded parser expects.
+  // Documented as "round-trips fully".
   for pattern in [
-    "{type}/{issue}-{desc}",         // no `#`
-    "{type}-{issue}-{desc}",         // no `/`
-    "{type}/#{issue}_{desc}",        // `_` instead of `-`
-    "{type}/#{issue}",               // no desc
-    "{repo}/{type}/#{issue}-{desc}", // extra leading segment
-    "wt/{type}/#{issue}-{desc}",     // extra leading segment
-  ] {
-    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
-      .unwrap_or_else(|| panic!("`{}` is documented as fully broken but did not warn", pattern));
-    assert!(
-      w.contains("match nothing at all"),
-      "`{}` is documented as fully unparseable: {}",
-      pattern,
-      w
-    );
-  }
-
-  // Documented as "parses, wrong desc": anything glued after `{desc}`, or a
-  // literal wedged between the `-` and `{desc}`.
-  for pattern in [
-    "{type}/#{issue}-{desc}-{repo}",
-    "{type}/#{issue}-{desc}{desc}",
+    "{type}/#{issue}-{desc}",
+    "{type}-{issue}-{desc}",
+    "{type}_{issue}_{desc}",
+    "{type}/{issue}-{desc}",
+    "{type}/#{issue}_{desc}",
+    "{repo}/{type}/#{issue}-{desc}",
+    "wt/{type}/#{issue}-{desc}",
     "{type}/#{issue}-prefix-{desc}",
+    "{type}/#{issue}-{desc}-{repo}",
+    "{desc}/#{issue}-{type}",
+    "{type}/#{desc}-{issue}",
+    "{type}{issue}-{desc}",
+    "{issue}{type}-{desc}",
+    "{type}-{issue}9-{desc}",
+  ] {
+    assert_eq!(
+      branch_pattern_warning(pattern, "gwm-cli", &default_branch_types()),
+      None,
+      "`{}` is documented as round-tripping",
+      pattern
+    );
+  }
+
+  // Documented as "refused as unreadable".
+  for pattern in [
+    "{issue}{desc}",
+    "{desc}{issue}",
+    "{type}{desc}",
+    "{type}-{issue}9{desc}",
+    "{type}a{desc}",
+    "{desc}1{issue}",
+    "{desc}-{desc}",
   ] {
     let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
-      .unwrap_or_else(|| panic!("`{}` is documented as lossy but did not warn", pattern));
+      .unwrap_or_else(|| panic!("`{}` is documented as refused but did not warn", pattern));
     assert!(
-      w.contains("parse but read back `desc`") && !w.contains("match nothing at all"),
-      "`{}` is documented as parseable-but-wrong-desc: {}",
+      w.contains("nothing between them") || w.contains("could be read as part of") || w.contains("more than once"),
+      "`{}` is documented as refused by the compiler: {}",
       pattern,
       w
     );
   }
+
+  // Documented as "freezes a segment": the literal is read back, so the
+  // features keep working, but the pattern ignores what `gwm create` was
+  // asked for, and that is the loss the warning names.
+  for (pattern, segment, frozen) in [
+    ("feat/#{issue}-{desc}", "type", "feat"),
+    ("{type}/#1-{desc}", "issue", "1"),
+    ("{type}/#{issue}-fixed", "desc", "fixed"),
+  ] {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).expect("compiles");
+    assert_eq!(
+      parser.constants(),
+      &[(segment, frozen.to_string())][..],
+      "`{}` is documented as freezing {} to `{}`",
+      pattern,
+      segment,
+      frozen
+    );
+    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
+      .unwrap_or_else(|| panic!("`{}` is documented as losing what create asked for", pattern));
+    assert!(
+      w.contains(&format!("read back `{}`", segment)),
+      "`{}` is documented as losing the {} create was given: {}",
+      pattern,
+      segment,
+      w
+    );
+  }
+
+  // Documented as "carries no such segment at all": nothing in the pattern
+  // could freeze one, so the absence needs no probing to state.
+  for (pattern, token) in [
+    ("{issue}-{desc}", "`{type}`"),
+    ("{type}/{desc}", "`{issue}`"),
+    ("{type}/#{issue}", "`{desc}`"),
+  ] {
+    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
+      .unwrap_or_else(|| panic!("`{}` is documented as carrying no segment but did not warn", pattern));
+    assert!(
+      w.contains(&format!("carries no {}", token)),
+      "`{}` is documented as carrying no {}: {}",
+      pattern,
+      token,
+      w
+    );
+  }
+
+  // Documented as the one shape the compiler does not mirror.
+  let w = branch_pattern_warning(UNREADABLE, "gwm-cli", &default_branch_types())
+    .expect("a `~`-leading pattern is documented as unreadable");
+  assert!(w.contains("match nothing at all"), "got: {}", w);
+}
+
+/// Ambiguity is about the *value*, not about how many places it could have
+/// come from. `feat/feat/#{issue}-{desc}` offers the type two candidates, and
+/// refusing on that count alone reported no type at all for a pattern whose
+/// every reading says `feat` — so `commit-prefix`, the templates and the TUI
+/// saw a branch with no type where the pattern names one unambiguously.
+#[test]
+fn two_ways_to_read_the_same_value_are_not_an_ambiguity() {
+  for (pattern, segment, frozen) in [
+    ("feat/feat/#{issue}-{desc}", "type", "feat"),
+    ("{type}/#1/1-{desc}", "issue", "1"),
+    // `/` and not `-` between them: a dash is inside `{desc}`'s own charset,
+    // so `-fixed-fixed` is one run reading `fixed-fixed`, not two reading
+    // `fixed`, and it would test the single-candidate path instead.
+    ("{type}/#{issue}-fixed/fixed", "desc", "fixed"),
+  ] {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).expect("compiles");
+    assert_eq!(
+      parser.constants(),
+      &[(segment, frozen.to_string())][..],
+      "`{}` reads {} as `{}` whichever candidate is taken, so it is frozen, not ambiguous",
+      pattern,
+      segment,
+      frozen
+    );
+  }
+
+  // The counterpart the rule still has to refuse: two candidates that would
+  // read *different* values really are a coin toss, and inventing one is
+  // worse than reporting none.
+  let parser = BranchParser::compile("feat/fix/#{issue}-{desc}", "gwm-cli", &default_branch_types()).expect("compiles");
+  assert!(
+    parser.constants().is_empty(),
+    "`feat/fix/#{{issue}}-{{desc}}` names two different configured types, which is a real ambiguity"
+  );
+
+  // And the reason the rule is stated per *segment* and not per reading:
+  // `feat/#{issue}-fix/done` is read two ways, and they disagree about the
+  // description. That says nothing about the type, which both of them read as
+  // `feat` — so one genuinely ambiguous segment must not take an unanimous
+  // one down with it.
+  let parser = BranchParser::compile("feat/#{issue}-fix/done", "gwm-cli", &default_branch_types()).expect("compiles");
+  assert_eq!(
+    parser.constants(),
+    &[("type", "feat".to_string())][..],
+    "the type is unanimous across both readings of `feat/#{{issue}}-fix/done`; only the description is ambiguous"
+  );
 }
 
 /// Issue #415 (Codex review): `Config::merge_layered` deserialises
@@ -494,27 +569,53 @@ fn an_unusable_branch_type_never_makes_the_default_pattern_look_broken() {
 /// neither `gwm doctor` nor `gwm config validate` goes through the TOFU
 /// trust gate, so running either in an unvetted repo must not hand its
 /// `.gwm.toml` a terminal escape channel (OSC 52 clipboard write, title
-/// rewrite). Both the pattern and the formatted example are echoed, so both
-/// have to be neutralised.
+/// rewrite). Every path that echoes the pattern has to neutralise it.
+///
+/// #417 added a third such path and moved the other two, so all three are
+/// exercised here rather than only the one that happened to fire in 1.5.0:
+/// the compile error, the missing-placeholder verdict, and the probe's `e.g.`
+/// example. A pattern that merely appends the payload is no longer a vehicle
+/// for any of them, because trailing literals round-trip now.
 #[test]
 fn control_characters_in_the_pattern_never_reach_the_terminal() {
   // OSC 52 clipboard-write shape: ESC ] 52 ; c ; <payload> BEL
-  let hostile = "{type}/#{issue}-{desc}\u{1b}]52;c;cHduZWQ=\u{7}";
-  let w = branch_pattern_warning(hostile, "gwm-cli", &default_branch_types())
-    .expect("a pattern carrying control bytes must warn");
+  const OSC52: &str = "\u{1b}]52;c;cHduZWQ=\u{7}";
+
+  // Path 1: the compile error, which quotes the pattern.
+  let w = branch_pattern_warning(
+    &format!("{{issue}}{{desc}}{}", OSC52),
+    "gwm-cli",
+    &default_branch_types(),
+  )
+  .expect("adjacent placeholders must warn");
   assert!(
     !w.chars().any(|c| c.is_control()),
-    "no control character may survive into the message: {:?}",
+    "no control character may survive the compile error: {:?}",
     w
   );
-  // The value stays recognisable — neutralised, not silently dropped.
-  assert!(w.contains("{type}/#{issue}-{desc}"), "got: {}", w);
+  assert!(w.contains("{issue}{desc}"), "the value stays recognisable: {}", w);
 
-  // Same for the formatted example, which is built from the pattern.
-  let w = branch_pattern_warning("{type}\u{1b}[2J{issue}", "gwm-cli", &default_branch_types()).expect("must warn");
+  // Path 2: the missing-placeholder verdict, which quotes the pattern too.
+  let w = branch_pattern_warning("{type}\u{1b}[2J{issue}", "gwm-cli", &default_branch_types())
+    .expect("a pattern with no `{desc}` must warn");
   assert!(
     !w.chars().any(|c| c.is_control()),
-    "the `e.g.` example is echoed too: {:?}",
+    "no control character may survive the missing-placeholder verdict: {:?}",
+    w
+  );
+  assert!(w.contains("{type}"), "the value stays recognisable: {}", w);
+
+  // Path 3: the probe's `e.g.` example, which is *built* from the pattern and
+  // so carries the payload even when the pattern itself is not echoed raw.
+  let w = branch_pattern_warning(
+    &format!("~/{{type}}/#{{issue}}-{{desc}}{}", OSC52),
+    "gwm-cli",
+    &default_branch_types(),
+  )
+  .expect("a `~`-leading pattern must warn");
+  assert!(
+    w.contains("match nothing at all") && !w.chars().any(|c| c.is_control()),
+    "the formatted example is echoed too: {:?}",
     w
   );
 }
@@ -526,8 +627,8 @@ fn control_characters_in_the_pattern_never_reach_the_terminal() {
 /// body placeholders, and that consumer has to be named.
 #[test]
 fn the_consumer_mapping_matches_the_call_sites() {
-  let w = branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli", &default_branch_types())
-    .expect("an unparseable pattern must warn");
+  let w =
+    branch_pattern_warning(UNREADABLE, "gwm-cli", &default_branch_types()).expect("an unreadable pattern must warn");
   assert!(
     w.contains("PR/MR detection is unaffected"),
     "PR detection survives an unreadable pattern — do not claim otherwise: {}",
@@ -782,4 +883,983 @@ fn the_rejection_names_the_offending_value() {
   let err = WorktreeName::freeform("has space").unwrap_err();
   let msg = format!("{}", err);
   assert!(msg.contains("has space"), "the message must quote the input: {}", msg);
+}
+
+// ---------------------------------------------------------------------
+// Issue #417 — the parser is compiled from `worktree.branch_pattern`, so
+// the shape gwm reads is the shape gwm writes. `BRANCH_RE` is gone.
+// ---------------------------------------------------------------------
+
+/// Format a triple through `pattern`, then read it back with the parser
+/// compiled from the same pattern. The property every test below asserts.
+fn round_trip(pattern: &str, type_: &str, issue: &str, desc: &str) -> (String, Option<(String, String, String)>) {
+  let cfg = WorktreeConfig {
+    branch_pattern: pattern.into(),
+    ..Default::default()
+  };
+  let spec = BranchSpec::new(type_, issue, desc).expect("the probe triple is valid");
+  let branch = spec.branch_name(&cfg, "gwm-cli").expect("the pattern expands");
+  let parser = BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).expect("the pattern compiles");
+  let back = parser
+    .parse(&branch)
+    .map(|s| (s.type_.clone(), s.issue.clone(), s.desc.clone()));
+  (branch, back)
+}
+
+#[test]
+fn every_plausible_convention_reads_back_what_it_wrote() {
+  // The acceptance criterion for #417 is not "custom patterns stop
+  // warning" — it is that the conventions people actually use keep issue
+  // auto-linking, gitmoji, hook placeholders and the TUI rename. Slash-less
+  // patterns are in scope, not an edge case: `-` and `_` sit in neither the
+  // type alternation nor `\d+`, so every split below is forced.
+  //
+  // The desc carries a `-` on purpose. It is the character most likely to
+  // collide with a separator, and `[a-z0-9-]` allows it.
+  for pattern in [
+    "{type}/#{issue}-{desc}", // today's default
+    "{type}-{issue}-{desc}",
+    "{type}_{issue}_{desc}",
+    "{type}/{issue}-{desc}",
+    "{repo}/{type}/#{issue}-{desc}",
+  ] {
+    let (branch, back) = round_trip(pattern, "feat", "417", "derive-branch-parser");
+    assert_eq!(
+      back,
+      Some(("feat".into(), "417".into(), "derive-branch-parser".into())),
+      "pattern `{}` wrote `{}` and could not read it back",
+      pattern,
+      branch
+    );
+  }
+}
+
+#[test]
+fn a_pattern_that_omits_a_token_reports_the_segments_it_does_carry() {
+  // `{type}/{desc}` has no issue number to find. Returning `None` for the
+  // whole parse would throw away the type and desc that ARE there — and
+  // those drive gitmoji, `[pr_template.by_type]` and the hook placeholders.
+  // The absent segment comes back empty; callers that need it say so.
+  let (branch, back) = round_trip("{type}/{desc}", "fix", "9", "flaky-test");
+  assert_eq!(branch, "fix/flaky-test");
+  assert_eq!(back, Some(("fix".into(), String::new(), "flaky-test".into())));
+
+  let (branch, back) = round_trip("{issue}-{desc}", "feat", "42", "no-type-here");
+  assert_eq!(branch, "42-no-type-here");
+  assert_eq!(back, Some((String::new(), "42".into(), "no-type-here".into())));
+
+  // A hardcoded literal prefix is the same situation: `feature/` is text, not
+  // a type, so nothing reads a type back.
+  let (branch, back) = round_trip("feature/{issue}-{desc}", "feat", "42", "literal-prefix");
+  assert_eq!(branch, "feature/42-literal-prefix");
+  assert_eq!(back, Some((String::new(), "42".into(), "literal-prefix".into())));
+}
+
+#[test]
+fn a_separator_the_left_token_could_itself_contain_is_not_an_obstacle() {
+  // The rule "the separator must not belong to the charset of the token on
+  // its left" would reject `{desc}-{issue}`, and it is wrong to. `{issue}`
+  // is `\d+`, so it cannot contain the `-`; the only split where the tail
+  // is all digits is the right one, and greedy backtracking finds exactly
+  // that one. `user-auth-42` is the counter-example #417's body cites as
+  // broken — it is not.
+  let (branch, back) = round_trip("{desc}-{issue}", "feat", "42", "user-auth");
+  assert_eq!(branch, "user-auth-42");
+  assert_eq!(back, Some((String::new(), "42".into(), "user-auth".into())));
+
+  // The same holds when the desc itself ends in digits-then-dash, which is
+  // where a naive split would go wrong.
+  let (_, back) = round_trip("{desc}-{issue}", "feat", "2", "spike-1");
+  assert_eq!(back, Some((String::new(), "2".into(), "spike-1".into())));
+}
+
+#[test]
+fn two_tokens_with_nothing_between_them_are_refused_at_compile_time() {
+  // These are the patterns that genuinely cannot be read back, and they are
+  // refused rather than compiled into a parser that silently mis-splits.
+  //
+  // `{issue}{desc}` is deterministic and wrong: `42` + `123-x` writes
+  // `42123-x`, which reads back as `4212` + `3-x`. `{desc}{issue}` is worse
+  // than wrong, it is ambiguous — `a` + `12` and `a1` + `2` both write
+  // `a12`, so no parser can be correct.
+  //
+  // What they have in common is a shared character, not the adjacency: it is
+  // the digit that can end an issue *and* open a description that moves the
+  // split. Codex review on PR #476 caught the first version of this rule
+  // refusing adjacency outright, which took the whole parser away from
+  // patterns that read back perfectly well — see below.
+  for pattern in ["{issue}{desc}", "{desc}{issue}", "{type}{desc}"] {
+    let err = BranchParser::compile(pattern, "gwm-cli", &default_branch_types())
+      .expect_err(&format!("`{}` must be refused, not compiled", pattern));
+    let msg = format!("{}", err);
+    assert!(
+      msg.contains("nothing") && msg.contains(pattern),
+      "the message must quote the pattern and say what is missing: {}",
+      msg
+    );
+  }
+
+  // `[a-z]+` stops at the first digit and `\d+` at the first letter, so there
+  // is exactly one place the split between them can be — no separator needed,
+  // and refusing these would have made `from_config` fall back to the inert
+  // parser for a config that works.
+  let (branch, back) = round_trip("{type}{issue}-{desc}", "feat", "42", "9-my");
+  assert_eq!(branch, "feat42-9-my");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "9-my".into())));
+  let (branch, back) = round_trip("{issue}{type}-{desc}", "feat", "42", "x9");
+  assert_eq!(branch, "42feat-x9");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "x9".into())));
+}
+
+#[test]
+fn the_same_token_twice_is_refused_rather_than_compiled_into_a_second_group() {
+  // The formatter's `str::replace` substitutes every occurrence, so
+  // `{desc}-{desc}` writes `foo-foo`. Reading that back needs a
+  // backreference; two groups of the same name do not even compile. Refuse
+  // with a message about the pattern rather than surfacing a regex error.
+  let err = BranchParser::compile("{desc}-{desc}", "gwm-cli", &default_branch_types())
+    .expect_err("a repeated token must be refused");
+  let msg = format!("{}", err);
+  assert!(msg.contains("more than once"), "unexpected message: {}", msg);
+}
+
+#[test]
+fn a_pattern_that_cannot_be_compiled_reads_nothing_rather_than_the_default_shape() {
+  // Falling back to the built-in parser here would reproduce exactly the
+  // defect #417 removes: the repo writes one shape, gwm reads another, and
+  // the issue number it recovers belongs to a branch that was never created
+  // that way. Reading nothing is the honest outcome; `gwm doctor` and
+  // `gwm config validate` are where the pattern gets reported.
+  let mut config = gwm::config::Config::default();
+  config.worktree.branch_pattern = "{desc}{issue}".into();
+  let parser = BranchParser::from_config(&config, "gwm-cli");
+  assert!(parser.parse("feat/#1-x").is_none());
+  assert!(parser.parse("x1").is_none());
+}
+
+#[test]
+fn the_builtin_parser_still_reads_the_canonical_shape() {
+  // `parse_branch` keeps its meaning for the one entry point with no repo
+  // to consult (`gwm commit-prefix --branch <name>` outside a checkout).
+  let spec = BranchParser::builtin()
+    .parse("feat/#417-derive-branch-parser")
+    .expect("the canonical shape parses");
+  assert_eq!(spec.type_, "feat");
+  assert_eq!(spec.issue, "417");
+  assert_eq!(spec.desc, "derive-branch-parser");
+  assert!(BranchParser::builtin().parse("random").is_none());
+}
+
+#[test]
+fn the_compiler_handles_every_token_the_formatter_substitutes() {
+  // The guard that survives someone adding a placeholder in six months.
+  //
+  // A token `expand_placeholders` substitutes but the compiler does not know
+  // about would be emitted as a literal `{token}` into the regex while the
+  // formatter replaced it with a value — the format/parse divergence this
+  // issue exists to delete, reintroduced silently. So the list is not
+  // hand-maintained here: it is read out of the function itself.
+  //
+  // `{repo_path}` / `{repo_parent}` are deliberately absent from the handled
+  // set. `BranchSpec::branch_name` passes `None` for `repo_path`, so those
+  // tokens are NOT substituted on the branch path and survive verbatim —
+  // which is exactly what the compiler's literal fallback expects.
+  // Line endings are normalised first: the Windows runner checks the source
+  // out with CRLF, so the closing-brace anchor below never matched there and
+  // the test failed on the read rather than on the compiler.
+  let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config.rs"))
+    .expect("read src/config.rs")
+    .replace("\r\n", "\n");
+  let body = src
+    .split_once("pub fn expand_placeholders(")
+    .expect("expand_placeholders is still named that")
+    .1;
+  let body = body.split_once("\n}\n").expect("the function has a body").0;
+
+  let mut found: Vec<String> = Vec::new();
+  let mut rest = body;
+  while let Some(open) = rest.find("(\"{") {
+    rest = &rest[open + 2..];
+    let Some(close) = rest.find("}\"") else { break };
+    found.push(rest[..close + 1].to_string());
+    rest = &rest[close + 1..];
+  }
+  found.sort();
+  found.dedup();
+  assert!(
+    found.len() >= 5,
+    "the token scan found only {:?} — the extraction broke, not the compiler",
+    found
+  );
+
+  // Substituted on the branch path: the compiler must resolve each one.
+  const HANDLED: [&str; 5] = ["{home}", "{repo}", "{type}", "{issue}", "{desc}"];
+  // Left literal on the branch path (`repo_path` is `None` there), so the
+  // compiler's literal fallback is correct for them by construction.
+  const LITERAL_ON_BRANCH_PATH: [&str; 2] = ["{repo_path}", "{repo_parent}"];
+
+  for token in &found {
+    assert!(
+      HANDLED.contains(&token.as_str()) || LITERAL_ON_BRANCH_PATH.contains(&token.as_str()),
+      "`{}` is substituted by expand_placeholders but BranchParser::compile does not know it — \
+       it would be matched as a literal while the formatter replaced it. Add it to the compiler \
+       (and to this list), or explain why the branch path leaves it literal.",
+      token
+    );
+  }
+}
+
+/// Issue #478. A worktree carries its triple in two places, and neither is
+/// complete on its own.
+///
+/// `branch_pattern` is authoritative for every segment it writes from a
+/// placeholder. For one it *freezes* — or does not carry at all — the branch
+/// cannot say what `gwm create` was given, and the directory can: under
+/// `branch_pattern = "feat/#{issue}-{desc}"` with the default `path_pattern`,
+/// `gwm create fix 42 x` writes the branch `feat/#42-x` and the directory
+/// `fix-42-x`, and `fix` survives only in the second. Rebuilding the triple
+/// from the branch alone dropped it, so a rename that touched only the
+/// description also renamed the directory's type component.
+#[test]
+fn a_worktree_spec_takes_from_the_path_what_the_branch_cannot_carry() {
+  let mut config = Config::default();
+  config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some("fix-42-x")).expect("reads the worktree");
+  assert_eq!(
+    (spec.type_.as_str(), spec.issue.as_str(), spec.desc.as_str()),
+    ("fix", "42", "x"),
+    "the type the worktree was created with survives in its directory"
+  );
+
+  // Without a directory to read, the frozen literal is still the best answer.
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", None).expect("reads the branch");
+  assert_eq!(spec.type_, "feat");
+}
+
+#[test]
+fn a_segment_the_branch_writes_is_never_overridden_by_the_path() {
+  // The branch is the identity. A directory that disagrees — renamed by hand,
+  // created under a different `path_pattern` — must not rewrite a segment the
+  // branch states outright, or a rename would silently adopt whatever the
+  // directory happened to say.
+  let config = Config::default(); // `{type}/#{issue}-{desc}` + `{type}-{issue}-{desc}`
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some("chore-9-something-else")).expect("reads");
+  assert_eq!(
+    (spec.type_.as_str(), spec.issue.as_str(), spec.desc.as_str()),
+    ("feat", "42", "x")
+  );
+}
+
+#[test]
+fn a_path_pattern_that_says_nothing_leaves_the_branch_reading_alone() {
+  let mut config = Config::default();
+  config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+
+  for dirname in [
+    "not-shaped-like-the-pattern-at-all/x", // does not match `path_pattern`
+    "",                                     // no directory name at all
+  ] {
+    let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some(dirname)).expect("reads the branch");
+    assert_eq!(spec.type_, "feat", "`{}` must not disturb the reading", dirname);
+  }
+
+  // A `path_pattern` that cannot be compiled into a parser is not an error
+  // here either — it has its own diagnostic, and the branch still reads.
+  config.worktree.path_pattern = "{issue}{desc}".into(); // refused: the split can move
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some("fix-42-x")).expect("reads the branch");
+  assert_eq!(spec.type_, "feat");
+}
+
+/// The complete no-regression obligation for constant recovery, enumerated
+/// instead of sampled.
+///
+/// 1.5.0 read a branch **iff** it matched a single hardcoded regex, so the set
+/// of patterns that owe anything to the previous release is exactly the family
+/// that regex accepts: `A/#B-C`, where each of the three positions is either a
+/// placeholder or a literal fitting the charset of the group that stood there.
+/// That is 16 patterns, and the release itself is the oracle — the same regex,
+/// run over what each pattern writes.
+///
+/// The recovery was checked against a hand-picked list before this, and two
+/// separate review findings landed in the gap: `feat/#{issue}-fix` (`feat` and
+/// `fix` are both configured branch types, so a globally-unique candidate does
+/// not exist and *both* segments were dropped) and `-fixed--desc` / `-fixed-`
+/// (a doubled dash split the value, a trailing one was trimmed off it). Both
+/// live inside this family and both were read correctly by 1.5.0.
+#[test]
+fn every_pattern_1_5_0_read_is_read_the_same_way() {
+  // The 1.5.0 parser, verbatim from `git show v1.5.0:src/naming.rs`.
+  let oracle = regex::Regex::new(r"^([a-z]+)/#(\d+)-([a-z0-9-]+)$").expect("the 1.5.0 regex compiles");
+  let types = default_branch_types();
+  // Deliberately none of the literals below, so a frozen segment and a written
+  // one can never be confused for each other.
+  const PROBE: (&str, &str, &str) = ("chore", "42", "x");
+
+  let mut checked = 0usize;
+  let mut broken: Vec<String> = Vec::new();
+  for a in ["{type}", "feat"] {
+    for b in ["{issue}", "1"] {
+      // 1.5.0's third group is `[a-z0-9-]+`, which is *looser* than `DESC_RE`:
+      // it accepts a description opening with `-`. The family is defined by
+      // that charset, not by the one gwm validates against today, so those
+      // literals are in scope too — leaving them out was what made the first
+      // version of this test claim more parity than it had.
+      for c in ["{desc}", "fix", "fixed--desc", "fixed-", "--fix", "-"] {
+        let pattern = format!("{}/#{}-{}", a, b, c);
+        let cfg = WorktreeConfig {
+          branch_pattern: pattern.clone(),
+          ..WorktreeConfig::default()
+        };
+        let spec = BranchSpec::new_with_types(PROBE.0, PROBE.1, PROBE.2, &types).expect("a valid triple");
+        let name = spec.branch_name(&cfg, "gwm-cli").expect("the formatter writes it");
+        // Outside the family 1.5.0 could read, there is nothing to preserve.
+        let Some(old) = oracle.captures(&name) else { continue };
+
+        let parser =
+          BranchParser::compile(&pattern, "gwm-cli", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
+        let read = parser
+          .parse(&name)
+          .unwrap_or_else(|| panic!("`{}` wrote `{}`, which 1.5.0 read and this does not", pattern, name));
+        let now = (read.type_.clone(), read.issue.clone(), read.desc.clone());
+        let then = (
+          old.get(1).unwrap().as_str().to_string(),
+          old.get(2).unwrap().as_str().to_string(),
+          old.get(3).unwrap().as_str().to_string(),
+        );
+        if then.2.starts_with('-') {
+          // The one deliberate divergence, and it is a bug 1.5.0 had rather
+          // than a contract it kept: `--fix` fails `DESC_RE`, so
+          // `BranchSpec::validate` rejects the very description that parser
+          // handed back — the rename form could not submit it and `gwm create`
+          // could never have produced it. A leading `-` is also exactly what
+          // #416 banned from a name, since `gwm remove` and `git branch -d`
+          // read it as a flag. Hooks, `[pr_template]` and the rename prefill
+          // get the value without it.
+          assert_eq!(
+            now.2,
+            then.2.trim_start_matches('-'),
+            "`{}` wrote `{}`: a leading dash is dropped from the description, not the description",
+            pattern,
+            name
+          );
+          checked += 1;
+          continue;
+        }
+        if now != then {
+          broken.push(format!(
+            "`{}` wrote `{}`: 1.5.0 read {:?}, this reads {:?}",
+            pattern, name, then, now
+          ));
+        }
+        checked += 1;
+      }
+    }
+  }
+  assert_eq!(
+    checked, 24,
+    "every pattern in the family must be inside what 1.5.0 could read"
+  );
+  assert!(
+    broken.is_empty(),
+    "patterns 1.5.0 read that this reads differently:\n  {}",
+    broken.join("\n  ")
+  );
+}
+
+/// Codex review on PR #476, fourth and fifth passes — and the reason the
+/// mirror is now *checked* rather than argued.
+///
+/// `expand_placeholders` substitutes in a fixed order (`{home}`, `{repo}`,
+/// then the three capturing tokens) and each `str::replace` runs over what the
+/// previous ones produced, so an expansion can be substituted again. Both
+/// shapes below were reported separately, one review pass apart, because the
+/// first fix inspected the expansion in isolation and the second token was
+/// formed with the literals around it. Replaying the whole chain for inputs
+/// nobody has is not worth it; compiling a parser that recognises none of the
+/// branches the pattern creates is worse. So `compile` writes one probe branch
+/// with the real formatter and refuses the pattern when it cannot read it back
+/// — which closes the class rather than these two instances.
+#[test]
+fn a_pattern_the_parser_and_the_formatter_disagree_on_is_refused() {
+  let types = default_branch_types();
+  for (pattern, repo) in [
+    // The token sits inside the expansion.
+    ("{repo}/#{issue}-{desc}", "{type}"),
+    // The token is formed with the braces the pattern wrote around it.
+    ("{{repo}}/#{issue}-{desc}", "type"),
+  ] {
+    // The formatter really does substitute twice — assert that rather than
+    // assume it, since the refusal is only correct if it does.
+    let written =
+      gwm::config::expand_placeholders(pattern, repo, Some("feat"), Some("42"), Some("x"), None).expect("formats");
+    assert_eq!(
+      written, "feat/#42-x",
+      "`{}` in a repo called `{}` is expected to substitute twice",
+      pattern, repo
+    );
+
+    let err = BranchParser::compile(pattern, repo, &types)
+      .map(|_| String::new())
+      .unwrap_or_else(|e| e.to_string());
+    assert!(
+      err.contains(pattern) && err.contains("does not read back"),
+      "the message must name the pattern and say the parser cannot read it back: {}",
+      err
+    );
+  }
+
+  // A repo name with no token in it is the ordinary case and must be unaffected.
+  let parser = BranchParser::compile("{repo}/#{issue}-{desc}", "gwm-cli", &types).expect("compiles");
+  assert_eq!(
+    parser.parse("gwm-cli/#42-x").map(|s| (s.issue, s.desc)),
+    Some(("42".into(), "x".into()))
+  );
+}
+
+/// Codex review on PR #476, third pass. Knowing the same *set* of tokens as
+/// the formatter is not enough — the compiler has to find them the same way.
+///
+/// `expand_placeholders` is a chain of `str::replace`, so it sees `{type}` at
+/// offset 1 of `{{type}` and writes `{feat`. The compiler scanned for `{`
+/// instead, took `{{type}` for one unknown token, and compiled a regex
+/// demanding that text literally — so no branch the pattern wrote was ever
+/// read back, and auto-linking, the hooks, `[pr_template.by_type]` and the TUI
+/// rename all went quiet on a pattern that formats perfectly well.
+#[test]
+fn the_compiler_finds_placeholders_where_the_formatter_substitutes_them() {
+  let types = default_branch_types();
+  for (pattern, expected_name) in [
+    // A literal brace immediately before a placeholder.
+    ("{{type}/#{issue}-{desc}", "{feat/#42-x"),
+    // A token that only starts after another one has opened.
+    ("{type{issue}}-{desc}", "{type42}-x"),
+    // A trailing brace that closes nothing.
+    ("{type}/#{issue}-{desc}}", "feat/#42-x}"),
+    // An unknown token: literal to the formatter, so literal to the compiler.
+    ("{foo}/{type}/#{issue}-{desc}", "{foo}/feat/#42-x"),
+  ] {
+    let cfg = WorktreeConfig {
+      branch_pattern: pattern.into(),
+      ..WorktreeConfig::default()
+    };
+    let spec = BranchSpec::new_with_types("feat", "42", "x", &types).expect("a valid triple");
+    let name = spec.branch_name(&cfg, "gwm-cli").expect("the formatter writes it");
+    assert_eq!(
+      name, expected_name,
+      "`{}` does not write what the test assumes",
+      pattern
+    );
+
+    let parser = BranchParser::compile(pattern, "gwm-cli", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
+    let read = parser
+      .parse(&name)
+      .unwrap_or_else(|| panic!("`{}` wrote `{}` and cannot read it back", pattern, name));
+    for (token, written, got) in [
+      ("{type}", "feat", &read.type_),
+      ("{issue}", "42", &read.issue),
+      ("{desc}", "x", &read.desc),
+    ] {
+      if pattern.contains(token) {
+        assert_eq!(
+          got, written,
+          "`{}` wrote `{}` and read {} back as `{}`",
+          pattern, name, token, got
+        );
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Issue #417 — no-regression baseline.
+//
+// The set of branches gwm 1.5.0 could read is exactly the set matching its
+// hardcoded `^([a-z]+)/#(\d+)-([a-z0-9-]+)$`, read verbatim off the `v1.5.0`
+// tag. Every pattern below writes names in that set, so every one of them
+// worked before this issue and has to keep working after it. The expected
+// triples were computed by running that regex, not by reasoning about the
+// new parser.
+// ---------------------------------------------------------------------
+
+/// Patterns whose output 1.5.0 parsed, with what it read back.
+///
+/// The last two are the ones it read *wrongly* — `{desc}` swallowed the
+/// literal that followed it — and #415's warning existed to say so. Those are
+/// listed separately below, because matching 1.5.0 there would mean keeping
+/// the bug.
+const V1_5_0_PARSED: [(&str, &str, &str, &str); 4] = [
+  // pattern, type, issue, desc
+  ("{type}/#{issue}-{desc}", "feat", "42", "my-desc"),
+  // Freezes the type. 1.5.0's `([a-z]+)` group happened to sit exactly where
+  // the literal does, so it read `feat` back and gitmoji worked.
+  ("feat/#{issue}-{desc}", "feat", "42", "my-desc"),
+  // Freezes the issue number.
+  ("{type}/#1-{desc}", "feat", "1", "my-desc"),
+  // Freezes the description.
+  ("{type}/#{issue}-fixed", "feat", "42", "fixed"),
+];
+
+#[test]
+fn every_branch_1_5_0_could_read_is_still_read_the_same_way() {
+  for (pattern, want_type, want_issue, want_desc) in V1_5_0_PARSED {
+    let (branch, back) = round_trip(pattern, "feat", "42", "my-desc");
+    assert_eq!(
+      back,
+      Some((want_type.into(), want_issue.into(), want_desc.into())),
+      "`{}` wrote `{}`; gwm 1.5.0 read it as ({}, {}, {}) and this must not regress",
+      pattern,
+      branch,
+      want_type,
+      want_issue,
+      want_desc
+    );
+  }
+}
+
+#[test]
+fn the_two_patterns_1_5_0_read_wrongly_are_read_correctly_now() {
+  // 1.5.0's `([a-z0-9-]+)$` desc group ran to the end of the name, so a
+  // literal after `{desc}` was swallowed into it. #415 reported it; deriving
+  // the parser fixes it. Matching 1.5.0 here would mean keeping the bug.
+  let (_, back) = round_trip("{type}/#{issue}-prefix-{desc}", "feat", "42", "my-desc");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "my-desc".into())));
+  //                                                  ^ 1.5.0 said `prefix-my-desc`
+
+  let (_, back) = round_trip("{type}/#{issue}-{desc}-{repo}", "feat", "42", "my-desc");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "my-desc".into())));
+  //                                                  ^ 1.5.0 said `my-desc-gwm-cli`
+}
+
+#[test]
+fn a_branch_type_the_repo_no_longer_declares_is_still_read() {
+  // `{type}` is `[a-z]+`, not an alternation of the configured types. A
+  // branch created while `wip` was configured keeps being recognised as
+  // gwm's after `wip` is dropped from `.gwm.toml`: `doctor` still counts it
+  // for the orphan check, `gwm commit-prefix` still renders (with the unknown
+  // -type gitmoji), and the TUI rename refuses it with the precise reason
+  // rather than a generic "does not match the pattern".
+  //
+  // Narrowing `{type}` to the configured list would have made all three go
+  // quiet on a name the previous release read fine.
+  let only_feat = vec![BranchType {
+    name: "feat".into(),
+    description: "the only configured type".into(),
+  }];
+  let parser = BranchParser::compile("{type}/#{issue}-{desc}", "gwm-cli", &only_feat).expect("compiles");
+  let spec = parser.parse("wip/#1-x").expect("an unconfigured type still parses");
+  assert_eq!(spec.type_, "wip");
+  assert_eq!(spec.issue, "1");
+}
+
+#[test]
+fn a_frozen_segment_is_recovered_from_the_literal_that_freezes_it() {
+  let types = default_branch_types();
+  let c = |p: &str| {
+    BranchParser::compile(p, "gwm-cli", &types)
+      .expect("compiles")
+      .constants()
+      .iter()
+      .map(|(seg, value)| (*seg, value.clone()))
+      .collect::<Vec<_>>()
+  };
+
+  assert_eq!(c("feat/#{issue}-{desc}"), vec![("type", "feat".into())]);
+  assert_eq!(c("{type}/#1-{desc}"), vec![("issue", "1".into())]);
+  assert_eq!(c("{type}/#{issue}-fixed"), vec![("desc", "fixed".into())]);
+  // A hardcoded description carrying the `-` `DESC_RE` allows.
+  assert_eq!(c("{type}/#{issue}-my-fix"), vec![("desc", "my-fix".into())]);
+  // All three at once: each oracle claims its own token and removes it from
+  // the pool the next one sees.
+  assert_eq!(
+    c("feat/#1-fixed"),
+    vec![("type", "feat".into()), ("issue", "1".into()), ("desc", "fixed".into())]
+  );
+  // Nothing frozen when every placeholder is present.
+  assert!(c("{type}/#{issue}-{desc}").is_empty());
+}
+
+#[test]
+fn a_namespace_literal_is_not_mistaken_for_a_branch_type() {
+  // The `type` oracle is an exact match against the configured list, so a
+  // literal that merely *contains* a type name, or that is a plain namespace,
+  // recovers nothing. This is what keeps the recovery from being guesswork.
+  let types = default_branch_types();
+  for pattern in [
+    "feature/{issue}-{desc}", // contains `feat`, is not `feat`
+    "wt/{issue}-{desc}",
+    "{repo}/{issue}-{desc}", // the repo name is not pattern text the user authored
+  ] {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &types).expect("compiles");
+    assert!(
+      !parser.reads_segment("type"),
+      "`{}` must not invent a branch type",
+      pattern
+    );
+  }
+
+  // Two configured types in the literal: genuinely ambiguous, so neither is
+  // claimed rather than picking one.
+  let parser = BranchParser::compile("feat/fix-{issue}-{desc}", "gwm-cli", &types).expect("compiles");
+  assert!(!parser.reads_segment("type"));
+}
+
+#[test]
+fn a_repo_named_after_a_branch_type_does_not_type_its_branches() {
+  // `{repo}` is resolved by the formatter, so it is fixed text in the branch
+  // name — but it is not text the *pattern author* chose, and a repo called
+  // `docs` would otherwise make every branch a docs branch.
+  let types = default_branch_types();
+  let parser = BranchParser::compile("{repo}/#{issue}-{desc}", "docs", &types).expect("compiles");
+  assert!(!parser.reads_segment("type"));
+  let spec = parser.parse("docs/#42-x").expect("parses");
+  assert_eq!(spec.type_, "");
+}
+
+/// Every pattern the compiler is expected to accept.
+///
+/// Membership is not an opinion: [`every_legal_pattern_round_trips`] writes a
+/// branch from each of these with the real formatter and reads it back, so a
+/// pattern only belongs here if it survives that.
+const LEGAL: [&str; 20] = [
+  "{desc}-{issue}",
+  "{type}/#{issue}-{desc}",
+  "{type}-{issue}-{desc}",
+  "{type}_{issue}_{desc}",
+  "{type}/{issue}-{desc}",
+  "{type}/#{issue}_{desc}",
+  "{repo}/{type}/#{issue}-{desc}",
+  "wt/{type}/#{issue}-{desc}",
+  "{type}/#{issue}-prefix-{desc}",
+  "{type}/#{issue}-{desc}-{repo}",
+  "{desc}/#{issue}-{type}",
+  "{type}/#{desc}-{issue}",
+  "feat/#{issue}-{desc}",
+  "{type}/#1-{desc}",
+  "{type}/#{issue}-fixed",
+  // Adjacent, but over disjoint alphabets: `[a-z]+` stops at the first digit
+  // and `\d+` stops at the first letter, so the split cannot move.
+  "{type}{issue}-{desc}",
+  "{issue}{type}-{desc}",
+  "{type}{issue}",
+  // A multi-character separator the left-hand group can only eat part of.
+  "{type}-{issue}9-{desc}",
+  "{issue}9-{desc}",
+];
+
+/// Every pattern the compiler is expected to refuse, with the phrase its
+/// message must carry. Same contract as [`LEGAL`], read from the other side:
+/// [`every_refused_pattern_really_is_ambiguous`] proves each one can write a
+/// branch name it would then read back wrong.
+const REFUSED: [(&str, &str); 8] = [
+  // Adjacent over overlapping alphabets.
+  ("{issue}{desc}", "nothing between them"),
+  ("{desc}{issue}", "nothing between them"),
+  ("{type}{desc}", "nothing between them"),
+  ("{desc}{type}", "nothing between them"),
+  // Separated, but by a character both neighbours can hold.
+  ("{type}-{issue}9{desc}", "could be read as part of"),
+  ("{type}a{desc}", "could be read as part of"),
+  ("{desc}1{issue}", "could be read as part of"),
+  // The same value written twice needs a backreference to read back.
+  ("{desc}-{desc}", "more than once"),
+];
+
+/// The triples the round-trip property is checked over. Small on purpose, but
+/// picked to attack the boundary rule rather than to look representative: a
+/// description that opens with a digit is what turns `{type}-{issue}9{desc}`
+/// into a mis-split, one that opens with the separator's own character is what
+/// lets a greedy group slide, and issue numbers of three different lengths are
+/// what make a shifted split observable at all.
+const TYPES: [&str; 2] = ["feat", "fix"];
+const ISSUES: [&str; 4] = ["1", "4", "42", "429"];
+const DESCS: [&str; 10] = ["a", "foo", "a-b", "9-my", "19x", "2-a-b", "x9", "fix", "bar", "b9c"];
+
+/// The arbiter for the whole ambiguity rule, and the reason it stopped being
+/// argued one hand-picked branch name at a time.
+///
+/// Three separate Codex findings landed on this rule in two review passes —
+/// one false negative, two over-strict refusals — because each was checked
+/// against a string chosen to illustrate it. This decides the question by
+/// construction instead: for every legal pattern, write a branch with the real
+/// formatter for every triple, read it back with the parser, and require the
+/// segments the pattern actually writes to come back unchanged. A pattern that
+/// fails here does not belong in [`LEGAL`], whatever the rule says.
+#[test]
+fn every_legal_pattern_round_trips() {
+  let types = default_branch_types();
+  for pattern in LEGAL {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &types)
+      .unwrap_or_else(|e| panic!("`{}` is a legal pattern and must compile: {}", pattern, e));
+    let cfg = WorktreeConfig {
+      branch_pattern: pattern.into(),
+      ..WorktreeConfig::default()
+    };
+    for type_ in TYPES {
+      for issue in ISSUES {
+        for desc in DESCS {
+          let spec = BranchSpec::new_with_types(type_, issue, desc, &types).expect("a valid triple");
+          let name = spec.branch_name(&cfg, "gwm-cli").expect("the formatter writes it");
+          let read = parser
+            .parse(&name)
+            .unwrap_or_else(|| panic!("`{}` wrote `{}` and cannot read it back", pattern, name));
+          // Only the segments the pattern writes from a placeholder: one it
+          // freezes as a literal is not carrying this triple's value, and one
+          // it omits is not carrying a value at all.
+          for (token, written, got) in [
+            ("{type}", &spec.type_, &read.type_),
+            ("{issue}", &spec.issue, &read.issue),
+            ("{desc}", &spec.desc, &read.desc),
+          ] {
+            if pattern.contains(token) {
+              assert_eq!(
+                written,
+                got,
+                "`{}` wrote `{}` from {:?} and read {} back as `{}`",
+                pattern,
+                name,
+                (type_, issue, desc),
+                token,
+                got
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The named half of the refusals: each one is refused, and refused for the
+/// reason its message states. The *general* claim — that these are exactly the
+/// patterns that cannot be read back — is
+/// [`the_ambiguity_rule_accepts_exactly_the_patterns_that_round_trip`].
+#[test]
+fn every_refused_pattern_is_refused_for_the_stated_reason() {
+  for (pattern, phrase) in REFUSED {
+    let err = BranchParser::compile(pattern, "gwm-cli", &default_branch_types())
+      .map(|_| String::new())
+      .unwrap_or_else(|e| e.to_string());
+    assert!(!err.is_empty(), "`{}` must be refused, not compiled", pattern);
+    assert!(
+      err.contains(phrase),
+      "`{}` must be refused for the stated reason (`{}`): {}",
+      pattern,
+      phrase,
+      err
+    );
+  }
+}
+
+/// The rule itself, decided by enumeration rather than argued from examples.
+///
+/// Three Codex findings landed on the ambiguity rule across two review passes —
+/// one pattern wrongly accepted, two wrongly refused — and every one of them
+/// was invisible to the sample branch names the rule was being checked against.
+/// So this stops sampling. It generates every pattern over the three
+/// placeholders and a set of separators chosen to attack the rule, decides
+/// independently whether each one round-trips (with a regex the *test* builds
+/// from the same three charsets), and requires `compile` to accept exactly
+/// those.
+///
+/// Accepting a pattern that does not round-trip is the silent mis-split #417
+/// exists to remove. Refusing one that does makes `from_config` fall back to
+/// the inert parser, which takes auto-linking, `commit-prefix`, the hooks and
+/// the TUI rename away from a config that works. This test is the only place
+/// that can fail for both.
+#[test]
+fn the_ambiguity_rule_accepts_exactly_the_patterns_that_round_trip() {
+  // The oracle's own copy of the capture groups. Deliberately not imported
+  // from `naming.rs`: an oracle that shares the code under test cannot
+  // contradict it. `every_legal_pattern_round_trips` is what pins the two
+  // together, so drift between them fails there.
+  const GROUPS: [(&str, &str); 3] = [
+    ("{type}", r"(?P<type>[a-z]+)"),
+    ("{issue}", r"(?P<issue>\d+)"),
+    ("{desc}", r"(?P<desc>[a-z0-9][a-z0-9-]*)"),
+  ];
+  // Separators picked for what they do to the rule, not for what a user would
+  // write: the empty one makes placeholders adjacent, `9` / `a` belong to a
+  // neighbouring charset, `9-` and `-9` are multi-character boundaries only
+  // half of which a greedy group can eat.
+  const SEPS: [&str; 8] = ["", "-", "/", "#", "_", "9", "a", "9-"];
+
+  let types = default_branch_types();
+  let mut orders: Vec<Vec<usize>> = Vec::new();
+  for a in 0..3 {
+    for b in 0..3 {
+      if a == b {
+        continue;
+      }
+      orders.push(vec![a, b]);
+      for c in 0..3 {
+        if c != a && c != b {
+          orders.push(vec![a, b, c]);
+        }
+      }
+    }
+  }
+
+  let mut checked = 0usize;
+  for order in &orders {
+    for seps in separator_tuples(order.len() - 1, &SEPS) {
+      let mut pattern = String::new();
+      let mut oracle = String::from("^");
+      for (position, &segment) in order.iter().enumerate() {
+        if position > 0 {
+          pattern.push_str(seps[position - 1]);
+          oracle.push_str(&regex::escape(seps[position - 1]));
+        }
+        pattern.push_str(GROUPS[segment].0);
+        oracle.push_str(GROUPS[segment].1);
+      }
+      oracle.push('$');
+      let oracle = regex::Regex::new(&oracle).expect("the oracle regex compiles");
+
+      let round_trips = round_trips_every_value(&pattern, &oracle);
+      let accepted = BranchParser::compile(&pattern, "gwm-cli", &types).is_ok();
+      assert_eq!(
+        accepted, round_trips,
+        "`{}` round-trips: {}, but the compiler accepts it: {}",
+        pattern, round_trips, accepted
+      );
+      checked += 1;
+    }
+  }
+  // The enumeration is the evidence, so it has to have actually happened.
+  assert_eq!(checked, 6 * SEPS.len() + 6 * SEPS.len() * SEPS.len());
+}
+
+/// Every tuple of `n` separators drawn from `pool`, in order.
+fn separator_tuples(n: usize, pool: &'static [&'static str]) -> Vec<Vec<&'static str>> {
+  let mut out: Vec<Vec<&'static str>> = vec![Vec::new()];
+  for _ in 0..n {
+    out = out
+      .into_iter()
+      .flat_map(|prefix| {
+        pool.iter().map(move |sep| {
+          let mut next = prefix.clone();
+          next.push(sep);
+          next
+        })
+      })
+      .collect();
+  }
+  out
+}
+
+/// Every non-empty string over `alphabet` up to `max` characters long.
+///
+/// Generated rather than curated on purpose: the two rounds of Codex findings
+/// this test exists to close were both invisible to hand-picked values, and a
+/// third gap showed up while writing it — the mis-split needs a value that
+/// *ends* in the separator's own character, which is precisely the kind of
+/// input nobody writes down. The alphabets below therefore include every
+/// character the separator pool uses.
+fn values(alphabet: &[char], max: usize) -> Vec<String> {
+  let mut out: Vec<String> = Vec::new();
+  let mut frontier: Vec<String> = vec![String::new()];
+  for _ in 0..max {
+    frontier = frontier
+      .iter()
+      .flat_map(|prefix| {
+        alphabet.iter().map(move |c| {
+          let mut next = prefix.clone();
+          next.push(*c);
+          next
+        })
+      })
+      .collect();
+    out.extend(frontier.iter().cloned());
+  }
+  out
+}
+
+/// Does `pattern` survive a write-then-read for every value the three
+/// placeholders can hold, judged by `oracle` rather than by the parser under
+/// test?
+///
+/// The formatter is called directly rather than through [`BranchSpec`] so the
+/// values are not restricted to the repo's configured branch types: the parser
+/// reads `{type}` as `[a-z]+`, so that is the space the rule has to be right
+/// over.
+fn round_trips_every_value(pattern: &str, oracle: &regex::Regex) -> bool {
+  for type_ in values(&['a', 'b'], 2) {
+    for issue in values(&['9', '1'], 2) {
+      for desc in values(&['a', '9', '-'], 3) {
+        if !DESC_SHAPE.is_match(&desc) {
+          continue;
+        }
+        let name = gwm::config::expand_placeholders(pattern, "", Some(&type_), Some(&issue), Some(&desc), None)
+          .expect("the formatter writes it");
+        let Some(cap) = oracle.captures(&name) else {
+          return false;
+        };
+        for (token, written) in [("type", &type_), ("issue", &issue), ("desc", &desc)] {
+          if pattern.contains(&format!("{{{}}}", token)) && cap.name(token).map(|m| m.as_str()) != Some(written) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  true
+}
+
+/// The oracle's own copy of the description shape, for the same reason its
+/// copy of the capture groups is: an oracle that imports the code under test
+/// cannot contradict it.
+static DESC_SHAPE: std::sync::LazyLock<regex::Regex> =
+  std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9-]*$").unwrap());
+
+/// Codex review on PR #476, second pass. Literal text either side of a
+/// placeholder is not one run: `1{type}2-{desc}` writes `1feat2-foo`, whose
+/// only digits are the `1` and the `2` the pattern itself contributes. Fusing
+/// them into `12` made the constant recovery freeze an issue number no branch
+/// the pattern can write ever contains, and auto-linking then pointed at #12.
+///
+/// `{repo}` and `{home}` break the run for the same reason: they are real text
+/// in the branch name, so the literals they sit between are not adjacent.
+///
+/// The assertion is the invariant rather than one outcome, and it is *not* the
+/// "recovers nothing" this test first pinned. Positional recovery reads the
+/// `2` of `1{type}2-{desc}` as the issue number, and it is right to: the `2`
+/// sits between the type and the description, which is where an issue number
+/// goes, and `{type}/#1-{desc}` freezes `1` from the same position with the
+/// same reasoning. What the finding was about is a value assembled *across* a
+/// placeholder — `12` is in no branch the pattern writes, and no run of the
+/// literals it wrote — so that is what is pinned, once as the general rule and
+/// once by name.
+#[test]
+fn a_placeholder_between_two_literals_does_not_fuse_them() {
+  let types = default_branch_types();
+  for pattern in ["1{type}2-{desc}", "1{repo}2/{type}-{desc}", "1{home}2/{type}-{desc}"] {
+    let parser = BranchParser::compile(pattern, "x", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
+    let cfg = WorktreeConfig {
+      branch_pattern: pattern.into(),
+      ..WorktreeConfig::default()
+    };
+    let name = BranchSpec::new_with_types("feat", "42", "foo", &types)
+      .expect("a valid triple")
+      .branch_name(&cfg, "x")
+      .expect("the formatter writes it");
+    for (segment, value) in parser.constants() {
+      assert!(
+        name.contains(value.as_str()),
+        "`{}` froze {} as `{}`, which no branch it writes contains — `{}` does not",
+        pattern,
+        segment,
+        value,
+        name
+      );
+    }
+  }
+
+  // The finding itself, by name: `12` is what the two literals fused into.
+  let parser = BranchParser::compile("1{type}2-{desc}", "x", &types).expect("compiles");
+  assert_eq!(
+    parser.constants().iter().find(|(segment, _)| *segment == "issue"),
+    Some(&("issue", "2".to_string())),
+    "the issue must be the `2` the pattern actually writes, never the fused `12`"
+  );
 }
