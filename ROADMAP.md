@@ -168,7 +168,7 @@ deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both. The remaining
 two are ordered by what they unlock rather than by size.
 
-### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) → [#418](https://github.com/kbrdn1/gwm-cli/issues/418))
+### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) → [#418](https://github.com/kbrdn1/gwm-cli/issues/418) → [#479](https://github.com/kbrdn1/gwm-cli/issues/479))
 
 `gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
 way to name a worktree freely. Working through this surfaced a real defect
@@ -186,6 +186,20 @@ Sequenced cheapest-first, each step shippable on its own:
 - [#416](https://github.com/kbrdn1/gwm-cli/issues/416) — free-form naming via `gwm create --name`, additive and contract-safe
 - [#417](https://github.com/kbrdn1/gwm-cli/issues/417) — derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
 - [#418](https://github.com/kbrdn1/gwm-cli/issues/418) — token-driven create form with a live branch/path preview
+- [#479](https://github.com/kbrdn1/gwm-cli/issues/479) : rename a free-form worktree, either freely again or into the pattern
+
+The last two came out of building the first three rather than from the original
+read. [#478](https://github.com/kbrdn1/gwm-cli/issues/478) is already closed inside
+#417's PR: `branch_pattern` and `path_pattern` need not carry the same segments, so
+a worktree created as `gwm create fix 42 login` under `feat/#{issue}-{desc}` keeps
+its `fix` only in the directory name, and rebuilding the triple from the branch
+alone silently renamed that component on every edit.
+
+[#479](https://github.com/kbrdn1/gwm-cli/issues/479) is the other half, still open:
+the rename form refuses a free-form branch outright, so a worktree named for a spike
+can neither be renamed again nor promoted into the convention once it grows an issue
+number. It sits next to #418 because both rewrite the same create form, and running
+them concurrently buys only merge conflicts.
 
 ### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
