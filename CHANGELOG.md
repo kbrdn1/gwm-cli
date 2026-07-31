@@ -137,9 +137,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off the Win32 page. Of the nine characters Win32 forbids in a path
   component, `Branch::name_is_valid` already refuses `:`, `\`, `?` and `*`,
   and `/` is the ref separator gwm flattens to `-`, so `<`, `>`, `"` and `|`
-  are what is left. Windows also refuses a trailing space or period, both of
-  which git refuses first, so neither gets a rule. What git knows nothing
-  about is the reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
+  are what is left. Windows also refuses a trailing space or period, and the
+  two are not symmetric: git refuses a space in every position, but its own
+  trailing-period rule covers the whole branch name rather than each
+  component, so `spike.` is git's to refuse and `foo./bar` is gwm's. What git
+  knows nothing about at all is the reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
   `COM1`-`COM9`, `LPT1`-`LPT9`, plus the ISO 8859-1 superscript forms Windows
   reads as digits): compared case-insensitively on the stem before the first
   `.`, since Win32 documents `NUL.tar.gz` as equivalent to `NUL`. `COM0` and

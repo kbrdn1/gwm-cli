@@ -438,13 +438,27 @@ impl WorktreeName {
     // is a file at `.git/refs/heads/<name>`, so every `/`-separated segment
     // is a path component there too. `spike/CON` flattens to the perfectly
     // legal directory `spike-CON` and would still be an unwritable ref.
-    if let Some(segment) = name.split('/').find(|s| is_windows_reserved_segment(s)) {
-      return reject(&format!(
-        "`{}` is a reserved device name on Windows (`CON`, `PRN`, `AUX`, `NUL`, \
-         `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension) — no path \
-         component may be one",
-        segment
-      ));
+    for segment in name.split('/') {
+      // Win32: "Do not end a file or directory name with a space or a
+      // period." Git covers the space in every position, but its own
+      // trailing-period rule applies to the *whole* name, so an inner
+      // segment slips through it: `foo./bar` and `a./b./c` are measured
+      // to pass both `Branch::name_is_valid` and `git check-ref-format`.
+      if segment.ends_with('.') {
+        return reject(&format!(
+          "`{}` ends with `.`, which Windows refuses as a directory name — git only \
+           applies that rule to the last segment of a branch",
+          segment
+        ));
+      }
+      if is_windows_reserved_segment(segment) {
+        return reject(&format!(
+          "`{}` is a reserved device name on Windows (`CON`, `PRN`, `AUX`, `NUL`, \
+           `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension) — no path \
+           component may be one",
+          segment
+        ));
+      }
     }
 
     Ok(Self::Freeform(name.to_string()))

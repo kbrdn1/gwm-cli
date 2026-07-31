@@ -1087,12 +1087,13 @@ fn the_windows_rule_stops_where_the_reserved_list_stops() {
   }
 }
 
-/// Windows also refuses a trailing space or period. No rule is written for
-/// either: git already refuses both, so adding one would be a second
-/// spelling of an existing check whose message is already the right one.
+/// Win32: "Do not end a file or directory name with a space or a period."
+/// Only the space half is left to git, and this pins why the two are not
+/// symmetric. Git refuses a space in *every* position, so a rule for it
+/// would be a second spelling of an existing check.
 #[test]
-fn the_trailing_space_and_period_rules_are_left_to_git() {
-  for bad in ["spike ", "spike."] {
+fn the_trailing_space_rule_is_left_to_git_in_every_position() {
+  for bad in ["spike ", " spike", "spi ke", "foo /bar", "foo/ bar"] {
     assert!(
       !git2::Branch::name_is_valid(bad).unwrap_or(false),
       "`{}` is refused by git itself, which is why gwm carries no rule for it",
@@ -1100,6 +1101,40 @@ fn the_trailing_space_and_period_rules_are_left_to_git() {
     );
     assert!(WorktreeName::freeform(bad).is_err(), "`{}` must still be refused", bad);
   }
+}
+
+/// The period half is *not* symmetric, which is the trap. Git's own
+/// trailing-period rule applies to the whole branch name, not to each
+/// slash-separated component: `foo./bar` passes both `Branch::name_is_valid`
+/// and `git check-ref-format --branch`, measured. On Windows `foo.` is a
+/// directory git has to create for the loose ref, so the segment rule is
+/// gwm's to carry even though the final-segment case is git's.
+///
+/// Found by the Codex review on this PR, which is exactly the class the
+/// per-segment reasoning already implied and the first draft applied only
+/// to the reserved names.
+#[test]
+fn a_trailing_period_is_refused_on_every_segment_not_just_the_last() {
+  assert!(
+    !git2::Branch::name_is_valid("spike.").unwrap_or(false),
+    "precondition: the final segment is git's own rule"
+  );
+  for bad in ["foo./bar", "a./b./c", "spike./x"] {
+    assert!(
+      git2::Branch::name_is_valid(bad).unwrap(),
+      "precondition: git accepts `{}`, so only our own check can stop it",
+      bad
+    );
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` needs a directory ending in `.`, which Windows refuses",
+      bad
+    );
+  }
+  assert!(
+    WorktreeName::freeform("v1.2/spike").is_ok(),
+    "a period inside a segment is not a trailing one and must stay legal"
+  );
 }
 
 /// The rejection has to say what is wrong, not just that something is.
