@@ -4070,10 +4070,17 @@ impl App {
     self.view = View::List;
   }
 
-  /// Refuse a change to a segment **nothing writes**, by setting
-  /// `edit_failure` (#417, Codex review on PR #476). Structured mode only:
-  /// see the call site for why free-form has no segments to freeze.
-  fn refuse_unwritable_segment_change(&mut self, type_: &str) {
+  /// Whether this submit changes a segment **nothing writes**, setting
+  /// `edit_failure` with the reason when it does (#417, Codex review on
+  /// PR #476). Structured mode only: see the call site for why free-form has
+  /// no segments to freeze.
+  ///
+  /// Returns its verdict rather than leaving the caller to read `edit_failure`
+  /// back (Codex review on PR #485). That field survives a failed submit, so
+  /// reading it as "did the guard refuse" also caught every *earlier* failure
+  /// and stopped a submit the user had just corrected, wedging the form shut
+  /// until it was closed and reopened.
+  fn refuse_unwritable_segment_change(&mut self, type_: &str) -> bool {
     // Issue #417 / Codex review on PR #476: a segment **nothing writes** is not
     // editable here, because there is nowhere to put the new value. The submit
     // would rebuild the same branch at the same path and close the form having
@@ -4146,10 +4153,11 @@ impl App {
           // validating by hand).
           let _ = was;
           self.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
-          return;
+          return true;
         }
       }
     }
+    false
   }
 
   /// Submit the rename from the `View::Edit` modal (#290). Composes the new
@@ -4174,11 +4182,8 @@ impl App {
     // guard, and that is right: the guard refuses to change a value the form was
     // opened with when nothing can write it, and a worktree opened free-form was
     // opened with no such value to contradict.
-    if self.create_form.mode == Mode::Structured {
-      self.refuse_unwritable_segment_change(&type_);
-      if self.edit_failure.is_some() {
-        return Ok(());
-      }
+    if self.create_form.mode == Mode::Structured && self.refuse_unwritable_segment_change(&type_) {
+      return Ok(());
     }
     // Issue #479: composed through `WorktreeName`, the same seam
     // `submit_create` uses, so free-form and structured targets are built by

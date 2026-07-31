@@ -8989,6 +8989,39 @@ fn the_rename_form_refuses_a_free_form_name_create_would_refuse() {
 }
 
 #[test]
+fn a_corrected_rename_is_not_held_back_by_the_previous_attempt() {
+  // Codex review on PR #485. The frozen-segment guard reports through
+  // `edit_failure`, and the call site read that same field back to decide
+  // whether to stop — so an *earlier* failure still sitting there stopped the
+  // next submit too, whatever the user had just fixed, and the form could only
+  // be unstuck by closing and reopening it. The guard returns its own verdict
+  // now, so the only thing that can stop a submit is that submit.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  // A first submit that fails on its own terms: an empty description is not a
+  // branch `BranchSpec` will build.
+  app.create_form.desc = String::new();
+  app
+    .submit_edit_worktree()
+    .expect("a refusal is a form failure, not an error");
+  assert!(app.edit_failure.is_some(), "an empty description is refused");
+
+  // Fixing it has to be enough.
+  app.create_form.desc = "other-desc".into();
+  app.submit_edit_worktree().expect("submits");
+  assert_eq!(
+    app.edit_failure, None,
+    "a corrected form must not be held back by the previous attempt's message"
+  );
+}
+
+#[test]
 fn the_rename_modal_opens_a_free_form_worktree_in_free_form_mode() {
   // Issue #479. `worktree_spec` starts with `branch_parser.parse(branch)?`, so a
   // name the user chose on purpose does not parse and the modal used to refuse
