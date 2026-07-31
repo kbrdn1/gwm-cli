@@ -38,10 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Toggling seeds only what is still empty, so a round trip never overwrites
   typed input. Leaving structured seeds the name with the current branch
-  verbatim. Leaving free-form seeds the description with `kebab` of the name and
-  leaves type and issue blank, because a free-form name carries neither;
-  `kebab`'s output is by construction either a valid description or empty, so
-  the seed can never dead-end the form on a value it would then refuse.
+  verbatim. Leaving free-form seeds the description with `kebab` of the name,
+  capped at the length the field enforces when typed, and leaves the issue
+  empty; `kebab`'s output is by construction either a valid description or
+  empty, so the seed can never dead-end the form on a value it would then
+  refuse. The type is neither seeded nor blanked, it stays on whatever the
+  selector shows, which is the create form's own contract and is spelled out by
+  the preview.
 
   Names are validated with the same `WorktreeName::freeform` rules as
   `gwm create --name`, so a name one form refuses the other refuses too. Two

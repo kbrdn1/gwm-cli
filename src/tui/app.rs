@@ -4032,11 +4032,26 @@ impl App {
   ///
   /// Leaving structured, the free-form name is seeded with the current branch
   /// verbatim: it is the only non-guess available, and the common edit is a
-  /// small one. Leaving free-form, the description is seeded with `kebab` of
-  /// the name while type and issue are left for the user, because a free-form
-  /// name carries neither and inventing one would be a guess. `kebab`'s output
-  /// is by construction either `DESC_RE`-valid or empty, so this seed can never
-  /// dead-end the form on a value it would then refuse to submit.
+  /// small one.
+  ///
+  /// Leaving free-form, the description is seeded with `kebab` of the name and
+  /// the issue is left empty, because a free-form name carries no issue number
+  /// and inventing one would be a guess. `kebab`'s output is by construction
+  /// either `DESC_RE`-valid or empty, so this seed can never dead-end the form
+  /// on a value it would then refuse to submit.
+  ///
+  /// Truncated to `MAX_DESC_LEN` (Codex review on PR #485): a free-form name
+  /// may run to `MAX_DIR_COMPONENT_BYTES`, `push_char` is the only other place
+  /// that bound is applied, and `BranchSpec` has no length check to catch the
+  /// overflow downstream — so seeding unbounded wrote a description no
+  /// keystroke could have produced, and the cap is what keeps
+  /// `<type>/#<issue>-<desc>` inside git's ref limit.
+  ///
+  /// The **type** is not seeded and is not left unset either: it stays on
+  /// whatever the selector shows, which is the first configured type on a form
+  /// that was just opened. That is the create form's own contract, the value is
+  /// on screen in the selector, and the preview spells out the branch it
+  /// produces — so a promotion into the pattern is stated rather than silent.
   fn seed_toggled_mode(&mut self) {
     if self.view != View::Edit {
       return;
@@ -4048,7 +4063,10 @@ impl App {
         }
       }
       Mode::Freeform if self.create_form.desc.is_empty() => {
-        self.create_form.desc = crate::naming::kebab(&self.create_form.name);
+        self.create_form.desc = crate::naming::kebab(&self.create_form.name)
+          .chars()
+          .take(crate::tui::state::create_form::MAX_DESC_LEN)
+          .collect();
       }
       _ => {}
     }

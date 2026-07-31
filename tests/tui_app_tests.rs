@@ -8989,6 +8989,37 @@ fn the_rename_form_refuses_a_free_form_name_create_would_refuse() {
 }
 
 #[test]
+fn the_seeded_description_respects_the_bound_typing_it_would_have() {
+  // Codex review on PR #485. A free-form name may run to
+  // `MAX_DIR_COMPONENT_BYTES` (255), while the description field caps typed
+  // input at `MAX_DESC_LEN` (200) — and that cap exists so
+  // `<type>/#<issue>-<desc>` cannot exceed git's ref limit. `push_char` is the
+  // only place it was enforced, so seeding the field wrote past a bound no
+  // keystroke could have crossed, and `BranchSpec` has no length check to
+  // catch it downstream.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::{Mode, MAX_DESC_LEN};
+  let long = "a".repeat(250);
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("spike");
+  wt.branch = Some(long.clone());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+  assert_eq!(app.create_form.name, long, "the whole name is a legal free-form branch");
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  assert_eq!(app.create_form.mode, Mode::Structured);
+  assert!(
+    app.create_form.desc.chars().count() <= MAX_DESC_LEN,
+    "the seed must not write past the bound typing enforces: {} chars",
+    app.create_form.desc.chars().count()
+  );
+}
+
+#[test]
 fn a_corrected_rename_is_not_held_back_by_the_previous_attempt() {
   // Codex review on PR #485. The frozen-segment guard reports through
   // `edit_failure`, and the call site read that same field back to decide
