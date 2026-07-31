@@ -138,6 +138,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the branch of the
+  worktree they were pointed at, instead of the main checkout's.
+  `worktree::discover_repo` walks back to the main working directory when it
+  lands inside a linked worktree, which is what `list` / `remove` / `switch` /
+  `prune` need, since they operate on the whole worktree set. Asking that
+  handle "which branch am I on" answered for the main checkout.
+
+  `gwm commit-prefix` was the one that hurt: the bundled `commit-msg` hook
+  calls it and git invokes that hook with the working directory inside the
+  worktree, so every commit made from a worktree took its prefix from whatever
+  the main checkout happened to be sitting on. `gwm pr` had a quieter symptom,
+  falling back to the `chore` template because the main branch did not parse.
+
+  A third site turned up on the sweep, with a different symptom: `gwm
+  bootstrap` only ever resolved a branch when its target came from a fuzzy
+  pattern, so hooks got an **empty** `{branch}` / `{type}` / `{issue}` rather
+  than the wrong one. Two of its three target paths were affected, no argument
+  and an argument that is already a directory.
+
+  Only the branch moves. `.gwm.toml`, the workdir and the repo name still come
+  from the main checkout, which is where the config lives and what `{repo}`
+  expands to, so a branch written with `{repo}` in `branch_pattern` keeps
+  being read back correctly from inside a worktree. `gwm status` was right all
+  along, and its `resolve_target_repo` is the shape the fix follows.
+
+  Pre-existing rather than a regression, measured against the published 1.5.0
+  binary. ([#477](https://github.com/kbrdn1/gwm-cli/issues/477))
+
 - A free-form worktree name is validated against Windows path rules, on every
   platform. `gwm create --name 'foo|bar'` or `--name CON` used to pass every
   check and fail inside `worktree::add`, after `pre_create` hooks had run and
