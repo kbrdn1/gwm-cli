@@ -117,15 +117,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `spike-{issue}` would have its own name rewritten inside the `{branch}`
   value a hook receives. Plus one rule belonging to none of them: no leading
   `-`, which git accepts but `gwm remove` and `git branch -d` read as a flag.
-  Windows-specific path rules are deliberately **not** covered — they cannot
-  be measured from a Unix machine, and the gap is tracked by
-  [#475](https://github.com/kbrdn1/gwm-cli/issues/475) rather than guessed at
-  here.
+  Windows path rules are covered by
+  [#475](https://github.com/kbrdn1/gwm-cli/issues/475) below, on every
+  platform rather than only that one.
   No `SCHEMA_VERSION` bump — `JsonWorktree` carries no `type` / `desc`, so
   the wire format is unchanged.
   ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))
 
 ### Fixed
+
+- A free-form worktree name is validated against Windows path rules, on every
+  platform. `gwm create --name 'foo|bar'` or `--name CON` used to pass every
+  check and fail inside `worktree::add`, after `pre_create` hooks had run and
+  with the branch already created, leaving it orphaned. Same late-failure
+  shape the 255-byte cap closed, on a platform-specific input set that only
+  free-form naming can reach.
+
+  The residual list is measured against libgit2's oracle rather than copied
+  off the Win32 page. Of the nine characters Win32 forbids in a path
+  component, `Branch::name_is_valid` already refuses `:`, `\`, `?` and `*`,
+  and `/` is the ref separator gwm flattens to `-`, so `<`, `>`, `"` and `|`
+  are what is left. Windows also refuses a trailing space or period, and the
+  two are not symmetric: git refuses a space in every position, but its own
+  trailing-period rule covers the whole branch name rather than each
+  component, so `spike.` is git's to refuse and `foo./bar` is gwm's. What git
+  knows nothing about at all is the reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
+  `COM1`-`COM9`, `LPT1`-`LPT9`, plus the ISO 8859-1 superscript forms Windows
+  reads as digits): compared case-insensitively on the stem before the first
+  `.`, since Win32 documents `NUL.tar.gz` as equivalent to `NUL`. `COM0` and
+  `LPT0` are absent from that list and stay legal.
+
+  Checked per `/`-separated segment rather than on the flattened directory
+  name alone, because a loose ref is a file at `.git/refs/heads/<name>`:
+  `spike/CON` becomes the legal directory `spike-CON` and an unwritable ref.
+
+  The rule is unconditional, not `#[cfg(windows)]`. A branch reaches a
+  teammate through the forge, so a name no Windows checkout can host is a
+  cross-platform hazard; and a rule only one CI runner exercises is the shape
+  this repo's own guidance on environment-dependent tests argues against.
+  Tightening now is free because `--name` has not shipped to a stable line
+  yet. ([#475](https://github.com/kbrdn1/gwm-cli/issues/475))
 
 - The TUI names a workspace repo by its directory, not by its display label.
   `workspace::discover` suffixes a repo whose basename collides with a sibling,
