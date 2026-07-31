@@ -12,6 +12,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The TUI rename form (`c`) now handles free-form worktrees, in both
+  directions. A worktree created with `gwm create --name spike-redis` could
+  not be renamed from the TUI at all: `worktree_spec` starts by parsing the
+  branch, a name chosen on purpose does not parse, and the form refused
+  outright. That left the two ordinary cases impossible, renaming a spike that
+  outlived its name and promoting one into the convention once it acquires an
+  issue number, and both are exactly what the form exists for.
+
+  Such a branch now opens the form in free-form mode with its current name
+  prefilled, and `Ctrl-T` moves between the two shapes in either direction, the
+  same verb and the same two modes the create form has had since #416. All four
+  conversions work: free-form to free-form and structured to free-form write
+  the name verbatim as the branch and flatten `/` to `-` for the directory;
+  free-form to structured applies `branch_pattern` and `path_pattern` to the
+  triple; structured to structured is unchanged.
+
+  The four cells are two code paths, not four. `WorktreeName` already knew how
+  each shape becomes a branch and a directory, so the rename target is composed
+  through it exactly the way the create target is, and the live preview reads
+  the same value the submit will write. That last point is not incidental: the
+  preview and the submit drifting is precisely how both forms came to display a
+  branch they were not going to create, and free-form is the same trap one mode
+  over, since there no pattern is expanded at all.
+
+  Toggling seeds only what is still empty, so a round trip never overwrites
+  typed input. Leaving structured seeds the name with the current branch
+  verbatim. Leaving free-form seeds the description with `kebab` of the name,
+  capped at the length the field enforces when typed, and leaves the issue
+  empty; `kebab`'s output is by construction either a valid description or
+  empty, so the seed can never dead-end the form on a value it would then
+  refuse. The type is neither seeded nor blanked, it stays on whatever the
+  selector shows, which is the create form's own contract and is spelled out by
+  the preview.
+
+  Names are validated with the same `WorktreeName::freeform` rules as
+  `gwm create --name`, so a name one form refuses the other refuses too. Two
+  guards come along with the change. A `worktree.base` written with `{type}` /
+  `{issue}` / `{desc}` is refused for a free-form target rather than expanded to
+  a literal, since a free-form name has no value for them. And the **main
+  worktree** is now refused explicitly: its branch is normally unparseable
+  (`main`, `dev`), so the old refusal was turning this form away from it by
+  accident, and free-form mode parses nothing, so that side effect had to be
+  replaced by the same stated guard `enter_confirm_delete` uses.
+
+  This inverts a decision from #416, which deliberately kept the rename modal
+  single-mode; the test that pinned it is rewritten rather than deleted, with
+  the original reasoning kept as history.
+  ([#479](https://github.com/kbrdn1/gwm-cli/issues/479))
+
 - The TUI rename modal says when submitting would close an open pull request.
   The remote half of a rename is `git push --atomic origin :<old> <new>:<new>`,
   a delete followed by a create, and GitHub closes a pull request whose head

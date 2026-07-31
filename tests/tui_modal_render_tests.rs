@@ -802,6 +802,93 @@ fn the_create_preview_expands_this_repo_s_own_patterns() {
 }
 
 #[test]
+fn the_statusbar_follows_the_rename_modal_s_mode() {
+  // Codex review on PR #485. The modal's own footer tracked the mode while
+  // `hint_context()` still returned `Rename` unconditionally for `View::Edit`,
+  // so the statusbar behind it kept advertising `field` and `type` — two verbs
+  // free-form mode neither renders nor can act on, and this codebase's rule is
+  // to never name a key that does nothing. The create overlay already solves
+  // it with one source both read (#416); rename gets the same.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+
+  let buf = render(&mut app);
+  assert_absent(&buf, "↑/↓ type", "free-form has no type selector to advertise");
+  // The toggle hint names its *target* mode, so free-form advertises the way back.
+  assert_present(
+    &buf,
+    "structured",
+    "the toggle is the one verb the visible inputs cannot suggest",
+  );
+
+  app.create_form.toggle_mode();
+  let buf = render(&mut app);
+  assert_present(&buf, "↑/↓ type", "structured mode does have a type selector");
+  assert_present(&buf, "free-form", "and advertises the way across");
+}
+
+#[test]
+fn the_rename_preview_shows_a_free_form_name_verbatim() {
+  // Issue #479. In free-form mode no pattern is expanded at all: the branch IS
+  // the name, and the directory is that name flattened. A preview that kept
+  // expanding `branch_pattern` here would show a branch the submit will not
+  // write, which is exactly the defect found by hand on #476 one mode over.
+  // Preview and submit therefore derive from the same `WorktreeName`.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+
+  // A `/` is legal in a free-form branch and has to flatten in the directory.
+  app.create_form.name = "spike/valkey".into();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "spike/valkey", "the branch preview is the name, verbatim");
+  assert_present(&buf, "spike-valkey", "the dir preview is the name, flattened");
+  assert!(
+    !buffer_contains(&buf, "#0-"),
+    "no pattern is expanded in free-form mode — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_rename_pr_warning_fires_on_a_free_form_rename_too() {
+  // The warning added for #481 compares the branch the submit would write
+  // against the current one. Free-form renames change the branch just as much
+  // as structured ones, so the comparison has to be fed the free-form target
+  // rather than a pattern expansion that never matches anything.
+  use gwm::github::PrState;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  wt.link.pr = Some(77);
+  wt.pr_state = Some(PrState::Open);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+
+  // Unchanged name: nothing is being renamed, so nothing is being closed.
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR #77", "an unchanged name renames nothing");
+
+  app.create_form.name = "spike-valkey".into();
+  let buf = render(&mut app);
+  assert_present(&buf, "closes PR #77", "a free-form rename closes the PR just the same");
+}
+
+#[test]
 fn the_rename_preview_expands_this_repo_s_own_patterns() {
   let (_dir, mut app) = make_app();
   // Freezes the type: whatever the selector says, the branch stays `feat/`.

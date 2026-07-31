@@ -8885,13 +8885,213 @@ fn enter_edit_worktree_prefills_create_form_from_branch() {
   );
 }
 
+/// Issue #479's conversion table, all four cells. `WorktreeName` already knows
+/// how each shape becomes a branch and a directory, so the rename target is
+/// built exactly the way `submit_create` builds the create target, and the
+/// table is two code paths rather than four.
+///
+/// The worker is never reached here — `spawn_edit_worktree` needs a real repo —
+/// so what these assert is the *target* the form composes, read back off the
+/// task the submit requested.
 #[test]
-fn ctrl_t_does_not_flip_the_rename_modal_into_free_form_mode() {
-  // The rename modal reuses `handle_create_key` (`tui/mod.rs`, #290), so
-  // #416's free-form toggle became reachable from it — but `draw_edit_worktree`
-  // never renders the `Name` field and `submit_edit_worktree` never reads it.
-  // Toggling there sent keystrokes into an invisible buffer and made Enter
-  // submit the untouched triple, i.e. "no change" (Codex review on PR #474).
+fn the_rename_form_composes_a_target_for_each_of_the_four_conversions() {
+  use gwm::tui::state::create_form::Mode;
+
+  // free-form → free-form: the name is the branch, verbatim.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+  app.create_form.name = "spike-valkey".into();
+  assert_eq!(
+    app.edit_target().expect("a legal free-form name composes a target"),
+    ("spike-valkey".to_string(), "spike-valkey".to_string()),
+    "free-form → free-form writes the name verbatim as branch and directory"
+  );
+
+  // free-form → structured: the pattern is applied after the fact.
+  app.create_form.mode = Mode::Structured;
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "feat")
+    .expect("`feat` is a built-in branch type");
+  app.create_form.issue = "42".into();
+  app.create_form.desc = "cache-layer".into();
+  assert_eq!(
+    app.edit_target().expect("a complete triple composes a target"),
+    ("feat/#42-cache-layer".to_string(), "feat-42-cache-layer".to_string()),
+    "free-form → structured promotes the spike into the convention"
+  );
+
+  // structured → free-form: the name is the branch, verbatim, again.
+  let (_dir2, mut app) = make_app();
+  let mut wt = worktree_fixture("feat-42-cache-layer");
+  wt.branch = Some("feat/#42-cache-layer".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Structured);
+  app.create_form.mode = Mode::Freeform;
+  app.create_form.name = "spike-again".into();
+  assert_eq!(
+    app.edit_target().expect("composes"),
+    ("spike-again".to_string(), "spike-again".to_string()),
+    "structured → free-form drops out of the convention on purpose"
+  );
+
+  // structured → structured: unchanged from before #479.
+  app.create_form.mode = Mode::Structured;
+  app.create_form.desc = "other-desc".into();
+  assert_eq!(
+    app.edit_target().expect("composes"),
+    ("feat/#42-other-desc".to_string(), "feat-42-other-desc".to_string()),
+    "structured → structured is exactly what #290 did"
+  );
+}
+
+#[test]
+fn the_rename_form_refuses_a_free_form_name_create_would_refuse() {
+  // Same validator, so a name one form turns away the other turns away too:
+  // `WorktreeName::freeform` is the single set of rules (#416), and a rename
+  // that accepted more than create would produce worktrees create could never
+  // have made.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+
+  for refused in ["HEAD", "spike-{issue}", "-spike", "..", " spike"] {
+    app.create_form.name = refused.into();
+    assert!(
+      gwm::naming::WorktreeName::freeform(refused).is_err(),
+      "`{}` is documented as refused by create",
+      refused
+    );
+    app.edit_failure = None;
+    app
+      .submit_edit_worktree()
+      .expect("a refusal is a form failure, not an error");
+    assert_eq!(app.view, View::Edit, "the form stays open on `{}`", refused);
+    assert!(
+      app.edit_failure.is_some(),
+      "`{}` must be refused by rename too, with a reason",
+      refused
+    );
+  }
+}
+
+#[test]
+fn the_seeded_description_respects_the_bound_typing_it_would_have() {
+  // Codex review on PR #485. A free-form name may run to
+  // `MAX_DIR_COMPONENT_BYTES` (255), while the description field caps typed
+  // input at `MAX_DESC_LEN` (200) — and that cap exists so
+  // `<type>/#<issue>-<desc>` cannot exceed git's ref limit. `push_char` is the
+  // only place it was enforced, so seeding the field wrote past a bound no
+  // keystroke could have crossed, and `BranchSpec` has no length check to
+  // catch it downstream.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::{Mode, MAX_DESC_LEN};
+  let long = "a".repeat(250);
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("spike");
+  wt.branch = Some(long.clone());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+  assert_eq!(app.create_form.name, long, "the whole name is a legal free-form branch");
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  assert_eq!(app.create_form.mode, Mode::Structured);
+  assert!(
+    app.create_form.desc.chars().count() <= MAX_DESC_LEN,
+    "the seed must not write past the bound typing enforces: {} chars",
+    app.create_form.desc.chars().count()
+  );
+}
+
+#[test]
+fn a_corrected_rename_is_not_held_back_by_the_previous_attempt() {
+  // Codex review on PR #485. The frozen-segment guard reports through
+  // `edit_failure`, and the call site read that same field back to decide
+  // whether to stop — so an *earlier* failure still sitting there stopped the
+  // next submit too, whatever the user had just fixed, and the form could only
+  // be unstuck by closing and reopening it. The guard returns its own verdict
+  // now, so the only thing that can stop a submit is that submit.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  // A first submit that fails on its own terms: an empty description is not a
+  // branch `BranchSpec` will build.
+  app.create_form.desc = String::new();
+  app
+    .submit_edit_worktree()
+    .expect("a refusal is a form failure, not an error");
+  assert!(app.edit_failure.is_some(), "an empty description is refused");
+
+  // Fixing it has to be enough.
+  app.create_form.desc = "other-desc".into();
+  app.submit_edit_worktree().expect("submits");
+  assert_eq!(
+    app.edit_failure, None,
+    "a corrected form must not be held back by the previous attempt's message"
+  );
+}
+
+#[test]
+fn the_rename_modal_opens_a_free_form_worktree_in_free_form_mode() {
+  // Issue #479. `worktree_spec` starts with `branch_parser.parse(branch)?`, so a
+  // name the user chose on purpose does not parse and the modal used to refuse
+  // outright. It is the one shape the rename form exists for and the one shape
+  // it turned away: renaming a spike that outlived its name meant `git branch -m`
+  // plus `git worktree move` by hand, two commands that have to agree.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(
+    app.view,
+    View::Edit,
+    "the modal opens instead of refusing: {}",
+    app.status
+  );
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+  assert_eq!(
+    app.create_form.name, "spike-redis",
+    "prefilled with the current name, so the common edit is a small one"
+  );
+  assert_eq!(app.create_form.field, Field::Name, "free-form's only field");
+}
+
+#[test]
+fn ctrl_t_flips_the_rename_modal_between_modes() {
+  // Issue #479 inverts a decision from #416, and the reasoning is kept rather
+  // than deleted. The rename modal reuses `handle_create_key` (`tui/mod.rs`,
+  // #290), so #416's free-form toggle was already *reachable* from it — and
+  // was swallowed, because `draw_edit_worktree` did not render the `Name`
+  // field and `submit_edit_worktree` did not read it, so toggling sent
+  // keystrokes into an invisible buffer and made Enter submit the untouched
+  // triple (Codex review on PR #474). #479 supplies the two missing halves, so
+  // the verb does what its name says instead of being suppressed.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use gwm::tui::state::create_form::Mode;
   let (_dir, mut app) = make_app();
@@ -8901,22 +9101,32 @@ fn ctrl_t_does_not_flip_the_rename_modal_into_free_form_mode() {
   app.list_state.select(Some(0));
   app.enter_edit_worktree();
   assert_eq!(app.view, View::Edit);
+  assert_eq!(app.create_form.mode, Mode::Structured, "a branch the pattern reads");
 
   app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
 
   assert_eq!(
     app.create_form.mode,
-    Mode::Structured,
-    "the rename modal has no free-form mode to switch to"
+    Mode::Freeform,
+    "the verb flips the rename modal now"
   );
   assert_eq!(
     app.create_form.field,
-    Field::Desc,
-    "focus must stay on the field the modal actually renders"
+    Field::Name,
+    "focus lands on the field the target mode renders"
   );
   assert_eq!(
+    app.create_form.name, "fix/#42-broken-thing",
+    "converting to free-form seeds the current branch verbatim, the only obvious answer"
+  );
+
+  // …and back, without losing what the structured side held: #416 keeps both
+  // buffers side by side precisely so a round trip costs nothing.
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  assert_eq!(app.create_form.mode, Mode::Structured);
+  assert_eq!(
     app.create_form.desc, "broken-thing",
-    "swallowing the verb must not leak `t` into the description as literal input"
+    "the structured buffer survives the round trip, and `t` never leaked into it as literal input"
   );
 }
 
@@ -8970,9 +9180,12 @@ fn ctrl_t_still_flips_the_create_modal_into_free_form_mode() {
 }
 
 #[test]
-fn enter_edit_worktree_rejects_unparseable_branch() {
-  // A branch that isn't `<type>/#<issue>-<desc>` (e.g. `main`) can't be
-  // decomposed into the form, so the modal refuses to open.
+fn enter_edit_worktree_opens_an_unparseable_branch_in_free_form() {
+  // Inverted by #479, and the reasoning is kept: a branch that is not
+  // `<type>/#<issue>-<desc>` could not be decomposed into the form, so the
+  // modal refused to open at all. It now has a mode that needs no
+  // decomposition, so the same branch opens in it.
+  use gwm::tui::state::create_form::Mode;
   let (_dir, mut app) = make_app();
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("main".into());
@@ -8981,8 +9194,36 @@ fn enter_edit_worktree_rejects_unparseable_branch() {
 
   app.enter_edit_worktree();
 
-  assert_eq!(app.view, View::List, "unparseable branch must not open the modal");
+  assert_eq!(app.view, View::Edit, "free-form mode needs no decomposition");
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+  assert_eq!(app.edit_original_branch.as_deref(), Some("main"));
+}
+
+#[test]
+fn enter_edit_worktree_refuses_the_main_worktree() {
+  // #479 removes an accidental protection and has to replace it deliberately.
+  // The main checkout's branch is normally unparseable (`main`, `dev`), so the
+  // parse failure used to turn the rename modal away from it — for the wrong
+  // reason, but with the right result. Free-form mode parses nothing, so that
+  // side effect is gone and the guard has to be the explicit one `enter_confirm_delete`
+  // already has: renaming the main worktree means renaming the repo's default
+  // branch, and `git worktree move` cannot move the main checkout anyway.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("main".into());
+  wt.is_main = true;
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "the main worktree is not renamed from here");
   assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("main worktree"),
+    "the refusal names what it is protecting: {}",
+    app.status
+  );
 }
 
 #[test]

@@ -2045,8 +2045,13 @@ pub enum HintContext {
   /// Clean reclaim overlay (issue #325): j/k pick a profile, confirm
   /// reclaims (safety countdown), Esc cancels.
   Clean,
-  /// Branch-rename modal (`View::Edit`, #290).
+  /// Branch-rename modal (`View::Edit`, #290), structured triple.
   Rename,
+  /// Branch-rename modal in free-form mode (issue #479). A separate context
+  /// for the same reason `CreateFreeform` is one: the two modes present
+  /// different inputs, so advertising a type selector free-form does not
+  /// render would name a key that does nothing.
+  RenameFreeform,
   /// Generic detail overlay (issue #408): scroll / close. Agent sessions
   /// today, the rich PR/Issue view tomorrow.
   Detail,
@@ -2075,7 +2080,7 @@ impl HintContext {
       HintContext::Pty => "terminal",
       HintContext::ExecPicker => "exec",
       HintContext::Clean => "clean",
-      HintContext::Rename => "rename",
+      HintContext::Rename | HintContext::RenameFreeform => "rename",
       HintContext::Detail => "agents",
       HintContext::CiChecks => "checks",
     }
@@ -2249,8 +2254,16 @@ impl HintContext {
       // Rename reuses the create-form input handler, hence the `create`
       // context's verbs (#290 / #219).
       HintContext::Rename => &[
+        Hint::Modal(ModalAction::CreateToggleMode, "free-form"),
         Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
+      ],
+      // Free-form has one field and no type selector, so `field` and `type`
+      // are left out rather than advertised inert (issue #479).
+      HintContext::RenameFreeform => &[
+        Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateSubmit, "submit"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
@@ -2289,7 +2302,9 @@ impl HintContext {
   /// hint key shadowed by a modal binding in the same context.
   fn modal_context(self) -> Option<KeyContext> {
     Some(match self {
-      HintContext::Create | HintContext::CreateFreeform | HintContext::Rename => KeyContext::Create,
+      HintContext::Create | HintContext::CreateFreeform | HintContext::Rename | HintContext::RenameFreeform => {
+        KeyContext::Create
+      }
       HintContext::Confirm => KeyContext::Confirm,
       HintContext::OpenMenu => KeyContext::OpenMenu,
       HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
@@ -3791,7 +3806,33 @@ fn rename_pr_warning(app: &App, new_branch: &str, old_branch: &str) -> Option<St
   })
 }
 
+/// The `(branch, directory)` pair the form would produce, for the live preview.
+///
+/// Both modes, because both are reachable from the create form (#416) and now
+/// from the rename modal too (#479) — and a preview that handled only one of
+/// them would show a branch the submit is not going to write. That defect
+/// shipped once already, with the preview hardcoding `<type>/#<issue>-<desc>`
+/// while the submit expanded the repo's patterns; free-form is the same trap
+/// one mode over, since there nothing is expanded at all.
+///
+/// Deliberately **unvalidated**, unlike [`App::edit_target`]: this runs on every
+/// keystroke and has to show what a half-typed form is heading towards. So the
+/// free-form arm builds `WorktreeName::Freeform` directly rather than through
+/// `WorktreeName::freeform`, which would refuse an incomplete name and blank the
+/// preview mid-word. The flattening still comes from `worktree_dirname`, so the
+/// preview and the submit cannot drift on it.
 fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
+  if app.create_form.mode == Mode::Freeform {
+    let name = crate::naming::WorktreeName::Freeform(app.create_form.name.clone());
+    return (
+      name
+        .branch_name(&app.config.worktree, &app.repo_name)
+        .unwrap_or_default(),
+      name
+        .worktree_dirname(&app.config.worktree, &app.repo_name)
+        .unwrap_or_default(),
+    );
+  }
   let expand = |pattern: &str| {
     crate::config::expand_placeholders(
       pattern,
@@ -5265,21 +5306,28 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
   let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
+  let freeform = app.create_form.mode == Mode::Freeform;
   let mut lines = overlay_title_lines("Rename Worktree", clean);
   lines.push(Line::from(vec![
     Span::raw("  From   : "),
     Span::styled(old_display, Style::default().fg(muted)),
   ]));
   lines.push(Line::from(String::new()));
-  lines.push(type_selector_line(
-    &label("Type"),
-    type_str,
-    type_desc,
-    app.create_form.field == Field::Type,
-    accent,
-    muted,
-  ));
-  lines.push(Line::from(String::new()));
+  // Issue #479: free-form has one field and no type selector, so the rows the
+  // structured triple needs are not rendered rather than rendered inert — the
+  // same shape `draw_create` uses, and the reason #474 suppressed the toggle
+  // here in the first place was that these rows did not exist.
+  if !freeform {
+    lines.push(type_selector_line(
+      &label("Type"),
+      type_str,
+      type_desc,
+      app.create_form.field == Field::Type,
+      accent,
+      muted,
+    ));
+    lines.push(Line::from(String::new()));
+  }
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -5298,25 +5346,37 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     ]));
   }
   lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Issue"),
-    &app.create_form.issue,
-    app.create_form.field == Field::Issue,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
-  lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Desc"),
-    &app.create_form.desc,
-    app.create_form.field == Field::Desc,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
+  if freeform {
+    lines.push(field_input_line(
+      &label("Name"),
+      &app.create_form.name,
+      app.create_form.field == Field::Name,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  } else {
+    lines.push(field_input_line(
+      &label("Issue"),
+      &app.create_form.issue,
+      app.create_form.field == Field::Issue,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+    lines.push(Line::from(String::new()));
+    lines.push(field_input_line(
+      &label("Desc"),
+      &app.create_form.desc,
+      app.create_form.field == Field::Desc,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
   let area = centered_box(70, 72, height, term);
@@ -5360,7 +5420,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     );
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
-        HintContext::Rename,
+        // One source with the statusbar (`App::rename_hint_context`), so the
+        // footer and the bar behind it cannot disagree about the mode.
+        app.rename_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
