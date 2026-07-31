@@ -168,7 +168,7 @@ deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both. The remaining
 two are ordered by what they unlock rather than by size.
 
-### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418) → [#479](https://github.com/kbrdn1/gwm-cli/issues/479)), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) / [#482](https://github.com/kbrdn1/gwm-cli/issues/482)
+### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418)), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475)
 
 `gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
 way to name a worktree freely. Working through this surfaced a real defect
@@ -185,12 +185,19 @@ Sequenced cheapest-first, each step shippable on its own:
 - [x] [#415](https://github.com/kbrdn1/gwm-cli/issues/415) : warn in `doctor` / `config validate` when the pattern is customised (turns a silent failure into a stated one)
 - [x] [#416](https://github.com/kbrdn1/gwm-cli/issues/416) : free-form naming via `gwm create --name`, additive and contract-safe
 - [x] [#417](https://github.com/kbrdn1/gwm-cli/issues/417) : derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
+- [x] [#479](https://github.com/kbrdn1/gwm-cli/issues/479) : rename a free-form worktree, either freely again or into the pattern
 - [ ] [#418](https://github.com/kbrdn1/gwm-cli/issues/418) : token-driven create form with a live branch/path preview
-- [ ] [#479](https://github.com/kbrdn1/gwm-cli/issues/479) : rename a free-form worktree, either freely again or into the pattern
 
-The first three are on `dev` and unreleased. **#418 is the only step of the original
-sequence still to build**; everything else listed below is follow-up work that came
-out of building the first three, not a widening of the plan.
+Everything checked above is on `dev` and unreleased, so none of it has shipped to a
+stable line yet. **#418 is the only step of the original sequence still to build**;
+everything else listed below is follow-up work that came out of building the first
+three, not a widening of the plan.
+
+A checkbox here tracks what is merged into `dev`, which is not the same thing as what
+GitHub shows as closed. `Closes #N` in a pull request body only fires when the pull
+request targets the default branch, so a merge into `dev` closes nothing on its own:
+an issue is either closed by hand once its work lands there, or left open until `dev`
+reaches `main`. Both states appear above and neither means the work is missing.
 
 [#478](https://github.com/kbrdn1/gwm-cli/issues/478) is already closed inside #417's
 PR: `branch_pattern` and `path_pattern` need not carry the same segments, so a
@@ -198,19 +205,25 @@ worktree created as `gwm create fix 42 login` under `feat/#{issue}-{desc}` keeps
 `fix` only in the directory name, and rebuilding the triple from the branch alone
 silently renamed that component on every edit.
 
-[#479](https://github.com/kbrdn1/gwm-cli/issues/479) is the other half of free-form
-naming, still open: the rename form refuses a free-form branch outright, so a worktree
-named for a spike can neither be renamed again nor promoted into the convention once
-it grows an issue number. It sits next to #418 because both rewrite the same create
-form, and running them concurrently buys only merge conflicts.
+[#479](https://github.com/kbrdn1/gwm-cli/issues/479) was the other half of free-form
+naming: the rename form refused a free-form branch outright, so a worktree named for a
+spike could neither be renamed again nor promoted into the convention once it grew an
+issue number. It shipped ahead of #418 rather than beside it, because both rewrite the
+same create form and running them concurrently buys only merge conflicts. That
+ordering is what unblocks #418 now.
 
 Three more came out of reviewing #417 and were split out rather than folded into an
-already large PR. They are independent of #418 and #479 and touch different files, so
-they run in parallel with them:
+already large PR. They touched different files, so they ran in parallel and are all on
+`dev`:
 
-- [ ] [#480](https://github.com/kbrdn1/gwm-cli/issues/480) : `{repo}` expands to the workspace display name when a branch is written and to the directory basename when one is read, so in a workspace holding two repos that share a basename a `{repo}` pattern writes what it cannot read back
-- [ ] [#481](https://github.com/kbrdn1/gwm-cli/issues/481) : renaming a worktree closes its open pull request without warning, since the remote rename is a delete plus a create and GitHub closes a PR whose head branch is renamed, including through its own rename API
-- [ ] [#482](https://github.com/kbrdn1/gwm-cli/issues/482) : a segment frozen as a literal is lost when the pattern reorders its placeholders, because the recovery bounds each literal by the canonical `type, issue, desc` rank against markers whose real order differs
+- [x] [#480](https://github.com/kbrdn1/gwm-cli/issues/480) : `{repo}` expands to the workspace display name when a branch is written and to the directory basename when one is read, so in a workspace holding two repos that share a basename a `{repo}` pattern writes what it cannot read back
+- [x] [#481](https://github.com/kbrdn1/gwm-cli/issues/481) : renaming a worktree closes its open pull request without warning, since the remote rename is a delete plus a create and GitHub closes a PR whose head branch is renamed, including through its own rename API
+- [x] [#482](https://github.com/kbrdn1/gwm-cli/issues/482) : a segment frozen as a literal is lost when the pattern reorders its placeholders, because the recovery bounds each literal by the canonical `type, issue, desc` rank against markers whose real order differs
+
+One follow-up of #416 is still open, and it is the one that gates the cut rather than
+waiting for the next one:
+
+- [ ] [#475](https://github.com/kbrdn1/gwm-cli/issues/475) : a free-form name is not validated against Windows path rules, so `< > " |` and the reserved device names (`CON`, `NUL`, `COM1`…) pass every check and fail only when the directory is created, after `pre_create` hooks have run and with the branch already left behind. `--name` is on `dev` and unreleased, so tightening the validator now is additive; doing it after the feature ships makes the same tightening a breaking change.
 
 ### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
