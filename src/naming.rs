@@ -264,6 +264,44 @@ const GIT_REF_LOCK_SUFFIX_BYTES: usize = ".lock".len();
 /// `{type}`.
 const STRUCTURED_BASE_PLACEHOLDERS: [&str; 3] = ["{type}", "{issue}", "{desc}"];
 
+/// The Win32 path characters `Branch::name_is_valid` does *not* already
+/// refuse. Windows forbids nine in a path component (`< > : " / \ | ? *`);
+/// measured against the oracle, it already rejects `: \ ? *`, and `/` is the
+/// ref separator [`WorktreeName::worktree_dirname`] flattens to `-`. These
+/// four are the residual, and flattening leaves each of them untouched, so
+/// they reach the directory name verbatim.
+const WINDOWS_FORBIDDEN_CHARS: [char; 4] = ['<', '>', '"', '|'];
+
+/// The MS-DOS device names, reserved by Win32 in *every* directory rather
+/// than only at a volume root. Taken verbatim from [Naming Files, Paths, and
+/// Namespaces][win32]: `COM0` and `LPT0` are deliberately absent (they are
+/// not on that list), while the ISO 8859-1 superscripts `¹ ² ³` are on it,
+/// because Windows reads them as digits in a device name.
+///
+/// [win32]: https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+const WINDOWS_RESERVED_STEMS: [&str; 28] = [
+  "CON", "PRN", "AUX", "NUL", //
+  "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", //
+  "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
+];
+
+/// Whether `segment` is a reserved Win32 device name.
+///
+/// The comparison is on the stem, everything before the **first** `.`: Win32
+/// documents `NUL.txt` and `NUL.tar.gz` as both equivalent to `NUL`. Taking
+/// the first rather than testing every dot-separated piece is what keeps
+/// `x.CON` legal, which it is.
+///
+/// Case-insensitive, since Windows path comparison is. `eq_ignore_ascii_case`
+/// is enough even for the superscript entries: `¹ ² ³` have no case variants,
+/// so their bytes compare equal either way.
+fn is_windows_reserved_segment(segment: &str) -> bool {
+  let stem = segment.split('.').next().unwrap_or(segment);
+  WINDOWS_RESERVED_STEMS
+    .iter()
+    .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
 #[derive(Debug, Clone)]
 pub enum WorktreeName {
   Structured(BranchSpec),
@@ -296,11 +334,15 @@ impl WorktreeName {
   /// Plus one rule that belongs to none of them: no leading `-`, which is a
   /// CLI-ergonomics rule (git accepts it).
   ///
-  /// What is deliberately **not** checked is the Windows-specific character
-  /// and reserved-device-name set (`< > " |`, `CON`, `NUL`, `COM1`…). That
-  /// gap is real and tracked separately — it cannot be verified from a Unix
-  /// machine, and a rule that only runs on one platform's CI is a rule
-  /// nobody can pre-validate.
+  /// Consumer (2) has a second half, added by #475: the directory has to be
+  /// hostable on **Windows** too, which forbids `< > " |` and the reserved
+  /// device names ([`WINDOWS_FORBIDDEN_CHARS`], [`WINDOWS_RESERVED_STEMS`]).
+  /// The rule is unconditional rather than `#[cfg(windows)]`: a branch
+  /// travels to a teammate's machine through the forge, so a name no Windows
+  /// checkout can host is a cross-platform hazard, and gating it would leave
+  /// a rule only one CI runner ever exercises. The residual list is what
+  /// libgit2 does not already cover, measured against the oracle rather than
+  /// copied wholesale from the Win32 page.
   ///
   /// The name is validated exactly as typed. Trimming would accept
   /// `--name " spike"` and create `spike` instead — a different branch from
@@ -379,6 +421,30 @@ impl WorktreeName {
         "not a valid git branch name — git rejects spaces, `~ ^ : ? * [ \\`, `@{`, `..`, \
          leading/trailing `/`, a trailing `.`, a `.lock` suffix and `HEAD`",
       );
+    }
+
+    // Consumer (2) again, for the platform this is not compiled on. Runs
+    // after the oracle so that a name failing both rules gets git's message,
+    // which is the more specific one; by construction everything reaching
+    // here is a name git already accepted.
+    if let Some(ch) = name.chars().find(|c| WINDOWS_FORBIDDEN_CHARS.contains(c)) {
+      return reject(&format!(
+        "`{}` cannot appear in a directory name on Windows — the branch would be \
+         unusable on a teammate's machine even though git accepts it",
+        ch
+      ));
+    }
+    // Per ref segment, not just on the flattened directory name: a loose ref
+    // is a file at `.git/refs/heads/<name>`, so every `/`-separated segment
+    // is a path component there too. `spike/CON` flattens to the perfectly
+    // legal directory `spike-CON` and would still be an unwritable ref.
+    if let Some(segment) = name.split('/').find(|s| is_windows_reserved_segment(s)) {
+      return reject(&format!(
+        "`{}` is a reserved device name on Windows (`CON`, `PRN`, `AUX`, `NUL`, \
+         `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension) — no path \
+         component may be one",
+        segment
+      ));
     }
 
     Ok(Self::Freeform(name.to_string()))
