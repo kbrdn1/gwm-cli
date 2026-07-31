@@ -973,6 +973,135 @@ fn a_name_that_looks_like_a_placeholder_is_refused() {
   }
 }
 
+// ---------------------------------------------------------------------
+// Issue #475 — consumer (2) again, on the platform the developing machine
+// is not. A free-form name that Windows cannot host as a path component
+// used to reach `worktree::add`, which creates the branch before the
+// directory: the failure landed after `pre_create` hooks had run and left
+// the branch orphaned. Same late-failure shape the 255-byte cap closed in
+// PR #474, on a platform-specific input set.
+//
+// The residual list is measured, not guessed. Win32 forbids nine
+// characters in a path component (`< > : " / \ | ? *`); of those,
+// `Branch::name_is_valid` already refuses `: \ ? *`, and `/` is the ref
+// separator `worktree_dirname` flattens to `-`. Four are left. Windows
+// also forbids a trailing space or period, both of which git already
+// refuses, so that class needs no rule at all. What git does *not* know
+// about is the reserved device names.
+//
+// The rule runs on every platform rather than under `#[cfg(windows)]`.
+// A branch travels to a teammate's machine through the forge, so a name
+// no Windows checkout can host is a cross-platform hazard rather than a
+// local one; and a rule only one CI runner exercises is the shape the
+// repo's own house rule on environment-dependent tests argues against.
+// ---------------------------------------------------------------------
+
+/// The four characters Win32 forbids that git accepts. Each one lands
+/// verbatim in the worktree directory name, since flattening only rewrites
+/// `/`.
+#[test]
+fn a_name_carrying_a_character_windows_forbids_in_a_path_is_refused() {
+  for bad in ["spike<x", "spike>x", "spike\"x", "spike|x"] {
+    assert!(
+      git2::Branch::name_is_valid(bad).unwrap(),
+      "precondition: git accepts `{}`, so only our own check can stop it",
+      bad
+    );
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` cannot become a directory on Windows and must be refused up front",
+      bad
+    );
+  }
+}
+
+/// The MS-DOS device names, which are reserved in *every* directory rather
+/// than only at the root. Case-insensitively, and with an extension: Win32
+/// documents `NUL.txt` and `NUL.tar.gz` as both equivalent to `NUL`, so the
+/// stem is what counts, taken before the first `.`.
+///
+/// Checked per ref segment, not only on the flattened directory name. A
+/// loose ref is a file at `.git/refs/heads/<name>`, so `spike/CON` makes
+/// `CON` a path component there even though the directory it flattens to
+/// (`spike-CON`) is perfectly legal.
+#[test]
+fn a_name_whose_segment_is_a_reserved_windows_device_is_refused() {
+  for bad in [
+    "CON",
+    "con",
+    "CoN",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM9",
+    "LPT1",
+    "LPT9", // bare
+    "CON.txt",
+    "NUL.tar.gz",
+    "com4.log", // an extension does not clear it
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}",
+    "LPT\u{b9}", // ISO 8859-1 superscripts count as digits
+    "spike/CON",
+    "CON/spike", // a ref segment is a path component too
+  ] {
+    assert!(
+      git2::Branch::name_is_valid(bad).unwrap(),
+      "precondition: git accepts `{}`, so only our own check can stop it",
+      bad
+    );
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` is a reserved Windows device name and must be refused up front",
+      bad
+    );
+  }
+}
+
+/// The other half of "measured, not guessed": the near misses stay legal.
+/// `COM0` and `LPT0` are absent from the Win32 reserved list, and a longer
+/// word that merely starts with a device name is not reserved. `x.CON` pins
+/// that the stem is taken before the *first* `.` rather than compared
+/// against every dot-separated piece: `NUL.tar.gz` is reserved because its
+/// stem is `NUL`, which says nothing about a name whose extension happens
+/// to spell a device. Refusing these would cost names Windows hosts fine.
+#[test]
+fn the_windows_rule_stops_where_the_reserved_list_stops() {
+  for good in [
+    "COM0",
+    "LPT0",
+    "CONX",
+    "CON-x",
+    "spike-CON",
+    "console",
+    "x.CON",
+    "COM10",
+  ] {
+    assert!(
+      WorktreeName::freeform(good).is_ok(),
+      "`{}` is not a reserved device name and must stay usable",
+      good
+    );
+  }
+}
+
+/// Windows also refuses a trailing space or period. No rule is written for
+/// either: git already refuses both, so adding one would be a second
+/// spelling of an existing check whose message is already the right one.
+#[test]
+fn the_trailing_space_and_period_rules_are_left_to_git() {
+  for bad in ["spike ", "spike."] {
+    assert!(
+      !git2::Branch::name_is_valid(bad).unwrap_or(false),
+      "`{}` is refused by git itself, which is why gwm carries no rule for it",
+      bad
+    );
+    assert!(WorktreeName::freeform(bad).is_err(), "`{}` must still be refused", bad);
+  }
+}
+
 /// The rejection has to say what is wrong, not just that something is.
 #[test]
 fn the_rejection_names_the_offending_value() {
