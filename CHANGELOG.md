@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<!-- RELEASE NOTE: before publishing, rewrite BOTH sections below (Added and
+     Fixed) in the advisory's own wording and reference the GHSA id. The full
+     write-up — impact, threat model, reproduction — lives in the draft
+     advisory, not in this file, until it is published. -->
+
 ### Added
 
 - The TUI rename form (`c`) now handles free-form worktrees, in both
@@ -123,6 +128,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No `SCHEMA_VERSION` bump — `JsonWorktree` carries no `type` / `desc`, so
   the wire format is unchanged.
   ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))
+
+- Lifecycle hooks receive their context as environment variables —
+  `GWM_BRANCH`, `GWM_PATH`, `GWM_TYPE`, `GWM_ISSUE`, `GWM_DESC`, `GWM_USER`,
+  `GWM_OWNER`, `GWM_REPO` — alongside the existing `{placeholder}` syntax. A
+  hook can now read `"$GWM_BRANCH"` and not think about quoting at all: a
+  shell never re-parses metacharacters coming out of a variable. An explicit
+  `env` entry of the same name still wins.
 
 ### Fixed
 
@@ -321,6 +333,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table, and the TUI rename, which does require a configured type, checks the
   resolved list itself and says so precisely.
   ([#417](https://github.com/kbrdn1/gwm-cli/issues/417))
+
+- Hook placeholder values are shell-escaped when they are expanded into a
+  hook's `run` script. A value is data, not script: git permits `;`, `|`,
+  `$`, backticks, parentheses and redirections in a ref name, and a ref can
+  arrive from someone else's push, so an unescaped `{branch}` let a name
+  decide what the hook actually ran. `env` values are deliberately left
+  unescaped — they go to the process environment and never see a shell, so
+  escaping them would put literal quote characters into what the hook reads
+  back. `[[bootstrap.command]]` steps fold into the same path and get the
+  same treatment.
+
+  Expansion is also single-pass now. Chained replacements re-scanned what the
+  previous one wrote, so a branch named `spike-{issue}` had the token inside
+  its own name rewritten — and with escaping in play that would have spliced
+  quote characters into the middle of another value.
+
+  An **empty** placeholder is left alone rather than escaped. It has nothing
+  to inject, and `shell_words::quote("")` is `''` — escaping it would mean
+  `mycmd {issue}` started passing an empty argument where it passed none,
+  on every branch that does not match the convention. Hooks therefore see no
+  change at all beyond the one this fixes.
 
 ### Docs
 
