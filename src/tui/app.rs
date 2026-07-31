@@ -2369,7 +2369,7 @@ impl App {
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
       View::CleanReport => HintContext::Clean,
-      View::Edit => HintContext::Rename,
+      View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
       View::DetailOverlay => {
         if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
@@ -2393,6 +2393,20 @@ impl App {
     match self.create_form.mode {
       Mode::Freeform => HintContext::CreateFreeform,
       Mode::Structured => HintContext::Create,
+    }
+  }
+
+  /// Which hint row the rename overlay advertises (issue #479). Same shape and
+  /// same reason as [`Self::create_hint_context`]: free-form has one field and
+  /// no type selector, so advertising `field` and `type` there would name keys
+  /// that do nothing. Both the statusbar and the modal's own footer read this,
+  /// so the two can never disagree — which they did when only the footer knew
+  /// about the mode (Codex review on PR #485).
+  pub fn rename_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.create_form.mode {
+      Mode::Freeform => HintContext::RenameFreeform,
+      Mode::Structured => HintContext::Rename,
     }
   }
 

@@ -802,6 +802,38 @@ fn the_create_preview_expands_this_repo_s_own_patterns() {
 }
 
 #[test]
+fn the_statusbar_follows_the_rename_modal_s_mode() {
+  // Codex review on PR #485. The modal's own footer tracked the mode while
+  // `hint_context()` still returned `Rename` unconditionally for `View::Edit`,
+  // so the statusbar behind it kept advertising `field` and `type` — two verbs
+  // free-form mode neither renders nor can act on, and this codebase's rule is
+  // to never name a key that does nothing. The create overlay already solves
+  // it with one source both read (#416); rename gets the same.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+
+  let buf = render(&mut app);
+  assert_absent(&buf, "↑/↓ type", "free-form has no type selector to advertise");
+  // The toggle hint names its *target* mode, so free-form advertises the way back.
+  assert_present(
+    &buf,
+    "structured",
+    "the toggle is the one verb the visible inputs cannot suggest",
+  );
+
+  app.create_form.toggle_mode();
+  let buf = render(&mut app);
+  assert_present(&buf, "↑/↓ type", "structured mode does have a type selector");
+  assert_present(&buf, "free-form", "and advertises the way across");
+}
+
+#[test]
 fn the_rename_preview_shows_a_free_form_name_verbatim() {
   // Issue #479. In free-form mode no pattern is expanded at all: the branch IS
   // the name, and the directory is that name flattened. A preview that kept

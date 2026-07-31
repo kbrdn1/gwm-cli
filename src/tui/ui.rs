@@ -5420,11 +5420,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     );
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
-        if freeform {
-          HintContext::RenameFreeform
-        } else {
-          HintContext::Rename
-        },
+        // One source with the statusbar (`App::rename_hint_context`), so the
+        // footer and the bar behind it cannot disagree about the mode.
+        app.rename_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
