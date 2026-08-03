@@ -186,7 +186,11 @@ pub fn validate() -> Result<()> {
   if let Some(warning) =
     crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern, &worktree::repo_name(&repo), &types)
   {
-    eprintln!("warning: {}", warning);
+    // Issue #473: `branch_pattern_warning` already neutralises the pattern it
+    // quotes, but it also embeds the repo name, and this `eprintln!` bypasses
+    // the sink in `main` (it is a warning, not a returned error). One row, so
+    // the row variant.
+    eprintln!("warning: {}", crate::naming::sanitise_for_terminal(&warning));
   }
   Ok(())
 }
@@ -501,14 +505,14 @@ fn render_segment(segment: &Segment) -> String {
 fn config_de_error(path: &Path, raw: &str, err: toml::de::Error) -> GwmError {
   let msg = enrich_schema_hint(err.to_string());
   match err.span() {
-    Some(span) => GwmError::Config(format!(
+    Some(span) => GwmError::ConfigDiagnostic(format!(
       "{}: error at line {}, col {}: {}",
       path.display(),
       line_col(raw, span.start).0,
       line_col(raw, span.start).1,
       msg
     )),
-    None => GwmError::Config(format!("{}: {}", path.display(), msg)),
+    None => GwmError::ConfigDiagnostic(format!("{}: {}", path.display(), msg)),
   }
 }
 
@@ -522,14 +526,14 @@ fn enrich_schema_hint(message: String) -> String {
 
 fn config_parse_error(path: &Path, raw: &str, err: toml_edit::TomlError) -> GwmError {
   match err.span() {
-    Some(span) => GwmError::Config(format!(
+    Some(span) => GwmError::ConfigDiagnostic(format!(
       "{}: error at line {}, col {}: {}",
       path.display(),
       line_col(raw, span.start).0,
       line_col(raw, span.start).1,
       err
     )),
-    None => GwmError::Config(format!("{}: {}", path.display(), err)),
+    None => GwmError::ConfigDiagnostic(format!("{}: {}", path.display(), err)),
   }
 }
 

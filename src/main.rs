@@ -33,25 +33,38 @@ fn main() {
       // way to surface the typo). The dispatcher will re-surface
       // the error if the user runs a subcommand that touches
       // config.
-      eprintln!(
-        "warning: failed to load aliases — using raw argv: {}",
-        gwm::naming::sanitise_block_for_terminal(&e.to_string())
-      );
+      eprintln!("warning: failed to load aliases — using raw argv: {}", clean_error(&e));
       argv
     }
   };
 
   let args = cli::Cli::parse_from(expanded);
   if let Err(e) = cli::run(args) {
-    // Issue #473: the two stderr sinks of the whole binary, so neutralising
-    // here covers every command by construction rather than one diagnostic at
-    // a time. It is not hypothetical — `toml`'s parse error quotes the
-    // offending source line verbatim, which replays a raw control byte from
-    // an unvetted `.gwm.toml` to the terminal of anyone who so much as runs
-    // `gwm list` inside the repo. The block variant keeps the `\n` that makes
-    // the caret-under-the-column snippet readable.
-    eprintln!("error: {}", gwm::naming::sanitise_block_for_terminal(&e.to_string()));
+    eprintln!("error: {}", clean_error(&e));
     std::process::exit(1);
+  }
+}
+
+/// Neutralise an error before it reaches the terminal (issue #473).
+///
+/// These two `eprintln!` are the only stderr sinks in the binary, so doing it
+/// here covers every command by construction rather than one diagnostic at a
+/// time. It is not hypothetical: `toml`'s parse error quotes the offending
+/// source line verbatim, so an unvetted `.gwm.toml` reaches the terminal of
+/// anyone who so much as runs `gwm list` inside the repo.
+///
+/// How hard depends on what the message *is*. Most errors are one line of
+/// prose that quotes a config value, so they are flattened: a value carrying
+/// a `\n` must not be able to forge a second line that reads like a gwm
+/// diagnostic. The exception is a rendered diagnostic, whose caret-under-the-
+/// column snippet spans lines by design; see
+/// [`GwmError::is_rendered_diagnostic`].
+fn clean_error(e: &gwm::error::GwmError) -> String {
+  let msg = e.to_string();
+  if e.is_rendered_diagnostic() {
+    gwm::naming::sanitise_block_for_terminal(&msg)
+  } else {
+    gwm::naming::sanitise_for_terminal(&msg)
   }
 }
 

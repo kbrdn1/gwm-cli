@@ -360,3 +360,115 @@ fn an_alias_expansion_cannot_smuggle_a_control_byte_through_clap() {
     );
   }
 }
+
+#[test]
+fn a_config_value_cannot_forge_a_line_in_an_error() {
+  // Errors are the one output path every command shares, and most of them
+  // quote something out of `.gwm.toml`. A value carrying a `\n` would
+  // otherwise print a second line that reads exactly like a gwm diagnostic,
+  // which is worse than a colour change: it is a false statement in gwm's
+  // own voice.
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    "[[branch_types]]\nname = \"bad\\nerror: everything is fine\"\ndescription = \"x\"\n",
+  )
+  .unwrap();
+
+  let out = gwm_in(dir.path()).args(["config", "list"]).output().unwrap();
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  // The forgery is a LINE in gwm's own voice, so count the lines that open
+  // like one. Asserting on the exact text would miss it: the forged row runs
+  // on into the rest of the real message.
+  let voiced = stderr.lines().filter(|l| l.starts_with("error: ")).count();
+  assert_eq!(voiced, 1, "a config value forged a diagnostic line:\n{:?}", stderr);
+  // Flattened, not dropped: the operator still needs to see what was rejected.
+  assert!(
+    stderr.contains("error: everything is fine"),
+    "the offending value should still be quoted, got {:?}",
+    stderr
+  );
+}
+
+#[test]
+fn a_rendered_diagnostic_keeps_the_lines_that_are_its_meaning() {
+  // The exemption the flattening above must not swallow. `toml` points at the
+  // broken column with a caret under it, across several lines; collapsing that
+  // would gut the one message whose entire job is to locate the problem.
+  let (dir, _repo) = init_repo();
+  fs::write(dir.path().join(".gwm.toml"), "[worktree\nbase = 1\n").unwrap();
+
+  let out = gwm_in(dir.path()).args(["config", "validate"]).output().unwrap();
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(
+    stderr.contains("\n  |\n"),
+    "the caret snippet should survive, got {:?}",
+    stderr
+  );
+  assert!(
+    control_bytes(&stderr).is_empty(),
+    "the exemption is for line breaks only, got {:?}",
+    control_bytes(&stderr)
+  );
+}
+
+#[test]
+fn the_forge_diff_rows_neutralise_control_bytes() {
+  // `milestones list` / `labels list` only reach their printers after a live
+  // forge round trip, so the rows are asserted as values. A milestone `title`
+  // is free text nothing validates on load; a label `name` is validated, but
+  // only against `is_ascii_control`, which lets the C1 range through.
+  use gwm::labels::{LabelSpec, RemoteLabel};
+  use gwm::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
+
+  let esc = char::from(27u8);
+  let milestones = vec![MilestoneSpec {
+    title: format!("v1{}]0;PWNED.0", esc),
+    description: None,
+    due_on: None,
+    state: MilestoneState::Open,
+  }];
+  let mdiff = gwm::milestones::diff_milestones(
+    &milestones,
+    &[RemoteMilestone {
+      number: 7,
+      title: format!("stale{}[2K", esc),
+      description: None,
+      due_on: None,
+      state: MilestoneState::Open,
+    }],
+  );
+  let rows = gwm::cli::milestones_diff_lines(&format!("acme/repo{}[31m", esc), &milestones, &mdiff).join("\n");
+  assert!(
+    control_bytes(&rows).is_empty(),
+    "milestone rows replayed {:?}:\n{:?}",
+    control_bytes(&rows),
+    rows
+  );
+  assert!(
+    rows.contains("]0;PWNED.0"),
+    "the title must stay legible, got {:?}",
+    rows
+  );
+
+  let labels = vec![LabelSpec {
+    name: "bug".to_string(),
+    color: "d73a4a".to_string(),
+    description: None,
+  }];
+  let ldiff = gwm::labels::diff_labels(
+    &labels,
+    &[RemoteLabel {
+      name: format!("stale{}[2K", esc),
+      color: "ffffff".to_string(),
+      description: None,
+    }],
+  );
+  let rows = gwm::cli::labels_diff_lines(&format!("acme/repo{}[31m", esc), &labels, &ldiff).join("\n");
+  assert!(
+    control_bytes(&rows).is_empty(),
+    "label rows replayed {:?}:\n{:?}",
+    control_bytes(&rows),
+    rows
+  );
+}

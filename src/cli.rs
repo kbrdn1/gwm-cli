@@ -4252,14 +4252,33 @@ fn labels_forge(config: &Config) -> Result<std::sync::Arc<dyn forge::Forge>> {
 }
 
 fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) {
+  for line in labels_diff_lines(slug, declared, diff) {
+    println!("{}", line);
+  }
+}
+
+/// The rows `gwm labels list` / `push --dry-run` print, as values (issue
+/// #473). Same seam and same reason as [`milestones_diff_lines`].
+///
+/// A declared `name` is the least exposed field here: `labels::
+/// validate_label_name` already rejects it at load. But it rejects
+/// `is_ascii_control` only, which leaves the C1 range (U+0080..U+009F, CSI
+/// among them) through, and `remote.name` / `slug` come off the forge rather
+/// than the config and are validated by nobody.
+pub fn labels_diff_lines(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) -> Vec<String> {
+  let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
-  println!(
+  let mut lines = vec![format!(
     "declared in .gwm.toml: {} labels — diff against {}:",
     declared.len(),
-    slug
-  );
+    clean(slug)
+  )];
   for spec in &diff.to_create {
-    println!("  + {:<20} (will create — color #{})", spec.name, spec.color);
+    lines.push(format!(
+      "  + {:<20} (will create — color #{})",
+      clean(&spec.name),
+      clean(&spec.color)
+    ));
   }
   for upd in &diff.to_update {
     let detail = match (&upd.previous_color, &upd.previous_description) {
@@ -4267,15 +4286,16 @@ fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDif
       (None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
     };
-    println!("  ~ {:<20} ({})", upd.spec.name, detail);
+    lines.push(format!("  ~ {:<20} ({})", clean(&upd.spec.name), clean(&detail)));
   }
   for spec in &diff.matching {
-    println!("  = {:<20} (match)", spec.name);
+    lines.push(format!("  = {:<20} (match)", clean(&spec.name)));
   }
   for remote in &diff.extra_on_remote {
-    println!("  - {:<20} (on remote, not in config)", remote.name);
+    lines.push(format!("  - {:<20} (on remote, not in config)", clean(&remote.name)));
   }
-  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines.push(labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines
 }
 
 // ---- Milestones commands (issue #82) ------------------------------------
@@ -4367,20 +4387,35 @@ fn load_milestones_config() -> Result<Config> {
 }
 
 fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) {
+  for line in milestones_diff_lines(slug, declared, diff) {
+    println!("{}", line);
+  }
+}
+
+/// The rows `gwm milestones list` / `push --dry-run` print, as values rather
+/// than `println!` side effects (issue #473).
+///
+/// A value because the printer is only reachable after a live forge round
+/// trip (`fetch_remote_milestones`), so there is no way to assert on it from a
+/// test without mocking `gh`. Unlike a label name, a milestone `title` is free
+/// text that nothing validates on load, and `gwm milestones list` reads
+/// `.gwm.toml` without the trust gate.
+pub fn milestones_diff_lines(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) -> Vec<String> {
+  let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
-  println!(
+  let mut lines = vec![format!(
     "declared in .gwm.toml: {} milestones — diff against {}:",
     declared.len(),
-    slug
-  );
+    clean(slug)
+  )];
   for spec in &diff.to_create {
     let due = spec.due_on.as_deref().unwrap_or("no due date");
-    println!(
+    lines.push(format!(
       "  + {:<20} (will create — state {}, due {})",
-      spec.title,
+      clean(&spec.title),
       spec.state.as_str(),
-      due
-    );
+      clean(due)
+    ));
   }
   for upd in &diff.to_update {
     let detail = match (&upd.previous_due_on, &upd.previous_state, &upd.previous_description) {
@@ -4389,15 +4424,20 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
       (None, None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
     };
-    println!("  ~ {:<20} ({})", upd.spec.title, detail);
+    lines.push(format!("  ~ {:<20} ({})", clean(&upd.spec.title), clean(&detail)));
   }
   for spec in &diff.matching {
-    println!("  = {:<20} (match)", spec.title);
+    lines.push(format!("  = {:<20} (match)", clean(&spec.title)));
   }
   for remote in &diff.extra_on_remote {
-    println!("  - {:<20} (#{} on remote, not in config)", remote.title, remote.number);
+    lines.push(format!(
+      "  - {:<20} (#{} on remote, not in config)",
+      clean(&remote.title),
+      remote.number
+    ));
   }
-  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines.push(labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines
 }
 
 // ---- Trust ledger commands (issue #95) ----------------------------------
