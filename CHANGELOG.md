@@ -182,10 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line above.
 
   `gwm config get`, `config list` (its keys, which are attacker-chosen wherever
-  the schema is a map), `types`, `aliases list`, `doctor`, `commit-prefix` and
-  the TOFU prompt are all covered. So is `toml`'s parse error, which quotes the
-  offending source line verbatim and therefore needed no echo command at all —
-  running `gwm list` inside the repo was enough.
+  the schema is a map), `types`, `aliases list`, `doctor`, `commit-prefix`,
+  `trust list` / `show` / `add` / `revoke`, the milestone and label diff rows,
+  and the TOFU prompt are all covered. So is every error message, which needed
+  no echo command at all: `toml`'s parse error quotes the offending source line
+  verbatim, so running `gwm list` inside the repo was enough.
 
   The one that matters most is the prompt: its bootstrap summary renders
   directly above `Trust this .gwm.toml? [y/N/show]:`, so a cursor-up-and-erase
@@ -193,9 +194,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was asking permission to run.
 
   Values are replaced rather than stripped, so what is left stays recognisable
-  and no length changes silently. Output that is meant to span rows — a parse
-  diagnostic, the raw body shown by `show` — keeps its line breaks and loses
-  everything else.
+  and no length changes silently. Errors keep their line breaks, because a
+  parse diagnostic points at the broken column across several rows, but every
+  line after the first now sits under gwm's own margin. That is what stops a
+  value carrying a newline from printing a second line at column zero that
+  reads like a statement from gwm rather than a quote from the repo.
+
+  One value is refused rather than neutralised: an `[aliases]` expansion
+  becomes argv before the CLI parser runs, and that parser prints its own
+  errors without passing through gwm's output path, so a control character
+  there is rejected when the config loads.
 
 - `worktree` patterns are expanded in a single pass, so an expansion is a value
   rather than more template. `expand_placeholders` chained `str::replace` calls
