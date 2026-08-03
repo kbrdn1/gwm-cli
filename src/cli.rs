@@ -2902,7 +2902,10 @@ const PR_FILES_CHANGED_MAX_LINES: usize = 30;
 
 fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context(None)?;
-  let head_name = current_branch(&repo)?;
+  // Issue #477: from the invoking checkout, not from `repo` — that handle
+  // has walked back to the main working directory. Everything else below
+  // keeps using `repo`, which is what it wants.
+  let head_name = current_branch_at(None)?;
   // Issue #417: `[pr_template.by_type]` selection and the body placeholders
   // read the branch back, so they read it with this repo's own pattern.
   let branch_spec = crate::naming::BranchParser::from_config(&config, &worktree::repo_name(&repo)).parse(&head_name);
@@ -3208,6 +3211,14 @@ fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode:
     }
     None => std::env::current_dir()?,
   };
+  // Issue #477: only the fuzzy arm above resolves a branch, off the worktree
+  // record. The other two left it `None`, so hooks received an empty
+  // `{branch}` / `{type}` / `{issue}` — the same defect as `pr` and
+  // `commit-prefix` with a quieter symptom. Read it from the target itself,
+  // which covers a path that was given outright as well as the CWD.
+  if worktree_branch.is_none() {
+    worktree_branch = current_branch_at(Some(&worktree_path)).ok();
+  }
   let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
@@ -3553,7 +3564,13 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
     None => {
       let repo = worktree::discover_repo(None)?;
       let wd = repo.workdir().map(|w| w.to_path_buf());
-      let name = current_branch(&repo)?;
+      // Issue #477: the workdir and the repo name come from the main
+      // checkout, because that is where `.gwm.toml` lives and what `{repo}`
+      // expands to. The branch does not: the bundled `commit-msg` hook runs
+      // this with git's working directory inside the worktree, so reading
+      // `repo`'s HEAD prefixed every commit made from a worktree with
+      // whatever the main checkout happened to be sitting on.
+      let name = current_branch_at(None)?;
       (wd, Some(worktree::repo_name(&repo)), name)
     }
   };
@@ -3777,6 +3794,36 @@ fn resolve_target_repo(worktree: Option<String>) -> Result<(Repository, String, 
   let repo = Repository::discover(&path).map_err(|_| GwmError::NotInGitRepo)?;
   let branch = current_branch(&repo)?;
   Ok((repo, branch, path))
+}
+
+/// The branch checked out *at* `start`, or at the current directory when
+/// `start` is `None`.
+///
+/// Issue #477. [`worktree::discover_repo`] deliberately walks back to the
+/// main working directory when it lands inside a linked worktree, which is
+/// what every command operating on the whole worktree **set** needs: `list`,
+/// `remove`, `switch`, `prune` all want the one handle that knows about all
+/// of them. Asking that handle "which branch am I on" answers for the main
+/// checkout instead, so `gwm commit-prefix` run by the bundled `commit-msg`
+/// hook — which git invokes with the working directory inside the worktree —
+/// derived its prefix from whatever the main checkout was sitting on.
+///
+/// So this discovers without the walk-back. It is deliberately *not* a
+/// replacement for `repo_context`: `.gwm.toml`, the workdir and
+/// [`worktree::repo_name`] all still want the main repo, and `{repo}` is a
+/// legal token in `branch_pattern`, so widening this to the whole context
+/// would compile the branch parser with the worktree directory's name and
+/// stop reading branches gwm itself wrote. Only the branch moves.
+///
+/// [`resolve_target_repo`] already had the right shape, which is why
+/// `gwm status` reported the right branch from the same directory all along.
+fn current_branch_at(start: Option<&Path>) -> Result<String> {
+  let from = match start {
+    Some(p) => p.to_path_buf(),
+    None => std::env::current_dir()?,
+  };
+  let repo = Repository::discover(&from).map_err(|_| GwmError::NotInGitRepo)?;
+  current_branch(&repo)
 }
 
 fn current_branch(repo: &Repository) -> Result<String> {
