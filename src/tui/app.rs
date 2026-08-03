@@ -854,6 +854,20 @@ impl App {
     }
   }
 
+  /// The verbs the structured form's status line advertises (#418), naming the
+  /// real submit field and dropping the field-switching half when there is
+  /// nothing to switch between. Same rule the hint row follows, and the same
+  /// reason: `next_field` rotates within a one-element list, so telling the
+  /// user to press Tab names a key that does nothing.
+  fn structured_form_instruction(&self) -> String {
+    let submit = format!("enter on {}: submit", self.submit_field_label());
+    if self.create_form.fields().len() > 1 {
+      format!("tab/shift-tab: switch field — {}", submit)
+    } else {
+      submit
+    }
+  }
+
   /// The segments the active repo's patterns ask the user to supply — what
   /// [`crate::naming::BranchSpec::new_with_required`] validates against, so the
   /// form never refuses a submission over a value the patterns discard (#418).
@@ -3997,31 +4011,49 @@ impl App {
       self.view = View::Edit;
       return;
     };
-    // Issue #418 deleted the guard that used to stand here. It refused to open
-    // the form when a segment came back empty, because "the form cannot be
-    // submitted without it" (Codex review on PR #476) — true while the form
-    // presented the canonical triple whatever the patterns said. It is not true
-    // now: a segment no pattern carries is one the form does not present and
-    // `new_with_required` does not validate, so its absence from the parse is
-    // not a dead end, it is simply not part of this repo's naming. A segment
-    // the patterns *do* carry gets a field the user can fill.
+    // **The form must not open on a segment whose current value it cannot show.**
     //
+    // Issue #418 rescoped the guard that stands here rather than removing it,
+    // and both earlier readings of it were wrong in the same direction. The
+    // original (Codex review on PR #476) refused whenever a segment came back
+    // empty, which took the form away from a repo whose patterns simply do not
+    // carry that segment: nothing writes it, nothing asks for it, its absence
+    // is not a dead end. Deleting the guard outright then went too far the
+    // other way (Codex review on PR #492, second pass): `worktree_spec` reads
+    // the branch and the directory name and never parses `base`, so a segment
+    // carried only by `base` comes back empty **while its value sits on disk**.
+    // Under `base = ".../wt/{type}"`, a worktree at `.../wt/fix/my-desc` would
+    // have opened with the selector defaulted to the first configured type, and
+    // submitting without touching it would have moved the worktree to
+    // `.../wt/feat/`. "Not recovered" is not "not there".
+    //
+    // So the rule is neither "empty" nor "absent from the patterns" but the
+    // conjunction: a segment some pattern **writes** that the parse did **not**
+    // recover. There the form would show a default it did not read and the
+    // submit would write it over the real one.
+    let required = self.required_segments();
+    if let Some(missing) = required.iter().find(|segment| match **segment {
+      "type" => spec.type_.is_empty(),
+      "issue" => spec.issue.is_empty(),
+      _ => spec.desc.is_empty(),
+    }) {
+      self.status = format!(
+        "'{}' carries {{{}}} only where this form cannot read it back (check worktree.base), so renaming would overwrite it — rename with git, or write {{{}}} into worktree.branch_pattern or worktree.path_pattern",
+        crate::naming::sanitise_for_terminal(&branch),
+        missing,
+        missing
+      );
+      return;
+    }
     // Refuse rather than silently preselect type index 0: a branch whose
     // parsed type isn't configured (config change, manual branch) would
     // otherwise be renamed to the first configured type on Enter (Codex
-    // review on PR #292).
-    //
-    // Scoped to a type that was actually recovered (Codex review on PR #492).
-    // `worktree_spec` reads the branch and the directory name and never parses
-    // `base`, so a `{type}` carried only there comes back empty, and refusing
-    // on it blamed a branch type of `''` for a form that works fine: the
-    // selector is presented, the user picks, and the submit writes it into the
-    // path. An empty type recovered nothing, so there is nothing to preserve
-    // and index 0 is not a silent change. Where no pattern carries `{type}` at
-    // all the value is discarded by every expansion anyway.
+    // review on PR #292). Only reachable when some pattern carries `{type}`,
+    // the guard above having taken the unrecovered case; where none does, the
+    // value is discarded by every expansion and index 0 is inert.
     let type_index = match self.branch_types.iter().position(|t| t.name == spec.type_) {
       Some(index) => index,
-      None if spec.type_.is_empty() => 0,
+      None if !required.contains(&"type") => 0,
       None => {
         self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
         return;
@@ -4456,10 +4488,7 @@ impl App {
     // writes no issue number, `Field::Issue` focused an input the renderer
     // does not draw, so the first keypress went nowhere at all.
     self.create_form.field = self.create_form.entry_field();
-    self.status = format!(
-      "tab/shift-tab: switch field — enter on {}: submit — esc: cancel",
-      self.submit_field_label()
-    );
+    self.status = format!("{} — esc: cancel", self.structured_form_instruction());
   }
 
   pub fn create_next_field(&mut self) {
@@ -4561,16 +4590,8 @@ impl App {
           // The submit field is named from the patterns, not hardcoded to
           // `desc` (#418): a pattern without one told the user to press enter
           // on a field the form does not present.
-          Mode::Structured if back.is_empty() => {
-            format!(
-              "tab/shift-tab: switch field — enter on {}: submit",
-              self.submit_field_label()
-            )
-          }
-          Mode::Structured => format!(
-            "tab/shift-tab: switch field — enter on {}: submit{back}free-form",
-            self.submit_field_label()
-          ),
+          Mode::Structured if back.is_empty() => self.structured_form_instruction(),
+          Mode::Structured => format!("{}{back}free-form", self.structured_form_instruction()),
         };
       }
       Some(ModalAction::CreateSubmit) => {

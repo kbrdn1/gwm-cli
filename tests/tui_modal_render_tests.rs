@@ -1096,3 +1096,52 @@ fn the_rename_modal_omits_the_same_field_the_create_modal_does() {
     row_strings(&buf).join("\n")
   );
 }
+
+/// Codex review on PR #492. Making the field set dynamic made two hint rows
+/// inert, and this codebase's rule is to never name a key that does nothing
+/// (the reason free-form drops the same two rows since #416). Introduced by
+/// #418, not pre-existing: before it, the structured form always presented the
+/// full triple, so both rows were always accurate.
+#[test]
+fn the_hint_row_drops_the_type_selector_when_no_pattern_carries_one() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_absent(&buf, "↑/↓", "no type selector is rendered, so its keys do nothing");
+  assert_present(&buf, "field", "two fields remain, so Tab still moves");
+}
+
+/// The other row: one field means `next_field` rotates within a one-element
+/// list, so Tab does nothing either.
+#[test]
+fn the_hint_row_drops_the_field_verb_when_the_pattern_presents_one_field() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wt/{desc}".into();
+  app.config.worktree.path_pattern = "{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  assert_eq!(app.create_form.fields().len(), 1);
+  let buf = render(&mut app);
+
+  assert_absent(&buf, "↑/↓", "no type selector either");
+  assert_absent(&buf, "field", "one field, so Tab is a no-op");
+  assert_present(&buf, "submit", "the verbs that still work stay");
+}
+
+/// And the canonical pattern is unchanged, so the fix cannot be a blanket
+/// removal of the two rows.
+#[test]
+fn the_hint_row_is_unchanged_on_the_canonical_pattern() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "↑/↓", "the default pattern has a type selector");
+  assert_present(&buf, "field", "and three fields to move between");
+}

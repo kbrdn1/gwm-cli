@@ -11445,21 +11445,24 @@ fn the_opening_instruction_names_the_field_enter_actually_submits_from() {
   );
 }
 
-/// Codex review on PR #492. `worktree_spec` reads the branch and the directory
-/// name; it never parses `base`. So a `{type}` carried only by `base` comes back
-/// empty, and because `required_segments` now counts `base`, the type-index
-/// lookup refused to open the rename form at all, blaming a branch type of `''`.
+/// Codex review on PR #492, two passes, and the second reversed the first.
 ///
-/// Refusing an unconfigured type (#292) is about a branch whose parsed type is
-/// real but unknown, where preselecting index 0 would silently rename it. An
-/// empty type recovered nothing, so there is nothing to preserve and the form's
-/// own default is not a silent change.
+/// `worktree_spec` reads the branch and the directory name and never parses
+/// `base`, so a segment carried only by `base` comes back empty. My first fix
+/// treated that as "nothing to preserve" and defaulted the selector to index 0.
+/// That is wrong in the most expensive way available: the value is not absent,
+/// it is **on disk**. Under `base = ".../wt/{type}"` a worktree at
+/// `.../wt/fix/my-desc` would open showing `feat`, and submitting without
+/// touching the type would move the worktree to `.../wt/feat/`.
+///
+/// The rule is the conjunction, not either half: refuse when a segment some
+/// pattern *writes* is one the parse did *not* recover.
 #[test]
-fn the_rename_form_opens_when_only_the_base_path_carries_the_type() {
+fn the_rename_form_refuses_a_segment_it_cannot_read_back_from_the_name() {
   let (_d, mut app) = app_with_patterns("{desc}", "{desc}", "{repo_parent}/wt/{type}");
   assert!(
     app.create_form.fields().contains(&Field::Type),
-    "base carries {{type}}, so the form presents a selector for it"
+    "base carries {{type}}, so the form would present a selector for it"
   );
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("my-desc".into());
@@ -11468,12 +11471,30 @@ fn the_rename_form_opens_when_only_the_base_path_carries_the_type() {
 
   app.enter_edit_worktree();
 
-  assert_eq!(app.view, View::Edit, "status was: {}", app.status);
-  assert_eq!(
-    app.create_form.type_index, 0,
-    "the selector falls back to its own default"
+  assert_eq!(app.view, View::List, "opening would overwrite the on-disk type");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("{type}") && app.status.contains("worktree.base"),
+    "the status must name the segment and where to look: {}",
+    app.status
   );
-  assert_eq!(app.create_form.desc, "my-desc");
+}
+
+/// The other half of that conjunction, and the #418 win it must not undo: a
+/// segment **no** pattern carries is not something the form shows or asks for,
+/// so its absence from the parse is not a reason to refuse.
+#[test]
+fn a_segment_no_pattern_carries_is_not_a_reason_to_refuse() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "status was: {}", app.status);
+  assert!(app.create_form.issue.is_empty());
 }
 
 /// The other side of the same guard: a parsed type that is real but not

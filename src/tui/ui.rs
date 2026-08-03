@@ -5,6 +5,12 @@ use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
+
+/// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
+/// default by the hint helpers that have no form in reach (issue #418). Every
+/// row those helpers can drop is present in it, so the default is "advertise
+/// everything", which is what they did before the field set became dynamic.
+const CANONICAL_TRIPLE: [Field; 3] = [Field::Type, Field::Issue, Field::Desc];
 use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
@@ -2276,9 +2282,45 @@ impl HintContext {
   /// overlay and the Issue/PR prompt use. An unbound action is dropped from
   /// the row rather than advertised with a phantom key.
   pub fn resolve(self, keymap: &super::keymap::Keymap, modal: &ModalKeymap) -> Vec<(String, String)> {
+    self.resolve_with_fields(keymap, modal, &CANONICAL_TRIPLE)
+  }
+
+  /// As [`Self::resolve`], but told which fields the create / rename form
+  /// actually presents (issue #418), so the structured rows stop advertising
+  /// verbs that do nothing.
+  ///
+  /// Two of them go inert once the field set follows the repo's patterns, and
+  /// this codebase's rule is to never name a key that does nothing (the reason
+  /// free-form drops the same two rows since #416):
+  ///
+  /// - `↑/↓ type` when no pattern carries `{type}`. The selector is not
+  ///   rendered and `handle_create_key` gates the cycling verbs on
+  ///   `Field::Type`, so the arrows are a no-op.
+  /// - `field` when the pattern presents one field. `next_field` rotates
+  ///   within a one-element list, so Tab does nothing.
+  ///
+  /// `fields` is ignored outside the structured create / rename contexts:
+  /// free-form drops both rows already, and no other context carries them.
+  pub fn resolve_with_fields(
+    self,
+    keymap: &super::keymap::Keymap,
+    modal: &ModalKeymap,
+    fields: &[Field],
+  ) -> Vec<(String, String)> {
+    let structured_form = matches!(self, HintContext::Create | HintContext::Rename);
     self
       .hint_specs()
       .iter()
+      .filter(|h| {
+        if !structured_form {
+          return true;
+        }
+        match h {
+          Hint::Lit("↑/↓", "type") => fields.contains(&Field::Type),
+          Hint::Modal(ModalAction::CreateNextField, _) => fields.len() > 1,
+          _ => true,
+        }
+      })
       .filter_map(|h| match h {
         // #219: a global verb whose key is claimed by a modal binding in the
         // active context is resolved as that modal verb first — the event loop
@@ -2487,7 +2529,19 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
 }
 
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
-  let resolved = ctx.resolve(keymap, modal);
+  modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
+}
+
+/// As [`modal_hint_for_context`], for the two footers whose form knows which
+/// fields it presents (issue #418). Every other modal keeps the plain call.
+pub fn modal_hint_for_context_with_fields(
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+  fields: &[Field],
+) -> Line<'static> {
+  let resolved = ctx.resolve_with_fields(keymap, modal, fields);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)
 }
@@ -2712,7 +2766,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Resolve the rebindable hint keys against the live keymap (issue #217
   // review) so a user override shows through, then borrow into the slice
   // `status_line` expects.
-  let resolved = ctx.resolve(&app.keymap, &app.modal_keymap);
+  // Same field set the two footers use (#418), so the bar behind a modal and
+  // the modal's own footer cannot advertise different verbs.
+  let resolved = ctx.resolve_with_fields(&app.keymap, &app.modal_keymap, app.create_form.fields());
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   let line = status_line(
     ctx.label(),
@@ -4018,11 +4074,12 @@ fn draw_create(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(
+      Paragraph::new(modal_hint_for_context_with_fields(
         app.create_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
+        app.create_form.fields(),
       )),
       inner[4],
     );
@@ -5419,13 +5476,14 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(
+      Paragraph::new(modal_hint_for_context_with_fields(
         // One source with the statusbar (`App::rename_hint_context`), so the
         // footer and the bar behind it cannot disagree about the mode.
         app.rename_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
+        app.create_form.fields(),
       )),
       inner[4],
     );
