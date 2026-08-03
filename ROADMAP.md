@@ -186,12 +186,20 @@ Sequenced cheapest-first, each step shippable on its own:
 - [x] [#416](https://github.com/kbrdn1/gwm-cli/issues/416) : free-form naming via `gwm create --name`, additive and contract-safe
 - [x] [#417](https://github.com/kbrdn1/gwm-cli/issues/417) : derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
 - [x] [#479](https://github.com/kbrdn1/gwm-cli/issues/479) : rename a free-form worktree, either freely again or into the pattern
-- [ ] [#418](https://github.com/kbrdn1/gwm-cli/issues/418) : token-driven create form with a live branch/path preview
+- [x] [#418](https://github.com/kbrdn1/gwm-cli/issues/418) : token-driven create form with a live branch/path preview
 
 Everything checked above is on `dev` and unreleased, so none of it has shipped to a
-stable line yet. **#418 is the only step of the original sequence still to build**;
-everything else listed below is follow-up work that came out of building the first
-three, not a widening of the plan.
+stable line yet. **The original sequence is complete**; everything else listed below is
+follow-up work that came out of building the first three, not a widening of the plan.
+
+Two of #418's three asks turned out to have shipped ahead of it, which is worth
+recording because it is what a long sequence does to its own tail: the live
+branch/path preview arrived with #217's follow-up and #416, and `Ctrl-T` with #416.
+What #418 actually contributed is the field set and the focus order, derived from the
+patterns rather than fixed at the canonical triple. Its scope note had argued for a
+generic token-driven form so exotic tokens would be supported rather than dropped,
+but the token vocabulary is closed at three editable names, so that design and the
+narrow one coincide except on ordering. A drift guard holds the intent instead.
 
 A checkbox here tracks what is merged into `dev`, which is not the same thing as what
 GitHub shows as closed. `Closes #N` in a pull request body only fires when the pull
@@ -210,7 +218,7 @@ naming: the rename form refused a free-form branch outright, so a worktree named
 spike could neither be renamed again nor promoted into the convention once it grew an
 issue number. It shipped ahead of #418 rather than beside it, because both rewrite the
 same create form and running them concurrently buys only merge conflicts. That
-ordering is what unblocks #418 now.
+ordering is what unblocked #418.
 
 Three more came out of reviewing #417 and were split out rather than folded into an
 already large PR. They touched different files, so they ran in parallel and are all on
@@ -229,6 +237,7 @@ Two bugs found while verifying this sequence end to end are fixed alongside it. 
 is naming work, both are recorded here because they were found here:
 
 - [x] [#477](https://github.com/kbrdn1/gwm-cli/issues/477) : `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the main checkout's branch (or, for `bootstrap`, no branch at all) when run from a worktree, because `discover_repo` deliberately walks back to the main working directory and they asked that handle where they were
+- [ ] [#494](https://github.com/kbrdn1/gwm-cli/issues/494) : `expand_placeholders` substitutes `{home}` / `{repo}` first and then substitutes what those expansions produced, so a repo whose own name contains `{type}` makes `{repo}/{desc}` write a type the pattern never mentions. #418 made the create form derive its fields after that resolution, which closes the symptom on the form; the multi-pass substitution itself still reaches the CLI, the hooks and path resolution, and is why `BranchParser::compile` refuses a class of otherwise-legal patterns
 - [ ] [#487](https://github.com/kbrdn1/gwm-cli/issues/487) : `worktree::add` creates the branch before the directory, so *any* late failure leaves it orphaned. #474 and #475 each closed one input set; a full disk is not an input set, so the ordering is what actually bounds the class
 
 ### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
