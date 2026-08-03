@@ -149,7 +149,7 @@ pub fn list(prefix: Option<&str>) -> Result<()> {
       .unwrap_or(true)
     {
       // Issue #473: the *value* is already escaped by `format_list_value`'s
-      // `{:?}`, but the key is not — and a key is attacker-controlled wherever
+      // `{:?}`, but the key is not, and a key is attacker-controlled wherever
       // the schema is a map rather than fixed fields (`[aliases]`,
       // `[forge_hosts]`, `[exec.profiles]`, `[clean.profiles]`, `[tui.keys]`).
       // Sanitised at the print site rather than inside `flatten_value`, whose
@@ -482,7 +482,7 @@ fn remove_value(table: &mut Table, segments: &[Segment]) -> Result<()> {
 fn format_get_value(value: &toml::Value) -> String {
   match value {
     // Issue #473: `gwm config get` prints the string bare (that is its
-    // contract — the output is meant to be pipeable), so unlike the
+    // contract, the output is meant to be pipeable), so unlike the
     // `format_list_value` path below it gets no incidental protection from
     // `Debug`'s escaping. Neutralise the control bytes here instead.
     toml::Value::String(s) => crate::naming::sanitise_for_terminal(s),

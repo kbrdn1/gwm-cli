@@ -475,7 +475,7 @@ pub fn validate_aliases(map: &BTreeMap<String, String>, source_label: &str) -> R
     // quoted with `{:?}` so the report cannot replay what it is refusing.
     if let Some(bad) = value.chars().find(|c| c.is_control()) {
       return Err(GwmError::Config(format!(
-        "{}: alias '{}' = {:?} contains control character {:?} — \
+        "{}: alias '{}' = {:?} contains control character {:?}; \
          an expansion becomes argv, and a control character there is a terminal \
          escape rather than an argument",
         source_label, name, value, bad

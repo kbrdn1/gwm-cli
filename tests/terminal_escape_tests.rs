@@ -1,6 +1,6 @@
 //! Issue #473: a `.gwm.toml` is data from an unvetted repo, and the
 //! read-only commands that echo it do **not** go through the TOFU trust
-//! gate — inspecting an unfamiliar repo before trusting it is meant to be
+//! gate, because inspecting an unfamiliar repo before trusting it is meant to be
 //! the safe thing to do. Echoing a config-supplied string verbatim hands
 //! that file a terminal escape channel: an OSC 52 clipboard write, a window
 //! title rewrite, cursor moves that erase the line above.
@@ -156,7 +156,7 @@ fn a_neutralised_value_is_still_recognisable_in_the_output() {
 #[test]
 fn config_list_keeps_escaping_string_values() {
   // `format_list_value` renders strings with `{:?}`, and Rust's `Debug` for
-  // `str` escapes control characters — so the *values* of `gwm config list`
+  // `str` escapes control characters, so the *values* of `gwm config list`
   // were never the hole (the keys were). That protection is incidental to a
   // formatting choice, so pin it: "simplifying" `{:?}` to `{}` would reopen
   // the channel silently.
@@ -175,7 +175,7 @@ fn config_list_keeps_escaping_string_values() {
 #[test]
 fn a_config_parse_error_does_not_replay_the_files_control_bytes() {
   // A raw ESC byte cannot live inside a TOML basic string, so it never
-  // becomes a *value* — but `toml`'s parse error quotes the offending source
+  // becomes a *value*, but `toml`'s parse error quotes the offending source
   // line verbatim, which puts the byte on stderr anyway. That path is
   // reachable from EVERY command that loads config, not only the ones that
   // echo a value, so it is the widest leg of #473.
@@ -535,5 +535,73 @@ fn the_forge_diff_rows_neutralise_control_bytes() {
     "label rows replayed {:?}:\n{:?}",
     control_bytes(&rows),
     rows
+  );
+}
+
+#[test]
+fn doctor_keeps_the_toml_diagnostic_readable() {
+  // `check_config_parses` puts `toml`'s whole caret-under-the-column
+  // diagnostic in the check detail, and the first cut of the row sanitiser
+  // turned it into `?  |?1 | [worktree?` on the one command whose job is to
+  // help you recover. The rows survive; the margin is owned by the printer.
+  let (dir, _repo) = init_repo();
+  fs::write(dir.path().join(".gwm.toml"), "[worktree\nbase = 1\n").unwrap();
+
+  let out = gwm_in(dir.path()).arg("doctor").output().unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    stdout.lines().filter(|l| l.trim_start().starts_with('|')).count() >= 2,
+    "the caret snippet should survive as rows, got {:?}",
+    stdout
+  );
+  assert!(
+    control_bytes(&stdout).is_empty(),
+    "doctor replayed {:?}",
+    control_bytes(&stdout)
+  );
+  // Every row of a multi-line detail stays under its check, so nothing the
+  // config wrote can pass for a check of its own.
+  assert!(
+    stdout.lines().all(|l| l.is_empty()
+      || l.starts_with(' ')
+      || l.starts_with('\u{2713}')
+      || l.starts_with('!')
+      || l.starts_with('\u{2717}')),
+    "a detail row escaped the margin, got {:?}",
+    stdout
+  );
+}
+
+#[test]
+fn a_crlf_line_ending_is_not_treated_as_an_escape() {
+  // Windows writes config files and ledgers with CRLF. Replacing the `\r` of
+  // every pair leaves a `?` at each line end, which makes the neutralisation
+  // itself look like the corruption it is there to prevent. A LONE `\r` is a
+  // different animal: it returns the cursor to column zero so what follows
+  // overwrites the row already printed, and that one still goes.
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  fs::write(
+    &ledger,
+    "[[entries]]\r\norigin = \"git@example.com:acme/repo.git\"\r\nconfig_sha = \"abc123\"\r\ntrusted_at = \"2026-01-01T00:00:00Z\"\r\ntrusted_by = \"t\"\r\n",
+  )
+  .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["trust", "show"])
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    !stdout.contains('?'),
+    "a CRLF line ending was marked as an escape:\n{:?}",
+    stdout
+  );
+  assert!(
+    control_bytes(&stdout).is_empty(),
+    "trust show replayed {:?}",
+    control_bytes(&stdout)
   );
 }

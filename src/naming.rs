@@ -1516,9 +1516,9 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
 /// a **single row**.
 ///
 /// Config values come from a repo's `.gwm.toml`, and the commands that quote
-/// them — `gwm config get` / `list`, `gwm types`, `gwm aliases list`,
+/// them (`gwm config get` / `list`, `gwm types`, `gwm aliases list`,
 /// `gwm doctor`, `gwm config validate`, `gwm commit-prefix`, and the TOFU
-/// prompt itself — do not go through the trust gate, because inspecting a repo
+/// prompt itself) do not go through the trust gate, because inspecting a repo
 /// you have not vetted is meant to be the safe thing to do. Echoing the raw
 /// value would hand an untrusted `.gwm.toml` a terminal escape channel (an
 /// OSC 52 clipboard write, a title rewrite, cursor games). Same idiom as
@@ -1536,7 +1536,7 @@ pub fn sanitise_for_terminal(s: &str) -> String {
   s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
 }
 
-/// Neutralise control characters in output whose **shape is rows** — a `toml`
+/// Neutralise control characters in output whose **shape is rows**: a `toml`
 /// parse diagnostic with its caret-under-the-column snippet, or the raw
 /// `.gwm.toml` body the TOFU prompt shows on `show` (issue #473).
 ///
@@ -1573,7 +1573,17 @@ pub fn sanitise_diagnostic_for_terminal(s: &str) -> String {
 }
 
 pub fn sanitise_block_for_terminal(s: &str) -> String {
-  s.chars()
+  // A CRLF pair is a line ending, so it normalises to `\n` rather than losing
+  // its `\r` to a `?`. Windows writes config files, ledgers and process output
+  // that way, and marking every one of their line ends as suspicious would
+  // make the neutralisation itself look like the corruption.
+  //
+  // A LONE `\r` is not a line ending: it returns the cursor to column zero and
+  // lets what follows overwrite the line already printed, which is the one
+  // thing the margin rule exists to prevent. That one still goes.
+  let normalised = s.replace("\r\n", "\n");
+  normalised
+    .chars()
     .map(|c| {
       if c.is_control() && c != '\n' && c != '\t' {
         '?'
