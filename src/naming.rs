@@ -1545,6 +1545,33 @@ pub fn sanitise_for_terminal(s: &str) -> String {
 /// overwrite the line it was printed on). Sanitising these is not "breaking
 /// raw": an escape sequence inside the body defeats the very inspection the
 /// `show` view exists to provide.
+/// Neutralise a **diagnostic** headed for stderr: block-sanitise it, then
+/// indent every line after the first (issue #473).
+///
+/// The indent is the security part, not cosmetics. A diagnostic is one string
+/// that mixes layout `toml` generated with values it decoded out of the repo's
+/// file, and no classification can separate them: the same message carries a
+/// caret-under-the-column snippet AND an ``unknown field `<key>` `` naming a
+/// key the repo chose. Measured, a key written as `"bad\nerror: forged"`
+/// printed a second line at column zero reading exactly like a statement from
+/// gwm.
+///
+/// Owning the left margin makes that impossible without classifying anything:
+/// only the first line starts at column zero, and `\r` is already replaced, so
+/// nothing the config emits can get back there. The snippet stays readable,
+/// which is the whole reason the line breaks survive at all.
+pub fn sanitise_diagnostic_for_terminal(s: &str) -> String {
+  let cleaned = sanitise_block_for_terminal(s);
+  let mut out = String::with_capacity(cleaned.len());
+  for (i, line) in cleaned.split('\n').enumerate() {
+    if i > 0 {
+      out.push_str("\n  ");
+    }
+    out.push_str(line);
+  }
+  out
+}
+
 pub fn sanitise_block_for_terminal(s: &str) -> String {
   s.chars()
     .map(|c| {

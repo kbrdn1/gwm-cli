@@ -505,14 +505,14 @@ fn render_segment(segment: &Segment) -> String {
 fn config_de_error(path: &Path, raw: &str, err: toml::de::Error) -> GwmError {
   let msg = enrich_schema_hint(err.to_string());
   match err.span() {
-    Some(span) => GwmError::ConfigDiagnostic(format!(
+    Some(span) => GwmError::Config(format!(
       "{}: error at line {}, col {}: {}",
       path.display(),
       line_col(raw, span.start).0,
       line_col(raw, span.start).1,
       msg
     )),
-    None => GwmError::ConfigDiagnostic(format!("{}: {}", path.display(), msg)),
+    None => GwmError::Config(format!("{}: {}", path.display(), msg)),
   }
 }
 
@@ -526,14 +526,14 @@ fn enrich_schema_hint(message: String) -> String {
 
 fn config_parse_error(path: &Path, raw: &str, err: toml_edit::TomlError) -> GwmError {
   match err.span() {
-    Some(span) => GwmError::ConfigDiagnostic(format!(
+    Some(span) => GwmError::Config(format!(
       "{}: error at line {}, col {}: {}",
       path.display(),
       line_col(raw, span.start).0,
       line_col(raw, span.start).1,
       err
     )),
-    None => GwmError::ConfigDiagnostic(format!("{}: {}", path.display(), err)),
+    None => GwmError::Config(format!("{}: {}", path.display(), err)),
   }
 }
 

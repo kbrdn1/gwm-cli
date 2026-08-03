@@ -375,16 +375,52 @@ fn a_config_value_cannot_forge_a_line_in_an_error() {
   )
   .unwrap();
 
-  let out = gwm_in(dir.path()).args(["config", "list"]).output().unwrap();
+  assert_one_voiced_line(dir.path());
+
+  // The harder shape, and the one a per-variant rule could not reach: `toml`
+  // names an unknown field using the key the repo WROTE, newline and all,
+  // inside the very message that also carries the caret snippet. Generated
+  // layout and untrusted value in one string, which is why the fix owns the
+  // left margin instead of trying to tell them apart.
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\n\"bad\\nerror: forged by the repo\" = 1\n",
+  )
+  .unwrap();
+  assert_one_voiced_line(dir.path());
+}
+
+/// Run `config list` in `dir` and assert exactly one line opens in gwm's voice.
+fn assert_one_voiced_line(dir: &Path) {
+  let out = gwm_in(dir).args(["config", "list"]).output().unwrap();
   let stderr = String::from_utf8_lossy(&out.stderr);
-  // The forgery is a LINE in gwm's own voice, so count the lines that open
-  // like one. Asserting on the exact text would miss it: the forged row runs
-  // on into the rest of the real message.
-  let voiced = stderr.lines().filter(|l| l.starts_with("error: ")).count();
-  assert_eq!(voiced, 1, "a config value forged a diagnostic line:\n{:?}", stderr);
-  // Flattened, not dropped: the operator still needs to see what was rejected.
+  // Count the lines at column zero. gwm writes exactly two here, one per
+  // `eprintln!`: the alias-loading warning and the error itself, both of which
+  // fail on the same broken config. Everything else has to sit under the
+  // margin, so a third column-zero line means the repo wrote one.
+  //
+  // Counting beats matching the forged text: the forgery runs on into the rest
+  // of the real message, so `l == "error: everything is fine"` never matches
+  // even when the line is there. That exact mistake made this test pass
+  // against the defect on its first draft.
+  let at_margin: Vec<&str> = stderr
+    .lines()
+    .filter(|l| !l.is_empty() && !l.starts_with("  "))
+    .collect();
+  assert_eq!(
+    at_margin.len(),
+    2,
+    "a config value forged a line at column zero:\n{:?}",
+    stderr
+  );
   assert!(
-    stderr.contains("error: everything is fine"),
+    at_margin[0].starts_with("warning: ") && at_margin[1].starts_with("error: "),
+    "the two column-zero lines should be gwm's own, got {:?}",
+    at_margin
+  );
+  // Indented, not dropped: the operator still needs to see what was rejected.
+  assert!(
+    stderr.contains("error: everything is fine") || stderr.contains("error: forged by the repo"),
     "the offending value should still be quoted, got {:?}",
     stderr
   );
@@ -392,22 +428,24 @@ fn a_config_value_cannot_forge_a_line_in_an_error() {
 
 #[test]
 fn a_rendered_diagnostic_keeps_the_lines_that_are_its_meaning() {
-  // The exemption the flattening above must not swallow. `toml` points at the
-  // broken column with a caret under it, across several lines; collapsing that
-  // would gut the one message whose entire job is to locate the problem.
+  // What the margin rule has to leave intact. `toml` points at the broken
+  // column with a caret under it, across several lines; flattening that would
+  // gut the one message whose entire job is to locate the problem. Keeping the
+  // line breaks is only safe BECAUSE every one of them lands under gwm's
+  // margin, which is what the previous test pins.
   let (dir, _repo) = init_repo();
   fs::write(dir.path().join(".gwm.toml"), "[worktree\nbase = 1\n").unwrap();
 
   let out = gwm_in(dir.path()).args(["config", "validate"]).output().unwrap();
   let stderr = String::from_utf8_lossy(&out.stderr);
   assert!(
-    stderr.contains("\n  |\n"),
-    "the caret snippet should survive, got {:?}",
+    stderr.lines().filter(|l| l.trim_start().starts_with('|')).count() >= 2,
+    "the caret snippet should survive as its own rows, got {:?}",
     stderr
   );
   assert!(
     control_bytes(&stderr).is_empty(),
-    "the exemption is for line breaks only, got {:?}",
+    "line breaks are the only control character spared, got {:?}",
     control_bytes(&stderr)
   );
 }

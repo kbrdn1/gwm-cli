@@ -99,20 +99,6 @@ pub enum GwmError {
   #[error("config error: {0}")]
   Config(String),
 
-  /// A config error whose message **is** a rendered diagnostic: `toml`'s
-  /// caret-under-the-column snippet, quoting the offending source line
-  /// (issue #473). Renders identically to [`GwmError::Config`]; the variant
-  /// exists so the process-wide stderr sink can tell the two apart.
-  ///
-  /// The distinction is a security one, not a cosmetic one. Every other
-  /// message is one line of prose that may *quote* a config value, so the
-  /// sink flattens it and an unvetted `.gwm.toml` cannot forge a second line
-  /// that reads like a gwm diagnostic. These two carry line breaks that are
-  /// their own meaning, so they keep them. See
-  /// [`GwmError::is_rendered_diagnostic`].
-  #[error("config error: {0}")]
-  ConfigDiagnostic(String),
-
   /// Issue #105: HEAD is unborn (no commits yet) or detached when a
   /// command that needs the current branch shorthand is invoked.
   /// Split out of `Other` so callers (and the TUI status line) can
@@ -173,27 +159,6 @@ pub enum GwmError {
 
   #[error("{0}")]
   Other(String),
-}
-
-impl GwmError {
-  /// Whether this error's message is a **rendered diagnostic** whose line
-  /// breaks carry meaning, rather than one line of prose (issue #473).
-  ///
-  /// Read by the process-wide stderr sink in `main` to decide how hard to
-  /// neutralise the message. Errors are the one output path every command
-  /// shares, and most of them quote something out of an unvetted
-  /// `.gwm.toml`: a pattern, a branch type, a guard name. Flattening those
-  /// is what stops a value carrying a `\n` from forging a second line that
-  /// reads like a gwm diagnostic ("error: everything is fine"). The two
-  /// variants below are the exceptions, because `toml` renders a
-  /// caret-under-the-column snippet across several lines and collapsing it
-  /// would gut the one message whose job is to point at the broken line.
-  ///
-  /// Both still lose every other control character, so the exemption is for
-  /// line breaks only.
-  pub fn is_rendered_diagnostic(&self) -> bool {
-    matches!(self, GwmError::TomlParse(_) | GwmError::ConfigDiagnostic(_))
-  }
 }
 
 impl From<anyhow::Error> for GwmError {

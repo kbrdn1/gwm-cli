@@ -53,19 +53,13 @@ fn main() {
 /// source line verbatim, so an unvetted `.gwm.toml` reaches the terminal of
 /// anyone who so much as runs `gwm list` inside the repo.
 ///
-/// How hard depends on what the message *is*. Most errors are one line of
-/// prose that quotes a config value, so they are flattened: a value carrying
-/// a `\n` must not be able to forge a second line that reads like a gwm
-/// diagnostic. The exception is a rendered diagnostic, whose caret-under-the-
-/// column snippet spans lines by design; see
-/// [`GwmError::is_rendered_diagnostic`].
+/// Line breaks survive, because `toml`'s caret-under-the-column snippet is the
+/// one message whose job is to point at the broken line. What stops a config
+/// value from abusing that is the left margin rather than any judgement about
+/// which message is which: see
+/// [`gwm::naming::sanitise_diagnostic_for_terminal`].
 fn clean_error(e: &gwm::error::GwmError) -> String {
-  let msg = e.to_string();
-  if e.is_rendered_diagnostic() {
-    gwm::naming::sanitise_block_for_terminal(&msg)
-  } else {
-    gwm::naming::sanitise_for_terminal(&msg)
-  }
+  gwm::naming::sanitise_diagnostic_for_terminal(&e.to_string())
 }
 
 /// Resolve the alias chain (built-in + repo + user) and run the
