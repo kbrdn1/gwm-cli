@@ -33,14 +33,24 @@ fn main() {
       // way to surface the typo). The dispatcher will re-surface
       // the error if the user runs a subcommand that touches
       // config.
-      eprintln!("warning: failed to load aliases — using raw argv: {}", e);
+      eprintln!(
+        "warning: failed to load aliases — using raw argv: {}",
+        gwm::naming::sanitise_block_for_terminal(&e.to_string())
+      );
       argv
     }
   };
 
   let args = cli::Cli::parse_from(expanded);
   if let Err(e) = cli::run(args) {
-    eprintln!("error: {}", e);
+    // Issue #473: the two stderr sinks of the whole binary, so neutralising
+    // here covers every command by construction rather than one diagnostic at
+    // a time. It is not hypothetical — `toml`'s parse error quotes the
+    // offending source line verbatim, which replays a raw control byte from
+    // an unvetted `.gwm.toml` to the terminal of anyone who so much as runs
+    // `gwm list` inside the repo. The block variant keeps the `\n` that makes
+    // the caret-under-the-column snippet readable.
+    eprintln!("error: {}", gwm::naming::sanitise_block_for_terminal(&e.to_string()));
     std::process::exit(1);
   }
 }

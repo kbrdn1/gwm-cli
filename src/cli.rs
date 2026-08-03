@@ -3446,18 +3446,24 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
 }
 
 fn print_doctor_report(report: &doctor::DoctorReport) {
+  // Issue #473: several checks quote config-supplied strings in their detail
+  // (`base directory writable` renders `[worktree].base`, the guard checks
+  // name their entries). Neutralised here, at the single sink, rather than in
+  // each `Check::ok` / `failed` call — so a check added later is covered
+  // without anyone having to remember.
+  let clean = crate::naming::sanitise_for_terminal;
   for c in &report.checks {
     let sigil = match c.status {
       CheckStatus::Ok => "✓",
       CheckStatus::Warning => "!",
       CheckStatus::Failed => "✗",
     };
-    println!("{} {}", sigil, c.name);
+    println!("{} {}", sigil, clean(&c.name));
     if !c.detail.is_empty() {
-      println!("    {}", c.detail);
+      println!("    {}", clean(&c.detail));
     }
     if let Some(hint) = &c.fix_hint {
-      println!("    → {}", hint);
+      println!("    → {}", clean(hint));
     }
   }
 }
@@ -3495,8 +3501,15 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
   // When the gitmoji columns are active, align the shortcode column on
   // the widest shortcode (`:white_check_mark:`, currently 18 chars) so
   // the description column doesn't drift between rows.
+  // Issue #473: `description` (from `[[branch_types]]`) and the shortcodes
+  // (from `[gitmoji]`) are free text out of an unvetted `.gwm.toml`; `name` is
+  // not, it is already constrained to `^[a-z]+$` by `validate_branch_types`.
+  // Widths are measured on the neutralised strings so the columns still line
+  // up — a replaced C1 control character is two bytes narrower than the one
+  // it replaced.
+  let clean = crate::naming::sanitise_for_terminal;
   let sc_width = match &gitmoji_map {
-    Some(map) => map.iter().map(|(_, sc)| sc.len()).max().unwrap_or(0).max(10),
+    Some(map) => map.iter().map(|(_, sc)| clean(sc).len()).max().unwrap_or(0).max(10),
     None => 0,
   };
 
@@ -3506,20 +3519,20 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
         // Two extra columns: unicode glyph (1 cell wide, padded for
         // BMP code points; emoji ZWJ sequences would break alignment
         // but our built-in set is all single-glyph) + shortcode.
-        let shortcode = map.get(&t.name).unwrap_or(":question:");
-        let unicode = gitmoji::shortcode_to_unicode(shortcode);
+        let shortcode = clean(map.get(&t.name).unwrap_or(":question:"));
+        let unicode = gitmoji::shortcode_to_unicode(&shortcode);
         println!(
           "  {:<width$}  {}  {:<sw$}  {}",
           t.name,
           unicode,
           shortcode,
-          t.description,
+          clean(&t.description),
           width = width,
           sw = sc_width,
         );
       }
       None => {
-        println!("  {:<width$}  {}", t.name, t.description, width = width);
+        println!("  {:<width$}  {}", t.name, clean(&t.description), width = width);
       }
     }
   }
@@ -3635,7 +3648,11 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
 
   let map = gitmoji::load(workdir.as_deref())?;
   let prefix = gitmoji::resolve_prefix(&map, &spec, unicode);
-  println!("{}", prefix);
+  // Issue #473: the prefix is assembled from `[gitmoji]` shortcodes read out
+  // of `.gwm.toml`, and this command is ungated by design — shell prompts and
+  // the bundled commit-msg hook call it on every commit, in whatever repo the
+  // user happens to be sitting in.
+  println!("{}", crate::naming::sanitise_for_terminal(&prefix));
   Ok(())
 }
 
@@ -4475,6 +4492,10 @@ fn cmd_trust_show() -> Result<()> {
   println!("ledger path: {}", path.display());
   match std::fs::read_to_string(&path) {
     Ok(body) => {
+      // Issue #473: the ledger records one origin key per trusted repo, and
+      // an origin is a remote URL that arrived with a clone. Block variant —
+      // the ledger is a file and its rows are its shape.
+      let body = crate::naming::sanitise_block_for_terminal(&body);
       println!("---");
       print!("{}", body);
       if !body.ends_with('\n') {
@@ -4570,7 +4591,10 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
   println!();
   println!("gwm: this repo's .gwm.toml has not been trusted yet.");
   println!("     path   : {}", cfg_path.display());
-  println!("     origin : {}", origin);
+  // Issue #473: `origin` is a remote URL out of `.git/config`, which travels
+  // with a clone just like `.gwm.toml` does. Nothing here has been vetted yet
+  // — that is what the prompt below is asking.
+  println!("     origin : {}", crate::naming::sanitise_for_terminal(origin));
   println!("     hash   : {}", sha);
   if let Some(cfg) = parsed.as_ref() {
     print_bootstrap_summary(cfg);
@@ -4592,6 +4616,11 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
       "y" | "yes" => return Ok(true),
       "n" | "no" | "" => return Ok(false),
       "show" | "s" => {
+        // Issue #473: the block variant, because this IS the file and its
+        // line breaks are its shape. Neutralising the rest is not "breaking
+        // raw" — an escape sequence buried in the body defeats the very
+        // inspection `show` exists to provide.
+        let body = crate::naming::sanitise_block_for_terminal(&body);
         println!("---");
         print!("{}", body);
         if !body.ends_with('\n') {
@@ -4600,7 +4629,10 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
         println!("---");
       }
       other => {
-        println!("unrecognised answer '{}' — answer y, N, or show", other);
+        println!(
+          "unrecognised answer '{}' — answer y, N, or show",
+          crate::naming::sanitise_for_terminal(other)
+        );
       }
     }
   }
@@ -4625,23 +4657,29 @@ pub fn bootstrap_summary_lines(cfg: &Config) -> Vec<String> {
   if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
     return vec!["     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)".to_string()];
   }
+  // Issue #473: every field below is verbatim text from a file the user has
+  // NOT trusted — that is the whole premise of the prompt this feeds. Left
+  // raw, `\u{1b}[1A\u{1b}[2K` in a `[[bootstrap.command]]` name walks the
+  // cursor up and erases the row above, so the malicious `run` line can
+  // delete the very evidence the summary exists to show.
+  let clean = crate::naming::sanitise_for_terminal;
   let mut lines = vec!["     bootstrap surface:".to_string()];
   for c in &bs.copy {
-    lines.push(format!("       - copy   {} → {}", c.from, c.to));
+    lines.push(format!("       - copy   {} → {}", clean(&c.from), clean(&c.to)));
   }
   for g in &bs.guard {
     lines.push(format!(
       "       - guard  {} (on_match={}, deny={} pattern(s))",
-      g.name,
+      clean(&g.name),
       g.on_match,
       g.deny_patterns.len()
     ));
   }
   for ns in &bs.no_symlink {
-    lines.push(format!("       - no-symlink {}", ns.path));
+    lines.push(format!("       - no-symlink {}", clean(&ns.path)));
   }
   for c in &bs.command {
-    lines.push(format!("       - run    {} ({})", c.name, c.run));
+    lines.push(format!("       - run    {} ({})", clean(&c.name), clean(&c.run)));
   }
   lines
 }
@@ -4695,6 +4733,13 @@ fn cmd_aliases_list() -> Result<()> {
 
   let resolved = crate::aliases::load(repo_workdir.as_deref(), None)?;
 
+  // Issue #473: repo and user alias tables are arbitrary key/value text from
+  // a `.gwm.toml` this command reads WITHOUT the trust gate — auditing an
+  // unfamiliar repo's aliases before running anything is exactly what it is
+  // for. Built-ins are compiled in and need no cleaning, but they share the
+  // helper so a future built-in read from a file cannot slip through.
+  let clean = crate::naming::sanitise_for_terminal;
+
   // built-in section ---------------------------------------------------
   println!("built-in:");
   if resolved.built_in.is_empty() {
@@ -4702,7 +4747,7 @@ fn cmd_aliases_list() -> Result<()> {
   } else {
     let width = resolved.built_in.iter().map(|e| e.name.len()).max().unwrap_or(2).max(2);
     for e in &resolved.built_in {
-      println!("  {:<width$} → {}", e.name, e.expansion, width = width);
+      println!("  {:<width$} → {}", clean(e.name), clean(e.expansion), width = width);
     }
   }
 
@@ -4713,9 +4758,9 @@ fn cmd_aliases_list() -> Result<()> {
   } else if resolved.repo.is_empty() {
     println!("  (none declared)");
   } else {
-    let width = resolved.repo.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    let width = resolved.repo.keys().map(|k| clean(k).len()).max().unwrap_or(2).max(2);
     for (name, expansion) in &resolved.repo {
-      println!("  {:<width$} → {}", name, expansion, width = width);
+      println!("  {:<width$} → {}", clean(name), clean(expansion), width = width);
     }
   }
 
@@ -4728,13 +4773,22 @@ fn cmd_aliases_list() -> Result<()> {
   if resolved.user.is_empty() {
     println!("  (none declared)");
   } else {
-    let width = resolved.user.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    let width = resolved.user.keys().map(|k| clean(k).len()).max().unwrap_or(2).max(2);
     for (name, expansion) in &resolved.user {
       // Mark entries shadowed by a repo declaration so the user can
       // see why a `gwm <name>` does not pick up the user expansion.
+      // Shadowing is probed on the raw name — that is the identity the
+      // resolver matches on, and two distinct names must not look shadowed
+      // just because they neutralise to the same string.
       let shadowed = resolved.repo.contains_key(name);
       let suffix = if shadowed { "  (shadowed by repo)" } else { "" };
-      println!("  {:<width$} → {}{}", name, expansion, suffix, width = width);
+      println!(
+        "  {:<width$} → {}{}",
+        clean(name),
+        clean(expansion),
+        suffix,
+        width = width
+      );
     }
   }
 

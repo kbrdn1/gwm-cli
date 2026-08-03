@@ -1512,22 +1512,49 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   ))
 }
 
-/// Neutralise control characters before echoing a config-supplied value.
+/// Neutralise control characters before echoing a config-supplied value on
+/// a **single row**.
 ///
-/// `branch_pattern` comes from a repo's `.gwm.toml`, and none of the commands
-/// that quote it — `gwm doctor`, `gwm config validate`, `gwm commit-prefix` —
-/// goes through the TOFU trust gate, because running them inside a repo you
-/// have not vetted is meant to be safe. Echoing the raw value would hand an
-/// untrusted `.gwm.toml` a terminal escape channel (an OSC 52 clipboard write,
-/// a title rewrite, cursor games). Same idiom as
+/// Config values come from a repo's `.gwm.toml`, and the commands that quote
+/// them — `gwm config get` / `list`, `gwm types`, `gwm aliases list`,
+/// `gwm doctor`, `gwm config validate`, `gwm commit-prefix`, and the TOFU
+/// prompt itself — do not go through the trust gate, because inspecting a repo
+/// you have not vetted is meant to be the safe thing to do. Echoing the raw
+/// value would hand an untrusted `.gwm.toml` a terminal escape channel (an
+/// OSC 52 clipboard write, a title rewrite, cursor games). Same idiom as
 /// [`crate::tui::wt_tree::sanitize_name`]: replace, don't strip, so the value
 /// stays recognisable and its length is not silently altered.
 ///
-/// `pub(crate)` rather than private because every site that quotes a
-/// config-supplied pattern has to use it; a second copy would be a second
-/// thing to forget.
-pub(crate) fn sanitise_for_terminal(s: &str) -> String {
+/// Line breaks are neutralised too, deliberately: a value that could emit a
+/// `\n` could forge an extra row in a report the user reads as a list of
+/// facts. Use [`sanitise_block_for_terminal`] for output that is *meant* to
+/// span rows.
+///
+/// Public because every site that echoes a config-supplied string has to use
+/// it, `main` included; a second copy would be a second thing to forget.
+pub fn sanitise_for_terminal(s: &str) -> String {
   s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
+/// Neutralise control characters in output whose **shape is rows** — a `toml`
+/// parse diagnostic with its caret-under-the-column snippet, or the raw
+/// `.gwm.toml` body the TOFU prompt shows on `show` (issue #473).
+///
+/// Keeps `\n` and `\t`, which carry the layout, and replaces everything else
+/// including `\r` (which returns the cursor to column zero and lets a value
+/// overwrite the line it was printed on). Sanitising these is not "breaking
+/// raw": an escape sequence inside the body defeats the very inspection the
+/// `show` view exists to provide.
+pub fn sanitise_block_for_terminal(s: &str) -> String {
+  s.chars()
+    .map(|c| {
+      if c.is_control() && c != '\n' && c != '\t' {
+        '?'
+      } else {
+        c
+      }
+    })
+    .collect()
 }
 
 pub fn kebab(input: &str) -> String {
