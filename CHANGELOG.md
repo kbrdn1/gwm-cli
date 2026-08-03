@@ -171,6 +171,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show a default and submitting would write it over the real value on disk.
   ([#418](https://github.com/kbrdn1/gwm-cli/issues/418))
 
+### Changed
+
+- The declared MSRV is now **1.95**, up from 1.86, and CI holds it from now on.
+
+  `Cargo.toml` claimed 1.86 while nothing verified the claim, and two separate
+  blind spots kept it that way. The clippy job only catches a **std API** used
+  above the declared floor, never a dependency raising its own; and
+  `cargo metadata`, the obvious way to read the graph's floor, only reports
+  crates that declare a `rust-version` at all. Read through metadata, the
+  locked graph asks for 1.88 (the ratatui 0.30 stack, `time 0.3.47`). Compiled,
+  it asks for 1.95: `libsqlite3-sys 0.38.1`, a normal dependency pulled in by
+  `rusqlite` with `bundled`, declares no `rust-version` whatsoever and its
+  build script uses `cfg_select!`, stable only since 1.95.0. A crate that
+  declares nothing is invisible to every metadata-based check. Only a build
+  finds it.
+
+  Both sides were measured against the committed lockfile:
+  `cargo +1.94 check --all-targets --locked` fails with `error[E0658]: use of
+  unstable library feature 'cfg_select'`, and `cargo +1.95 check --all-targets
+  --locked` passes. `libsqlite3-sys 0.38.1` was already locked at the `v1.5.0`
+  tag, so this raises the *declared* floor to what the code has in fact
+  required since before that release; it does not raise the real one.
+
+  Holding a lower floor was considered and dropped: `rusqlite 0.40.1` requires
+  `libsqlite3-sys ^0.38.1`, so it would mean downgrading rusqlite itself.
+  ([#491](https://github.com/kbrdn1/gwm-cli/issues/491))
+
+- A `msrv` job now runs on every push and pull request. It reads `rust-version`
+  out of `Cargo.toml`, installs exactly that toolchain, and runs
+  `cargo check --all-targets --locked`, which both fires cargo's own
+  `rust-version` gate at resolve time and compiles the dependencies that
+  declare no floor at all. The toolchain is derived rather than hardcoded, so
+  the job cannot drift from the manifest the way the manifest drifted from the
+  graph. A companion test pins the ten user-facing places that advertise the
+  MSRV to whatever `Cargo.toml` declares.
+  ([#491](https://github.com/kbrdn1/gwm-cli/issues/491))
+
 ### Fixed
 
 - A `gwm create` that fails while making the worktree no longer leaves the
