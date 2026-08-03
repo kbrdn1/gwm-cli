@@ -6,7 +6,7 @@ use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
-use super::state::create_form::{CreateForm, Field};
+use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
@@ -21,7 +21,7 @@ use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode}
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
-use crate::naming::BranchSpec;
+use crate::naming::{BranchSpec, WorktreeName};
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
@@ -256,7 +256,23 @@ pub struct WorkspaceState {
 
 pub struct App {
   pub repo: Repository,
+  /// The name `{repo}` expands to, in `branch_pattern`, `path_pattern` and
+  /// `[worktree].base` alike: the repo directory's basename
+  /// ([`worktree::repo_name`]), which is also the name every `gwm create` from
+  /// the CLI uses and the one the parser side reads back
+  /// ([`crate::naming::BranchParser::for_repo`], `github::read_link`,
+  /// `lifecycle`).
+  ///
+  /// Issue #480: deliberately **not** the workspace display label. That label
+  /// is derived from the workspace's current membership (a second `api` becomes
+  /// `api-2`, #304), so it changes when a sibling repo moves while the branches
+  /// already written keep saying `api-2`. A name persisted in git cannot depend
+  /// on what else happens to sit next to it on disk.
   pub repo_name: String,
+  /// The name shown to the user for the active repo: the workspace display
+  /// label when there is one, otherwise identical to [`Self::repo_name`]. Only
+  /// the header reads it; nothing that writes a branch or a path does.
+  pub display_repo_name: String,
   pub workdir: PathBuf,
   pub config: Config,
   /// Workspace-mode state (issue #36); `None` in single-repo mode.
@@ -616,6 +632,7 @@ impl App {
     let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
       repo,
+      display_repo_name: repo_name.clone(),
       repo_name,
       workdir,
       config,
@@ -682,6 +699,7 @@ impl App {
       edit_failure: None,
     };
     out.apply_sidebar_config();
+    out.apply_create_form_fields();
     out.refresh_link();
     let spawned = out.refresh_linked_github_statuses_for_worktrees();
     if spawned > 0 {
@@ -804,6 +822,91 @@ impl App {
     self.sidebar.orientation = self.config.tui.sidebar_orientation;
   }
 
+  /// Point the create form at the fields the active repo's patterns ask for
+  /// (issue #418). Same three call sites and same reasoning as
+  /// [`Self::apply_sidebar_config`]: one call rather than open-coded
+  /// assignments, so the repo swap cannot come to ignore it.
+  ///
+  /// The union covers `base` as well as the two patterns, because
+  /// [`crate::naming::BranchSpec::worktree_path`] expands the triple in it too:
+  /// a segment only `base` carries still names a directory on disk.
+  /// Public for the same reason the rest of the lib surface is (#342, the
+  /// internal test seam): state-machine tests set `config.worktree.*` directly
+  /// rather than round-tripping a `.gwm.toml`, and that shortcut has to be able
+  /// to re-derive what construction derives.
+  pub fn apply_create_form_fields(&mut self) {
+    self.create_form.set_fields(super::state::create_form::fields_for(&[
+      &self.config.worktree.branch_pattern,
+      &self.config.worktree.path_pattern,
+      &self.config.worktree.base,
+    ]));
+  }
+
+  /// The name of the field Enter submits from, for the status line (#418).
+  /// Read from the same `last_field` the key handler gates on, so the hint and
+  /// the behaviour cannot disagree.
+  fn submit_field_label(&self) -> &'static str {
+    match self.create_form.last_field() {
+      Field::Type => "type",
+      Field::Issue => "issue",
+      Field::Name => "name",
+      Field::Desc => "desc",
+    }
+  }
+
+  /// The verbs the structured form's status line advertises (#418), naming the
+  /// real submit field and dropping the field-switching half when there is
+  /// nothing to switch between. Same rule the hint row follows, and the same
+  /// reason: `next_field` rotates within a one-element list, so telling the
+  /// user to press Tab names a key that does nothing.
+  fn structured_form_instruction(&self) -> String {
+    match self.create_form.fields().len() {
+      // A pattern set with no editable token at all presents no field, so
+      // there is none to name — `last_field` falls back to `Type`, which the
+      // renderer is not drawing (Codex review on PR #492, fifth pass).
+      0 => "enter: submit".into(),
+      1 => format!("enter on {}: submit", self.submit_field_label()),
+      _ => format!(
+        "tab/shift-tab: switch field — enter on {}: submit",
+        self.submit_field_label()
+      ),
+    }
+  }
+
+  /// How the free-form status line names the mode it toggles back to (#418):
+  /// the fields that mode actually presents, rather than the canonical triple.
+  /// On a `{type}/{desc}` repo "back to type/issue/desc" promised an Issue
+  /// field the structured form hides.
+  fn structured_mode_label(&self) -> String {
+    let names: Vec<&str> = self
+      .create_form
+      .fields()
+      .iter()
+      .map(|f| match f {
+        Field::Type => "type",
+        Field::Issue => "issue",
+        Field::Desc => "desc",
+        Field::Name => "name",
+      })
+      .collect();
+    if names.is_empty() {
+      "the structured form".into()
+    } else {
+      names.join("/")
+    }
+  }
+
+  /// The segments the active repo's patterns ask the user to supply — what
+  /// [`crate::naming::BranchSpec::new_with_required`] validates against, so the
+  /// form never refuses a submission over a value the patterns discard (#418).
+  fn required_segments(&self) -> Vec<&'static str> {
+    crate::naming::editable_segments(&[
+      &self.config.worktree.branch_pattern,
+      &self.config.worktree.path_pattern,
+      &self.config.worktree.base,
+    ])
+  }
+
   /// Mark the workspace selection stale AND close the open CI checks
   /// overlay (Codex review #455): its rows belong to the previously
   /// active repo, so every verb — `Enter` opening a check URL included —
@@ -845,8 +948,11 @@ impl App {
     };
     match Repository::open(&meta.workdir) {
       Ok(repo) => {
+        // Issue #480: the naming name comes from the freshly-opened repo's own
+        // directory, never from the workspace label — see `App::repo_name`.
+        self.repo_name = worktree::repo_name(&repo);
         self.repo = repo;
-        self.repo_name = meta.name;
+        self.display_repo_name = meta.name;
         self.workdir = meta.workdir;
         self.config = meta.config;
         self.workspace_active_stale = false;
@@ -854,6 +960,10 @@ impl App {
         // newly-active repo's config so a per-repo `[[branch_types]]` override
         // applies to the row being acted on (Codex review #303 P2).
         self.branch_types = self.config.resolved_branch_types().types;
+        // Same reasoning for the form's field set (#418): the swap replaced
+        // `self.config` wholesale, so the newly-active repo's patterns decide
+        // which fields the form presents.
+        self.apply_create_form_fields();
         // Same reasoning for the sidebar layout: the swap replaced `self.config`
         // wholesale, so a per-repo `[tui]` sidebar override would otherwise be
         // ignored until a reload (Codex review #366 P2).
@@ -2323,7 +2433,7 @@ impl App {
   pub fn hint_context(&self) -> super::ui::HintContext {
     use super::ui::HintContext;
     match self.view {
-      View::Create => HintContext::Create,
+      View::Create => self.create_hint_context(),
       View::Confirm => HintContext::Confirm,
       View::OpenMenu => HintContext::OpenMenu,
       // #219: the two link-prompt stages advertise different keys — the
@@ -2349,7 +2459,7 @@ impl App {
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
       View::CleanReport => HintContext::Clean,
-      View::Edit => HintContext::Rename,
+      View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
       View::DetailOverlay => {
         if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
@@ -2359,6 +2469,34 @@ impl App {
         }
       }
       View::List => self.pane_hint_context(),
+    }
+  }
+
+  /// Which hint row the create overlay advertises (issue #416). The two
+  /// modes present different inputs, so they advertise different verbs:
+  /// free-form has one field and no type selector, and `toggle_mode` is the
+  /// only way between them — a verb a user cannot guess from the visible
+  /// inputs, unlike Tab or the arrows. Both the statusbar and the overlay's
+  /// own footer read this, so the two can never disagree.
+  pub fn create_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.create_form.mode {
+      Mode::Freeform => HintContext::CreateFreeform,
+      Mode::Structured => HintContext::Create,
+    }
+  }
+
+  /// Which hint row the rename overlay advertises (issue #479). Same shape and
+  /// same reason as [`Self::create_hint_context`]: free-form has one field and
+  /// no type selector, so advertising `field` and `type` there would name keys
+  /// that do nothing. Both the statusbar and the modal's own footer read this,
+  /// so the two can never disagree — which they did when only the footer knew
+  /// about the mode (Codex review on PR #485).
+  pub fn rename_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.create_form.mode {
+      Mode::Freeform => HintContext::RenameFreeform,
+      Mode::Structured => HintContext::Rename,
     }
   }
 
@@ -3481,6 +3619,10 @@ impl App {
       Err(e) => self.status = format!("theme: {}", e),
     }
     self.apply_sidebar_config();
+    // A Settings edit can rewrite the patterns themselves, and the field set is
+    // derived from them (#418) — refresh it here too, or the form keeps asking
+    // for a token the pattern no longer carries until the next launch.
+    self.apply_create_form_fields();
     if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
       self.config_panel.rows = rows;
     }
@@ -3838,6 +3980,18 @@ impl App {
   /// not match the `<type>/#<issue>-<desc>` pattern can't be decomposed into
   /// the form, so the modal refuses to open and explains why.
   pub fn enter_edit_worktree(&mut self) {
+    // Issue #479 replaces an accidental protection with a deliberate one. The
+    // main checkout's branch is normally unparseable (`main`, `dev`), so the
+    // refusal below used to turn this modal away from it — for the wrong
+    // reason, but with the right result. Free-form mode parses nothing, so that
+    // side effect is gone: state the guard, the same shape
+    // `enter_confirm_delete` already uses. Renaming the main worktree means
+    // renaming the repo's default branch, and `git worktree move` cannot move
+    // the main checkout anyway.
+    if self.selected().is_some_and(|w| w.is_main) {
+      self.status = "cannot rename the main worktree".into();
+      return;
+    }
     let Some((branch, path)) = self
       .selected()
       .and_then(|w| w.branch.clone().map(|b| (b, w.path.clone())))
@@ -3845,30 +3999,212 @@ impl App {
       self.status = "no branch to rename (detached HEAD or nothing selected)".into();
       return;
     };
-    let Some(spec) = crate::naming::parse_branch(&branch) else {
-      self.status = format!(
-        "branch '{}' doesn't match <type>/#<issue>-<desc>; can't rename here",
-        branch
-      );
+    // Issue #417: the form rebuilds the triple this repo's own
+    // `worktree.branch_pattern` writes, so the branch is read back with it.
+    // `self.repo_name`, not the workdir basename: in a workspace, two repos
+    // sharing a basename are disambiguated for display (#304) and every
+    // formatter call in this flow expands `{repo}` with that name. Parser and
+    // formatter agreeing is the whole of #417, so they read the same name.
+    //
+    // Issue #478: the directory is read too. A segment `branch_pattern`
+    // freezes is not in the branch, and `path_pattern` may still carry what
+    // `gwm create` was given — rebuilding from the branch alone renamed the
+    // directory's own components on every edit.
+    let Some(spec) = crate::naming::worktree_spec(
+      &self.config,
+      &self.repo_name,
+      &branch,
+      path.file_name().and_then(|name| name.to_str()),
+    ) else {
+      // Issue #416 refused here: a name the user chose on purpose has none of
+      // the `<type>/#<issue>-<desc>` triple the form rebuilds, so the form said
+      // it did not apply. Issue #479 supplies the missing mode instead — the
+      // form now collects a free-form name too, which is exactly the shape this
+      // worktree already has, so there is nothing left to turn away.
+      //
+      // Prefilled with the current branch verbatim: the common edit is a small
+      // one (`spike-redis` becoming `spike-valkey`), and it is also the only
+      // non-guess available, since a free-form name carries no segments.
+      //
+      // Issue #417 deliberately did NOT fold "type not configured" into this
+      // arm: `{type}` stays `[a-z]+`, so `zzz/#7-thing` still parses and the
+      // type-index lookup below refuses it with the precise reason.
+      self.create_form.reset();
+      self.create_form.mode = Mode::Freeform;
+      self.create_form.name = branch.clone();
+      self.create_form.field = Field::Name;
+      self.edit_original_branch = Some(branch);
+      self.edit_original_path = Some(path);
+      self.edit_failure = None;
+      self.view = View::Edit;
       return;
     };
+    // **The form must not open on a segment whose current value it cannot show.**
+    //
+    // Issue #418 rescoped the guard that stands here rather than removing it,
+    // and both earlier readings of it were wrong in the same direction. The
+    // original (Codex review on PR #476) refused whenever a segment came back
+    // empty, which took the form away from a repo whose patterns simply do not
+    // carry that segment: nothing writes it, nothing asks for it, its absence
+    // is not a dead end. Deleting the guard outright then went too far the
+    // other way (Codex review on PR #492, second pass): `worktree_spec` reads
+    // the branch and the directory name and never parses `base`, so a segment
+    // carried only by `base` comes back empty **while its value sits on disk**.
+    // Under `base = ".../wt/{type}"`, a worktree at `.../wt/fix/my-desc` would
+    // have opened with the selector defaulted to the first configured type, and
+    // submitting without touching it would have moved the worktree to
+    // `.../wt/feat/`. "Not recovered" is not "not there".
+    //
+    // So the rule is neither "empty" nor "absent from the patterns" but the
+    // conjunction: a segment some pattern **writes** that the parse did **not**
+    // recover. There the form would show a default it did not read and the
+    // submit would write it over the real one.
+    let required = self.required_segments();
+    if let Some(missing) = required.iter().find(|segment| match **segment {
+      "type" => spec.type_.is_empty(),
+      "issue" => spec.issue.is_empty(),
+      _ => spec.desc.is_empty(),
+    }) {
+      self.status = format!(
+        "'{}' carries {{{}}} only where this form cannot read it back (check worktree.base), so renaming would overwrite it — rename with git, or write {{{}}} into worktree.branch_pattern or worktree.path_pattern",
+        crate::naming::sanitise_for_terminal(&branch),
+        missing,
+        missing
+      );
+      return;
+    }
     // Refuse rather than silently preselect type index 0: a branch whose
     // parsed type isn't configured (config change, manual branch) would
     // otherwise be renamed to the first configured type on Enter (Codex
-    // review on PR #292).
-    let Some(type_index) = self.branch_types.iter().position(|t| t.name == spec.type_) else {
-      self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
-      return;
+    // review on PR #292). Only reachable when some pattern carries `{type}`,
+    // the guard above having taken the unrecovered case; where none does, the
+    // value is discarded by every expansion and index 0 is inert.
+    let type_index = match self.branch_types.iter().position(|t| t.name == spec.type_) {
+      Some(index) => index,
+      None if !required.contains(&"type") => 0,
+      None => {
+        self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
+        return;
+      }
     };
     self.create_form.reset();
     self.create_form.type_index = type_index;
     self.create_form.issue = spec.issue;
     self.create_form.desc = spec.desc;
-    self.create_form.field = Field::Desc;
+    // The last field in pattern order: the usual rename edits the trailing
+    // description, and naming `Field::Desc` here focused an input the renderer
+    // does not draw on a pattern without one (#418).
+    self.create_form.field = self.create_form.last_field();
     self.edit_original_branch = Some(branch);
     self.edit_original_path = Some(path);
     self.edit_failure = None;
     self.view = View::Edit;
+  }
+
+  /// The [`WorktreeName`] the form currently describes, in whichever mode it is
+  /// in (#479). The rename target is built the same way the create target is,
+  /// so the four conversions of issue #479 are two code paths, not four:
+  /// `WorktreeName` already knows how each shape becomes a branch and a
+  /// directory.
+  fn worktree_name_from_form(&self) -> std::result::Result<WorktreeName, String> {
+    match self.create_form.mode {
+      Mode::Freeform => WorktreeName::freeform(&self.create_form.name).map_err(|e| e.to_string()),
+      Mode::Structured => {
+        let type_ = self
+          .branch_types
+          .get(self.create_form.type_index)
+          .map(|t| t.name.clone())
+          .unwrap_or_default();
+        // Validated only against the segments the patterns actually carry
+        // (#418): a `{type}/{desc}` repo writes no issue number anywhere, so
+        // refusing an empty one refused a form the user had filled completely.
+        BranchSpec::new_with_required(
+          type_,
+          self.create_form.issue.clone(),
+          self.create_form.desc.clone(),
+          &self.branch_types,
+          &self.required_segments(),
+        )
+        .map(WorktreeName::Structured)
+        .map_err(|e| e.to_string())
+      }
+    }
+  }
+
+  /// What the rename would write: `(branch, directory name)`.
+  ///
+  /// Public because the renderer needs it. The preview and the submit have to
+  /// derive from **one** place or they drift, and drifting is not hypothetical:
+  /// both live previews used to expand a hardcoded `<type>/#<issue>-<desc>`
+  /// while the submit expanded the repo's real patterns, so the modal showed a
+  /// branch it was not going to write (found by hand on #476). Free-form mode
+  /// is the same trap one mode over, since there the branch is the name and no
+  /// pattern is expanded at all.
+  ///
+  /// `Err` carries the reason the form cannot compose a target yet — an
+  /// incomplete triple, a refused free-form name, or a `base` that uses a
+  /// placeholder a free-form name has no value for.
+  pub fn edit_target(&self) -> std::result::Result<(String, String), String> {
+    let name = self.worktree_name_from_form()?;
+    let branch = name
+      .branch_name(&self.config.worktree, &self.repo_name)
+      .map_err(|e| e.to_string())?;
+    let dirname = name
+      .worktree_dirname(&self.config.worktree, &self.repo_name)
+      .map_err(|e| e.to_string())?;
+    Ok((branch, dirname))
+  }
+
+  /// Seed the mode `toggle_mode` is about to switch *into*, for the rename
+  /// modal (#479). Called before the flip, so `self.create_form.mode` is still
+  /// the mode being left.
+  ///
+  /// Only ever fills an **empty** buffer: #416 keeps both modes' buffers side
+  /// by side precisely so a round trip loses nothing, and overwriting what the
+  /// user already typed would defeat that.
+  ///
+  /// Create seeds nothing — there is no worktree to seed from.
+  ///
+  /// Leaving structured, the free-form name is seeded with the current branch
+  /// verbatim: it is the only non-guess available, and the common edit is a
+  /// small one.
+  ///
+  /// Leaving free-form, the description is seeded with `kebab` of the name and
+  /// the issue is left empty, because a free-form name carries no issue number
+  /// and inventing one would be a guess. `kebab`'s output is by construction
+  /// either `DESC_RE`-valid or empty, so this seed can never dead-end the form
+  /// on a value it would then refuse to submit.
+  ///
+  /// Truncated to `MAX_DESC_LEN` (Codex review on PR #485): a free-form name
+  /// may run to `MAX_DIR_COMPONENT_BYTES`, `push_char` is the only other place
+  /// that bound is applied, and `BranchSpec` has no length check to catch the
+  /// overflow downstream — so seeding unbounded wrote a description no
+  /// keystroke could have produced, and the cap is what keeps
+  /// `<type>/#<issue>-<desc>` inside git's ref limit.
+  ///
+  /// The **type** is not seeded and is not left unset either: it stays on
+  /// whatever the selector shows, which is the first configured type on a form
+  /// that was just opened. That is the create form's own contract, the value is
+  /// on screen in the selector, and the preview spells out the branch it
+  /// produces — so a promotion into the pattern is stated rather than silent.
+  fn seed_toggled_mode(&mut self) {
+    if self.view != View::Edit {
+      return;
+    }
+    match self.create_form.mode {
+      Mode::Structured if self.create_form.name.is_empty() => {
+        if let Some(branch) = self.edit_original_branch.clone() {
+          self.create_form.name = branch;
+        }
+      }
+      Mode::Freeform if self.create_form.desc.is_empty() => {
+        self.create_form.desc = crate::naming::kebab(&self.create_form.name)
+          .chars()
+          .take(crate::tui::state::create_form::MAX_DESC_LEN)
+          .collect();
+      }
+      _ => {}
+    }
   }
 
   /// `true` while the async rename worker is in flight (#290). The run loop
@@ -3887,6 +4223,119 @@ impl App {
     self.view = View::List;
   }
 
+  /// Whether this submit changes a segment **nothing writes**, setting
+  /// `edit_failure` with the reason when it does (#417, Codex review on
+  /// PR #476). Structured mode only: see the call site for why free-form has
+  /// no segments to freeze.
+  ///
+  /// Returns its verdict rather than leaving the caller to read `edit_failure`
+  /// back (Codex review on PR #485). That field survives a failed submit, so
+  /// reading it as "did the guard refuse" also caught every *earlier* failure
+  /// and stopped a submit the user had just corrected, wedging the form shut
+  /// until it was closed and reopened.
+  fn refuse_unwritable_segment_change(&mut self, type_: &str) -> bool {
+    // Issue #417 / Codex review on PR #476: a segment **nothing writes** is not
+    // editable here, because there is nowhere to put the new value. The submit
+    // would rebuild the same branch at the same path and close the form having
+    // changed nothing, so say no instead.
+    //
+    // The question is the *formatter's*, not the parser's — asking the parser
+    // is what made the first two versions of this guard wrong. It is not "can a
+    // new value be read back", it is "will a new value be written anywhere", and
+    // `expand_placeholders` writes a token wherever it appears. So the test is
+    // whether any of the three patterns it expands carries that token:
+    //
+    // - `branch_pattern`, the obvious one;
+    // - `path_pattern` (Kylian, validating by hand): `feat/#{issue}-{desc}` will
+    //   say `feat` whatever the form holds, so under that config the *directory*
+    //   is where this worktree's type lives, and refusing meant a worktree
+    //   created as `fix` could never become `docs`;
+    // - `[worktree].base` (Codex review, tenth pass): `worktree_path` feeds it
+    //   the triple too, so a `base` of `.../{type}` sorts worktrees into
+    //   per-type directories and changing the type moves the worktree between
+    //   them.
+    //
+    // In the last two cases the branch does not change at all, which
+    // `rename_worktree` handles as a path-only edit — it skips every ref
+    // mutation, local and remote — and the preview states it on screen by
+    // showing the branch unchanged.
+    //
+    // Scoped to a segment the user actually changed, so `feat/#{issue}-{desc}`,
+    // whose rename worked before #417, keeps renaming its issue and description.
+    //
+    // Compared against what the form was **opened with**, not against the
+    // pattern's literal (#478): that value may have come from the worktree's
+    // directory rather than from the pattern. And against the *form's* fields
+    // rather than the `BranchSpec`, because a frozen description need not be
+    // canonical — `DESC_RE` accepts `fixed-`, and `kebab` would strip that
+    // trailing dash on the way into the spec, making every submit look like a
+    // change and locking the form shut.
+    // The same predicate `editable_segments` computes for the form's field set
+    // (#418), asked once rather than open-coded twice: this guard and the field
+    // set have to agree on "does any pattern write this", and two spellings of
+    // one question are two things to keep in step.
+    //
+    // ⚠️ I wrote here that this made the guard unreachable in structured mode,
+    // reasoning that the form presents no field for a segment nothing writes so
+    // its value cannot differ. Wrong, and the sixth review pass found it: the
+    // buffer behind a hidden field keeps its default, which is not the parsed
+    // value, so the comparison below fired on a change nobody made. The skip
+    // added there is what actually makes the two agree.
+    let written = self.required_segments();
+    let writes = |segment: &str| written.contains(&segment);
+    let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
+      crate::naming::worktree_spec(
+        &self.config,
+        &self.repo_name,
+        branch,
+        self
+          .edit_original_path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .and_then(|name| name.to_str()),
+      )
+    });
+    if let Some(opened_with) = opened_with.as_ref() {
+      for segment in ["type", "issue", "desc"] {
+        if writes(segment) {
+          continue;
+        }
+        // A segment the form does not present has no value to defend (Codex
+        // review on PR #492, sixth pass, and it disproves the note two commits
+        // back claiming this guard had become unreachable in structured mode).
+        // The buffers behind a hidden field keep their defaults — `type_index`
+        // points at the first configured type — so comparing them against what
+        // the branch parsed reads as a change the user never made, and refuses
+        // every structured rename on a pattern set that omits `{type}`. The
+        // field is not on screen, so nothing clears it either.
+        if !self.create_form.fields().contains(&match segment {
+          "type" => Field::Type,
+          "issue" => Field::Issue,
+          _ => Field::Desc,
+        }) {
+          continue;
+        }
+        let (submitted, was) = match segment {
+          "type" => (type_, opened_with.type_.as_str()),
+          "issue" => (self.create_form.issue.as_str(), opened_with.issue.as_str()),
+          _ => (self.create_form.desc.as_str(), opened_with.desc.as_str()),
+        };
+        if submitted != was {
+          // No value in the message, on purpose: `LoaderWidget` renders one
+          // unwrapped line, so a message whose length follows a user-supplied
+          // value clips at an arbitrary point. This one is a fixed 36
+          // characters whatever the branch holds, and the value it would have
+          // quoted is on screen anyway, in the `From :` row above (found
+          // validating by hand).
+          let _ = was;
+          self.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
+          return true;
+        }
+      }
+    }
+    false
+  }
+
   /// Submit the rename from the `View::Edit` modal (#290). Composes the new
   /// branch name + worktree path from the form, then spawns an off-thread
   /// worker that renames the local branch (`git branch -m`), the remote
@@ -3899,21 +4348,47 @@ impl App {
       .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
-    let spec = match BranchSpec::new_with_types(
-      type_,
-      self.create_form.issue.clone(),
-      self.create_form.desc.clone(),
-      &self.branch_types,
-    ) {
-      Ok(s) => s,
+    // Issue #479: the frozen-segment guard below is about segments, and a
+    // free-form name has none — the branch is the name, no pattern is expanded,
+    // so nothing can be frozen out of reach. Skipping it is stated here rather
+    // than left to fall out of `opened_with` being `None` for an unparseable
+    // branch, which is how it would happen by accident.
+    //
+    // Converting a free-form worktree *into* the pattern therefore bypasses the
+    // guard, and that is right: the guard refuses to change a value the form was
+    // opened with when nothing can write it, and a worktree opened free-form was
+    // opened with no such value to contradict.
+    if self.create_form.mode == Mode::Structured && self.refuse_unwritable_segment_change(&type_) {
+      return Ok(());
+    }
+    // Issue #479: composed through `WorktreeName`, the same seam
+    // `submit_create` uses, so free-form and structured targets are built by
+    // one mechanism and the preview can show exactly what this will write.
+    let name = match self.worktree_name_from_form() {
+      Ok(n) => n,
+      Err(e) => {
+        self.edit_failure = Some(e);
+        return Ok(());
+      }
+    };
+    // Reported in the form rather than returned as `Err`: these are user- and
+    // config-driven refusals (an incomplete triple, a name git will not take, a
+    // `base` a free-form name has no value for), and an `Err` out of here tears
+    // down the alternate screen instead of telling the user what to fix.
+    let (new_branch, new_name) = match self.edit_target() {
+      Ok(target) => target,
+      Err(e) => {
+        self.edit_failure = Some(e);
+        return Ok(());
+      }
+    };
+    let new_path = match name.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir) {
+      Ok(p) => p,
       Err(e) => {
         self.edit_failure = Some(e.to_string());
         return Ok(());
       }
     };
-    let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
-    let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
-    let new_path = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
 
     let Some(old_branch) = self.edit_original_branch.clone() else {
       self.cancel_edit_worktree();
@@ -4048,12 +4523,16 @@ impl App {
     self.view = View::Create;
     self.create_form.reset();
     self.create_failure = None;
-    // Open focused on Issue rather than the cycle-only Type field (#217 UX):
-    // the first keypress then edits text instead of being a silent no-op on
-    // Type. The type keeps its `reset()` default and stays reachable via
-    // Shift-Tab / the field rotation.
-    self.create_form.field = Field::Issue;
-    self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
+    // Open focused on the first field the user types into rather than the
+    // cycle-only Type field (#217 UX): the first keypress then edits text
+    // instead of being a silent no-op on Type. The type keeps its `reset()`
+    // default and stays reachable via Shift-Tab / the field rotation.
+    //
+    // Asked of the form rather than named here (#418): on a pattern that
+    // writes no issue number, `Field::Issue` focused an input the renderer
+    // does not draw, so the first keypress went nowhere at all.
+    self.create_form.field = self.create_form.entry_field();
+    self.status = format!("{} — esc: cancel", self.structured_form_instruction());
   }
 
   pub fn create_next_field(&mut self) {
@@ -4129,8 +4608,50 @@ impl App {
       Some(ModalAction::CreateCancel) => return CreateKey::Cancel,
       Some(ModalAction::CreateNextField) => self.create_next_field(),
       Some(ModalAction::CreatePrevField) => self.create_prev_field(),
+      // Both modal views that collect a name: create (#416) and rename (#479).
+      // #474 scoped this to create alone because `draw_edit_worktree` did not
+      // render the `Name` field and `submit_edit_worktree` did not read it, so
+      // toggling there sent keystrokes into an invisible buffer; #479 supplies
+      // both halves, so the verb is no longer suppressed.
+      // Swallowed outside those modals — an explicit empty arm, not a
+      // guard on the arm below, because a failing guard would fall through
+      // to the literal-input fallback and type `t` into the description.
+      Some(ModalAction::CreateToggleMode) if !matches!(self.view, View::Create | View::Edit) => {}
+      Some(ModalAction::CreateToggleMode) => {
+        self.seed_toggled_mode();
+        self.create_form.toggle_mode();
+        // Name the LIVE binding, and drop the clause when the verb is
+        // unbound — same contract as the confirm countdown above: never
+        // advertise a key that does nothing (Codex review on PR #474).
+        let back = self
+          .modal_keymap
+          .primary_key(ModalAction::CreateToggleMode)
+          .map(|k| format!(" — {k}: "))
+          .unwrap_or_default();
+        self.status = match self.create_form.mode {
+          Mode::Freeform if back.is_empty() => "free-form: name the worktree anything git accepts".into(),
+          Mode::Freeform => format!(
+            "free-form: name the worktree anything git accepts{back}back to {}",
+            self.structured_mode_label()
+          ),
+          // The submit field is named from the patterns, not hardcoded to
+          // `desc` (#418): a pattern without one told the user to press enter
+          // on a field the form does not present.
+          Mode::Structured if back.is_empty() => self.structured_form_instruction(),
+          Mode::Structured => format!("{}{back}free-form", self.structured_form_instruction()),
+        };
+      }
       Some(ModalAction::CreateSubmit) => {
-        if self.create_form.field == Field::Desc {
+        // The submit field is the last one of the active mode: `Name` in
+        // free-form (its only field), and in structured mode the last field
+        // the *patterns* present (#418) rather than `Desc` by name. Naming
+        // `Desc` made `{type}/#{issue}` a form that could not be submitted at
+        // all, since Enter then only ever rotated.
+        let submit_field = match self.create_form.mode {
+          Mode::Freeform => Field::Name,
+          Mode::Structured => self.create_form.last_field(),
+        };
+        if self.create_form.field == submit_field {
           return CreateKey::Submit;
         }
         self.create_next_field();
@@ -4150,20 +4671,28 @@ impl App {
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
-    let type_ = self
-      .branch_types
-      .get(self.create_form.type_index)
-      .map(|t| t.name.clone())
-      .unwrap_or_default();
-    let spec = BranchSpec::new_with_types(
-      type_,
-      self.create_form.issue.clone(),
-      self.create_form.desc.clone(),
-      &self.branch_types,
-    )?;
-    let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
-    let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
-    let target = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
+    // Issue #416: free-form validation lands here rather than per keystroke,
+    // so the user can type through an intermediate state. A rejected name
+    // keeps the form open with the reason in the status bar — same shape as
+    // the trust refusal below, and for the same reason (an `Err` would tear
+    // down the alternate screen).
+    //
+    // Composed through the same `worktree_name_from_form` the rename uses
+    // (#418). It used to build its own `BranchSpec` here, so relaxing
+    // validation for the patterns' actual segments in one composer left the
+    // other still demanding a value it would discard — two composers of one
+    // value drift, and this is the second time on this form (the previews did
+    // it in #476).
+    let wt_name = match self.worktree_name_from_form() {
+      Ok(n) => n,
+      Err(e) => {
+        self.status = e;
+        return Ok(());
+      }
+    };
+    let branch = wt_name.branch_name(&self.config.worktree, &self.repo_name)?;
+    let dirname = wt_name.worktree_dirname(&self.config.worktree, &self.repo_name)?;
+    let target = wt_name.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
 
     // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
     // creating the worktree on disk (issue #95). A refusal here

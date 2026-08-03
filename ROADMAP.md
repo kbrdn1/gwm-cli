@@ -4,9 +4,10 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v1.5.0 stable
+## Current state — v1.6.0 stable
 
-The current **stable** line is **v1.5.0** (2026-07-26). The machine-readable
+The current **stable** line is **v1.6.0** (2026-08-03), which carries a
+**security fix affecting every earlier version** (see the highlights table). The machine-readable
 contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
 the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
 section set will not break without a major bump (see
@@ -27,7 +28,9 @@ closed the TUI-polish trio ([#436](https://github.com/kbrdn1/gwm-cli/issues/436)
 / [#437](https://github.com/kbrdn1/gwm-cli/issues/437) /
 [#438](https://github.com/kbrdn1/gwm-cli/issues/438)); **1.5.0** made gwm
 multi-forge ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)), adding a
-`Forge` trait and a GitLab (`glab`) backend behind it. See
+`Forge` trait and a GitLab (`glab`) backend behind it; **1.6.0** fixes
+[GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm)
+and lands the naming-flexibility line. See
 [Shipped highlights](#shipped-highlights).
 
 1.0.0 promotes the entire **0.10.0 train**: the **rc.1** Settings-editability +
@@ -47,8 +50,13 @@ bounded `--jobs`, and `--workspace` fan-out ([#324](https://github.com/kbrdn1/gw
 overlays ([#325](https://github.com/kbrdn1/gwm-cli/issues/325)). See the
 [Shipped highlights](#shipped-highlights) table for the per-issue breakdown and
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes. The
-MSRV is **1.86** (raised by the PTY overlay's `portable-pty` / `tui-term`
-dependencies; MSRV bumps ride a minor per the stability policy).
+MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys`, which
+declares no floor of its own; MSRV bumps ride a minor per the stability
+policy). It is held by a CI job that installs the declared floor and both
+resolves and compiles the committed lockfile against it on all three runners
+([#491](https://github.com/kbrdn1/gwm-cli/issues/491) ✅), because the previous
+setup let `Cargo.toml` claim 1.86 for a whole release line while the graph
+needed more, silently.
 
 The 0.9.x stable line ships:
 
@@ -143,6 +151,8 @@ For reference (each linked to its closing PR):
 | [#437](https://github.com/kbrdn1/gwm-cli/issues/437) ([PR #452](https://github.com/kbrdn1/gwm-cli/pull/452)) / [#438](https://github.com/kbrdn1/gwm-cli/issues/438) ([PR #454](https://github.com/kbrdn1/gwm-cli/pull/454)) / [#436](https://github.com/kbrdn1/gwm-cli/issues/436) ([PR #455](https://github.com/kbrdn1/gwm-cli/pull/455)) / [#453](https://github.com/kbrdn1/gwm-cli/issues/453) ([PR #456](https://github.com/kbrdn1/gwm-cli/pull/456)) | v1.4.0 | **TUI polish + complete help overlay**: Working Tree scroll from the Status context (`J` / `K`, rebindable, viewport-clamped) (#437); responsive sidebar heights via a pure layout solver (guaranteed floors, proportional split, Agents pane never clipped, Working Tree scrollbar) (#438); CI checks overlay — one row per `statusCheckRollup` entry with workflow + duration, `Enter` opens details, `/` filter, `f` refresh (#436); `?` help overlay documents every modal context with a per-section completeness guard, which-key re-audit (`exec` / `agents`), and a reserved-typing contract across every input sub-mode (#453) |
 | [#419](https://github.com/kbrdn1/gwm-cli/issues/419) ([PR #458](https://github.com/kbrdn1/gwm-cli/pull/458)) + [#463](https://github.com/kbrdn1/gwm-cli/issues/463) ([PR #464](https://github.com/kbrdn1/gwm-cli/pull/464)) | v1.5.0 | **Multi-forge**: a `Forge` trait with two backends, the existing GitHub one (`gh`) and a new GitLab one (`glab`). Worktrees, bootstrap, branch naming and the `branch.<name>.gwm-*` link storage stay forge-neutral; only the network layer knows which forge is in play. Ships the `forge` key in `.gwm.toml`, a `[forge_hosts]` table read from the user's own global config, `gwm trust add`, `$GWM_GLAB`, and a refusal to assume an unrecognised host is GitHub (which would have sent an authenticated call, and a token, to whatever host a cloned repo named). GitLab specifics absorbed at the parse boundary: `iid`, nested subgroup paths, the `/-/` URL infix, date-only milestones, project-vs-group labels, and a pipeline-to-CI-state map where an unknown status never aggregates to green. Fix: the trust ledger keys on the repo again, not on its host (#463) |
 
+| [GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm) + [#415](https://github.com/kbrdn1/gwm-cli/issues/415) / [#416](https://github.com/kbrdn1/gwm-cli/issues/416) / [#417](https://github.com/kbrdn1/gwm-cli/issues/417) / [#418](https://github.com/kbrdn1/gwm-cli/issues/418) / [#479](https://github.com/kbrdn1/gwm-cli/issues/479) + [#491](https://github.com/kbrdn1/gwm-cli/issues/491) | v1.6.0 | **Security fix + naming flexibility.** A branch name could inject a command into a lifecycle hook: placeholders were expanded into `sh -c` unescaped, and git permits `;`, `|`, `&`, `$`, backticks and redirections in a ref name, so a branch someone else pushed ran arbitrary commands as anyone who had trusted their own repo's hooks, with no trust prompt in the path (the gate covers the repo's hooks, never the branch name entering them). Affects every version up to and including 1.5.0, no backport. Values are shell-escaped on expansion, `env` values stay raw because they never see a shell, and hooks additionally get `GWM_*` environment variables that need no quoting. Alongside it: `gwm create --name` drops the `<type> <issue> <desc>` requirement (#416), the TUI create and rename forms present the fields the repo's patterns actually ask for in pattern order, in both directions (#418), and the declared MSRV becomes an honest 1.95 held by a CI job that resolves and compiles the locked graph at the floor (#491). Verifying the sequence produced the Fixed section: terminal-escape neutralisation of echoed config (#473), single-pass placeholder expansion (#494), branch rollback on a failed `gwm create` (#487), Windows path rules on free-form names (#475), and worktree-aware branch reads (#477) |
+
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
 ## Next up
@@ -168,7 +178,7 @@ deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both. The remaining
 two are ordered by what they unlock rather than by size.
 
-### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) → [#418](https://github.com/kbrdn1/gwm-cli/issues/418))
+### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418) ✅), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475) ✅
 
 `gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
 way to name a worktree freely. Working through this surfaced a real defect
@@ -182,10 +192,64 @@ connecting cause to effect.
 
 Sequenced cheapest-first, each step shippable on its own:
 
-- [#415](https://github.com/kbrdn1/gwm-cli/issues/415) — warn in `doctor` / `config validate` when the pattern is customised (turns a silent failure into a stated one)
-- [#416](https://github.com/kbrdn1/gwm-cli/issues/416) — free-form naming via `gwm create --name`, additive and contract-safe
-- [#417](https://github.com/kbrdn1/gwm-cli/issues/417) — derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
-- [#418](https://github.com/kbrdn1/gwm-cli/issues/418) — token-driven create form with a live branch/path preview
+- [x] [#415](https://github.com/kbrdn1/gwm-cli/issues/415) : warn in `doctor` / `config validate` when the pattern is customised (turns a silent failure into a stated one)
+- [x] [#416](https://github.com/kbrdn1/gwm-cli/issues/416) : free-form naming via `gwm create --name`, additive and contract-safe
+- [x] [#417](https://github.com/kbrdn1/gwm-cli/issues/417) : derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
+- [x] [#479](https://github.com/kbrdn1/gwm-cli/issues/479) : rename a free-form worktree, either freely again or into the pattern
+- [x] [#418](https://github.com/kbrdn1/gwm-cli/issues/418) : token-driven create form with a live branch/path preview
+
+Everything checked above is on `dev` and unreleased, so none of it has shipped to a
+stable line yet. **The original sequence is complete**; everything else listed below is
+follow-up work that came out of building the first three, not a widening of the plan.
+
+Two of #418's three asks turned out to have shipped ahead of it, which is worth
+recording because it is what a long sequence does to its own tail: the live
+branch/path preview arrived with #217's follow-up and #416, and `Ctrl-T` with #416.
+What #418 actually contributed is the field set and the focus order, derived from the
+patterns rather than fixed at the canonical triple. Its scope note had argued for a
+generic token-driven form so exotic tokens would be supported rather than dropped,
+but the token vocabulary is closed at three editable names, so that design and the
+narrow one coincide except on ordering. A drift guard holds the intent instead.
+
+A checkbox here tracks what is merged into `dev`, which is not the same thing as what
+GitHub shows as closed. `Closes #N` in a pull request body only fires when the pull
+request targets the default branch, so a merge into `dev` closes nothing on its own:
+an issue is either closed by hand once its work lands there, or left open until `dev`
+reaches `main`. Both states appear above and neither means the work is missing.
+
+[#478](https://github.com/kbrdn1/gwm-cli/issues/478) is already closed inside #417's
+PR: `branch_pattern` and `path_pattern` need not carry the same segments, so a
+worktree created as `gwm create fix 42 login` under `feat/#{issue}-{desc}` keeps its
+`fix` only in the directory name, and rebuilding the triple from the branch alone
+silently renamed that component on every edit.
+
+[#479](https://github.com/kbrdn1/gwm-cli/issues/479) was the other half of free-form
+naming: the rename form refused a free-form branch outright, so a worktree named for a
+spike could neither be renamed again nor promoted into the convention once it grew an
+issue number. It shipped ahead of #418 rather than beside it, because both rewrite the
+same create form and running them concurrently buys only merge conflicts. That
+ordering is what unblocked #418.
+
+Three more came out of reviewing #417 and were split out rather than folded into an
+already large PR. They touched different files, so they ran in parallel and are all on
+`dev`:
+
+- [x] [#480](https://github.com/kbrdn1/gwm-cli/issues/480) : `{repo}` expands to the workspace display name when a branch is written and to the directory basename when one is read, so in a workspace holding two repos that share a basename a `{repo}` pattern writes what it cannot read back
+- [x] [#481](https://github.com/kbrdn1/gwm-cli/issues/481) : renaming a worktree closes its open pull request without warning, since the remote rename is a delete plus a create and GitHub closes a PR whose head branch is renamed, including through its own rename API
+- [x] [#482](https://github.com/kbrdn1/gwm-cli/issues/482) : a segment frozen as a literal is lost when the pattern reorders its placeholders, because the recovery bounds each literal by the canonical `type, issue, desc` rank against markers whose real order differs
+
+One follow-up of #416 was taken ahead of #418 rather than after it, because it had to
+land before the feature shipped rather than after:
+
+- [x] [#475](https://github.com/kbrdn1/gwm-cli/issues/475) : a free-form name was not validated against Windows path rules, so `< > " |` and the reserved device names (`CON`, `NUL`, `COM1`…) passed every check and failed only when the directory was created, after `pre_create` hooks had run and with the branch already left behind. `--name` merged into `dev` two days after `v1.5.0` was tagged, so it had never reached a stable line: tightening the validator was additive then and would have been a breaking change once it shipped.
+
+Four bugs found while verifying this sequence end to end are fixed alongside it. None
+is naming work; they are recorded here because they were found here:
+
+- [x] [#477](https://github.com/kbrdn1/gwm-cli/issues/477) : `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the main checkout's branch (or, for `bootstrap`, no branch at all) when run from a worktree, because `discover_repo` deliberately walks back to the main working directory and they asked that handle where they were
+- [x] [#494](https://github.com/kbrdn1/gwm-cli/issues/494) : `expand_placeholders` substituted `{home}` / `{repo}` first and then substituted what those expansions produced, so a repo whose own name contains `{type}` made `{repo}/{desc}` write a type the pattern never mentions. Now single pass, which is also an *enlargement*: `BranchParser::compile` had been refusing that whole class rather than mirror a formatter that rewrote its own output, and those patterns round-trip. Fixing the root meant reverting part of #418, which had derived the form's fields after the resolution as a workaround
+- [x] [#473](https://github.com/kbrdn1/gwm-cli/issues/473) : a `.gwm.toml` is data from a repo nobody has vetted, and the commands that read it back skip the trust gate on purpose, so echoing a value verbatim handed that file a terminal escape channel out of a read-only command. Neutralised at each **sink** rather than each producer, which is what covers checks and rows nobody has written yet. The worst site was not in `gwm config` at all but in the TOFU prompt, whose bootstrap summary could be made to erase the row naming the shell it asks permission to run; and `toml`'s parse error quotes the offending source line, so `gwm list` inside the repo was enough
+- [x] [#487](https://github.com/kbrdn1/gwm-cli/issues/487) : `worktree::add` creates the branch before the directory, because `WorktreeAddOptions::reference` takes a reference that already exists, so *any* late failure left it orphaned. #474 and #475 each closed one input set; a full disk is not an input set, so the ordering is what actually bounds the class. Three conditions now gate the rollback, and each came from a different way of getting it wrong: this call created the branch, it still points where the call put it, and no checkout has it as HEAD. The last one is the review's: deleting the *reference* rather than the branch spares a `branch.<name>` config section the command never wrote, but it also drops `git_branch_delete`'s refusal on a branch a linked worktree stands on, and that residue is a worktree bound to nothing, which no check reports
 
 ### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
@@ -202,6 +266,11 @@ worktree → branch → PR → issue chain and can open on the current row direc
 ### Deferred
 
 - [#421](https://github.com/kbrdn1/gwm-cli/issues/421) — **container execution**: a `container:` block on the existing `exec` / aliases surface. Low cost (it wraps `docker run`, and anything exposing a Docker-compatible socket works for free), but no observed demand yet, so it waits until after the discovery push.
+
+### Maintenance
+
+- [#500](https://github.com/kbrdn1/gwm-cli/issues/500) — `exec_tests` flakes on Linux with `ETXTBSY`: the test writes an executable and runs it, which races against the fork-to-exec window of any other test in the harness that spawns a process. Seen once on a lockfile-only PR, green on a bare re-run. Retry on that one errno, with the reason written next to it so it does not read as flake-hiding later
+- The transitive graph needs a manual `cargo update` from time to time. `.github/dependabot.yml` sets no `allow: dependency-type: all`, so dependabot only ever PRs the direct dependencies. Last full refresh: [#499](https://github.com/kbrdn1/gwm-cli/pull/499), which also took the vendored libgit2 from 1.9.3 to 1.9.6. Do it **after** an MSRV change lands, never before: a lockfile refresh is exactly how a floor moves without anyone deciding to, so it has to be checked against a floor that is already settled
 
 ### Visibility
 

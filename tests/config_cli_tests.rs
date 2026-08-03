@@ -419,3 +419,94 @@ fn write_windows_editor_script(root: &Path) -> std::path::PathBuf {
   .unwrap();
   script
 }
+
+/// Issue #415: `gwm config validate` still exits 0 for a `worktree.branch_pattern`
+/// gwm cannot fully read back — it is a valid config — but it says on stderr
+/// which features go without.
+///
+/// Issue #417 changed the vehicle, not the contract. `{type}-{issue}-{desc}`
+/// used to be the example here and round-trips now that the parser is derived
+/// from the pattern, so the test uses a pattern that genuinely drops a
+/// segment: a frozen issue number is absent from every branch the pattern
+/// writes, whatever the parser does.
+#[test]
+fn config_validate_warns_when_branch_pattern_carries_no_issue() {
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[worktree]
+branch_pattern = "{type}/#1-{desc}"
+"#,
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["config", "validate"])
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("branch_pattern"))
+    .stderr(predicate::str::contains("auto-linking"));
+}
+
+#[test]
+fn config_validate_is_quiet_for_the_default_branch_pattern() {
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[worktree]
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    // The warning reads the *effective* (repo over global) pattern, so a
+    // runner whose own `~/.config/gwm/config.toml` customises it would
+    // flip this assertion. Pin repo-only loading.
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["config", "validate"])
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("branch_pattern").not());
+}
+
+/// Issue #415 (Codex review): `branch_pattern` set only in the user-level
+/// global config still applies at runtime through `Config::merge_layered`,
+/// so `gwm config validate` has to warn on the *effective* pattern, not
+/// just on what the repo file happens to carry.
+#[test]
+fn config_validate_warns_for_a_globally_set_branch_pattern() {
+  let (dir, _repo) = init_repo();
+  let xdg = tempfile::tempdir().unwrap();
+  let gwm_dir = xdg.path().join("gwm");
+  fs::create_dir_all(&gwm_dir).unwrap();
+  fs::write(
+    gwm_dir.join("config.toml"),
+    r#"
+[worktree]
+branch_pattern = "{type}/#1-{desc}"
+"#,
+  )
+  .unwrap();
+  // No repo-level `.gwm.toml` at all: the global layer is the only source.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", xdg.path())
+    // CI sets `GWM_NO_GLOBAL_CONFIG=1` workflow-wide (ci.yml) so the suite
+    // ignores the runner's own config. This test is *about* the global
+    // layer, so it has to opt back in explicitly — inheriting the flag made
+    // it pass locally and fail on all three runners.
+    .env_remove("GWM_NO_GLOBAL_CONFIG")
+    .args(["config", "validate"])
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("branch_pattern"))
+    .stderr(predicate::str::contains("auto-linking"));
+}

@@ -1720,3 +1720,304 @@ fn find_fuzzy_duplicate_names_stay_ambiguous_even_when_an_id_matches() {
   // The non-colliding worktree is still reachable by its unique id.
   assert_eq!(worktree::find_fuzzy(&repo, "idb").unwrap().id, "idb");
 }
+
+// ---------------------------------------------------------------------
+// Issue #487. `add` creates the branch before it creates the worktree,
+// because `WorktreeAddOptions::reference` needs a reference that already
+// exists. Every late failure therefore lands with a branch already on
+// disk that the user never asked for. #474 (255-byte cap) and #475 (the
+// Windows character and device set) each refused one input set up front;
+// a full disk is not an input set, so the ordering is what bounds the
+// class.
+//
+// Measured boundary of the rollback: `git_branch_delete` refuses a branch
+// that is "the current HEAD of a linked repository", and libgit2 writes
+// `.git/worktrees/<name>/HEAD` late in `git_worktree_add`, after both
+// mkdirs. So a failure during the checkout itself is still recoverable
+// only through `gwm doctor` / `gwm prune`. Everything before that point,
+// which is where the disk-full and permission classes land, is covered:
+// the permission test below asserts it with the admin entry already
+// written.
+
+/// Leave the `.git/worktrees/<name>` entry a crashed earlier run leaves
+/// behind. libgit2 mkdirs that path with `EXCL`, so the next `repo.worktree`
+/// under the same name fails without the test going near a name a validator
+/// could reject up front.
+fn wedge_admin_entry(repo: &Repository, name: &str) {
+  std::fs::create_dir_all(repo.path().join("worktrees").join(name)).unwrap();
+}
+
+fn branch_exists(repo: &Repository, name: &str) -> bool {
+  repo.find_branch(name, git2::BranchType::Local).is_ok()
+}
+
+#[test]
+fn add_rolls_back_the_branch_it_created_when_the_worktree_fails() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  wedge_admin_entry(&repo, "feat-487-late");
+  assert!(
+    !branch_exists(&repo, "feat/#487-late"),
+    "precondition: the branch must not exist before the call under test"
+  );
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-late");
+  let err = worktree::add(&repo, "feat-487-late", &target, "feat/#487-late", false).unwrap_err();
+
+  // The rollback is not the story, the failure is: the caller must still
+  // get the underlying libgit2 error to act on.
+  assert!(
+    matches!(err, gwm::error::GwmError::Git(_)),
+    "the underlying failure must reach the caller, got: {err:?}"
+  );
+  assert!(
+    !format!("{err}").to_lowercase().contains("roll"),
+    "the error must describe the failure, not the cleanup: {err}"
+  );
+
+  assert!(
+    !branch_exists(&repo, "feat/#487-late"),
+    "a branch this call created must not outlive the call that failed"
+  );
+  assert!(
+    repo
+      .config()
+      .unwrap()
+      .get_string("branch.feat/#487-late.gwm-created-at")
+      .is_err(),
+    "the created-at stamp must go with the branch, otherwise the next branch \
+     to take this name reads a timestamp older than itself in `gwm list`"
+  );
+}
+
+#[test]
+fn add_leaves_a_reused_branch_alone_when_the_worktree_fails() {
+  // `--reuse-branch` attaches to a branch that existed before the command
+  // ran. Deleting that one on failure would destroy work this call never
+  // created.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  let tip = repo
+    .branch("feat/#487-reused", &head, false)
+    .unwrap()
+    .into_reference()
+    .target()
+    .unwrap();
+  wedge_admin_entry(&repo, "feat-487-reused");
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-reused");
+  worktree::add(&repo, "feat-487-reused", &target, "feat/#487-reused", true).unwrap_err();
+
+  let still = repo
+    .find_branch("feat/#487-reused", git2::BranchType::Local)
+    .expect("a pre-existing branch must survive a failed add")
+    .into_reference()
+    .target()
+    .unwrap();
+  assert_eq!(still, tip, "the reused branch tip must be untouched");
+}
+
+#[test]
+fn add_rolls_back_a_branch_it_created_even_when_reuse_was_asked_for() {
+  // The predicate is "did this call create the branch", not "was reuse
+  // off". `gwm undo` and `gwm review` both pass `reuse_branch: true`
+  // against a branch that is frequently absent, and `add` then creates
+  // it. A rollback keyed on `!reuse_branch` would leave exactly those two
+  // paths orphaning branches.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  wedge_admin_entry(&repo, "feat-487-reuse-absent");
+  assert!(
+    !branch_exists(&repo, "feat/#487-reuse-absent"),
+    "precondition: reuse was asked for, but there is nothing to reuse"
+  );
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-reuse-absent");
+  worktree::add(&repo, "feat-487-reuse-absent", &target, "feat/#487-reuse-absent", true).unwrap_err();
+
+  assert!(
+    !branch_exists(&repo, "feat/#487-reuse-absent"),
+    "reuse_branch: true does not make a branch this call created someone else's"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_rolls_back_after_a_permission_denial_on_the_target_parent() {
+  // The class the issue is actually about: a failure that no validator can
+  // refuse up front. This one also gets *further* into `git_worktree_add`
+  // than the wedged-entry fixture does, since libgit2 has already created
+  // its admin entry by the time the worktree directory mkdir is denied.
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let parent = wt_root.path().join("read-only");
+  std::fs::create_dir_all(&parent).unwrap();
+  std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+  // Root ignores the mode bits, so the denial never happens and the test
+  // would assert against a *successful* add. Skip explicitly rather than
+  // let it pass or fail for the wrong reason.
+  if std::fs::create_dir(parent.join(".writable-probe")).is_ok() {
+    std::fs::remove_dir(parent.join(".writable-probe")).ok();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    eprintln!("skipping: this process can write to a 0555 directory (running as root?)");
+    return;
+  }
+
+  let target = parent.join("feat-487-denied");
+  let err = worktree::add(&repo, "feat-487-denied", &target, "feat/#487-denied", false).unwrap_err();
+
+  let admin = repo.path().join("worktrees").join("feat-487-denied");
+  assert!(
+    admin.exists(),
+    "precondition: libgit2 must have written its admin entry before failing, \
+     otherwise this fixture is not testing a later failure point than the wedge one"
+  );
+  assert!(
+    matches!(err, gwm::error::GwmError::Git(_)),
+    "the underlying failure must reach the caller, got: {err:?}"
+  );
+  assert!(
+    !branch_exists(&repo, "feat/#487-denied"),
+    "a disk or permission failure must not leave a branch behind either"
+  );
+
+  std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn add_rollback_keeps_branch_config_it_did_not_write() {
+  // Codex review on PR #497 (P2, iter 2). "Roll back what this call
+  // created" has to hold for config too. A `branch.<name>` section
+  // outlives its ref easily (`git update-ref -d` leaves it behind, and an
+  // upstream can be configured before the branch exists), and
+  // `git_branch_delete` drops the whole section. Only the stamp `add`
+  // itself wrote is this call's to remove.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/#487-cfg.remote", "origin").unwrap();
+  }
+  wedge_admin_entry(&repo, "feat-487-cfg");
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-cfg");
+  worktree::add(&repo, "feat-487-cfg", &target, "feat/#487-cfg", false).unwrap_err();
+
+  let cfg = repo.config().unwrap();
+  assert_eq!(
+    cfg.get_string("branch.feat/#487-cfg.remote").ok().as_deref(),
+    Some("origin"),
+    "settings that predate the command must survive its rollback"
+  );
+  assert!(
+    cfg.get_string("branch.feat/#487-cfg.gwm-created-at").is_err(),
+    "the stamp this call wrote is still this call's to remove"
+  );
+  assert!(
+    !branch_exists(&repo, "feat/#487-cfg"),
+    "and the branch itself must still be rolled back"
+  );
+}
+
+#[test]
+fn add_keeps_the_branch_when_the_worktree_is_already_bound_to_it() {
+  // Codex review on PR #497 (P2, iter 3). `git_branch_delete` refuses a
+  // branch that is "the current HEAD of a linked repository";
+  // `git_reference_delete`, which the rollback moved to in order to spare
+  // the config section, carries no such check. Measured on a live
+  // worktree: the ref goes, `find_worktree` still resolves the entry and
+  // `prunable_worktrees` does not list it, so the residue is a worktree
+  // bound to a branch that no longer exists and nothing reports it. That
+  // is worse than the orphan branch this whole change is about.
+  //
+  // libgit2 writes `.git/worktrees/<name>/HEAD` near the end of
+  // `git_worktree_add`, right before the checkout, and a checkout failure
+  // is not reachable from an integration test. The fixture writes the
+  // binding directly, which is the state that failure leaves behind.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let admin = repo.path().join("worktrees").join("feat-487-bound");
+  std::fs::create_dir_all(&admin).unwrap();
+  std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat/#487-bound\n").unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-bound");
+  worktree::add(&repo, "feat-487-bound", &target, "feat/#487-bound", false).unwrap_err();
+
+  assert!(
+    branch_exists(&repo, "feat/#487-bound"),
+    "a branch a worktree is already bound to must survive the rollback, \
+     otherwise the rollback trades an orphan branch for a worktree pointing \
+     at nothing that no check reports"
+  );
+}
+
+#[test]
+fn add_keeps_a_branch_another_worktree_is_bound_to() {
+  // Codex review on PR #497 (P1, iter 4). The bound check is about the
+  // branch, not about the name this call happened to try. A *different*
+  // checkout can hold the branch as its HEAD while the ref itself is
+  // absent, which is what deleting a ref under a live worktree leaves, and
+  // `git_worktree_add` then refuses with "reference is already checked
+  // out". Rolling back there deletes the ref that other worktree is
+  // standing on.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let other = repo.path().join("worktrees").join("someone-else");
+  std::fs::create_dir_all(&other).unwrap();
+  std::fs::write(other.join("HEAD"), "ref: refs/heads/feat/#487-shared\n").unwrap();
+  wedge_admin_entry(&repo, "feat-487-shared");
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-shared");
+  worktree::add(&repo, "feat-487-shared", &target, "feat/#487-shared", false).unwrap_err();
+
+  assert!(
+    branch_exists(&repo, "feat/#487-shared"),
+    "the rollback must not delete a ref another worktree is standing on"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_keeps_the_branch_when_the_checkouts_cannot_be_inspected() {
+  // Codex review on PR #497 (P1, iter 5). The bound check answers "is this
+  // branch someone's HEAD", and a read that fails answers nothing at all.
+  // Folding that into "no" makes the rollback delete a ref on the strength
+  // of a failed read, which is the one outcome the check exists to
+  // prevent. Absent is still "no", unreadable is "assume yes".
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  wedge_admin_entry(&repo, "feat-487-blind");
+  let admin_root = repo.path().join("worktrees");
+  std::fs::set_permissions(&admin_root, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+  // Root reads through the mode bits, so the inspection would succeed and
+  // the test would assert against a case it never produced.
+  if std::fs::read_dir(&admin_root).is_ok() {
+    std::fs::set_permissions(&admin_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    eprintln!("skipping: this process can read a 0000 directory (running as root?)");
+    return;
+  }
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-blind");
+  worktree::add(&repo, "feat-487-blind", &target, "feat/#487-blind", false).unwrap_err();
+  std::fs::set_permissions(&admin_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+  assert!(
+    branch_exists(&repo, "feat/#487-blind"),
+    "an unreadable admin directory must hold the rollback back, not wave it through"
+  );
+}

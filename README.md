@@ -11,7 +11,7 @@
 [![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
-[![rust](https://img.shields.io/badge/rust-1.86%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![rust](https://img.shields.io/badge/rust-1.95%2B-orange?logo=rust)](https://www.rust-lang.org/)
 
 **One binary to manage every git worktree in every repo, with the setup already done.**
 
@@ -47,7 +47,7 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 | Arch (AUR) ⚠️     | `yay -S gwm-cli-bin` (or `paru -S gwm-cli-bin`) — community-maintained, currently **1.2.0** ([#430](https://github.com/kbrdn1/gwm-cli/issues/430)) |
 | Prebuilt         | <https://github.com/kbrdn1/gwm-cli/releases> (Linux / macOS / Windows) |
 
-**On the AUR row:** `gwm-cli-bin` is packaged and maintained by a community contributor, not by this project, so its version can lag behind a release (it is at `1.4.0` while the current release is `1.5.0`). Every other channel in the table is published from this repository's release pipeline. See [#430](https://github.com/kbrdn1/gwm-cli/issues/430); if you want the current version on Arch, use `cargo binstall gwm-cli` or a prebuilt tarball in the meantime.
+**On the AUR row:** `gwm-cli-bin` is packaged and maintained by a community contributor, not by this project, so its version can lag behind a release (it is at `1.5.0` while the current release is `1.6.0`). Every other channel in the table is published from this repository's release pipeline. See [#430](https://github.com/kbrdn1/gwm-cli/issues/430); if you want the current version on Arch, use `cargo binstall gwm-cli` or a prebuilt tarball in the meantime.
 
 The crate is published as **`gwm-cli`** (the bare `gwm` name on crates.io belongs to an unrelated project) — the installed command is still `gwm`. `cargo binstall gwm-cli` grabs the prebuilt binary from the matching GitHub Release instead of compiling `git2`/vendored-libgit2 from source — no Rust toolchain needed at install time.
 
@@ -111,6 +111,12 @@ The [`docs/README.md`](docs/README.md) page documents the authoring conventions 
 ## history
 
 gwm started as a Rust rewrite of `tools/worktree-manager.sh` — a bash script tied to one team's Laravel stack and one repo's incident history. The Rust version keeps the lessons, makes them configurable per repo, and ships as a single binary so it works in every repo without per-project shell-script copies. Full background under [Development → Contributing → history](docs/6.development/2.contributing.md#history).
+
+## sponsor
+
+gwm is MIT and built on personal time. If it saves you some of yours, you can support it through [GitHub Sponsors](https://github.com/sponsors/kbrdn1).
+
+Sponsoring buys nothing in particular: no priority support, no roadmap influence, no private builds. It pays for the time that goes into the release pipeline, the docs tree and the issue queue. Reporting a bug, sending a PR or packaging gwm for a channel it does not reach yet helps just as much.
 
 ## license
 

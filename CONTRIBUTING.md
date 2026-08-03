@@ -112,7 +112,7 @@ All tests live under `tests/` — no inline `#[cfg(test)] mod tests` blocks insi
 
 ### Prerequisites
 
-- Rust toolchain (stable channel, 1.86+ — the MSRV declared in `Cargo.toml`, raised by `tui-term` / `portable-pty` when the PTY overlay landed).
+- Rust toolchain (stable channel, 1.95+ — the MSRV declared in `Cargo.toml`, raised by `rusqlite`'s bundled `libsqlite3-sys` and verified on every PR by CI's `msrv` job).
 - A C compiler (libgit2 is vendored and built from source on first `cargo build`).
 
 ### Build & run

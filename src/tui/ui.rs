@@ -4,7 +4,13 @@ use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
-use super::state::create_form::Field;
+use super::state::create_form::{Field, Mode};
+
+/// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
+/// default by the hint helpers that have no form in reach (issue #418). Every
+/// row those helpers can drop is present in it, so the default is "advertise
+/// everything", which is what they did before the field set became dynamic.
+const CANONICAL_TRIPLE: [Field; 3] = [Field::Type, Field::Issue, Field::Desc];
 use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
@@ -351,7 +357,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   // line renders flush, mirroring the footer. No `Wrap` — `header_line`
   // guarantees one visual line clipped to `width`.
   let line = header_line(
-    &app.repo_name,
+    // The workspace label, which is what the user is looking at; `repo_name` is
+    // the naming name and can be the same string in a workspace of one (#480).
+    &app.display_repo_name,
     &workdir,
     app.picker_mode,
     area.width as usize,
@@ -2011,8 +2019,13 @@ pub enum HintContext {
   Status,
   /// `gwm switch` picker — mutating verbs are inert, Enter/Esc pick/cancel.
   Picker,
-  /// Create-worktree form modal.
+  /// Create-worktree form modal, structured `<type> <issue> <desc>` mode.
   Create,
+  /// Create-worktree form modal, free-form mode (issue #416). A separate
+  /// context because the two modes present different inputs: free-form has
+  /// one field and no type selector, so the `field` / `type` hints would
+  /// name verbs that do nothing there.
+  CreateFreeform,
   /// Confirm-delete modal.
   Confirm,
   /// Open issue/PR URL menu.
@@ -2038,8 +2051,13 @@ pub enum HintContext {
   /// Clean reclaim overlay (issue #325): j/k pick a profile, confirm
   /// reclaims (safety countdown), Esc cancels.
   Clean,
-  /// Branch-rename modal (`View::Edit`, #290).
+  /// Branch-rename modal (`View::Edit`, #290), structured triple.
   Rename,
+  /// Branch-rename modal in free-form mode (issue #479). A separate context
+  /// for the same reason `CreateFreeform` is one: the two modes present
+  /// different inputs, so advertising a type selector free-form does not
+  /// render would name a key that does nothing.
+  RenameFreeform,
   /// Generic detail overlay (issue #408): scroll / close. Agent sessions
   /// today, the rich PR/Issue view tomorrow.
   Detail,
@@ -2057,7 +2075,7 @@ impl HintContext {
       HintContext::Worktrees => "worktrees",
       HintContext::Status => "status",
       HintContext::Picker => "switch",
-      HintContext::Create => "create",
+      HintContext::Create | HintContext::CreateFreeform => "create",
       HintContext::Confirm => "confirm",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
@@ -2068,7 +2086,7 @@ impl HintContext {
       HintContext::Pty => "terminal",
       HintContext::ExecPicker => "exec",
       HintContext::Clean => "clean",
-      HintContext::Rename => "rename",
+      HintContext::Rename | HintContext::RenameFreeform => "rename",
       HintContext::Detail => "agents",
       HintContext::CiChecks => "checks",
     }
@@ -2147,6 +2165,17 @@ impl HintContext {
       HintContext::Create => &[
         Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
+        Hint::Modal(ModalAction::CreateToggleMode, "free-form"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
+      ],
+      // Free-form has one field and no type selector, so `field` and `type`
+      // are dropped rather than shown inert — the same reason `draw_create`
+      // stops rendering those rows. `toggle_mode` leads the row: it is the
+      // only way back, and unlike the create form's other verbs it is not
+      // guessable from the visible inputs.
+      HintContext::CreateFreeform => &[
+        Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateSubmit, "submit"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
@@ -2231,8 +2260,16 @@ impl HintContext {
       // Rename reuses the create-form input handler, hence the `create`
       // context's verbs (#290 / #219).
       HintContext::Rename => &[
+        Hint::Modal(ModalAction::CreateToggleMode, "free-form"),
         Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
+      ],
+      // Free-form has one field and no type selector, so `field` and `type`
+      // are left out rather than advertised inert (issue #479).
+      HintContext::RenameFreeform => &[
+        Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateSubmit, "submit"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
@@ -2245,9 +2282,45 @@ impl HintContext {
   /// overlay and the Issue/PR prompt use. An unbound action is dropped from
   /// the row rather than advertised with a phantom key.
   pub fn resolve(self, keymap: &super::keymap::Keymap, modal: &ModalKeymap) -> Vec<(String, String)> {
+    self.resolve_with_fields(keymap, modal, &CANONICAL_TRIPLE)
+  }
+
+  /// As [`Self::resolve`], but told which fields the create / rename form
+  /// actually presents (issue #418), so the structured rows stop advertising
+  /// verbs that do nothing.
+  ///
+  /// Two of them go inert once the field set follows the repo's patterns, and
+  /// this codebase's rule is to never name a key that does nothing (the reason
+  /// free-form drops the same two rows since #416):
+  ///
+  /// - `↑/↓ type` when no pattern carries `{type}`. The selector is not
+  ///   rendered and `handle_create_key` gates the cycling verbs on
+  ///   `Field::Type`, so the arrows are a no-op.
+  /// - `field` when the pattern presents one field. `next_field` rotates
+  ///   within a one-element list, so Tab does nothing.
+  ///
+  /// `fields` is ignored outside the structured create / rename contexts:
+  /// free-form drops both rows already, and no other context carries them.
+  pub fn resolve_with_fields(
+    self,
+    keymap: &super::keymap::Keymap,
+    modal: &ModalKeymap,
+    fields: &[Field],
+  ) -> Vec<(String, String)> {
+    let structured_form = matches!(self, HintContext::Create | HintContext::Rename);
     self
       .hint_specs()
       .iter()
+      .filter(|h| {
+        if !structured_form {
+          return true;
+        }
+        match h {
+          Hint::Lit("↑/↓", "type") => fields.contains(&Field::Type),
+          Hint::Modal(ModalAction::CreateNextField, _) => fields.len() > 1,
+          _ => true,
+        }
+      })
       .filter_map(|h| match h {
         // #219: a global verb whose key is claimed by a modal binding in the
         // active context is resolved as that modal verb first — the event loop
@@ -2271,7 +2344,9 @@ impl HintContext {
   /// hint key shadowed by a modal binding in the same context.
   fn modal_context(self) -> Option<KeyContext> {
     Some(match self {
-      HintContext::Create | HintContext::Rename => KeyContext::Create,
+      HintContext::Create | HintContext::CreateFreeform | HintContext::Rename | HintContext::RenameFreeform => {
+        KeyContext::Create
+      }
       HintContext::Confirm => KeyContext::Confirm,
       HintContext::OpenMenu => KeyContext::OpenMenu,
       HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
@@ -2454,7 +2529,19 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
 }
 
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
-  let resolved = ctx.resolve(keymap, modal);
+  modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
+}
+
+/// As [`modal_hint_for_context`], for the two footers whose form knows which
+/// fields it presents (issue #418). Every other modal keeps the plain call.
+pub fn modal_hint_for_context_with_fields(
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+  fields: &[Field],
+) -> Line<'static> {
+  let resolved = ctx.resolve_with_fields(keymap, modal, fields);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)
 }
@@ -2679,7 +2766,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Resolve the rebindable hint keys against the live keymap (issue #217
   // review) so a user override shows through, then borrow into the slice
   // `status_line` expects.
-  let resolved = ctx.resolve(&app.keymap, &app.modal_keymap);
+  // Same field set the two footers use (#418), so the bar behind a modal and
+  // the modal's own footer cannot advertise different verbs.
+  let resolved = ctx.resolve_with_fields(&app.keymap, &app.modal_keymap, app.create_form.fields());
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   let line = status_line(
     ctx.label(),
@@ -2953,10 +3042,17 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreateNextType, "next branch type"),
       modal_entry(ModalAction::CreateNextField, "next field"),
       modal_entry(ModalAction::CreatePrevField, "previous field"),
-      modal_entry(ModalAction::CreateSubmit, "submit (on description) / next field"),
+      modal_entry(ModalAction::CreateSubmit, "submit (on the last field) / next field"),
+      modal_entry(
+        ModalAction::CreateToggleMode,
+        "toggle structured fields ↔ free-form name",
+      ),
       modal_entry(ModalAction::CreateCancel, "cancel"),
-      fixed("0-9", "type into the issue field (digits only)"),
-      fixed("any char", "type into the description field"),
+      fixed(
+        "0-9",
+        "type into the issue field, where the patterns ask for one (digits only)",
+      ),
+      fixed("any char", "type into the focused text field"),
       fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
@@ -3722,6 +3818,157 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
+/// The branch and directory a structured form would produce, expanded from
+/// **this repo's own** `branch_pattern` / `path_pattern`.
+///
+/// Issue #417: those patterns are what `gwm create` and the rename actually
+/// write, so a live preview has to come from them. Both modals hardcoded the
+/// default `<type>/#<issue>-<desc>` shape instead, and under a custom pattern
+/// they promised names the repo would never create. The rename case was the
+/// loud one: with `feat/#{issue}-{desc}`, picking `docs` in the type selector
+/// previewed `docs/#42-x` while submitting wrote `feat/#42-x`, because the
+/// pattern has no `{type}` to write into.
+///
+/// The form's fields are expanded exactly as they stand, mid-typing and all,
+/// so this never validates and never refuses: an empty issue expands to
+/// nothing, which is what a preview should show. An expansion that cannot be
+/// resolved at all yields an empty string rather than a stale or invented one.
+/// Issue #481. Whether submitting this rename would close an open pull request,
+/// as a message ready to render, or `None` when nothing is at risk.
+///
+/// The remote half of a rename is `git push --atomic origin :<old> <new>:<new>`,
+/// a delete followed by a create, and GitHub closes a pull request whose head
+/// branch is renamed. gwm cannot route around that. GitHub's own rename
+/// endpoint retargets a pull request whose *base* is the renamed branch and
+/// closes one whose *head* it is, and a worktree branch is always the head of
+/// its own pull request, so both paths end in the same place. GitLab has no
+/// rename operation at all, only create-then-delete. Saying so before the push
+/// is the whole of what is available.
+///
+/// Keyed on the **branch** rather than on the rename: an edit that only moves
+/// the directory returns from `worktree::rename_worktree` before touching a
+/// single ref, so it is never at risk, and warning there would train the user
+/// to ignore the line. Recomputed per frame, so it appears the moment the form
+/// would write a different branch and goes away when the user reverts.
+///
+/// A merged or closed pull request has nothing left to lose, and an unfetched
+/// state says nothing either way: this reports what gwm knows, and claims
+/// nothing about what it has not looked up.
+fn rename_pr_warning(app: &App, new_branch: &str, old_branch: &str) -> Option<String> {
+  if new_branch == old_branch {
+    return None;
+  }
+  let w = app.selected()?;
+  if !matches!(w.pr_state.or(w.link.pr_state)?, PrState::Open | PrState::Draft) {
+    return None;
+  }
+  Some(match w.link.pr {
+    Some(number) => format!("⚠ renaming the branch closes PR #{}", number),
+    None => "⚠ renaming the branch closes its open pull request".into(),
+  })
+}
+
+/// The `(branch, directory)` pair the form would produce, for the live preview.
+///
+/// Both modes, because both are reachable from the create form (#416) and now
+/// from the rename modal too (#479) — and a preview that handled only one of
+/// them would show a branch the submit is not going to write. That defect
+/// shipped once already, with the preview hardcoding `<type>/#<issue>-<desc>`
+/// while the submit expanded the repo's patterns; free-form is the same trap
+/// one mode over, since there nothing is expanded at all.
+///
+/// Deliberately **unvalidated**, unlike [`App::edit_target`]: this runs on every
+/// keystroke and has to show what a half-typed form is heading towards. So the
+/// free-form arm builds `WorktreeName::Freeform` directly rather than through
+/// `WorktreeName::freeform`, which would refuse an incomplete name and blank the
+/// preview mid-word. The flattening still comes from `worktree_dirname`, so the
+/// preview and the submit cannot drift on it.
+fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
+  if app.create_form.mode == Mode::Freeform {
+    let name = crate::naming::WorktreeName::Freeform(app.create_form.name.clone());
+    return (
+      name
+        .branch_name(&app.config.worktree, &app.repo_name)
+        .unwrap_or_default(),
+      name
+        .worktree_dirname(&app.config.worktree, &app.repo_name)
+        .unwrap_or_default(),
+    );
+  }
+  let expand = |pattern: &str| {
+    crate::config::expand_placeholders(
+      pattern,
+      &app.repo_name,
+      Some(type_str),
+      Some(&app.create_form.issue),
+      Some(&app.create_form.desc),
+      None,
+    )
+    .unwrap_or_default()
+  };
+  (
+    expand(&app.config.worktree.branch_pattern),
+    expand(&app.config.worktree.path_pattern),
+  )
+}
+
+/// One row per field the form presents, in the order the patterns write them
+/// (issue #418), blank-line separated.
+///
+/// Both the create overlay and the rename modal draw from this, so they cannot
+/// come to disagree about which inputs exist — they used to hardcode the same
+/// `Type` / `Issue` / `Desc` triple twice, which is two places to forget a
+/// pattern that carries only some of them.
+///
+/// Visual order is focus order by construction, which is the property that
+/// makes a custom pattern legible: `{desc}-{issue}` reads top-to-bottom in the
+/// same order it writes left-to-right. That does move the type selector below
+/// the preview, where the old layout kept it above.
+fn form_field_lines(app: &App, type_str: &str, type_desc: &str, value_w: usize, label_w: usize) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let surface = app.theme.selection_bg;
+  let label = |s: &str| format!("{:<label_w$}", s);
+
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  for field in app.create_form.fields() {
+    if !lines.is_empty() {
+      lines.push(Line::from(String::new()));
+    }
+    lines.push(match field {
+      Field::Type => type_selector_line(
+        &label("Type"),
+        type_str,
+        type_desc,
+        app.create_form.field == Field::Type,
+        accent,
+        muted,
+      ),
+      Field::Issue => field_input_line(
+        &label("Issue"),
+        &app.create_form.issue,
+        app.create_form.field == Field::Issue,
+        value_w,
+        accent,
+        muted,
+        surface,
+      ),
+      Field::Desc => field_input_line(
+        &label("Desc"),
+        &app.create_form.desc,
+        app.create_form.field == Field::Desc,
+        value_w,
+        accent,
+        muted,
+        surface,
+      ),
+      // `Name` belongs to free-form mode, which never reaches this list.
+      Field::Name => continue,
+    });
+  }
+  lines
+}
+
 fn draw_create(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -3746,28 +3993,29 @@ fn draw_create(f: &mut Frame, app: &App) {
   let value_w = inner_w.saturating_sub(gutter);
 
   let label = |s: &str| format!("{:<label_w$}", s);
-  let branch = ellipsize_middle(
-    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Branch : ".len()),
-  );
-  let dirname = ellipsize_middle(
-    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Dir    : ".len()),
-  );
+  let freeform = app.create_form.mode == Mode::Freeform;
+  // Issue #416: a free-form name IS the branch, and the directory is that
+  // name with `/` flattened — mirroring `WorktreeName::worktree_dirname`.
+  let (branch_raw, dir_raw) = if freeform {
+    (app.create_form.name.clone(), app.create_form.name.replace('/', "-"))
+  } else {
+    pattern_preview(app, type_str)
+  };
+  let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
+  let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
-  let mut lines = overlay_title_lines("New Worktree", clean);
-  // Type selector first, then the live preview, then the editable fields —
-  // the preview sits above the inputs so the resulting names stay in view
-  // while typing (issue #217 follow-up).
-  lines.push(type_selector_line(
-    &label("Type"),
-    type_str,
-    type_desc,
-    app.create_form.field == Field::Type,
-    accent,
-    muted,
-  ));
-  lines.push(Line::from(String::new()));
+  let mut lines = overlay_title_lines(
+    if freeform {
+      "New Worktree — free-form"
+    } else {
+      "New Worktree"
+    },
+    clean,
+  );
+  // The live preview first, then the editable fields — the preview sits above
+  // the inputs so the resulting names stay in view while typing (issue #217
+  // follow-up). Which inputs those are comes from the patterns (#418), so a
+  // repo whose convention writes no issue number is not shown a field for one.
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -3777,25 +4025,19 @@ fn draw_create(f: &mut Frame, app: &App) {
     Span::styled(dirname, Style::default().fg(app.theme.dirty)),
   ]));
   lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Issue"),
-    &app.create_form.issue,
-    app.create_form.field == Field::Issue,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
-  lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Desc"),
-    &app.create_form.desc,
-    app.create_form.field == Field::Desc,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
+  if freeform {
+    lines.push(field_input_line(
+      &label("Name"),
+      &app.create_form.name,
+      app.create_form.field == Field::Name,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  } else {
+    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
+  }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
   let area = centered_box(70, 72, height, term);
@@ -3838,11 +4080,12 @@ fn draw_create(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(
-        HintContext::Create,
+      Paragraph::new(modal_hint_for_context_with_fields(
+        app.create_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
+        app.create_form.fields(),
       )),
       inner[4],
     );
@@ -5150,29 +5393,16 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
     .unwrap_or("(none)");
   let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From   : ".len()));
-  let branch = ellipsize_middle(
-    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Branch : ".len()),
-  );
-  let dirname = ellipsize_middle(
-    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Dir    : ".len()),
-  );
+  let (branch_raw, dir_raw) = pattern_preview(app, type_str);
+  let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
+  let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
+  let freeform = app.create_form.mode == Mode::Freeform;
   let mut lines = overlay_title_lines("Rename Worktree", clean);
   lines.push(Line::from(vec![
     Span::raw("  From   : "),
     Span::styled(old_display, Style::default().fg(muted)),
   ]));
-  lines.push(Line::from(String::new()));
-  lines.push(type_selector_line(
-    &label("Type"),
-    type_str,
-    type_desc,
-    app.create_form.field == Field::Type,
-    accent,
-    muted,
-  ));
   lines.push(Line::from(String::new()));
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
@@ -5182,26 +5412,34 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     Span::raw("  Dir    : "),
     Span::styled(dirname, Style::default().fg(app.theme.dirty)),
   ]));
+  if let Some(warning) = rename_pr_warning(app, &branch_raw, old_branch) {
+    lines.push(Line::from(vec![
+      Span::raw("  "),
+      Span::styled(
+        ellipsize_middle(&warning, inner_w.saturating_sub(2)),
+        Style::default().fg(app.theme.prunable),
+      ),
+    ]));
+  }
   lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Issue"),
-    &app.create_form.issue,
-    app.create_form.field == Field::Issue,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
-  lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Desc"),
-    &app.create_form.desc,
-    app.create_form.field == Field::Desc,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
+  // Issue #479: free-form has one field and no type selector, so the rows the
+  // structured triple needs are not rendered rather than rendered inert — the
+  // same shape `draw_create` uses, and the reason #474 suppressed the toggle
+  // here in the first place was that these rows did not exist. Which rows the
+  // structured side needs comes from the patterns (#418).
+  if freeform {
+    lines.push(field_input_line(
+      &label("Name"),
+      &app.create_form.name,
+      app.create_form.field == Field::Name,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  } else {
+    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
+  }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
   let area = centered_box(70, 72, height, term);
@@ -5244,11 +5482,14 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(
-        HintContext::Rename,
+      Paragraph::new(modal_hint_for_context_with_fields(
+        // One source with the statusbar (`App::rename_hint_context`), so the
+        // footer and the bar behind it cannot disagree about the mode.
+        app.rename_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
+        app.create_form.fields(),
       )),
       inner[4],
     );

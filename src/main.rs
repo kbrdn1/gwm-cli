@@ -33,16 +33,33 @@ fn main() {
       // way to surface the typo). The dispatcher will re-surface
       // the error if the user runs a subcommand that touches
       // config.
-      eprintln!("warning: failed to load aliases — using raw argv: {}", e);
+      eprintln!("warning: failed to load aliases, using raw argv: {}", clean_error(&e));
       argv
     }
   };
 
   let args = cli::Cli::parse_from(expanded);
   if let Err(e) = cli::run(args) {
-    eprintln!("error: {}", e);
+    eprintln!("error: {}", clean_error(&e));
     std::process::exit(1);
   }
+}
+
+/// Neutralise an error before it reaches the terminal (issue #473).
+///
+/// These two `eprintln!` are the only stderr sinks in the binary, so doing it
+/// here covers every command by construction rather than one diagnostic at a
+/// time. It is not hypothetical: `toml`'s parse error quotes the offending
+/// source line verbatim, so an unvetted `.gwm.toml` reaches the terminal of
+/// anyone who so much as runs `gwm list` inside the repo.
+///
+/// Line breaks survive, because `toml`'s caret-under-the-column snippet is the
+/// one message whose job is to point at the broken line. What stops a config
+/// value from abusing that is the left margin rather than any judgement about
+/// which message is which: see
+/// [`gwm::naming::sanitise_diagnostic_for_terminal`].
+fn clean_error(e: &gwm::error::GwmError) -> String {
+  gwm::naming::sanitise_diagnostic_for_terminal(&e.to_string())
 }
 
 /// Resolve the alias chain (built-in + repo + user) and run the

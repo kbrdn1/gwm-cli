@@ -60,6 +60,13 @@ pub enum GwmError {
   #[error("invalid description '{0}' (kebab-case alphanumeric)")]
   InvalidDescription(String),
 
+  /// A `gwm create --name` value git or the filesystem would refuse
+  /// (issue #416). Free-form names skip the `<type>/#<issue>-<desc>`
+  /// convention entirely, so the only bar left is "can this be a branch
+  /// and a directory" — `{reason}` says which of the two objected.
+  #[error("invalid worktree name '{name}': {reason}")]
+  InvalidWorktreeName { name: String, reason: String },
+
   #[error("worktree '{0}' not found")]
   WorktreeNotFound(String),
 

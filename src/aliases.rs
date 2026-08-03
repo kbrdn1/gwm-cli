@@ -463,6 +463,24 @@ pub fn validate_aliases(map: &BTreeMap<String, String>, source_label: &str) -> R
         )));
       }
     }
+    // Issue #473. An alias expansion becomes argv BEFORE clap parses it, and
+    // clap prints its own error and exits without passing through the stderr
+    // sink in `main`. Clap strips the ASCII controls from the token it quotes,
+    // but not the C1 range: measured, `\u{9b}` (CSI) and `\u{85}` (NEL) came
+    // out of `gwm <alias>` intact.
+    //
+    // Rejected at the boundary rather than cleaned at the sink, because argv
+    // has more than one downstream and clap's is the one we do not own. No
+    // legitimate expansion needs a control character; the name and value are
+    // quoted with `{:?}` so the report cannot replay what it is refusing.
+    if let Some(bad) = value.chars().find(|c| c.is_control()) {
+      return Err(GwmError::Config(format!(
+        "{}: alias '{}' = {:?} contains control character {:?}; \
+         an expansion becomes argv, and a control character there is a terminal \
+         escape rather than an argument",
+        source_label, name, value, bad
+      )));
+    }
   }
   Ok(())
 }

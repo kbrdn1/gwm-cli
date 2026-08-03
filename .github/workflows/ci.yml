@@ -46,6 +46,63 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  msrv:
+    name: msrv (declared floor, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Same matrix as `test`, and for the same reason: a single-platform run
+    # sees neither the `[target."cfg(windows)".dependencies]` block nor the
+    # `#[cfg(windows)]` code, so a Windows-only dependency raising its floor
+    # (or a Windows-only use of a newer std API) would keep this job green on
+    # Linux while `cargo install` breaks for those users. That is the #491 bug
+    # again, one axis over.
+    #
+    # The clippy job catches a *std API* newer than the declared floor
+    # (`clippy::incompatible_msrv`), but nothing covered a **dependency**
+    # whose floor is higher than ours: `Cargo.toml` said 1.86 for a whole
+    # release line while the graph needed 1.95, silently (issue #491).
+    # This job installs exactly the declared floor and both resolves and
+    # compiles the committed lockfile against it, which is why `--locked`
+    # is load-bearing: cargo's `rust-version` gate fires at resolve time
+    # for the crates that declare a floor, and the compile that follows
+    # is the only thing that catches one declaring nothing at all (which
+    # is what `rusqlite`'s `libsqlite3-sys` does). The toolchain is read
+    # out of `Cargo.toml` rather than hardcoded so the job cannot drift
+    # from the manifest either.
+    env:
+      # Overrides the workflow-wide `-D warnings`. A warning only an older
+      # toolchain emits (or an `unknown_lints` for a lint added after it)
+      # says nothing about the MSRV and must not paint this job red.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: read the declared MSRV
+        id: msrv
+        # `windows-latest` defaults to PowerShell, which has no grep/cut.
+        shell: bash
+        run: |
+          version=$(grep -m1 '^rust-version = ' Cargo.toml | cut -d'"' -f2)
+          [ -n "$version" ] || { echo "::error::no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $version"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check at the declared floor
+        run: cargo check --all-targets --locked
+      # `daemon` is default-on, so the check above never compiles the
+      # `#[cfg(not(all(any(unix, windows), feature = "daemon")))]` arms of
+      # `cmd_daemon` / `cmd_statusline`. That build is documented as supported
+      # (docs/3.cli/1.reference.md), so it gets the same floor guarantee.
+      - name: cargo check at the declared floor (no default features)
+        run: cargo check --all-targets --locked --no-default-features
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

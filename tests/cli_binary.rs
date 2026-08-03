@@ -6703,3 +6703,358 @@ fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
   run(&["open", "issue", "--print-url"]).success();
   run(&["bootstrap"]).success();
 }
+
+// --- create --name (issue #416) -----------------------------------------
+
+#[test]
+fn create_name_flag_appears_in_help() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--name"));
+}
+
+/// The mode is chosen by an explicit flag, never inferred from how many
+/// positionals were supplied — two of the three is a typo, not a request
+/// for free-form naming.
+#[test]
+fn create_rejects_a_partial_triple() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "feat", "42"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("<DESC>").or(predicate::str::contains("required")));
+}
+
+#[test]
+fn create_name_conflicts_with_the_structured_triple() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "--name", "spike-redis", "feat", "42", "x"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cannot be used with").or(predicate::str::contains("conflict")));
+}
+
+#[test]
+fn create_name_makes_a_worktree_whose_branch_is_the_name() {
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "--name", "spike-redis"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("spike-redis"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  // `path_pattern` is `{type}-{issue}-{desc}` in the test config and must
+  // NOT have been applied — a free-form name has none of those tokens.
+  let wt_dir = base.path().join("spike-redis");
+  assert!(wt_dir.exists(), "worktree dir must be the name verbatim");
+  assert!(
+    repo.find_branch("spike-redis", git2::BranchType::Local).is_ok(),
+    "the branch must be the name verbatim"
+  );
+}
+
+#[test]
+fn create_name_rejects_a_name_git_would_refuse() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "--name", "has space"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("has space"));
+}
+
+#[test]
+fn commit_prefix_reads_a_branch_written_with_a_custom_pattern() {
+  // Issue #417. `worktree.branch_pattern` drives `BranchSpec::branch_name`,
+  // so a repo configured with `{type}-{issue}-{desc}` creates
+  // `feat-41-foo` and every gwm surface that re-reads the branch has to
+  // recognise it. The parser matched a hardcoded `<type>/#<issue>-<desc>`
+  // instead, so the branch this very repo told gwm to create came back
+  // unreadable: no gitmoji, no issue in the prefix.
+  //
+  // Slash-less is the point, not an edge case — `-` sits in neither the
+  // type charset (`[a-z]+`) nor the issue charset (`\d+`), so the split is
+  // unambiguous and there is no reason for it to fail.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"{type}-{issue}-{desc}\"\n",
+  )
+  .expect("seed .gwm.toml");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat-41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":sparkles: feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_never_echoes_control_bytes_from_the_branch_pattern() {
+  // Codex review on PR #476. `branch_pattern` comes from a repo's `.gwm.toml`
+  // and `gwm commit-prefix` does not go through the TOFU trust gate, so
+  // running it inside a repo you have not vetted must stay safe. Both errors
+  // #417 added quote the pattern, and quoting it raw hands an unvetted config
+  // the same terminal escape channel (OSC 52 clipboard write, screen clear)
+  // that `branch_pattern_warning` already neutralises.
+  let (dir, _repo) = init_repo();
+  // OSC 52 clipboard-write shape: ESC ] 52 ; c ; <payload> BEL
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    // TOML basic-string escapes: `\u001B` is ESC, `\u0007` is BEL. Written this
+    // way rather than as raw bytes because TOML forbids control characters
+    // inside a string, and a config that fails to parse would fall back to the
+    // default pattern and quietly make this test vacuous.
+    "[worktree]\nbranch_pattern = \"{type}/{desc}\\u001B]52;c;cHduZWQ=\\u0007\"\n",
+  )
+  .expect("seed .gwm.toml");
+
+  // A branch that does not match, so the "does not match this pattern" error
+  // fires and quotes the pattern.
+  let assert = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "nothing-like-it"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+  assert!(
+    !stderr.chars().any(|c| c.is_control() && c != '\n'),
+    "no control character may reach the terminal: {:?}",
+    stderr
+  );
+
+  // …and the "carries no {issue}" error, which quotes it too.
+  let assert = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/x"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+  assert!(
+    !stderr.chars().any(|c| c.is_control() && c != '\n'),
+    "the second error quotes the pattern too: {:?}",
+    stderr
+  );
+}
+
+#[test]
+fn pr_falls_back_to_chore_when_the_pattern_carries_no_type() {
+  // Codex review on PR #476, second pass. Before #417 the parser either
+  // matched or returned `None`, so `unwrap_or_else(|| "chore")` covered every
+  // branch with no readable type. #417 let a partial pattern parse and report
+  // the segments it *does* carry, which hands `gwm pr` a `Some` holding an
+  // empty type — and an empty type selects no `[pr_template.by_type]` entry
+  // and renders `{type}` blank. The fallback has to survive the loosening.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"{issue}-{desc}\"\n\n\
+     [pr_template.by_type.chore]\nbody = \"chore body for {desc} (#{issue})\\n\"\n",
+  )
+  .expect("seed .gwm.toml");
+  make_feature_branch_with_commit(&repo, dir.path(), "42-tidy-up", "note.md", "x\n", "🔧 chore: tidy");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("chore body for tidy-up (#42)"));
+}
+
+// ---------------------------------------------------------------------
+// Issue #477 — `worktree::discover_repo` walks back to the main working
+// directory when it lands inside a linked worktree, which is right for
+// every command operating on the whole worktree *set* (`list`, `remove`,
+// `switch`, `prune`). Commands that instead ask "which branch am I on"
+// were reading that handle's HEAD, so from inside a worktree they
+// answered with the main checkout's branch.
+//
+// `gwm commit-prefix` is the one that hurts: the bundled `commit-msg`
+// hook calls it, and git invokes that hook with the working directory
+// inside the worktree, so committing from a worktree derived the prefix
+// from whatever the main checkout happened to be sitting on.
+//
+// Pre-existing, measured against the published 1.5.0 binary in the issue
+// and re-measured against this branch's build before the fix.
+// ---------------------------------------------------------------------
+
+/// The reproduction from the issue, as a test. `repo_with_one_worktree`
+/// leaves the main checkout on its default branch and the worktree on
+/// `feat/#1-wt`; before the fix this errored out saying the *main*
+/// branch carried no type to read.
+#[test]
+fn commit_prefix_reads_the_branch_of_the_worktree_it_runs_in() {
+  let (_dir, _base, wt) = repo_with_one_worktree();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["commit-prefix", "--unicode"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat(#1):"));
+}
+
+/// Same handle, same defect, different symptom: `cmd_pr` falls back to
+/// the `chore` template when the branch does not parse, so reading the
+/// main checkout's branch surfaced as "no pr_template configured for
+/// branch type 'chore'" rather than as a wrong branch name.
+#[test]
+fn pr_reads_the_branch_of_the_worktree_it_runs_in() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  let cfg = dir.path().join(".gwm.toml");
+  let mut body = std::fs::read_to_string(&cfg).expect("seeded config");
+  body.push_str("\n[pr_template.by_type.feat]\nbody = \"GWM_PROBE head={head} type={type} issue={issue}\\n\"\n");
+  std::fs::write(&cfg, body).expect("append a template");
+
+  // Selecting the `feat` entry at all is half the assertion: before the fix
+  // the main checkout's branch did not parse, the type fell back to `chore`,
+  // and this errored with "no pr_template configured for branch type
+  // 'chore'". `{head}` then pins the branch itself, not just its type.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("GWM_PROBE head=feat/#1-wt type=feat issue=1"));
+}
+
+/// 🔴 The over-correction guard. Only the *branch* comes from the
+/// invoking checkout. `.gwm.toml`, the workdir and `worktree::repo_name`
+/// all legitimately want the main repo, and `{repo}` is a legal token in
+/// `branch_pattern`, so a fix that discovered from the current directory
+/// everywhere would compile the parser with the *worktree directory's*
+/// name and stop reading a branch gwm itself wrote.
+///
+/// Under `{type}/#{issue}-{desc}-{repo}` the worktree directory is named
+/// `feat-1-wt` while the repo is not, so the two names cannot be
+/// confused: this passes only if the parser was handed the main repo's.
+///
+/// `{repo}` sits at the end rather than leading the branch because
+/// `init_repo` builds on `TempDir`, whose basename starts with `.` on
+/// macOS, and git refuses a ref component that does. Inside a component
+/// the same character is fine.
+#[test]
+fn only_the_branch_comes_from_the_worktree_the_repo_name_still_comes_from_the_main_checkout() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let repo_name = dir.path().file_name().unwrap().to_string_lossy().to_string();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      "[worktree]\nbase = \"{base}\"\n\
+       path_pattern = \"{{type}}-{{issue}}-{{desc}}\"\n\
+       branch_pattern = \"{{type}}/#{{issue}}-{{desc}}-{{repo}}\"\n",
+      base = toml_basic_string(base.path()),
+    ),
+  )
+  .expect("seed .gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "1", "wt"])
+    .assert()
+    .success();
+  let wt = base.path().join("feat-1-wt");
+  assert!(
+    wt.join(".git").exists(),
+    "precondition: the worktree exists and is named after `path_pattern`, not the repo"
+  );
+  assert_ne!(
+    repo_name, "feat-1-wt",
+    "precondition: the two names differ, or the assertion below proves nothing"
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["commit-prefix", "--unicode"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat(#1):"));
+}
+
+/// The sweep the issue asked for ("worth checking whether the same
+/// handle is used for anything else that is position-dependent") found a
+/// third site with a *different* symptom: `cmd_bootstrap` never resolved
+/// a branch at all unless the target came from a fuzzy pattern, so hooks
+/// received an empty `{branch}` / `{type}` / `{issue}` rather than the
+/// wrong one. Two of its three target paths were affected, measured
+/// against this branch's build: no argument (the worktree is the CWD),
+/// and an argument that is already a directory. Only the fuzzy path,
+/// which reads the branch off the worktree record, was correct.
+#[test]
+fn bootstrap_gives_hooks_the_branch_of_the_worktree_it_targets() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  let cfg = dir.path().join(".gwm.toml");
+  let mut body = std::fs::read_to_string(&cfg).expect("seeded config");
+  body.push_str(
+    "\n[[hooks.post_bootstrap]]\nname = \"probe\"\n\
+     run = \"echo GWM_PROBE branch=[{branch}] type=[{type}] issue=[{issue}]\"\n",
+  );
+  std::fs::write(&cfg, body).expect("append a hook");
+
+  let expected = "GWM_PROBE branch=[feat/#1-wt] type=[feat] issue=[1]";
+
+  // No argument: the worktree is the current directory.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .arg("bootstrap")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(expected));
+
+  // An argument that is already a directory, from the main checkout.
+  // This one is not about where the command runs: the path was given
+  // outright and its branch was simply never looked up.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .arg("bootstrap")
+    .arg(&wt)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(expected));
+
+  // The fuzzy path already worked; it is here so a future change cannot
+  // fix the two above by breaking the one that was right.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["bootstrap", "feat-1"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(expected));
+}

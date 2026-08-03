@@ -121,6 +121,14 @@ fn assert_present(buf: &Buffer, needle: &str, what: &str) {
   );
 }
 
+fn assert_absent(buf: &Buffer, needle: &str, what: &str) {
+  assert!(
+    !buffer_contains(buf, needle),
+    "{what}: expected {needle:?} NOT to be rendered — buffer rows:\n{}",
+    row_strings(buf).join("\n")
+  );
+}
+
 #[test]
 fn worktrees_table_header_labels_the_issue_pr_badge_column() {
   // The worktree table's badge column (the `●/●` issue/PR pastilles) now
@@ -691,6 +699,525 @@ fn settings_tui_tab_keeps_the_selected_field_visible_on_a_short_terminal() {
       "selected field {field:?} ({label:?}) is off screen on a 24-line terminal — \
        the user can edit a row they cannot see.\nRendered:\n{}",
       rows.join("\n")
+    );
+  }
+}
+
+/// The hint row has to describe the mode that is on screen. Free-form has a
+/// single field and no type selector, so `field` and `type` advertise verbs
+/// that do nothing there — and `toggle_mode`, the only way between the two
+/// modes, was advertised by neither. Caught on the install-and-validate pass:
+/// the verb existed in the keymap and the help overlay but never reached the
+/// footer, which is where a user actually looks.
+#[test]
+fn the_create_hint_row_describes_the_mode_that_is_on_screen() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  let buf = render(&mut app);
+  assert_present(&buf, "free-form", "structured mode must advertise the way across");
+  assert_present(&buf, "field", "structured mode still rotates fields");
+
+  // Through the real key route, not `toggle_mode()` directly: the status
+  // line is part of what the user reads, and only the key handler updates
+  // it. Toggling the form behind its back would leave the structured
+  // message on screen and hide exactly the kind of mismatch this pins.
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  let buf = render(&mut app);
+  assert_present(&buf, "structured", "free-form must advertise the way back");
+
+  // Scoped to the overlay's own hint row — the row inside the modal box that
+  // carries `submit`. The status line legitimately says "back to
+  // type/issue/desc" as prose, and the worktree table behind the modal can
+  // hold anything; neither is the row under test.
+  let hint_row = row_strings(&buf)
+    .into_iter()
+    .find(|r| r.contains("submit") && r.contains('│'))
+    .expect("the create overlay renders a hint row inside its box");
+  for absent in ["field", "type"] {
+    assert!(
+      !hint_row.contains(absent),
+      "`{}` names a verb that does nothing in free-form mode — hint row: {}",
+      absent,
+      hint_row.trim()
+    );
+  }
+}
+
+/// Issue #416: free-form mode presents a single `Name` field and drops the
+/// inputs it has no notion of — the branch type selector and the issue
+/// number. Showing them inert would suggest they still apply.
+#[test]
+fn create_modal_in_freeform_mode_shows_only_the_name_field() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.toggle_mode();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "free-form", "the title states the active mode");
+  assert_present(&buf, "Name", "the free-form name field");
+  // The preview rows survive — they are what makes the resolved branch and
+  // directory legible while typing.
+  assert_present(&buf, "Branch", "branch preview label");
+  assert_present(&buf, "Dir", "dir preview label");
+
+  for absent in ["Issue", "Type"] {
+    assert!(
+      !buffer_contains(&buf, absent),
+      "`{}` has no meaning in free-form mode and must not be rendered — buffer rows:\n{}",
+      absent,
+      row_strings(&buf).join("\n")
+    );
+  }
+}
+
+/// Issue #417, found by validating the branch by hand. Both live previews
+/// hardcoded `<type>/#<issue>-<desc>` and `<type>-<issue>-<desc>` instead of
+/// expanding the repo's own `branch_pattern` / `path_pattern`, so under a
+/// custom pattern they promised names the repo would never create.
+///
+/// The rename case was the loud one: with `branch_pattern = "feat/#{issue}-{desc}"`,
+/// picking `docs` in the type selector previewed `docs/#42-x` while submit
+/// would have written `feat/#42-x`, since the pattern has no `{type}` to write
+/// into. A preview that disagrees with what submitting does is worse than no
+/// preview at all.
+#[test]
+fn the_create_preview_expands_this_repo_s_own_patterns() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wt/{type}-{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}_{desc}".into();
+  app.enter_create();
+  app.create_form.issue = "42".into();
+  app.create_form.desc = "cache".into();
+  let type_str = app.branch_types[app.create_form.type_index].name.clone();
+
+  let buf = render(&mut app);
+
+  assert_present(
+    &buf,
+    &format!("wt/{}-42-cache", type_str),
+    "the branch preview must come from branch_pattern",
+  );
+  assert_present(&buf, "42_cache", "the dir preview must come from path_pattern");
+}
+
+#[test]
+fn the_statusbar_follows_the_rename_modal_s_mode() {
+  // Codex review on PR #485. The modal's own footer tracked the mode while
+  // `hint_context()` still returned `Rename` unconditionally for `View::Edit`,
+  // so the statusbar behind it kept advertising `field` and `type` — two verbs
+  // free-form mode neither renders nor can act on, and this codebase's rule is
+  // to never name a key that does nothing. The create overlay already solves
+  // it with one source both read (#416); rename gets the same.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+
+  let buf = render(&mut app);
+  assert_absent(&buf, "↑/↓ type", "free-form has no type selector to advertise");
+  // The toggle hint names its *target* mode, so free-form advertises the way back.
+  assert_present(
+    &buf,
+    "structured",
+    "the toggle is the one verb the visible inputs cannot suggest",
+  );
+
+  app.create_form.toggle_mode();
+  let buf = render(&mut app);
+  assert_present(&buf, "↑/↓ type", "structured mode does have a type selector");
+  assert_present(&buf, "free-form", "and advertises the way across");
+}
+
+#[test]
+fn the_rename_preview_shows_a_free_form_name_verbatim() {
+  // Issue #479. In free-form mode no pattern is expanded at all: the branch IS
+  // the name, and the directory is that name flattened. A preview that kept
+  // expanding `branch_pattern` here would show a branch the submit will not
+  // write, which is exactly the defect found by hand on #476 one mode over.
+  // Preview and submit therefore derive from the same `WorktreeName`.
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+
+  // A `/` is legal in a free-form branch and has to flatten in the directory.
+  app.create_form.name = "spike/valkey".into();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "spike/valkey", "the branch preview is the name, verbatim");
+  assert_present(&buf, "spike-valkey", "the dir preview is the name, flattened");
+  assert!(
+    !buffer_contains(&buf, "#0-"),
+    "no pattern is expanded in free-form mode — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_rename_pr_warning_fires_on_a_free_form_rename_too() {
+  // The warning added for #481 compares the branch the submit would write
+  // against the current one. Free-form renames change the branch just as much
+  // as structured ones, so the comparison has to be fed the free-form target
+  // rather than a pattern expansion that never matches anything.
+  use gwm::github::PrState;
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("spike-redis");
+  wt.branch = Some("spike-redis".into());
+  wt.link.pr = Some(77);
+  wt.pr_state = Some(PrState::Open);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+
+  // Unchanged name: nothing is being renamed, so nothing is being closed.
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR #77", "an unchanged name renames nothing");
+
+  app.create_form.name = "spike-valkey".into();
+  let buf = render(&mut app);
+  assert_present(&buf, "closes PR #77", "a free-form rename closes the PR just the same");
+}
+
+#[test]
+fn the_rename_preview_expands_this_repo_s_own_patterns() {
+  let (_dir, mut app) = make_app();
+  // Freezes the type: whatever the selector says, the branch stays `feat/`.
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  // Move the type selector somewhere the pattern cannot write.
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("docs is configured");
+
+  let buf = render(&mut app);
+
+  assert_present(
+    &buf,
+    "feat/#42-login",
+    "the branch preview must be what branch_pattern would write",
+  );
+  assert!(
+    !buffer_contains(&buf, "docs/#42-login"),
+    "the preview must not offer a branch the pattern cannot write — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+/// The refusal has to fit. `TestBackend` hard-clips, so asserting the whole
+/// sentence is the clip guard: the first version ran to 87 characters and the
+/// modal cut it at "has no {type} to write," leaving the user with half a
+/// reason and no value.
+#[test]
+fn the_rename_refusal_fits_in_the_modal() {
+  // Both patterns freeze the type, which is what the refusal is now about: a
+  // `path_pattern` that writes `{type}` gives the new value a destination and
+  // the edit is allowed instead.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "fix-{issue}-{desc}".into();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("docs is configured");
+  app.submit_edit_worktree().expect("the refusal is a form failure");
+  let failure = app.edit_failure.clone().expect("refused");
+
+  let buf = render(&mut app);
+  assert_present(&buf, &failure, "the whole refusal, not the part that fits");
+}
+
+/// Issue #481. The remote half of a rename is `git push --atomic origin :<old>
+/// <new>:<new>`, a delete plus a create, and GitHub closes a pull request whose
+/// head branch is renamed. That is not something gwm can route around: GitHub's
+/// own rename endpoint retargets a PR whose *base* is the renamed branch and
+/// closes one whose head it is, and a worktree branch is always the head of its
+/// own PR. So the only honest protection is to say so before the push.
+///
+/// Live rather than one-shot, so it appears the moment the form would write a
+/// different branch and goes away when the user reverts.
+#[test]
+fn the_rename_modal_warns_before_a_branch_change_closes_an_open_pr() {
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  wt.link.pr = Some(476);
+  wt.pr_state = Some(gwm::github::PrState::Open);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  // Untouched: the submit would rewrite the same branch, so nothing is at risk.
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR #476", "an unchanged branch renames nothing");
+
+  app.create_form.desc = "login-v2".into();
+  let buf = render(&mut app);
+  assert_present(
+    &buf,
+    "closes PR #476",
+    "a branch change deletes the remote branch, which closes the PR",
+  );
+}
+
+/// The counterpart, and the reason the warning is tied to the *branch* rather
+/// than to the rename: an edit that only moves the directory returns from
+/// `rename_worktree` before it touches a single ref, local or remote, so the
+/// PR is never in danger and saying otherwise would train the user to ignore
+/// the line.
+#[test]
+fn the_rename_modal_stays_quiet_when_only_the_directory_moves() {
+  let (_dir, mut app) = make_app();
+  // Freezes every branch segment, so the branch cannot change; `path_pattern`
+  // still writes the description, so the directory can.
+  app.config.worktree.branch_pattern = "feat/#42-login".into();
+  app.config.worktree.path_pattern = "{type}-{issue}-{desc}".into();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  wt.link.pr = Some(476);
+  wt.pr_state = Some(gwm::github::PrState::Open);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  app.create_form.desc = "login-v2".into();
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR", "a path-only edit never touches a ref");
+}
+
+/// A merged or closed PR has nothing left to lose, so warning about it would be
+/// noise on the common case of renaming a branch after its PR landed.
+#[test]
+fn the_rename_modal_stays_quiet_about_a_pr_that_is_already_closed() {
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  wt.link.pr = Some(476);
+  wt.pr_state = Some(gwm::github::PrState::Merged);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+
+  app.create_form.desc = "login-v2".into();
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR", "a merged PR cannot be closed by a rename");
+}
+
+/// Issue #418. The overlay drew the canonical `Type` / `Issue` / `Desc` triple
+/// whatever the repo's patterns said, so a convention that writes no issue
+/// number was still shown a field for one — and `BranchSpec::validate_against`
+/// then refused to submit until it was filled with a value the patterns
+/// discard. The field set now comes from the patterns.
+#[test]
+fn the_create_modal_omits_a_field_the_patterns_never_write() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Type", "the pattern writes a type");
+  assert_present(&buf, "Desc", "and a description");
+  assert!(
+    !buffer_contains(&buf, "Issue"),
+    "no pattern carries {{issue}}, so no Issue field — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+/// `base` feeds the triple too (`BranchSpec::worktree_path` expands it), so a
+/// segment only `base` carries still names a real directory on disk and still
+/// has to be collected. A field set derived from the two obvious patterns
+/// would have dropped it.
+#[test]
+fn the_create_modal_keeps_a_field_only_the_base_path_writes() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt/{issue}".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Issue", "base writes the issue number into the path");
+}
+
+/// The rename modal draws the same set from the same place, so the two cannot
+/// disagree about which inputs exist — they used to hardcode the triple twice.
+#[test]
+fn the_rename_modal_omits_the_same_field_the_create_modal_does() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  let mut wt = deletable_worktree("foo");
+  wt.branch = Some("feat/my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, gwm::tui::View::Edit, "the rename form must open");
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Rename", "the rename modal is up");
+  assert_present(&buf, "Desc", "the pattern writes a description");
+  assert!(
+    !buffer_contains(&buf, "Issue"),
+    "no pattern carries {{issue}}, so no Issue field — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+/// Codex review on PR #492. Making the field set dynamic made two hint rows
+/// inert, and this codebase's rule is to never name a key that does nothing
+/// (the reason free-form drops the same two rows since #416). Introduced by
+/// #418, not pre-existing: before it, the structured form always presented the
+/// full triple, so both rows were always accurate.
+#[test]
+fn the_hint_row_drops_the_type_selector_when_no_pattern_carries_one() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_absent(&buf, "↑/↓", "no type selector is rendered, so its keys do nothing");
+  assert_present(&buf, "field", "two fields remain, so Tab still moves");
+}
+
+/// The other row: one field means `next_field` rotates within a one-element
+/// list, so Tab does nothing either.
+#[test]
+fn the_hint_row_drops_the_field_verb_when_the_pattern_presents_one_field() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wt/{desc}".into();
+  app.config.worktree.path_pattern = "{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  assert_eq!(app.create_form.fields().len(), 1);
+  let buf = render(&mut app);
+
+  assert_absent(&buf, "↑/↓", "no type selector either");
+  assert_absent(&buf, "field", "one field, so Tab is a no-op");
+  assert_present(&buf, "submit", "the verbs that still work stay");
+}
+
+/// And the canonical pattern is unchanged, so the fix cannot be a blanket
+/// removal of the two rows.
+#[test]
+fn the_hint_row_is_unchanged_on_the_canonical_pattern() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "↑/↓", "the default pattern has a type selector");
+  assert_present(&buf, "field", "and three fields to move between");
+}
+
+/// Codex review on PR #492, fifth pass, and the third finding of one class:
+/// a user-facing string that names a field the patterns do not present. Three
+/// passes each named one string, so this stops enumerating strings and
+/// enumerates the **property** instead.
+///
+/// **Invariant: on a repo whose patterns omit a segment, nothing the create or
+/// rename surface renders may name that segment.** That covers the modal body,
+/// its footer, and the statusbar behind it in one assertion, and it holds for
+/// strings nobody has written yet.
+#[test]
+fn no_create_surface_names_a_segment_the_patterns_omit() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::Mode;
+
+  // Each pattern set omits exactly one segment, so no single hardcoded string
+  // can pass all three.
+  for (branch, path, omitted) in [
+    ("{type}/{desc}", "{type}-{desc}", "issue"),
+    ("#{issue}-{desc}", "{issue}-{desc}", "type"),
+    ("{type}/#{issue}", "{type}-{issue}", "desc"),
+  ] {
+    for freeform in [false, true] {
+      let (_dir, mut app) = make_app();
+      app.config.worktree.branch_pattern = branch.into();
+      app.config.worktree.path_pattern = path.into();
+      app.config.worktree.base = "/tmp/wt".into();
+      app.apply_create_form_fields();
+      app.enter_create();
+      if freeform {
+        // Through the key handler, not `CreateForm::toggle_mode`: the status
+        // line is written by the handler, so calling the form method directly
+        // leaves the very string this test is about unexercised. (It did, on
+        // the first draft, and the test passed with the defect restored.)
+        app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.create_form.mode, Mode::Freeform);
+      }
+      let buf = render(&mut app);
+
+      assert!(
+        !buffer_contains(&buf, omitted),
+        "`{}` / `{}` (free-form: {}) writes no {{{}}}, but the surface names it — buffer rows:\n{}",
+        branch,
+        path,
+        freeform,
+        omitted,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+/// The degenerate end of the same rule: a pattern set with no editable token
+/// presents no field, so there is none to name. `last_field` falls back to
+/// `Type`, which the renderer is not drawing.
+#[test]
+fn an_all_literal_pattern_set_names_no_field_at_all() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wip".into();
+  app.config.worktree.path_pattern = "wip".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  assert!(app.create_form.fields().is_empty());
+
+  assert_eq!(app.status, "enter: submit — esc: cancel");
+  let buf = render(&mut app);
+  for absent in ["Type", "Issue", "Desc"] {
+    assert!(
+      !buffer_contains(&buf, absent),
+      "`{}` is not presented — buffer rows:\n{}",
+      absent,
+      row_strings(&buf).join("\n")
     );
   }
 }

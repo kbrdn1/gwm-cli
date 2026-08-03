@@ -4,6 +4,7 @@ use crate::error::{GwmError, Result};
 use crate::github;
 use crate::naming::BranchSpec;
 use git2::Repository;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -116,7 +117,12 @@ impl HookContext {
 
   pub fn for_worktree(repo: &Repository, main_repo: &Path, cwd: &Path, path: &Path, branch: Option<&str>) -> Self {
     let meta = RepoMeta::from_repo(repo);
-    let parsed = branch.and_then(crate::naming::parse_branch);
+    // Issue #417: the remove / bootstrap hook context rebuilds `{type}` /
+    // `{issue}` / `{desc}` by re-reading the branch, so it reads it with the
+    // pattern that wrote it. `for_create` does not come through here — it
+    // carries the original `BranchSpec` straight through.
+    let parser = crate::naming::BranchParser::for_repo(repo);
+    let parsed = branch.and_then(|b| parser.parse(b));
     Self {
       main_repo: main_repo.to_path_buf(),
       cwd: cwd.to_path_buf(),
@@ -227,7 +233,11 @@ fn steps_for(config: &Config, phase: HookPhase) -> Vec<HookStep> {
 }
 
 fn run_step(step: &HookStep, ctx: &HookContext) -> std::result::Result<String, String> {
-  let run = expand_placeholders(&step.run, ctx);
+  // `run` becomes a shell script, so its placeholder values are escaped;
+  // `env` values are handed to `Command::env` and never see a shell, so
+  // escaping them would push literal quote characters into what the hook
+  // reads back. Same placeholders, deliberately different treatment.
+  let run = expand_shell(&step.run, ctx);
   let env = step
     .env
     .iter()
@@ -235,6 +245,10 @@ fn run_step(step: &HookStep, ctx: &HookContext) -> std::result::Result<String, S
     .collect::<HashMap<_, _>>();
   let mut cmd = Command::new("sh");
   cmd.arg("-c").arg(&run).current_dir(&ctx.cwd);
+  // Exported before the step's own entries so an explicit `env` key wins.
+  for (key, value) in gwm_env(ctx) {
+    cmd.env(key, value);
+  }
   for (key, value) in env {
     cmd.env(key, value);
   }
@@ -251,16 +265,92 @@ fn run_step(step: &HookStep, ctx: &HookContext) -> std::result::Result<String, S
   Ok(detail)
 }
 
+/// Value behind a `{token}`, or `None` when the token is not one of ours —
+/// an unknown `{…}` is left in the template untouched, as it always was.
+fn placeholder_value<'a>(token: &str, ctx: &'a HookContext) -> Option<Cow<'a, str>> {
+  Some(match token {
+    "{branch}" => Cow::Borrowed(ctx.branch.as_str()),
+    "{path}" => Cow::Owned(ctx.path.display().to_string()),
+    "{type}" => Cow::Borrowed(ctx.branch_type.as_str()),
+    "{issue}" => Cow::Borrowed(ctx.issue.as_str()),
+    "{desc}" => Cow::Borrowed(ctx.desc.as_str()),
+    "{user}" => Cow::Borrowed(ctx.user.as_str()),
+    "{owner}" => Cow::Borrowed(ctx.owner.as_str()),
+    "{repo}" => Cow::Borrowed(ctx.repo.as_str()),
+    _ => return None,
+  })
+}
+
+/// Substitute the hook placeholders in `template`, in **one pass**.
+///
+/// Single-pass is a correctness requirement, not a tidiness one. Chained
+/// `str::replace` calls re-scan what the previous call just wrote, so a
+/// value that itself contains a token — a branch really can be called
+/// `spike-{issue}` — gets rewritten from the inside. With `escape` on, that
+/// would splice quote characters into the middle of another value.
+///
+/// `escape` is set when the result becomes a shell script. Placeholder
+/// values are **data**: the branch name is whatever git says it is, and a
+/// branch can arrive from a colleague's push or a fork PR, so it must not be
+/// able to close the hook's command and open its own.
+fn expand(template: &str, ctx: &HookContext, escape: bool) -> String {
+  let mut out = String::with_capacity(template.len());
+  let mut rest = template;
+  while let Some(open) = rest.find('{') {
+    out.push_str(&rest[..open]);
+    let tail = &rest[open..];
+    let Some(close) = tail.find('}') else {
+      // Unbalanced `{` — nothing left to substitute, keep it verbatim.
+      out.push_str(tail);
+      return out;
+    };
+    let token = &tail[..=close];
+    match placeholder_value(token, ctx) {
+      // An empty value has nothing to inject, and quoting it would change
+      // arity rather than safety: `quote("")` is `''`, so `mycmd {issue}`
+      // would start passing an argument where every release up to 1.5.0
+      // passed none — on any branch that does not match the convention,
+      // since `{type}` / `{issue}` / `{desc}` are empty there. Letting it
+      // through keeps this change's blast radius to the vulnerability
+      // itself, which is what a security patch owes the people applying it.
+      Some(value) if escape && !value.is_empty() => out.push_str(&shell_words::quote(&value)),
+      Some(value) => out.push_str(&value),
+      None => out.push_str(token),
+    }
+    rest = &tail[close + 1..];
+  }
+  out.push_str(rest);
+  out
+}
+
+/// Expansion for a value that never reaches a shell (a `Command::env` entry).
 fn expand_placeholders(template: &str, ctx: &HookContext) -> String {
-  template
-    .replace("{branch}", &ctx.branch)
-    .replace("{path}", &ctx.path.display().to_string())
-    .replace("{type}", &ctx.branch_type)
-    .replace("{issue}", &ctx.issue)
-    .replace("{desc}", &ctx.desc)
-    .replace("{user}", &ctx.user)
-    .replace("{owner}", &ctx.owner)
-    .replace("{repo}", &ctx.repo)
+  expand(template, ctx, false)
+}
+
+/// Expansion for a string that becomes `sh -c <script>`.
+fn expand_shell(template: &str, ctx: &HookContext) -> String {
+  expand(template, ctx, true)
+}
+
+/// The same context, exported as environment variables.
+///
+/// A hook that reads `"$GWM_BRANCH"` never has to think about escaping at
+/// all: shell parameter expansion does not re-parse the value it produces,
+/// so no substitution can start a second command. Quote it — the value is
+/// still subject to word splitting and pathname expansion when bare, and a
+/// branch may contain a tab, a newline or a `*`.
+fn gwm_env(ctx: &HookContext) -> [(&'static str, String); 8] {
+  [
+    ("GWM_BRANCH", ctx.branch.clone()),
+    ("GWM_PATH", ctx.path.display().to_string()),
+    ("GWM_TYPE", ctx.branch_type.clone()),
+    ("GWM_ISSUE", ctx.issue.clone()),
+    ("GWM_DESC", ctx.desc.clone()),
+    ("GWM_USER", ctx.user.clone()),
+    ("GWM_OWNER", ctx.owner.clone()),
+    ("GWM_REPO", ctx.repo.clone()),
+  ]
 }
 
 fn git_user(repo: &Repository) -> String {

@@ -18,7 +18,7 @@ use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::{parse_branch, BranchSpec};
+use crate::naming::{BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
 use crate::review;
@@ -182,14 +182,25 @@ pub enum Command {
   /// Create a new worktree (and matching branch).
   Create {
     /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
-    #[arg()]
-    branch_type: String,
+    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    branch_type: Option<String>,
     /// Issue number (digits only).
-    #[arg()]
-    issue: String,
+    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    issue: Option<String>,
     /// Short description (kebab-case, will be normalized).
-    #[arg()]
-    desc: String,
+    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    desc: Option<String>,
+    /// Name the worktree freely instead of using the <TYPE> <ISSUE> <DESC>
+    /// triple (issue #416), e.g. `gwm create --name spike-redis`. The name
+    /// becomes the branch verbatim; `branch_pattern` / `path_pattern` do not
+    /// apply because it has no `{type}` / `{issue}` / `{desc}` to expand.
+    /// Features that read the branch name back (issue auto-linking, gitmoji)
+    /// stay inactive on it — `gwm link` remains available.
+    ///
+    /// Exclusive with the positional triple: the mode is chosen explicitly,
+    /// never inferred from how many arguments were supplied.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["branch_type", "issue", "desc"])]
+    name: Option<String>,
     /// Skip bootstrap after creation.
     #[arg(long)]
     no_bootstrap: bool,
@@ -1038,6 +1049,7 @@ pub fn run(cli: Cli) -> Result<()> {
       branch_type,
       issue,
       desc,
+      name,
       no_bootstrap,
       reuse_branch,
       skip_hooks,
@@ -1051,6 +1063,7 @@ pub fn run(cli: Cli) -> Result<()> {
         branch_type,
         issue,
         desc,
+        name,
         no_bootstrap,
         reuse_branch,
         skip_hooks,
@@ -2604,9 +2617,10 @@ fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<Pa
 // of this dispatcher follows, so the arg count is deliberate here.
 #[allow(clippy::too_many_arguments)]
 fn cmd_create(
-  branch_type: String,
-  issue: String,
-  desc: String,
+  branch_type: Option<String>,
+  issue: Option<String>,
+  desc: Option<String>,
+  name: Option<String>,
   no_bootstrap: bool,
   reuse_branch: bool,
   skip_hooks: Option<String>,
@@ -2616,11 +2630,34 @@ fn cmd_create(
   let RepoContext { repo, workdir, config } = repo_context(start)?;
   let repo_name = worktree::repo_name(&repo);
 
-  let resolved_types = config.resolved_branch_types();
-  let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
-  let branch = spec.branch_name(&config.worktree, &repo_name)?;
-  let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
-  let target = spec.worktree_path(&config.worktree, &repo_name, &workdir)?;
+  // clap guarantees exactly one of the two shapes reaches here:
+  // `--name` conflicts with all three positionals, and each positional is
+  // `required_unless_present = "name"`, so a partial triple is rejected
+  // before dispatch rather than silently read as a free-form request.
+  let wt_name = match name {
+    Some(name) => WorktreeName::freeform(&name)?,
+    None => {
+      let resolved_types = config.resolved_branch_types();
+      let (branch_type, issue, desc) = match (branch_type, issue, desc) {
+        (Some(t), Some(i), Some(d)) => (t, i, d),
+        _ => {
+          return Err(GwmError::Other(
+            "`gwm create` needs <TYPE> <ISSUE> <DESC> or --name".into(),
+          ))
+        }
+      };
+      WorktreeName::Structured(BranchSpec::new_with_types(
+        branch_type,
+        issue,
+        desc,
+        &resolved_types.types,
+      )?)
+    }
+  };
+
+  let branch = wt_name.branch_name(&config.worktree, &repo_name)?;
+  let dirname = wt_name.worktree_dirname(&config.worktree, &repo_name)?;
+  let target = wt_name.worktree_path(&config.worktree, &repo_name, &workdir)?;
   let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
@@ -2633,7 +2670,17 @@ fn cmd_create(
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
 
-  let pre_ctx = HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, &spec);
+  // `for_worktree` derives the context by re-parsing the branch, exactly as
+  // a later `gwm remove` on the same worktree would, so the two phases
+  // agree. Note what that means: the placeholders resolve empty only when
+  // the name does not match the branch convention. `--name 'feat/#42-x'`
+  // parses, so its context populates — and that is right, because nothing
+  // downstream knows how a worktree was named, only what its branch is
+  // (Codex review on PR #474).
+  let pre_ctx = match &wt_name {
+    WorktreeName::Structured(spec) => HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, spec),
+    WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch)),
+  };
   let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
   print_lifecycle_report(&report);
 
@@ -2832,9 +2879,12 @@ fn cmd_new(
   println!("creating linked worktree for {}", branch);
 
   cmd_create(
-    spec.type_,
-    issue,
-    spec.desc,
+    Some(spec.type_),
+    Some(issue),
+    Some(spec.desc),
+    // `gwm new` always produces a structured worktree — it has just created
+    // the issue whose number the branch carries.
+    None,
     no_bootstrap,
     reuse_branch,
     skip_hooks,
@@ -2852,12 +2902,23 @@ const PR_FILES_CHANGED_MAX_LINES: usize = 30;
 
 fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context(None)?;
-  let head_name = current_branch(&repo)?;
-  let branch_spec = parse_branch(&head_name);
+  // Issue #477: from the invoking checkout, not from `repo` — that handle
+  // has walked back to the main working directory. Everything else below
+  // keeps using `repo`, which is what it wants.
+  let head_name = current_branch_at(None)?;
+  // Issue #417: `[pr_template.by_type]` selection and the body placeholders
+  // read the branch back, so they read it with this repo's own pattern.
+  let branch_spec = crate::naming::BranchParser::from_config(&config, &worktree::repo_name(&repo)).parse(&head_name);
 
+  // `.filter` and not just `.map`: since #417 a pattern with no `{type}` still
+  // parses, reporting the segments it *does* carry, so the type comes back
+  // empty rather than as a failed parse. An empty type selects no
+  // `[pr_template.by_type]` entry and renders `{type}` blank, which is exactly
+  // what this fallback exists to prevent.
   let branch_type = branch_spec
     .as_ref()
     .map(|s| s.type_.clone())
+    .filter(|t| !t.is_empty())
     .unwrap_or_else(|| "chore".into());
   let issue = branch_spec.as_ref().map(|s| s.issue.clone()).unwrap_or_default();
   let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();
@@ -3150,6 +3211,14 @@ fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode:
     }
     None => std::env::current_dir()?,
   };
+  // Issue #477: only the fuzzy arm above resolves a branch, off the worktree
+  // record. The other two left it `None`, so hooks received an empty
+  // `{branch}` / `{type}` / `{issue}` — the same defect as `pr` and
+  // `commit-prefix` with a quieter symptom. Read it from the target itself,
+  // which covers a path that was given outright as well as the CWD.
+  if worktree_branch.is_none() {
+    worktree_branch = current_branch_at(Some(&worktree_path)).ok();
+  }
   let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
@@ -3377,18 +3446,43 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
 }
 
 fn print_doctor_report(report: &doctor::DoctorReport) {
+  // Issue #473: several checks quote config-supplied strings in their detail
+  // (`base directory writable` renders `[worktree].base`, the guard checks
+  // name their entries). Neutralised here, at the single sink, rather than in
+  // each `Check::ok` / `failed` call, so a check added later is covered
+  // without anyone having to remember.
+  //
+  // A detail can span rows: `check_config_parses` puts `toml`'s whole
+  // caret-under-the-column diagnostic in it. Flattening that turned the output
+  // of the recovery command into `?  |?1 | [worktree?`, so line breaks survive
+  // here too. They are safe for the same reason they are safe in `main`: this
+  // printer owns the margin, and every row it emits is indented under the
+  // check that produced it.
+  let clean = crate::naming::sanitise_block_for_terminal;
+  let indented = |text: &str, first: &str| {
+    let cleaned = clean(text);
+    let mut lines = cleaned.split('\n');
+    let mut out = format!("{}{}", first, lines.next().unwrap_or_default());
+    for line in lines {
+      out.push_str("\n      ");
+      out.push_str(line);
+    }
+    out
+  };
   for c in &report.checks {
     let sigil = match c.status {
       CheckStatus::Ok => "✓",
       CheckStatus::Warning => "!",
       CheckStatus::Failed => "✗",
     };
-    println!("{} {}", sigil, c.name);
+    // The check name is a fixed label, never config text, but it shares the
+    // helper so a check that starts naming its subject cannot slip through.
+    println!("{} {}", sigil, crate::naming::sanitise_for_terminal(&c.name));
     if !c.detail.is_empty() {
-      println!("    {}", c.detail);
+      println!("{}", indented(&c.detail, "    "));
     }
     if let Some(hint) = &c.fix_hint {
-      println!("    → {}", hint);
+      println!("{}", indented(hint, "    → "));
     }
   }
 }
@@ -3426,8 +3520,15 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
   // When the gitmoji columns are active, align the shortcode column on
   // the widest shortcode (`:white_check_mark:`, currently 18 chars) so
   // the description column doesn't drift between rows.
+  // Issue #473: `description` (from `[[branch_types]]`) and the shortcodes
+  // (from `[gitmoji]`) are free text out of an unvetted `.gwm.toml`; `name` is
+  // not, it is already constrained to `^[a-z]+$` by `validate_branch_types`.
+  // Widths are measured on the neutralised strings so the columns still line
+  // up: a replaced C1 control character is two bytes narrower than the one
+  // it replaced.
+  let clean = crate::naming::sanitise_for_terminal;
   let sc_width = match &gitmoji_map {
-    Some(map) => map.iter().map(|(_, sc)| sc.len()).max().unwrap_or(0).max(10),
+    Some(map) => map.iter().map(|(_, sc)| clean(sc).len()).max().unwrap_or(0).max(10),
     None => 0,
   };
 
@@ -3437,20 +3538,20 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
         // Two extra columns: unicode glyph (1 cell wide, padded for
         // BMP code points; emoji ZWJ sequences would break alignment
         // but our built-in set is all single-glyph) + shortcode.
-        let shortcode = map.get(&t.name).unwrap_or(":question:");
-        let unicode = gitmoji::shortcode_to_unicode(shortcode);
+        let shortcode = clean(map.get(&t.name).unwrap_or(":question:"));
+        let unicode = gitmoji::shortcode_to_unicode(&shortcode);
         println!(
           "  {:<width$}  {}  {:<sw$}  {}",
           t.name,
           unicode,
           shortcode,
-          t.description,
+          clean(&t.description),
           width = width,
           sw = sc_width,
         );
       }
       None => {
-        println!("  {:<width$}  {}", t.name, t.description, width = width);
+        println!("  {:<width$}  {}", t.name, clean(&t.description), width = width);
       }
     }
   }
@@ -3466,9 +3567,10 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
 fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<()> {
   // Two resolution paths: an explicit `--branch <name>` (no repo
   // *required* — useful for scripted contexts outside a repo) and
-  // the implicit "use HEAD" branch (requires a repo). Both go
-  // through `parse_branch` so the prefix shape stays canonical
-  // regardless of entry point.
+  // the implicit "use HEAD" branch (requires a repo). Both go through the
+  // same parser so the prefix shape stays canonical regardless of entry
+  // point — the repo's own where there is a repo, the built-in pattern
+  // otherwise (issue #417).
   //
   // For BOTH paths we still attempt repo discovery so the workdir
   // handle is fed into `gitmoji::load` — this is what makes
@@ -3478,36 +3580,98 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
   // are silently downgraded to "no workdir" so the `--branch` form
   // still works outside a git checkout — that's the whole point of
   // the explicit-branch entry point.
-  let (workdir, branch_name) = match branch_override {
+  // `repo_name` rides along for issue #417: `{repo}` is a legal token in
+  // `worktree.branch_pattern`, so compiling the parser needs the same name
+  // the formatter used.
+  let (workdir, repo_name, branch_name) = match branch_override {
     Some(name) => {
       // Best-effort discovery: outside a repo the user passed
       // `--branch` precisely because there's no HEAD to read; we
       // must not fail here. Inside a repo we want the workdir so
       // `.gwm.toml` overrides apply.
-      let workdir = worktree::discover_repo(None)
-        .ok()
-        .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
-      (workdir, name)
+      let repo = worktree::discover_repo(None).ok();
+      let workdir = repo.as_ref().and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+      (workdir, repo.as_ref().map(worktree::repo_name), name)
     }
     None => {
       let repo = worktree::discover_repo(None)?;
       let wd = repo.workdir().map(|w| w.to_path_buf());
-      let name = current_branch(&repo)?;
-      (wd, name)
+      // Issue #477: the workdir and the repo name come from the main
+      // checkout, because that is where `.gwm.toml` lives and what `{repo}`
+      // expands to. The branch does not: the bundled `commit-msg` hook runs
+      // this with git's working directory inside the worktree, so reading
+      // `repo`'s HEAD prefixed every commit made from a worktree with
+      // whatever the main checkout happened to be sitting on.
+      let name = current_branch_at(None)?;
+      (wd, Some(worktree::repo_name(&repo)), name)
     }
   };
 
-  let spec = parse_branch(&branch_name).ok_or_else(|| {
+  // Issue #417: the branch was written by expanding this repo's
+  // `worktree.branch_pattern`, so it is read back by a parser compiled from
+  // that same pattern — otherwise a repo that customised it gets no prefix
+  // for branches gwm itself created. Outside a checkout there is no config to
+  // consult and the built-in shape is all `--branch` can mean.
+  let config = workdir.as_deref().and_then(|wd| Config::load_for_repo(wd).ok());
+  let parser = match (config.as_ref(), repo_name.as_deref()) {
+    (Some(cfg), Some(repo)) => crate::naming::BranchParser::from_config(cfg, repo),
+    _ => crate::naming::BranchParser::builtin().clone(),
+  };
+  // Neutralised before it is ever quoted: `branch_pattern` is repo-supplied
+  // and this command does not go through the trust gate, so an unvetted
+  // `.gwm.toml` must not get a terminal escape channel out of an error message
+  // (Codex review on PR #476).
+  let pattern = crate::naming::sanitise_for_terminal(
+    &config
+      .as_ref()
+      .map(|c| c.worktree.branch_pattern.clone())
+      .unwrap_or_else(crate::config::default_branch_pattern),
+  );
+
+  // Issue #416: a free-form branch reaches here legitimately. This command
+  // exists solely to derive a prefix from the branch *type* and issue, and a
+  // name the user chose has neither — there is no honest default to fall back
+  // to, so it stays an error. The message says the shape is unavailable
+  // rather than implying the branch is wrong.
+  let spec = parser.parse(&branch_name).ok_or_else(|| {
     GwmError::Other(format!(
-      "branch '{}' does not follow the gwm convention <type>/#<issue>-<slug> — \
-       cannot derive a commit prefix from it",
-      branch_name
+      "branch '{}' does not match this repo's branch pattern `{}`, so it carries no branch type to \
+       read — a commit prefix is derived from one, and a free-form branch has none. Pass --branch \
+       <name written by the pattern>, or write the prefix by hand",
+      branch_name, pattern
     ))
   })?;
 
+  // Issue #417: a pattern that carries no `{type}` or `{issue}` *and* freezes
+  // neither as a literal — `{type}/{desc}`, `{issue}-{desc}` — parses
+  // perfectly and yields an empty segment. Rendering `resolve_prefix` from
+  // that prints ` (#):`, a broken prefix shipped as a success straight into a
+  // commit message. A pattern that hardcodes one (`feat/#{issue}-{desc}`) does
+  // not land here: the literal is recovered, so the prefix is right.
+  if spec.type_.is_empty() || spec.issue.is_empty() {
+    let want = match (spec.type_.is_empty(), spec.issue.is_empty()) {
+      // `and`, not `or`: a prefix needs both, so adding one placeholder on the
+      // strength of this message would leave the command failing (Codex review
+      // on PR #476).
+      (true, true) => "`{type}` and `{issue}`",
+      (true, false) => "`{type}`",
+      _ => "`{issue}`",
+    };
+    return Err(GwmError::Other(format!(
+      "this repo's branch pattern `{}` carries no {}, so branch '{}' has none to read — a commit \
+       prefix is built from the branch type and issue number. Add {} to worktree.branch_pattern, \
+       or write the prefix by hand",
+      pattern, want, branch_name, want
+    )));
+  }
+
   let map = gitmoji::load(workdir.as_deref())?;
   let prefix = gitmoji::resolve_prefix(&map, &spec, unicode);
-  println!("{}", prefix);
+  // Issue #473: the prefix is assembled from `[gitmoji]` shortcodes read out
+  // of `.gwm.toml`, and this command is ungated by design: shell prompts and
+  // the bundled commit-msg hook call it on every commit, in whatever repo the
+  // user happens to be sitting in.
+  println!("{}", crate::naming::sanitise_for_terminal(&prefix));
   Ok(())
 }
 
@@ -3666,6 +3830,36 @@ fn resolve_target_repo(worktree: Option<String>) -> Result<(Repository, String, 
   let repo = Repository::discover(&path).map_err(|_| GwmError::NotInGitRepo)?;
   let branch = current_branch(&repo)?;
   Ok((repo, branch, path))
+}
+
+/// The branch checked out *at* `start`, or at the current directory when
+/// `start` is `None`.
+///
+/// Issue #477. [`worktree::discover_repo`] deliberately walks back to the
+/// main working directory when it lands inside a linked worktree, which is
+/// what every command operating on the whole worktree **set** needs: `list`,
+/// `remove`, `switch`, `prune` all want the one handle that knows about all
+/// of them. Asking that handle "which branch am I on" answers for the main
+/// checkout instead, so `gwm commit-prefix` run by the bundled `commit-msg`
+/// hook — which git invokes with the working directory inside the worktree —
+/// derived its prefix from whatever the main checkout was sitting on.
+///
+/// So this discovers without the walk-back. It is deliberately *not* a
+/// replacement for `repo_context`: `.gwm.toml`, the workdir and
+/// [`worktree::repo_name`] all still want the main repo, and `{repo}` is a
+/// legal token in `branch_pattern`, so widening this to the whole context
+/// would compile the branch parser with the worktree directory's name and
+/// stop reading branches gwm itself wrote. Only the branch moves.
+///
+/// [`resolve_target_repo`] already had the right shape, which is why
+/// `gwm status` reported the right branch from the same directory all along.
+fn current_branch_at(start: Option<&Path>) -> Result<String> {
+  let from = match start {
+    Some(p) => p.to_path_buf(),
+    None => std::env::current_dir()?,
+  };
+  let repo = Repository::discover(&from).map_err(|_| GwmError::NotInGitRepo)?;
+  current_branch(&repo)
 }
 
 fn current_branch(repo: &Repository) -> Result<String> {
@@ -4077,14 +4271,33 @@ fn labels_forge(config: &Config) -> Result<std::sync::Arc<dyn forge::Forge>> {
 }
 
 fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) {
+  for line in labels_diff_lines(slug, declared, diff) {
+    println!("{}", line);
+  }
+}
+
+/// The rows `gwm labels list` / `push --dry-run` print, as values (issue
+/// #473). Same seam and same reason as [`milestones_diff_lines`].
+///
+/// A declared `name` is the least exposed field here: `labels::
+/// validate_label_name` already rejects it at load. But it rejects
+/// `is_ascii_control` only, which leaves the C1 range (U+0080..U+009F, CSI
+/// among them) through, and `remote.name` / `slug` come off the forge rather
+/// than the config and are validated by nobody.
+pub fn labels_diff_lines(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) -> Vec<String> {
+  let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
-  println!(
+  let mut lines = vec![format!(
     "declared in .gwm.toml: {} labels — diff against {}:",
     declared.len(),
-    slug
-  );
+    clean(slug)
+  )];
   for spec in &diff.to_create {
-    println!("  + {:<20} (will create — color #{})", spec.name, spec.color);
+    lines.push(format!(
+      "  + {:<20} (will create, color #{})",
+      clean(&spec.name),
+      clean(&spec.color)
+    ));
   }
   for upd in &diff.to_update {
     let detail = match (&upd.previous_color, &upd.previous_description) {
@@ -4092,15 +4305,16 @@ fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDif
       (None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
     };
-    println!("  ~ {:<20} ({})", upd.spec.name, detail);
+    lines.push(format!("  ~ {:<20} ({})", clean(&upd.spec.name), clean(&detail)));
   }
   for spec in &diff.matching {
-    println!("  = {:<20} (match)", spec.name);
+    lines.push(format!("  = {:<20} (match)", clean(&spec.name)));
   }
   for remote in &diff.extra_on_remote {
-    println!("  - {:<20} (on remote, not in config)", remote.name);
+    lines.push(format!("  - {:<20} (on remote, not in config)", clean(&remote.name)));
   }
-  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines.push(labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines
 }
 
 // ---- Milestones commands (issue #82) ------------------------------------
@@ -4192,20 +4406,35 @@ fn load_milestones_config() -> Result<Config> {
 }
 
 fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) {
+  for line in milestones_diff_lines(slug, declared, diff) {
+    println!("{}", line);
+  }
+}
+
+/// The rows `gwm milestones list` / `push --dry-run` print, as values rather
+/// than `println!` side effects (issue #473).
+///
+/// A value because the printer is only reachable after a live forge round
+/// trip (`fetch_remote_milestones`), so there is no way to assert on it from a
+/// test without mocking `gh`. Unlike a label name, a milestone `title` is free
+/// text that nothing validates on load, and `gwm milestones list` reads
+/// `.gwm.toml` without the trust gate.
+pub fn milestones_diff_lines(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) -> Vec<String> {
+  let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
-  println!(
+  let mut lines = vec![format!(
     "declared in .gwm.toml: {} milestones — diff against {}:",
     declared.len(),
-    slug
-  );
+    clean(slug)
+  )];
   for spec in &diff.to_create {
     let due = spec.due_on.as_deref().unwrap_or("no due date");
-    println!(
-      "  + {:<20} (will create — state {}, due {})",
-      spec.title,
+    lines.push(format!(
+      "  + {:<20} (will create, state {}, due {})",
+      clean(&spec.title),
       spec.state.as_str(),
-      due
-    );
+      clean(due)
+    ));
   }
   for upd in &diff.to_update {
     let detail = match (&upd.previous_due_on, &upd.previous_state, &upd.previous_description) {
@@ -4214,15 +4443,20 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
       (None, None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
     };
-    println!("  ~ {:<20} ({})", upd.spec.title, detail);
+    lines.push(format!("  ~ {:<20} ({})", clean(&upd.spec.title), clean(&detail)));
   }
   for spec in &diff.matching {
-    println!("  = {:<20} (match)", spec.title);
+    lines.push(format!("  = {:<20} (match)", clean(&spec.title)));
   }
   for remote in &diff.extra_on_remote {
-    println!("  - {:<20} (#{} on remote, not in config)", remote.title, remote.number);
+    lines.push(format!(
+      "  - {:<20} (#{} on remote, not in config)",
+      clean(&remote.title),
+      remote.number
+    ));
   }
-  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines.push(labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines
 }
 
 // ---- Trust ledger commands (issue #95) ----------------------------------
@@ -4249,10 +4483,16 @@ fn cmd_trust_list() -> Result<()> {
     ledger.entries.len(),
     if ledger.entries.len() == 1 { "y" } else { "ies" }
   );
+  // Issue #473, Codex pass 2: `trust show` cats the ledger file, where TOML
+  // has already escaped any control byte in a value, but `load` DECODES it, so
+  // every command that reads the ledger back through `TrustLedger` handles the
+  // real character. `origin` is a remote URL that arrived with a clone, and
+  // this listing is exactly what someone runs to audit what they trusted.
+  let clean = crate::naming::sanitise_for_terminal;
   let origin_w = ledger
     .entries
     .iter()
-    .map(|e| e.origin.len())
+    .map(|e| clean(&e.origin).len())
     .max()
     .unwrap_or(6)
     .clamp(6, 60);
@@ -4265,10 +4505,10 @@ fn cmd_trust_list() -> Result<()> {
     let short_sha: String = e.config_sha.chars().take(12).collect();
     println!(
       "  {:<ow$}  {}  trusted_at {}  by {}",
-      e.origin,
-      short_sha,
+      clean(&e.origin),
+      clean(&short_sha),
       e.trusted_at.to_rfc3339(),
-      e.trusted_by,
+      clean(&e.trusted_by),
       ow = origin_w,
     );
   }
@@ -4279,8 +4519,11 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
   let path = trust::default_ledger_path()?;
   let mut ledger = TrustLedger::load(&path)?;
   let removed = ledger.revoke(&origin);
+  // Echoed back rather than read from the ledger, but it lands in the same
+  // terminal and costs one call (issue #473).
+  let shown = crate::naming::sanitise_for_terminal(&origin);
   if removed == 0 {
-    println!("0 entries matched origin {} (nothing to revoke).", origin);
+    println!("0 entries matched origin {} (nothing to revoke).", shown);
     return Ok(());
   }
   ledger.save(&path)?;
@@ -4288,7 +4531,7 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
     "✓ revoked {} entr{} for {}",
     removed,
     if removed == 1 { "y" } else { "ies" },
-    origin
+    shown
   );
   Ok(())
 }
@@ -4302,7 +4545,12 @@ fn cmd_trust_add() -> Result<()> {
   match trust::record_config(&workdir, &key, &trust::current_actor())? {
     Some(sha) => {
       let short: String = sha.chars().take(12).collect();
-      println!("✓ trusted {} (.gwm.toml {})", key, short);
+      // `key` is the repo's origin URL (issue #473).
+      println!(
+        "✓ trusted {} (.gwm.toml {})",
+        crate::naming::sanitise_for_terminal(&key),
+        short
+      );
       Ok(())
     }
     None => Err(GwmError::Other(format!(
@@ -4317,6 +4565,10 @@ fn cmd_trust_show() -> Result<()> {
   println!("ledger path: {}", path.display());
   match std::fs::read_to_string(&path) {
     Ok(body) => {
+      // Issue #473: the ledger records one origin key per trusted repo, and
+      // an origin is a remote URL that arrived with a clone. Block variant,
+      // the ledger is a file and its rows are its shape.
+      let body = crate::naming::sanitise_block_for_terminal(&body);
       println!("---");
       print!("{}", body);
       if !body.ends_with('\n') {
@@ -4387,7 +4639,11 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 
       ledger.record(&origin, &sha, &trust::current_actor());
       ledger.save(&ledger_path)?;
-      println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
+      println!(
+        "✓ recorded trust for {} in {}",
+        crate::naming::sanitise_for_terminal(&origin),
+        ledger_path.display()
+      );
       Ok(())
     }
   }
@@ -4412,7 +4668,10 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
   println!();
   println!("gwm: this repo's .gwm.toml has not been trusted yet.");
   println!("     path   : {}", cfg_path.display());
-  println!("     origin : {}", origin);
+  // Issue #473: `origin` is a remote URL out of `.git/config`, which travels
+  // with a clone just like `.gwm.toml` does. Nothing here has been vetted yet
+  // That is what the prompt below is asking.
+  println!("     origin : {}", crate::naming::sanitise_for_terminal(origin));
   println!("     hash   : {}", sha);
   if let Some(cfg) = parsed.as_ref() {
     print_bootstrap_summary(cfg);
@@ -4434,6 +4693,11 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
       "y" | "yes" => return Ok(true),
       "n" | "no" | "" => return Ok(false),
       "show" | "s" => {
+        // Issue #473: the block variant, because this IS the file and its
+        // line breaks are its shape. Neutralising the rest is not "breaking
+        // raw": an escape sequence buried in the body defeats the very
+        // inspection `show` exists to provide.
+        let body = crate::naming::sanitise_block_for_terminal(&body);
         println!("---");
         print!("{}", body);
         if !body.ends_with('\n') {
@@ -4442,36 +4706,59 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
         println!("---");
       }
       other => {
-        println!("unrecognised answer '{}' — answer y, N, or show", other);
+        println!(
+          "unrecognised answer '{}': answer y, N, or show",
+          crate::naming::sanitise_for_terminal(other)
+        );
       }
     }
   }
 }
 
 fn print_bootstrap_summary(cfg: &Config) {
+  for line in bootstrap_summary_lines(cfg) {
+    println!("{}", line);
+  }
+}
+
+/// The lines the TOFU prompt shows for an **untrusted** `.gwm.toml`, as
+/// values rather than as `println!` side effects (issue #473).
+///
+/// A value so the highest-stakes echo in the binary can be asserted on
+/// without driving a PTY: this summary is rendered immediately above
+/// `Trust this .gwm.toml? [y/N/show]:`, from a file the user has by
+/// definition not vetted, and it is the only thing standing between them
+/// and a `[[bootstrap.command]]` that runs arbitrary shell.
+pub fn bootstrap_summary_lines(cfg: &Config) -> Vec<String> {
   let bs = &cfg.bootstrap;
   if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
-    println!("     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)");
-    return;
+    return vec!["     bootstrap surface: (empty, no copies/commands/guards/no_symlinks declared)".to_string()];
   }
-  println!("     bootstrap surface:");
+  // Issue #473: every field below is verbatim text from a file the user has
+  // NOT trusted, which is the whole premise of the prompt this feeds. Left
+  // raw, `\u{1b}[1A\u{1b}[2K` in a `[[bootstrap.command]]` name walks the
+  // cursor up and erases the row above, so the malicious `run` line can
+  // delete the very evidence the summary exists to show.
+  let clean = crate::naming::sanitise_for_terminal;
+  let mut lines = vec!["     bootstrap surface:".to_string()];
   for c in &bs.copy {
-    println!("       - copy   {} → {}", c.from, c.to);
+    lines.push(format!("       - copy   {} → {}", clean(&c.from), clean(&c.to)));
   }
   for g in &bs.guard {
-    println!(
+    lines.push(format!(
       "       - guard  {} (on_match={}, deny={} pattern(s))",
-      g.name,
+      clean(&g.name),
       g.on_match,
       g.deny_patterns.len()
-    );
+    ));
   }
   for ns in &bs.no_symlink {
-    println!("       - no-symlink {}", ns.path);
+    lines.push(format!("       - no-symlink {}", clean(&ns.path)));
   }
   for c in &bs.command {
-    println!("       - run    {} ({})", c.name, c.run);
+    lines.push(format!("       - run    {} ({})", clean(&c.name), clean(&c.run)));
   }
+  lines
 }
 
 // ---- Aliases commands (issue #86) ---------------------------------------
@@ -4523,6 +4810,13 @@ fn cmd_aliases_list() -> Result<()> {
 
   let resolved = crate::aliases::load(repo_workdir.as_deref(), None)?;
 
+  // Issue #473: repo and user alias tables are arbitrary key/value text from
+  // a `.gwm.toml` this command reads WITHOUT the trust gate: auditing an
+  // unfamiliar repo's aliases before running anything is exactly what it is
+  // for. Built-ins are compiled in and need no cleaning, but they share the
+  // helper so a future built-in read from a file cannot slip through.
+  let clean = crate::naming::sanitise_for_terminal;
+
   // built-in section ---------------------------------------------------
   println!("built-in:");
   if resolved.built_in.is_empty() {
@@ -4530,7 +4824,7 @@ fn cmd_aliases_list() -> Result<()> {
   } else {
     let width = resolved.built_in.iter().map(|e| e.name.len()).max().unwrap_or(2).max(2);
     for e in &resolved.built_in {
-      println!("  {:<width$} → {}", e.name, e.expansion, width = width);
+      println!("  {:<width$} → {}", clean(e.name), clean(e.expansion), width = width);
     }
   }
 
@@ -4541,9 +4835,9 @@ fn cmd_aliases_list() -> Result<()> {
   } else if resolved.repo.is_empty() {
     println!("  (none declared)");
   } else {
-    let width = resolved.repo.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    let width = resolved.repo.keys().map(|k| clean(k).len()).max().unwrap_or(2).max(2);
     for (name, expansion) in &resolved.repo {
-      println!("  {:<width$} → {}", name, expansion, width = width);
+      println!("  {:<width$} → {}", clean(name), clean(expansion), width = width);
     }
   }
 
@@ -4556,13 +4850,22 @@ fn cmd_aliases_list() -> Result<()> {
   if resolved.user.is_empty() {
     println!("  (none declared)");
   } else {
-    let width = resolved.user.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    let width = resolved.user.keys().map(|k| clean(k).len()).max().unwrap_or(2).max(2);
     for (name, expansion) in &resolved.user {
       // Mark entries shadowed by a repo declaration so the user can
       // see why a `gwm <name>` does not pick up the user expansion.
+      // Shadowing is probed on the raw name, which is the identity the
+      // resolver matches on, and two distinct names must not look shadowed
+      // just because they neutralise to the same string.
       let shadowed = resolved.repo.contains_key(name);
       let suffix = if shadowed { "  (shadowed by repo)" } else { "" };
-      println!("  {:<width$} → {}{}", name, expansion, suffix, width = width);
+      println!(
+        "  {:<width$} → {}{}",
+        clean(name),
+        clean(expansion),
+        suffix,
+        width = width
+      );
     }
   }
 

@@ -1226,3 +1226,84 @@ fn the_forge_cli_probe_honours_the_gwm_gh_override() {
     c.detail
   );
 }
+
+/// Issue #415: a `worktree.branch_pattern` gwm cannot read back silently
+/// disables every feature that re-parses a branch name, so `gwm doctor`
+/// states the limitation instead of leaving it silent.
+///
+/// Issue #417 derived the parser from the pattern, which shrank the set this
+/// applies to: `{type}-{issue}-{desc}` was the example here and round-trips
+/// now. A `~`-leading pattern is what still reaches the "everything inactive"
+/// verdict, because the writer ends with a tilde expansion the reader cannot
+/// undo.
+#[test]
+fn a_branch_pattern_nothing_reads_back_warns_that_the_parser_is_blind() {
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"~/{type}/#{issue}-{desc}\"\n",
+  )
+  .unwrap();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("branch_pattern"))
+    .expect("expected a `branch_pattern` check in the report");
+
+  assert_eq!(check.status, CheckStatus::Warning);
+  // The message has to name the consequence, not just the divergence —
+  // the whole point is connecting cause to effect.
+  for expected in ["auto-linking", "gitmoji", "branch-convention"] {
+    assert!(
+      check.detail.contains(expected),
+      "warning should name the '{}' consequence, got: {}",
+      expected,
+      check.detail
+    );
+  }
+}
+
+#[test]
+fn default_branch_pattern_does_not_warn() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("branch_pattern"))
+    .expect("expected a `branch_pattern` check in the report");
+
+  assert_eq!(check.status, CheckStatus::Ok);
+}
+
+/// Issue #415 (Codex review): `repo_context_lenient` hands `doctor` a
+/// `Config::default()` when the on-disk config fails to load for an
+/// unrelated semantic reason. Reading `ctx.config` would then report the
+/// default pattern as fine while the file on disk carries a broken one —
+/// a false `✓` from the very check that exists to stop silent failures.
+/// Re-derive from disk, as `check_tui_keymap` already does.
+#[test]
+fn branch_pattern_check_reads_the_on_disk_config_not_the_lenient_fallback() {
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"~/{type}/#{issue}-{desc}\"\n",
+  )
+  .unwrap();
+  // What `repo_context_lenient` would have handed us after a load failure.
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("branch_pattern"))
+    .expect("expected a `branch_pattern` check in the report");
+
+  assert_eq!(check.status, CheckStatus::Warning);
+}

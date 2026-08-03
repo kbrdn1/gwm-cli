@@ -16,7 +16,7 @@ use crate::error::{GwmError, Result};
 use crate::forge::{self, Forge, ForgeKind};
 use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
-use crate::naming::parse_branch;
+use crate::naming::BranchParser;
 use git2::Repository;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
@@ -137,7 +137,19 @@ impl BranchLink {
 }
 
 /// Read the link for `branch`. Explicit overrides win over branch-name auto-detect.
+///
+/// The branch-name half is read with a parser compiled from this repo's own
+/// `worktree.branch_pattern` (issue #417), which is what keeps auto-linking
+/// alive in a repo that customised it. Deriving the parser reads `.gwm.toml`
+/// and compiles a regex, so anything looping over branches should hoist that
+/// out and call [`read_link_with`] instead.
 pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
+  read_link_with(repo, branch, &BranchParser::for_repo(repo))
+}
+
+/// [`read_link`] with the branch parser supplied by the caller, for loops that
+/// would otherwise re-read `.gwm.toml` once per branch.
+pub fn read_link_with(repo: &Repository, branch: &str, parser: &BranchParser) -> Result<BranchLink> {
   // Numbers stamped against another instance are dropped before they are
   // resolved (Codex review #458). Only the *persisted* values go: the
   // issue parsed out of the branch name is the user's own naming and
@@ -197,7 +209,7 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
 
   let (issue, issue_source) = match explicit_issue {
     Some(n) => (Some(n), LinkSource::Explicit),
-    None => match parse_branch(branch).and_then(|s| s.issue.parse::<u64>().ok()) {
+    None => match parser.parse(branch).and_then(|s| s.issue.parse::<u64>().ok()) {
       Some(n) => (Some(n), LinkSource::BranchName),
       None => (None, LinkSource::None),
     },
