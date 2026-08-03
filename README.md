@@ -112,6 +112,12 @@ The [`docs/README.md`](docs/README.md) page documents the authoring conventions 
 
 gwm started as a Rust rewrite of `tools/worktree-manager.sh` — a bash script tied to one team's Laravel stack and one repo's incident history. The Rust version keeps the lessons, makes them configurable per repo, and ships as a single binary so it works in every repo without per-project shell-script copies. Full background under [Development → Contributing → history](docs/6.development/2.contributing.md#history).
 
+## sponsor
+
+gwm is MIT and built on personal time. If it saves you some of yours, you can support it through [GitHub Sponsors](https://github.com/sponsors/kbrdn1).
+
+Sponsoring buys nothing in particular: no priority support, no roadmap influence, no private builds. It pays for the time that goes into the release pipeline, the docs tree and the issue queue. Reporting a bug, sending a PR or packaging gwm for a channel it does not reach yet helps just as much.
+
 ## license
 
 MIT — see [LICENSE.md](LICENSE.md).
