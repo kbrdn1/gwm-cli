@@ -2230,3 +2230,45 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
     );
   }
 }
+
+/// Codex review on PR #492, third pass. `expand_placeholders` substitutes
+/// `{repo}` / `{home}` first and then substitutes what those expansions
+/// produced, so a repo literally named `api-{type}` makes `{repo}/{desc}` write
+/// a branch carrying a type that the raw template never mentions.
+/// `editable_segments` scans the raw template, so it does not see it.
+///
+/// The gap is real and it is **bounded by a loud failure that already ships**:
+/// #417's compiler refuses exactly this class, and `branch_pattern_warning` is
+/// the predicate `gwm doctor` and `gwm config validate` both consume. gwm
+/// declares such a repo's pattern unusable before the form is ever opened, and
+/// the message names the cause.
+///
+/// This test is what keeps that true. If the compiler ever starts accepting a
+/// pattern whose expansion carries a token, the field set becomes silently
+/// wrong on it and this goes red.
+#[test]
+fn a_pattern_whose_expansion_carries_a_token_is_refused_before_the_form_sees_it() {
+  let repo = "api-{type}";
+  let pattern = "{repo}/{desc}";
+  let types = gwm::naming::default_branch_types();
+
+  // The mechanism, measured: the formatter really does write a type here.
+  assert_eq!(
+    gwm::config::expand_placeholders(pattern, repo, Some("fix"), Some("42"), Some("foo"), None).unwrap(),
+    "api-fix/foo"
+  );
+  // And the raw scan really does miss it.
+  assert_eq!(gwm::naming::editable_segments(&[pattern]), ["desc"]);
+
+  // Which is survivable only because gwm refuses the pattern outright.
+  assert!(
+    BranchParser::compile(pattern, repo, &types).is_err(),
+    "the compiler must keep refusing an expansion that carries a token"
+  );
+  let warning = gwm::naming::branch_pattern_warning(pattern, repo, &types).expect("doctor must report it");
+  assert!(
+    warning.contains("expands to text containing another placeholder"),
+    "and must keep naming the cause: {}",
+    warning
+  );
+}

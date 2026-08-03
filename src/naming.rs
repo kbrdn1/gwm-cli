@@ -90,6 +90,18 @@ const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 /// [`BranchParser::compile`]'s stricter contract: the compiler refuses a
 /// repeated capturing token, but `expand_placeholders` is a chain of
 /// `str::replace` and substitutes every occurrence quite happily.
+///
+/// ⚠️ **Precondition: the patterns must be ones [`BranchParser::compile`]
+/// accepts.** This reads the *raw* template, while `expand_placeholders`
+/// substitutes `{repo}` / `{home}` first and then substitutes what those
+/// expansions produced. So a repo literally named `api-{type}` makes
+/// `{repo}/{desc}` write a type the template never mentions, and this function
+/// does not see it (Codex review on PR #492). That is survivable only because
+/// the compiler refuses exactly this class, and `branch_pattern_warning` is the
+/// predicate `gwm doctor` and `gwm config validate` consume: such a pattern is
+/// reported unusable, by name, before any form opens on it. Pinned by
+/// `a_pattern_whose_expansion_carries_a_token_is_refused_before_the_form_sees_it`.
+/// The root cause is the multi-pass substitution itself, which the CLI shares.
 pub fn editable_segments(patterns: &[&str]) -> Vec<&'static str> {
   let mut out: Vec<&'static str> = Vec::new();
   for pattern in patterns {
