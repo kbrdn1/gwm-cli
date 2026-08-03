@@ -73,10 +73,9 @@ impl Field {
 /// Pass every pattern the triple feeds — `branch_pattern`, `path_pattern` and
 /// `base` — because [`crate::naming::BranchSpec::worktree_path`] expands the
 /// three tokens in `base` too, so a segment only `base` carries still names a
-/// real directory on disk. `repo` is the name `{repo}` expands to, which can
-/// itself contain a token (see [`crate::naming::editable_segments`]).
-pub fn fields_for(patterns: &[&str], repo: &str) -> Vec<Field> {
-  crate::naming::editable_segments(patterns, repo)
+/// real directory on disk.
+pub fn fields_for(patterns: &[&str]) -> Vec<Field> {
+  crate::naming::editable_segments(patterns)
     .into_iter()
     .filter_map(Field::from_segment)
     .collect()

@@ -91,34 +91,19 @@ const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 /// repeated capturing token, but `expand_placeholders` is a chain of
 /// `str::replace` and substitutes every occurrence quite happily.
 ///
-/// Scanned **after** the context placeholders are resolved, because that is what
-/// the formatter does: `expand_placeholders` substitutes `{home}` / `{repo}`
-/// first and then substitutes what those expansions produced. A repo literally
-/// named `api-{type}` therefore makes `{repo}/{desc}` write a type the raw
-/// template never mentions, and reading the raw template hid the field while
-/// silently defaulting it (Codex review on PR #492).
-///
-/// Bounding that by "the compiler refuses this class anyway" was **false**, and
-/// worth recording because the bound looked solid: `branch_pattern_warning` is
-/// only ever called with `worktree.branch_pattern`, so the same repo name
-/// reaches the form through `path_pattern` or `base` with no diagnostic at all.
-/// The multi-pass substitution is still the root cause and still worth removing
-/// (#494); deriving from the same intermediate text is what makes this function
-/// agree with the formatter meanwhile.
-pub fn editable_segments(patterns: &[&str], repo: &str) -> Vec<&'static str> {
-  // `{home}` failing to resolve leaves it literal here, which matches what the
-  // caller is about to hit anyway: `expand_placeholders` errors outright on it.
-  let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
+/// Reads the pattern as written, which is only correct because
+/// `expand_placeholders` is single-pass (#494): an expansion is a value, so a
+/// repo named `api-{type}` contributes the text `api-{type}` and not a `{type}`
+/// placeholder. While the formatter re-substituted its own output, #418 had to
+/// resolve `{home}` / `{repo}` here first to stay in step with it; removing the
+/// root removed the need, and leaving that resolution in would now invent a
+/// field for a token the formatter writes literally.
+pub fn editable_segments(patterns: &[&str]) -> Vec<&'static str> {
   let mut out: Vec<&'static str> = Vec::new();
   for pattern in patterns {
-    let mut resolved = (*pattern).to_string();
-    if let Some(home) = &home {
-      resolved = resolved.replace("{home}", home);
-    }
-    let resolved = resolved.replace("{repo}", repo);
     let mut hits: Vec<(usize, &'static str)> = SEGMENTS
       .into_iter()
-      .filter_map(|segment| resolved.find(&format!("{{{}}}", segment)).map(|at| (at, segment)))
+      .filter_map(|segment| pattern.find(&format!("{{{}}}", segment)).map(|at| (at, segment)))
       .collect();
     hits.sort_by_key(|(at, _)| *at);
     for (_, segment) in hits {
@@ -424,10 +409,14 @@ impl WorktreeName {
   /// 2. **A single filesystem path component** — the worktree directory. A
   ///    branch name is a *path* of components, so the two have different
   ///    limits: bounded at [`MAX_DIR_COMPONENT_BYTES`], and no `.` / `..`.
-  /// 3. **A literal value in placeholder expansion.**
-  ///    `lifecycle::expand_placeholders` substitutes sequentially, so a name
-  ///    that itself contains a token gets rewritten inside its own
-  ///    substituted value.
+  /// 3. **A literal value in placeholder expansion.** Defensive now rather
+  ///    than live: both expanders substitute in one pass — `lifecycle::expand`
+  ///    since the hook-injection patch, `config::expand_placeholders` since
+  ///    #494 — so a name containing a token is no longer rewritten inside its
+  ///    own substituted value. The rule is kept because a name is data that
+  ///    reaches two script-adjacent surfaces, but it now stands without the
+  ///    bug that motivated it, which is a naming-surface decision to revisit
+  ///    rather than something this list can settle.
   ///
   /// Plus one rule that belongs to none of them: no leading `-`, which is a
   /// CLI-ergonomics rule (git accepts it).
@@ -475,12 +464,15 @@ impl WorktreeName {
     if name.starts_with('-') {
       return reject("a leading `-` makes the name unusable as a command argument");
     }
-    // Consumer (3): `lifecycle::expand_placeholders` replaces `{branch}`
-    // first and `{type}` / `{issue}` / `{desc}` / `{repo}` after, so a hook
-    // asking for `{branch}` on `spike-{issue}` receives `spike-` — the
-    // second pass rewrites the value the first one just substituted.
-    // `DESC_RE` kept structured names out of this; free-form names reach it,
-    // so the boundary is where it gets closed.
+    // Consumer (3), and the reason has expired: `lifecycle::expand` used to
+    // replace `{branch}` first and `{type}` / `{issue}` / `{desc}` / `{repo}`
+    // after, so a hook asking for `{branch}` on `spike-{issue}` received
+    // `spike-`. Both expanders are single-pass now, so nothing re-substitutes
+    // a name that contains a token. Kept as a defensive rule rather than
+    // dropped, because loosening what a free-form name may contain is a
+    // separate decision from removing the re-substitution — but the stated
+    // cause is no longer live, and a rejection justified by a false cause is
+    // how the next reader removes it for the wrong reason.
     if name.contains('{') || name.contains('}') {
       return reject("`{` and `}` would be re-substituted when a lifecycle hook expands its placeholders");
     }
@@ -810,6 +802,13 @@ impl BranchParser {
   /// the two disagree on is refused rather than compiled into a parser that
   /// recognises none of the branches it creates.
   ///
+  /// Two of those three classes are gone since #494 made the formatter
+  /// single-pass: an expansion is a value now, so it cannot carry a token and
+  /// cannot form one against the text around it. The patterns that used to be
+  /// refused for it compile and round-trip. The check stays because its value
+  /// was never the list of known cases — it is what turns the next unknown one
+  /// into a refusal instead of a parser that reads nothing.
+  ///
   /// Two deliberate exclusions:
   ///
   /// - **A `~` prefix.** `expand_placeholders` ends with `shellexpand::tilde`,
@@ -845,9 +844,7 @@ impl BranchParser {
     }
     Err(GwmError::Config(format!(
       "worktree.branch_pattern `{}` writes `{}`, which the parser derived from it does not read \
-       back, so gwm would recognise none of the branches this pattern creates — a `{{repo}}` or \
-       `{{home}}` that expands to text containing another placeholder does this, because the \
-       formatter substitutes what its own expansions produce",
+       back, so gwm would recognise none of the branches this pattern creates",
       sanitise_for_terminal(pattern),
       sanitise_for_terminal(&written)
     )))
