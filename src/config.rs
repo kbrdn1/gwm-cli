@@ -2080,22 +2080,63 @@ pub fn expand_placeholders(
     .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
     .to_string_lossy()
     .to_string();
-  let mut out = template.replace("{home}", &home).replace("{repo}", repo);
-  if let Some(t) = type_ {
-    out = out.replace("{type}", t);
-  }
-  if let Some(i) = issue {
-    out = out.replace("{issue}", i);
-  }
-  if let Some(d) = desc {
-    out = out.replace("{desc}", d);
-  }
-  if let Some(p) = repo_path {
-    out = out.replace("{repo_path}", &p.to_string_lossy());
-    if let Some(parent) = p.parent() {
-      out = out.replace("{repo_parent}", &parent.to_string_lossy());
+
+  // Resolved value for one `{token}`, or `None` to leave it verbatim.
+  //
+  // The `None` arm carries real weight: `BranchSpec::branch_name` passes no
+  // `repo_path` precisely so the disk-path tokens survive into the branch
+  // name, and `BranchParser::compile` mirrors that by treating them as
+  // literals. Note the asymmetry when a `repo_path` has no parent — `/` is the
+  // case — where `{repo_path}` resolves and `{repo_parent}` does not: the old
+  // nested `if let` fell into that by accident, so it has to be said here.
+  let value_for = |token: &str| -> Option<String> {
+    match token {
+      "{home}" => Some(home.clone()),
+      "{repo}" => Some(repo.to_string()),
+      "{type}" => type_.map(str::to_string),
+      "{issue}" => issue.map(str::to_string),
+      "{desc}" => desc.map(str::to_string),
+      "{repo_path}" => repo_path.map(|p| p.to_string_lossy().into_owned()),
+      "{repo_parent}" => repo_path
+        .and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().into_owned()),
+      _ => None,
     }
+  };
+
+  // One pass, never re-examining what was written (issue #494). Chained
+  // `str::replace` calls re-scan the previous call's output, so a value that
+  // itself contains a token got rewritten from the inside: on a repo named
+  // `api-{type}`, `{repo}/{desc}` wrote `api-fix/foo` and carried a type the
+  // template never mentions. **An expansion is a value, not more template** —
+  // nothing downstream can reason about a pattern by reading it otherwise, and
+  // `naming::editable_segments` and `BranchParser::compile` both do.
+  //
+  // Same property `lifecycle::expand` has had since the hook-injection patch,
+  // and for the same reason one layer down.
+  let mut out = String::with_capacity(template.len());
+  let mut rest = template;
+  while let Some(open) = rest.find('{') {
+    let Some(close) = rest[open..].find('}').map(|at| open + at) else {
+      // Unbalanced `{` — no token to close, so the remainder is literal.
+      break;
+    };
+    // The token starts at the **last** `{` before this `}`, not the first.
+    // `str::replace` matched `{type}` inside `{{type}` and wrote `{feat`, and
+    // #417 built the compiler to mirror that. Taking the first `{` would leave
+    // `{{type}` literal instead, which is a pattern that worked in 1.5.0
+    // quietly changing meaning — a different bug from the one this fixes.
+    let start = rest[open..close].rfind('{').map(|at| open + at).unwrap_or(open);
+    out.push_str(&rest[..start]);
+    let token = &rest[start..=close];
+    match value_for(token) {
+      Some(value) => out.push_str(&value),
+      None => out.push_str(token),
+    }
+    rest = &rest[close + 1..];
   }
+  out.push_str(rest);
+
   // Tilde expansion in case the template starts with ~/...
   let expanded = shellexpand::tilde(&out).to_string();
   Ok(expanded)

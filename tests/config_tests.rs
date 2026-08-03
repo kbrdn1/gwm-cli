@@ -4,6 +4,16 @@ use gwm::config::{
 };
 use tempfile::TempDir;
 
+/// Process-global lock guarding every test in this binary that reads or
+/// mutates `$HOME`. `expand_placeholders` resolves `{home}` through
+/// `dirs::home_dir` and ends with `shellexpand::tilde`, so a test that swaps
+/// `$HOME` races every other one that expands a `{home}` pattern. `set_var` is
+/// `unsafe` for the same reason the other suites take this lock (#494).
+fn env_lock() -> &'static std::sync::Mutex<()> {
+  static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+  LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(unix)]
 fn toml_absolute_path(unix: &'static str, _windows: &'static str) -> &'static str {
   unix
@@ -323,6 +333,7 @@ trunks = []
 
 #[test]
 fn placeholders_expand() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let out = expand_placeholders(
     "{home}/cc-worktree/{repo}/{type}-{issue}-{desc}",
     "my-repo",
@@ -339,6 +350,7 @@ fn placeholders_expand() {
 
 #[test]
 fn placeholders_no_optional_args_leave_repo_only() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let out = expand_placeholders("{home}/{repo}", "x", None, None, None, None).unwrap();
   assert!(out.ends_with("/x"));
 }
@@ -2520,4 +2532,110 @@ fn tui_clipboard_invalid_value_errors_at_parse_time() {
   let dir = TempDir::new().unwrap();
   std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nclipboard = \"osc-52\"\n").unwrap();
   assert!(Config::load_layered(dir.path(), None).is_err());
+}
+
+// --- single-pass substitution (issue #494) --------------------------------
+
+/// `expand_placeholders` chained `str::replace` calls, so each one re-scanned
+/// what the previous had just written. `{home}` and `{repo}` go first, which
+/// means a repo whose own name contains `{type}` made `{repo}/{desc}` write a
+/// type the template never mentions.
+///
+/// An expansion is a **value**, not more template. Nothing downstream can
+/// reason about a pattern by reading it otherwise: `naming::editable_segments`
+/// derived the create form's fields from the wrong set, and
+/// `BranchParser::compile` had to refuse the whole class rather than mirror a
+/// formatter it could not predict.
+///
+/// Same property `lifecycle::expand` has had since the security patch
+/// (`97e4e09`), and for the same reason.
+#[test]
+fn a_token_produced_by_expanding_the_repo_name_stays_literal() {
+  let out = expand_placeholders(
+    "{repo}/{desc}",
+    "api-{type}",
+    Some("fix"),
+    Some("42"),
+    Some("foo"),
+    None,
+  )
+  .unwrap();
+  assert_eq!(
+    out, "api-{type}/foo",
+    "the repo name is a value; the `{{type}}` inside it is not a placeholder"
+  );
+
+  // Every token, so no single ordering of the replace chain passes by luck.
+  for token in ["{type}", "{issue}", "{desc}", "{repo}", "{home}"] {
+    let out = expand_placeholders(
+      "{repo}-x",
+      &format!("api-{token}"),
+      Some("fix"),
+      Some("42"),
+      Some("foo"),
+      None,
+    )
+    .unwrap();
+    assert_eq!(
+      out,
+      format!("api-{token}-x"),
+      "`{}` arrived through the repo name, so it is data",
+      token
+    );
+  }
+}
+
+/// The same for `{home}`, which is substituted first of all and is the one
+/// token whose value the user does not choose directly.
+#[test]
+fn a_token_produced_by_expanding_home_stays_literal() {
+  // `$HOME` is read through `dirs::home_dir`, so drive it via the env var the
+  // way the other environment-sensitive tests in this file do.
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+  let previous = std::env::var("HOME").ok();
+  unsafe { std::env::set_var("HOME", "/tmp/h-{issue}") };
+
+  let out = expand_placeholders("{home}/wt/{desc}", "r", Some("fix"), Some("42"), Some("foo"), None);
+
+  match previous {
+    Some(v) => unsafe { std::env::set_var("HOME", v) },
+    None => unsafe { std::env::remove_var("HOME") },
+  }
+
+  assert_eq!(out.unwrap(), "/tmp/h-{issue}/wt/foo");
+}
+
+/// A token with no value is left **literal**, not emptied.
+/// `BranchSpec::branch_name` passes no `repo_path` precisely so the disk-path
+/// tokens survive verbatim into the branch name, and `BranchParser::compile`
+/// mirrors that. Restated here against the rewritten expander, since the old
+/// one got it by not calling `replace` at all.
+#[test]
+fn a_token_with_no_value_survives_the_single_pass_verbatim() {
+  assert_eq!(
+    expand_placeholders("{repo_parent}/{type}/{issue}/{desc}", "r", None, None, None, None).unwrap(),
+    "{repo_parent}/{type}/{issue}/{desc}"
+  );
+  // And an unknown token is not a token.
+  assert_eq!(
+    expand_placeholders("{nope}/{repo}", "r", None, None, None, None).unwrap(),
+    "{nope}/r"
+  );
+  // Nor is an unbalanced brace.
+  assert_eq!(
+    expand_placeholders("{repo}/{unclosed", "r", None, None, None, None).unwrap(),
+    "r/{unclosed"
+  );
+}
+
+/// The asymmetry the old nesting encoded by accident: with `repo_path` set but
+/// its parent `None`, `{repo_path}` resolves and `{repo_parent}` does not. A
+/// token lookup has to state that, where the nested `if let` fell into it.
+#[test]
+fn a_repo_path_without_a_parent_resolves_only_the_path_token() {
+  let root = std::path::Path::new("/");
+  assert!(root.parent().is_none(), "the fixture must actually have no parent");
+
+  let out = expand_placeholders("{repo_path}|{repo_parent}", "r", None, None, None, Some(root)).unwrap();
+  assert_eq!(out, "/|{repo_parent}");
 }
