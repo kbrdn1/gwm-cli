@@ -2123,3 +2123,110 @@ fn a_placeholder_between_two_literals_does_not_fuse_them() {
     "the issue must be the `2` the pattern actually writes, never the fused `12`"
   );
 }
+
+// --- the editable token set the create form asks for (issue #418) ---------
+
+/// A pattern set names the fields the form has to present, in the order the
+/// name is built left to right. Not "the canonical triple, filtered": a pattern
+/// is free to order its tokens however it likes, and a form whose Tab order
+/// disagrees with the name being written is a form that reads backwards.
+#[test]
+fn the_editable_segments_come_back_in_the_order_the_pattern_writes_them() {
+  assert_eq!(
+    gwm::naming::editable_segments(&["{type}/#{issue}-{desc}"]),
+    ["type", "issue", "desc"],
+    "the canonical pattern keeps the canonical order"
+  );
+  assert_eq!(
+    gwm::naming::editable_segments(&["{desc}-{issue}"]),
+    ["desc", "issue"],
+    "a pattern that leads with the description is read in its own order"
+  );
+  assert_eq!(
+    gwm::naming::editable_segments(&["{type}/{desc}"]),
+    ["type", "desc"],
+    "a pattern that writes no issue number must not ask for one"
+  );
+  assert!(
+    gwm::naming::editable_segments(&["wip"]).is_empty(),
+    "a pattern that is pure literal asks the user for nothing"
+  );
+}
+
+/// The union is over every pattern the triple feeds, and `base` is one of them:
+/// `BranchSpec::worktree_path` expands `{type}` / `{issue}` / `{desc}` in it, so
+/// a value dropped there names a real directory on disk. Missing this is how a
+/// form ends up hiding a field whose value still reaches the filesystem.
+#[test]
+fn a_segment_only_base_carries_is_still_asked_for() {
+  assert_eq!(
+    gwm::naming::editable_segments(&["{type}/{desc}", "{type}-{desc}", "{home}/wt/{issue}"]),
+    ["type", "desc", "issue"],
+    "base carries the issue, so the form must still collect it"
+  );
+}
+
+/// `expand_placeholders` substitutes a repeated token everywhere it appears
+/// (it is a chain of `str::replace`), unlike `BranchParser::compile`, which
+/// refuses one. So the de-duplication has to happen here rather than being
+/// inherited from the compiler's stricter contract.
+#[test]
+fn a_token_repeated_across_or_within_patterns_yields_one_field() {
+  assert_eq!(
+    gwm::naming::editable_segments(&["{type}/{desc}-{desc}", "{type}-{desc}"]),
+    ["type", "desc"]
+  );
+}
+
+/// The guard that survives someone adding a placeholder in six months, in the
+/// shape `the_compiler_handles_every_token_the_formatter_substitutes` uses one
+/// layer down.
+///
+/// Every token `expand_placeholders` substitutes is either **resolved from
+/// context** (gwm knows it from the repo and the environment) or **supplied by
+/// the user** (the create form has to present a field for it). A token in
+/// neither list is one the form would silently never ask for, so the pattern
+/// would expand it to nothing and no one would be told.
+#[test]
+fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
+  let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config.rs"))
+    .expect("read src/config.rs")
+    .replace("\r\n", "\n");
+  let body = src
+    .split_once("pub fn expand_placeholders(")
+    .expect("expand_placeholders is still named that")
+    .1;
+  let body = body.split_once("\n}\n").expect("the function has a body").0;
+
+  let mut found: Vec<String> = Vec::new();
+  let mut rest = body;
+  while let Some(open) = rest.find("(\"{") {
+    rest = &rest[open + 2..];
+    let Some(close) = rest.find("}\"") else { break };
+    found.push(rest[..close + 1].to_string());
+    rest = &rest[close + 1..];
+  }
+  found.sort();
+  found.dedup();
+  assert!(
+    found.len() >= 5,
+    "the token scan found only {:?} — the extraction broke, not the classification",
+    found
+  );
+
+  // Resolved by gwm from the repo and the environment: never a form field.
+  const FROM_CONTEXT: [&str; 4] = ["{home}", "{repo}", "{repo_path}", "{repo_parent}"];
+
+  for token in &found {
+    let segment = token.trim_start_matches('{').trim_end_matches('}');
+    let is_field = !gwm::naming::editable_segments(&[token.as_str()]).is_empty();
+    assert!(
+      FROM_CONTEXT.contains(&token.as_str()) || is_field,
+      "`{}` is substituted by expand_placeholders but is neither resolved from context nor \
+       collected by the create form — a pattern using it would expand it to nothing. Add `{}` \
+       to `editable_segments` (and give the form a field for it), or to FROM_CONTEXT here.",
+      token,
+      segment
+    );
+  }
+}

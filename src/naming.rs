@@ -66,6 +66,47 @@ const TOKENS: [Token; 5] = [
 /// goes to the one that can be sure about it.
 const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 
+/// Which of the three editable segments the given patterns ask the user to
+/// supply, in the order the patterns write them (issue #418).
+///
+/// These are the tokens [`crate::config::expand_placeholders`] fills from a
+/// value the user typed, as opposed to the ones gwm resolves from the repo and
+/// the environment (`{repo}`, `{home}`, `{repo_path}`, `{repo_parent}`). So this
+/// is exactly the field set the TUI create form has to present: a pattern that
+/// writes no issue number must not ask for one, and asking anyway is not merely
+/// noise — [`BranchSpec::validate_against`] then refuses to submit until the
+/// field is filled with a number the patterns discard.
+///
+/// **Order is the pattern's, not the canonical triple's.** `{desc}-{issue}` is a
+/// legitimate convention, and a form whose Tab order disagreed with the name
+/// being written would read backwards.
+///
+/// Pass every pattern the triple feeds. `base` is one of them:
+/// [`BranchSpec::worktree_path`] expands `{type}` / `{issue}` / `{desc}` in it,
+/// so a segment only `base` carries still names a real directory on disk and
+/// still has to be collected.
+///
+/// De-duplicated on first occurrence, which cannot be inherited from
+/// [`BranchParser::compile`]'s stricter contract: the compiler refuses a
+/// repeated capturing token, but `expand_placeholders` is a chain of
+/// `str::replace` and substitutes every occurrence quite happily.
+pub fn editable_segments(patterns: &[&str]) -> Vec<&'static str> {
+  let mut out: Vec<&'static str> = Vec::new();
+  for pattern in patterns {
+    let mut hits: Vec<(usize, &'static str)> = SEGMENTS
+      .into_iter()
+      .filter_map(|segment| pattern.find(&format!("{{{}}}", segment)).map(|at| (at, segment)))
+      .collect();
+    hits.sort_by_key(|(at, _)| *at);
+    for (_, segment) in hits {
+      if !out.contains(&segment) {
+        out.push(segment);
+      }
+    }
+  }
+  out
+}
+
 /// Where a placeholder stood, in the literal text [`literal_constants`] reads.
 ///
 /// Two jobs. It **separates**: the literals in `1{type}2-{desc}` are not one
