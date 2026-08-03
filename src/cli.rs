@@ -4424,10 +4424,16 @@ fn cmd_trust_list() -> Result<()> {
     ledger.entries.len(),
     if ledger.entries.len() == 1 { "y" } else { "ies" }
   );
+  // Issue #473, Codex pass 2: `trust show` cats the ledger file, where TOML
+  // has already escaped any control byte in a value, but `load` DECODES it, so
+  // every command that reads the ledger back through `TrustLedger` handles the
+  // real character. `origin` is a remote URL that arrived with a clone, and
+  // this listing is exactly what someone runs to audit what they trusted.
+  let clean = crate::naming::sanitise_for_terminal;
   let origin_w = ledger
     .entries
     .iter()
-    .map(|e| e.origin.len())
+    .map(|e| clean(&e.origin).len())
     .max()
     .unwrap_or(6)
     .clamp(6, 60);
@@ -4440,10 +4446,10 @@ fn cmd_trust_list() -> Result<()> {
     let short_sha: String = e.config_sha.chars().take(12).collect();
     println!(
       "  {:<ow$}  {}  trusted_at {}  by {}",
-      e.origin,
-      short_sha,
+      clean(&e.origin),
+      clean(&short_sha),
       e.trusted_at.to_rfc3339(),
-      e.trusted_by,
+      clean(&e.trusted_by),
       ow = origin_w,
     );
   }
@@ -4454,8 +4460,11 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
   let path = trust::default_ledger_path()?;
   let mut ledger = TrustLedger::load(&path)?;
   let removed = ledger.revoke(&origin);
+  // Echoed back rather than read from the ledger, but it lands in the same
+  // terminal and costs one call (issue #473).
+  let shown = crate::naming::sanitise_for_terminal(&origin);
   if removed == 0 {
-    println!("0 entries matched origin {} (nothing to revoke).", origin);
+    println!("0 entries matched origin {} (nothing to revoke).", shown);
     return Ok(());
   }
   ledger.save(&path)?;
@@ -4463,7 +4472,7 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
     "✓ revoked {} entr{} for {}",
     removed,
     if removed == 1 { "y" } else { "ies" },
-    origin
+    shown
   );
   Ok(())
 }
@@ -4477,7 +4486,12 @@ fn cmd_trust_add() -> Result<()> {
   match trust::record_config(&workdir, &key, &trust::current_actor())? {
     Some(sha) => {
       let short: String = sha.chars().take(12).collect();
-      println!("✓ trusted {} (.gwm.toml {})", key, short);
+      // `key` is the repo's origin URL (issue #473).
+      println!(
+        "✓ trusted {} (.gwm.toml {})",
+        crate::naming::sanitise_for_terminal(&key),
+        short
+      );
       Ok(())
     }
     None => Err(GwmError::Other(format!(
@@ -4566,7 +4580,11 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 
       ledger.record(&origin, &sha, &trust::current_actor());
       ledger.save(&ledger_path)?;
-      println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
+      println!(
+        "✓ recorded trust for {} in {}",
+        crate::naming::sanitise_for_terminal(&origin),
+        ledger_path.display()
+      );
       Ok(())
     }
   }

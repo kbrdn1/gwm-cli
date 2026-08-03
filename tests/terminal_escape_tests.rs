@@ -288,3 +288,75 @@ fn commit_prefix_neutralises_control_bytes_from_the_gitmoji_table() {
     stdout
   );
 }
+
+/// A ledger whose `origin` carries an ESC. It travels as TOML's escape, which
+/// is exactly the point: `trust show` cats the file and sees harmless text,
+/// but `TrustLedger::load` DECODES it, so every command that reads the ledger
+/// back through the struct handles the real control character.
+const HOSTILE_LEDGER: &str = concat!(
+  "[[entries]]\n",
+  "origin = \"git@example.com:acme/repo",
+  r"\u001B",
+  "]0;PWNED.git\"\n",
+  "config_sha = \"abc123def456789\"\n",
+  "trusted_at = \"2026-01-01T00:00:00Z\"\n",
+  "trusted_by = \"someone@somewhere\"\n",
+);
+
+#[test]
+fn trust_list_neutralises_a_decoded_origin() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  fs::write(&ledger, HOSTILE_LEDGER).unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["trust", "list"])
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    control_bytes(&stdout).is_empty(),
+    "trust list replayed {:?} from a decoded origin:\n{:?}",
+    control_bytes(&stdout),
+    stdout
+  );
+  assert!(
+    stdout.contains("git@example.com:acme/repo"),
+    "the origin must stay auditable, got {:?}",
+    stdout
+  );
+}
+
+#[test]
+fn an_alias_expansion_cannot_smuggle_a_control_byte_through_clap() {
+  // `main` expands `[aliases]` into argv BEFORE clap parses it, and clap
+  // prints its own error and exits without ever reaching the error sink in
+  // `main`. Measured, that is not a hole: clap strips control characters from
+  // the token it quotes, and the expander splits on whitespace so a `\n` in
+  // an expansion becomes a second token rather than a forged output line.
+  //
+  // Pinned rather than trusted, for the same reason `config list`'s `{:?}` is
+  // pinned: the protection belongs to a dependency's rendering choice, so a
+  // clap upgrade that starts echoing argv verbatim has to fail here rather
+  // than ship quietly.
+  let (dir, _repo) = init_repo();
+  for expansion in ["nope\u{7}bell", "nope\ninjected-line"] {
+    fs::write(
+      dir.path().join(".gwm.toml"),
+      format!("[aliases]\nboom = \"{}\"\n", expansion.escape_default()),
+    )
+    .unwrap();
+
+    let out = gwm_in(dir.path()).arg("boom").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+      control_bytes(&stdout).is_empty() && control_bytes(&stderr).is_empty(),
+      "an alias expansion reached the terminal through clap: {:?} / {:?}",
+      stdout,
+      stderr
+    );
+  }
+}
