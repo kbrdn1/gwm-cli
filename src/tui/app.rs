@@ -4281,11 +4281,12 @@ impl App {
     // set have to agree on "does any pattern write this", and two spellings of
     // one question are two things to keep in step.
     //
-    // Which also makes this guard unreachable in structured mode now: the form
-    // presents no field for a segment nothing writes, so its value cannot
-    // differ from what the form was opened with. Kept as a backstop rather than
-    // deleted, since three earlier versions of it were wrong in ways the field
-    // set does not speak to.
+    // ⚠️ I wrote here that this made the guard unreachable in structured mode,
+    // reasoning that the form presents no field for a segment nothing writes so
+    // its value cannot differ. Wrong, and the sixth review pass found it: the
+    // buffer behind a hidden field keeps its default, which is not the parsed
+    // value, so the comparison below fired on a change nobody made. The skip
+    // added there is what actually makes the two agree.
     let written = self.required_segments();
     let writes = |segment: &str| written.contains(&segment);
     let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
@@ -4303,6 +4304,21 @@ impl App {
     if let Some(opened_with) = opened_with.as_ref() {
       for segment in ["type", "issue", "desc"] {
         if writes(segment) {
+          continue;
+        }
+        // A segment the form does not present has no value to defend (Codex
+        // review on PR #492, sixth pass, and it disproves the note two commits
+        // back claiming this guard had become unreachable in structured mode).
+        // The buffers behind a hidden field keep their defaults — `type_index`
+        // points at the first configured type — so comparing them against what
+        // the branch parsed reads as a change the user never made, and refuses
+        // every structured rename on a pattern set that omits `{type}`. The
+        // field is not on screen, so nothing clears it either.
+        if !self.create_form.fields().contains(&match segment {
+          "type" => Field::Type,
+          "issue" => Field::Issue,
+          _ => Field::Desc,
+        }) {
           continue;
         }
         let (submitted, was) = match segment {

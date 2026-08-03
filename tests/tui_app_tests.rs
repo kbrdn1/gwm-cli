@@ -11516,3 +11516,54 @@ fn a_parsed_but_unconfigured_type_is_still_refused() {
   );
   assert!(app.status.contains("zzz"), "and must be named: {}", app.status);
 }
+
+/// Codex review on PR #492, sixth pass, P1, and it disproves a claim I wrote
+/// into the code two commits earlier: that `refuse_unwritable_segment_change`
+/// had become unreachable in structured mode.
+///
+/// It is reachable, and it blocks every structured rename on a pattern set that
+/// omits `{type}`. The form hides the Type field but `type_index` still points
+/// at the first configured type, so the guard compares `feat` against the empty
+/// type recovered from the branch, calls that a change to an unwritten segment,
+/// and refuses. Nothing the user can do clears it, because the field is not on
+/// screen to correct.
+///
+/// A hidden field has no value to defend: the guard must skip the segments the
+/// form does not present rather than compare their fallbacks.
+#[test]
+fn a_hidden_segment_cannot_block_the_rename_it_is_not_part_of() {
+  let (_d, mut app) = app_with_patterns("#{issue}-{desc}", "{issue}-{desc}", "{repo_parent}/wt");
+  assert!(
+    !app.create_form.fields().contains(&Field::Type),
+    "no pattern carries {{type}}, so the form must not present it"
+  );
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "status was: {}", app.status);
+
+  // Edit only what the pattern writes.
+  app.create_form.field = Field::Desc;
+  for _ in 0.."my-desc".len() {
+    app.create_form.pop_char();
+  }
+  for c in "renamed".chars() {
+    app.create_form.push_char(c);
+  }
+
+  let out = app.submit_edit_worktree();
+  assert!(
+    !app.edit_failure.as_deref().unwrap_or("").contains("{type}"),
+    "the hidden type must not be read as a change: {:?}",
+    app.edit_failure
+  );
+  assert!(
+    !app.status.contains("no {type} to write"),
+    "nor block the submit: {}",
+    app.status
+  );
+  let _ = out;
+}
