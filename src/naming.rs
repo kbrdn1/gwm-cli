@@ -409,14 +409,15 @@ impl WorktreeName {
   /// 2. **A single filesystem path component** — the worktree directory. A
   ///    branch name is a *path* of components, so the two have different
   ///    limits: bounded at [`MAX_DIR_COMPONENT_BYTES`], and no `.` / `..`.
-  /// 3. **A literal value in placeholder expansion.** Defensive now rather
-  ///    than live: both expanders substitute in one pass — `lifecycle::expand`
-  ///    since the hook-injection patch, `config::expand_placeholders` since
-  ///    #494 — so a name containing a token is no longer rewritten inside its
-  ///    own substituted value. The rule is kept because a name is data that
-  ///    reaches two script-adjacent surfaces, but it now stands without the
-  ///    bug that motivated it, which is a naming-surface decision to revisit
-  ///    rather than something this list can settle.
+  /// 3. **A literal value in placeholder expansion.** Two of the three
+  ///    expanders substitute in one pass and can no longer rewrite a value
+  ///    from the inside — `lifecycle::expand` since the hook-injection patch,
+  ///    `config::expand_placeholders` since #494. The third,
+  ///    `launcher::expand`, still chains `str::replace` over its own output,
+  ///    and it substitutes the worktree **path** before `{base}` / `{head}`,
+  ///    so a brace reaching that path is re-substituted inside an already
+  ///    shell-quoted value. So this rule is not merely defensive: it is what
+  ///    keeps a chosen name out of that surface.
   ///
   /// Plus one rule that belongs to none of them: no leading `-`, which is a
   /// CLI-ergonomics rule (git accepts it).
@@ -464,15 +465,23 @@ impl WorktreeName {
     if name.starts_with('-') {
       return reject("a leading `-` makes the name unusable as a command argument");
     }
-    // Consumer (3), and the reason has expired: `lifecycle::expand` used to
-    // replace `{branch}` first and `{type}` / `{issue}` / `{desc}` / `{repo}`
-    // after, so a hook asking for `{branch}` on `spike-{issue}` received
-    // `spike-`. Both expanders are single-pass now, so nothing re-substitutes
-    // a name that contains a token. Kept as a defensive rule rather than
-    // dropped, because loosening what a free-form name may contain is a
-    // separate decision from removing the re-substitution — but the stated
-    // cause is no longer live, and a rejection justified by a false cause is
-    // how the next reader removes it for the wrong reason.
+    // Consumer (3). The reason originally written here has expired:
+    // `lifecycle::expand` used to replace `{branch}` first and `{type}` /
+    // `{issue}` / `{desc}` / `{repo}` after, so a hook asking for `{branch}`
+    // on `spike-{issue}` received `spike-`. That expander has been single-pass
+    // since the hook-injection patch and `config::expand_placeholders` is
+    // since #494.
+    //
+    // The rule stays, and not merely as a belt: `launcher::expand` still
+    // chains `str::replace` over its own output, substituting the worktree
+    // path before `{base}` / `{head}`. `kebab` strips braces out of a
+    // structured description, so this check is the only thing keeping them out
+    // of a name that becomes a directory. (`worktree.base` can still put one
+    // there, which is config rather than a chosen name — a separate surface.)
+    //
+    // Worth stating rather than leaving as folklore: a rejection justified by
+    // a cause that has expired is how the next reader removes it for the wrong
+    // reason, and this one nearly was.
     if name.contains('{') || name.contains('}') {
       return reject("`{` and `}` would be re-substituted when a lifecycle hook expands its placeholders");
     }
