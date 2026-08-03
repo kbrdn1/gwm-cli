@@ -4294,7 +4294,7 @@ pub fn labels_diff_lines(slug: &str, declared: &[labels::LabelSpec], diff: &Labe
   )];
   for spec in &diff.to_create {
     lines.push(format!(
-      "  + {:<20} (will create — color #{})",
+      "  + {:<20} (will create, color #{})",
       clean(&spec.name),
       clean(&spec.color)
     ));
@@ -4430,7 +4430,7 @@ pub fn milestones_diff_lines(slug: &str, declared: &[milestones::MilestoneSpec],
   for spec in &diff.to_create {
     let due = spec.due_on.as_deref().unwrap_or("no due date");
     lines.push(format!(
-      "  + {:<20} (will create — state {}, due {})",
+      "  + {:<20} (will create, state {}, due {})",
       clean(&spec.title),
       spec.state.as_str(),
       clean(due)
@@ -4707,7 +4707,7 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
       }
       other => {
         println!(
-          "unrecognised answer '{}' — answer y, N, or show",
+          "unrecognised answer '{}': answer y, N, or show",
           crate::naming::sanitise_for_terminal(other)
         );
       }
@@ -4732,7 +4732,7 @@ fn print_bootstrap_summary(cfg: &Config) {
 pub fn bootstrap_summary_lines(cfg: &Config) -> Vec<String> {
   let bs = &cfg.bootstrap;
   if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
-    return vec!["     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)".to_string()];
+    return vec!["     bootstrap surface: (empty, no copies/commands/guards/no_symlinks declared)".to_string()];
   }
   // Issue #473: every field below is verbatim text from a file the user has
   // NOT trusted, which is the whole premise of the prompt this feeds. Left

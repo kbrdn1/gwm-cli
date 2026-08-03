@@ -33,7 +33,7 @@ fn main() {
       // way to surface the typo). The dispatcher will re-surface
       // the error if the user runs a subcommand that touches
       // config.
-      eprintln!("warning: failed to load aliases — using raw argv: {}", clean_error(&e));
+      eprintln!("warning: failed to load aliases, using raw argv: {}", clean_error(&e));
       argv
     }
   };
