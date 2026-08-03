@@ -1986,3 +1986,38 @@ fn add_keeps_a_branch_another_worktree_is_bound_to() {
     "the rollback must not delete a ref another worktree is standing on"
   );
 }
+
+#[cfg(unix)]
+#[test]
+fn add_keeps_the_branch_when_the_checkouts_cannot_be_inspected() {
+  // Codex review on PR #497 (P1, iter 5). The bound check answers "is this
+  // branch someone's HEAD", and a read that fails answers nothing at all.
+  // Folding that into "no" makes the rollback delete a ref on the strength
+  // of a failed read, which is the one outcome the check exists to
+  // prevent. Absent is still "no", unreadable is "assume yes".
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  wedge_admin_entry(&repo, "feat-487-blind");
+  let admin_root = repo.path().join("worktrees");
+  std::fs::set_permissions(&admin_root, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+  // Root reads through the mode bits, so the inspection would succeed and
+  // the test would assert against a case it never produced.
+  if std::fs::read_dir(&admin_root).is_ok() {
+    std::fs::set_permissions(&admin_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    eprintln!("skipping: this process can read a 0000 directory (running as root?)");
+    return;
+  }
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-blind");
+  worktree::add(&repo, "feat-487-blind", &target, "feat/#487-blind", false).unwrap_err();
+  std::fs::set_permissions(&admin_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+  assert!(
+    branch_exists(&repo, "feat/#487-blind"),
+    "an unreadable admin directory must hold the rollback back, not wave it through"
+  );
+}

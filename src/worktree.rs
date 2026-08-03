@@ -443,16 +443,28 @@ fn write_branch_created_at(repo: &Repository, branch: &str, unix_secs: i64) -> R
 /// `gitdir` file and libgit2 will not list it, while its `HEAD` still names a
 /// branch. `commondir` rather than `path`, since the latter is the
 /// per-worktree gitdir when gwm runs from inside a linked worktree.
+///
+/// A read that fails answers nothing, and folding that into "no" would make
+/// the rollback delete a ref on the strength of a failed read, which is the
+/// one outcome this check exists to prevent. So: absent is "no", unreadable is
+/// "assume yes".
 fn branch_is_checked_out_anywhere(repo: &Repository, branch: &str) -> bool {
   let want = format!("ref: refs/heads/{}", branch);
-  let names_branch = |p: PathBuf| std::fs::read_to_string(p).map(|s| s.trim() == want).unwrap_or(false);
+  let names_branch = |p: PathBuf| match std::fs::read_to_string(p) {
+    Ok(s) => s.trim() == want,
+    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+  };
   let common = repo.commondir().to_path_buf();
   if names_branch(common.join("HEAD")) {
     return true;
   }
   match std::fs::read_dir(common.join("worktrees")) {
-    Ok(entries) => entries.flatten().any(|e| names_branch(e.path().join("HEAD"))),
-    Err(_) => false,
+    Ok(mut entries) => entries.any(|e| match e {
+      Ok(entry) => names_branch(entry.path().join("HEAD")),
+      Err(_) => true,
+    }),
+    // No linked worktrees at all is the ordinary case, and it is a "no".
+    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
   }
 }
 
