@@ -173,6 +173,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `gwm create` that fails while making the worktree no longer leaves the
+  branch behind. `worktree::add` has to create the branch before it calls
+  `repo.worktree`, because libgit2's `WorktreeAddOptions::reference` takes a
+  reference that already exists, so any failure past that point left a branch
+  nobody asked for, pointing at the old HEAD, surfaced only by `gwm doctor`'s
+  orphan check or by a `git branch -D` on a name the error printed in passing.
+
+  It is now deleted on the failure path, and only when that same call created
+  it: a branch attached with `--reuse-branch` predates the command, and
+  deleting it would destroy work. The predicate is "this call created it"
+  rather than "reuse was off", because `gwm undo` and `gwm review` both pass
+  the reuse flag against a branch that is usually absent, and then create it.
+  libgit2 drops the `branch.<name>` config section along with the ref, so the
+  creation stamp goes with it instead of ageing the next branch to take that
+  name.
+
+  The error stays the underlying failure rather than a cleanup message. One
+  residue is out of reach and remains `gwm doctor`'s job: libgit2 refuses to
+  delete a branch that is already the HEAD of a linked repository, which is
+  the state it leaves when the failure came from the checkout itself rather
+  than from either mkdir.
+
+  This bounds the class that #474 (the 255-byte cap) and #475 (the Windows
+  character and device set) each closed one input set of. Refusing a name up
+  front is worth having on its own, but a full disk is not an input set.
+
 - Config values no longer reach the terminal with their control bytes intact.
   A `.gwm.toml` comes from a repo nobody has vetted, and the commands that read
   it back skip the trust gate on purpose, because inspecting an unfamiliar repo
