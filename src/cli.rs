@@ -4607,29 +4607,43 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
 }
 
 fn print_bootstrap_summary(cfg: &Config) {
+  for line in bootstrap_summary_lines(cfg) {
+    println!("{}", line);
+  }
+}
+
+/// The lines the TOFU prompt shows for an **untrusted** `.gwm.toml`, as
+/// values rather than as `println!` side effects (issue #473).
+///
+/// A value so the highest-stakes echo in the binary can be asserted on
+/// without driving a PTY: this summary is rendered immediately above
+/// `Trust this .gwm.toml? [y/N/show]:`, from a file the user has by
+/// definition not vetted, and it is the only thing standing between them
+/// and a `[[bootstrap.command]]` that runs arbitrary shell.
+pub fn bootstrap_summary_lines(cfg: &Config) -> Vec<String> {
   let bs = &cfg.bootstrap;
   if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
-    println!("     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)");
-    return;
+    return vec!["     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)".to_string()];
   }
-  println!("     bootstrap surface:");
+  let mut lines = vec!["     bootstrap surface:".to_string()];
   for c in &bs.copy {
-    println!("       - copy   {} → {}", c.from, c.to);
+    lines.push(format!("       - copy   {} → {}", c.from, c.to));
   }
   for g in &bs.guard {
-    println!(
+    lines.push(format!(
       "       - guard  {} (on_match={}, deny={} pattern(s))",
       g.name,
       g.on_match,
       g.deny_patterns.len()
-    );
+    ));
   }
   for ns in &bs.no_symlink {
-    println!("       - no-symlink {}", ns.path);
+    lines.push(format!("       - no-symlink {}", ns.path));
   }
   for c in &bs.command {
-    println!("       - run    {} ({})", c.name, c.run);
+    lines.push(format!("       - run    {} ({})", c.name, c.run));
   }
+  lines
 }
 
 // ---- Aliases commands (issue #86) ---------------------------------------
