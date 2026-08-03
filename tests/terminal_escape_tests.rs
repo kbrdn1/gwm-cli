@@ -39,6 +39,9 @@ description = "a feature\u001B]52;c;ZXZpbA==here"
 [aliases]
 "ok\u001B[31m" = "list --all"
 
+[gitmoji]
+feat = "\u001B]0;PWNED:sparkles:"
+
 [[bootstrap.copy]]
 from = ".env\u001B[1A\u001B[2K"
 to = ".env"
@@ -208,5 +211,80 @@ fn the_pre_trust_bootstrap_summary_neutralises_control_bytes() {
     joined.contains("node_modules"),
     "the summary must still name the no-symlink target, got {:?}",
     joined
+  );
+}
+
+#[test]
+fn trust_show_neutralises_control_bytes_in_the_ledger() {
+  // `trust show` prints the ledger verbatim, and a ledger row records an
+  // origin key: a remote URL, which arrived with a clone like everything else
+  // here. The block variant applies, so the rows survive as rows and only the
+  // control bytes go.
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  std::fs::write(
+    &ledger,
+    "[[entry]]\norigin = \"git@example.com:acme/repo\u{1b}]0;PWNED.git\"\nsha = \"abc\"\n",
+  )
+  .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["trust", "show"])
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    control_bytes(&stdout).is_empty(),
+    "trust show replayed {:?} from the ledger:\n{:?}",
+    control_bytes(&stdout),
+    stdout
+  );
+  // A document, not a row: the ledger's own line breaks are its shape.
+  assert!(
+    stdout.contains("origin = ") && stdout.contains("sha = "),
+    "the ledger should still render as rows, got {:?}",
+    stdout
+  );
+}
+
+#[test]
+fn commit_prefix_neutralises_control_bytes_from_the_gitmoji_table() {
+  // `commit-prefix` needs its own fixture: it only reaches its printer when
+  // the branch matches `branch_pattern`, and no git-legal branch can match a
+  // pattern that starts with an ESC. So the pattern here is benign and the
+  // payload sits in `[gitmoji]`, which is where this command reads from.
+  //
+  // The command is ungated and runs constantly: shell prompts call it on
+  // every prompt draw, and the bundled commit-msg hook on every commit, in
+  // whatever repo the user happens to be sitting in.
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    "[gitmoji]\nfeat = \"\\u001B]0;PWNED:sparkles:\"\n",
+  )
+  .unwrap();
+
+  let out = gwm_in(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-hostile"])
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    out.status.success(),
+    "the command has to reach its printer for this to test anything: {:?}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+  assert!(
+    control_bytes(&stdout).is_empty(),
+    "commit-prefix replayed {:?} from [gitmoji]:\n{:?}",
+    control_bytes(&stdout),
+    stdout
+  );
+  assert!(
+    stdout.contains("]0;PWNED:sparkles:"),
+    "the shortcode should stay readable minus its control bytes, got {:?}",
+    stdout
   );
 }
