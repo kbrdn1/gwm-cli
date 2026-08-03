@@ -372,7 +372,26 @@ pub fn add(
   let mut opts = WorktreeAddOptions::new();
   opts.reference(Some(&reference));
 
-  repo.worktree(name, target_path, Some(&opts))?;
+  if let Err(e) = repo.worktree(name, target_path, Some(&opts)) {
+    // The branch has to exist before this call, because
+    // `WorktreeAddOptions::reference` takes a live reference, so every
+    // failure here lands with a branch already on disk that the user never
+    // asked for (#487). Roll back only what *this* call created: a reused
+    // branch predates the command, and deleting it would destroy work.
+    //
+    // Best effort, and deliberately so. libgit2 refuses to delete a branch
+    // that is already the HEAD of a linked repository, which is the state
+    // it leaves behind when the failure came from the checkout rather than
+    // from either mkdir; `gwm doctor` still catches that residue. The
+    // caller gets the underlying error in every case, since the rollback
+    // is not the story.
+    if created_branch {
+      if let Ok(mut b) = repo.find_branch(branch_name, git2::BranchType::Local) {
+        let _ = b.delete();
+      }
+    }
+    return Err(e.into());
+  }
 
   // Record the parent ref for the launcher's base resolution chain.
   if let Some(parent_ref) = head_short {
