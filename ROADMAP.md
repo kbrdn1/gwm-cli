@@ -47,8 +47,9 @@ bounded `--jobs`, and `--workspace` fan-out ([#324](https://github.com/kbrdn1/gw
 overlays ([#325](https://github.com/kbrdn1/gwm-cli/issues/325)). See the
 [Shipped highlights](#shipped-highlights) table for the per-issue breakdown and
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes. The
-MSRV is **1.86** (raised by the PTY overlay's `portable-pty` / `tui-term`
-dependencies; MSRV bumps ride a minor per the stability policy).
+MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys`, which
+declares no floor of its own; MSRV bumps ride a minor per the stability
+policy).
 
 The 0.9.x stable line ships:
 

@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.5.0`** (machine contracts frozen since 1.0.0 — MSRV 1.86).
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.5.0`** (machine contracts frozen since 1.0.0 — MSRV 1.95).
 
 **Multi-forge, shipped in 1.5.0 (#419).** Issue / PR lookups go through a `Forge` trait with two backends — GitHub via `gh`, GitLab via `glab`. `forge = "github" | "gitlab"` in `.gwm.toml` names the backend; `[forge_hosts]` in the **user-level** config authorises a self-hosted host; `gwm trust add` is the per-repo alternative. Worktrees, bootstrap, branch naming and link storage are forge-neutral — only the network layer knows which forge is in play. See [Forge selection](#forge-selection-github--gitlab).
 
@@ -38,7 +38,7 @@ Shipped since 1.0.0: **multi-forge** in 1.5.0 (#419, above); the **help overlay*
 
 ```bash
 command -v gwm           # required — installed by `cargo install --path .` from the gwm-cli repo
-command -v cargo         # required at install time (1.86+ — the crate MSRV)
+command -v cargo         # required at install time (1.95+ — the crate MSRV)
 command -v git           # required at runtime
 command -v gh            # OPTIONAL — the GitHub backend: live `gwm status`, TUI state, `R: review` preset
 command -v glab          # OPTIONAL — the GitLab backend (forge = "gitlab"); $GWM_GLAB overrides it
