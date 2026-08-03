@@ -96,6 +96,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo check at the declared floor
         run: cargo check --all-targets --locked
+      # `daemon` is default-on, so the check above never compiles the
+      # `#[cfg(not(all(any(unix, windows), feature = "daemon")))]` arms of
+      # `cmd_daemon` / `cmd_statusline`. That build is documented as supported
+      # (docs/3.cli/1.reference.md), so it gets the same floor guarantee.
+      - name: cargo check at the declared floor (no default features)
+        run: cargo check --all-targets --locked --no-default-features
 
   test:
     name: test (${{ matrix.os }})
