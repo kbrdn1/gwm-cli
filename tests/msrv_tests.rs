@@ -25,9 +25,16 @@ fn repo_file(rel: &str) -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
+/// Reads a repo file with line endings normalised to `\n`.
+///
+/// The normalisation is not cosmetic. Windows runners check out with
+/// `core.autocrlf=true`, so every file arrives CRLF, and `job_block`'s
+/// `find("\n  msrv:\n")` matched nothing there while passing on Linux and
+/// macOS: the guard failed on `test (windows-latest)` only.
 fn read(rel: &str) -> String {
   fs::read_to_string(repo_file(rel))
     .unwrap_or_else(|err| panic!("{rel} must exist at the repo root; read error: {err}"))
+    .replace("\r\n", "\n")
 }
 
 /// The declared floor, read from the left margin of `Cargo.toml` so a
