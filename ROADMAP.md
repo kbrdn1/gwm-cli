@@ -168,7 +168,7 @@ deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both. The remaining
 two are ordered by what they unlock rather than by size.
 
-### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418)), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475)
+### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418)), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475) ✅
 
 `gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
 way to name a worktree freely. Working through this surfaced a real defect
@@ -220,10 +220,16 @@ already large PR. They touched different files, so they ran in parallel and are 
 - [x] [#481](https://github.com/kbrdn1/gwm-cli/issues/481) : renaming a worktree closes its open pull request without warning, since the remote rename is a delete plus a create and GitHub closes a PR whose head branch is renamed, including through its own rename API
 - [x] [#482](https://github.com/kbrdn1/gwm-cli/issues/482) : a segment frozen as a literal is lost when the pattern reorders its placeholders, because the recovery bounds each literal by the canonical `type, issue, desc` rank against markers whose real order differs
 
-One follow-up of #416 is still open, and it is the one that gates the cut rather than
-waiting for the next one:
+One follow-up of #416 was taken ahead of #418 rather than after it, because it had to
+land before the feature shipped rather than after:
 
-- [ ] [#475](https://github.com/kbrdn1/gwm-cli/issues/475) : a free-form name is not validated against Windows path rules, so `< > " |` and the reserved device names (`CON`, `NUL`, `COM1`…) pass every check and fail only when the directory is created, after `pre_create` hooks have run and with the branch already left behind. `--name` is on `dev` and unreleased, so tightening the validator now is additive; doing it after the feature ships makes the same tightening a breaking change.
+- [x] [#475](https://github.com/kbrdn1/gwm-cli/issues/475) : a free-form name was not validated against Windows path rules, so `< > " |` and the reserved device names (`CON`, `NUL`, `COM1`…) passed every check and failed only when the directory was created, after `pre_create` hooks had run and with the branch already left behind. `--name` merged into `dev` two days after `v1.5.0` was tagged, so it had never reached a stable line: tightening the validator was additive then and would have been a breaking change once it shipped.
+
+Two bugs found while verifying this sequence end to end are fixed alongside it. Neither
+is naming work, both are recorded here because they were found here:
+
+- [x] [#477](https://github.com/kbrdn1/gwm-cli/issues/477) : `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the main checkout's branch (or, for `bootstrap`, no branch at all) when run from a worktree, because `discover_repo` deliberately walks back to the main working directory and they asked that handle where they were
+- [ ] [#487](https://github.com/kbrdn1/gwm-cli/issues/487) : `worktree::add` creates the branch before the directory, so *any* late failure leaves it orphaned. #474 and #475 each closed one input set; a full disk is not an input set, so the ordering is what actually bounds the class
 
 ### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
