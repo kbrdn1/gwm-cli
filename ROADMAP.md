@@ -168,7 +168,7 @@ deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both. The remaining
 two are ordered by what they unlock rather than by size.
 
-### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418)), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475) ✅
+### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418) ✅), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475) ✅
 
 `gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
 way to name a worktree freely. Working through this surfaced a real defect
@@ -233,11 +233,12 @@ land before the feature shipped rather than after:
 
 - [x] [#475](https://github.com/kbrdn1/gwm-cli/issues/475) : a free-form name was not validated against Windows path rules, so `< > " |` and the reserved device names (`CON`, `NUL`, `COM1`…) passed every check and failed only when the directory was created, after `pre_create` hooks had run and with the branch already left behind. `--name` merged into `dev` two days after `v1.5.0` was tagged, so it had never reached a stable line: tightening the validator was additive then and would have been a breaking change once it shipped.
 
-Two bugs found while verifying this sequence end to end are fixed alongside it. Neither
-is naming work, both are recorded here because they were found here:
+Three bugs found while verifying this sequence end to end are fixed alongside it. None
+is naming work; they are recorded here because they were found here:
 
 - [x] [#477](https://github.com/kbrdn1/gwm-cli/issues/477) : `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the main checkout's branch (or, for `bootstrap`, no branch at all) when run from a worktree, because `discover_repo` deliberately walks back to the main working directory and they asked that handle where they were
-- [ ] [#494](https://github.com/kbrdn1/gwm-cli/issues/494) : `expand_placeholders` substitutes `{home}` / `{repo}` first and then substitutes what those expansions produced, so a repo whose own name contains `{type}` makes `{repo}/{desc}` write a type the pattern never mentions. #418 made the create form derive its fields after that resolution, which closes the symptom on the form; the multi-pass substitution itself still reaches the CLI, the hooks and path resolution, and is why `BranchParser::compile` refuses a class of otherwise-legal patterns
+- [x] [#494](https://github.com/kbrdn1/gwm-cli/issues/494) : `expand_placeholders` substituted `{home}` / `{repo}` first and then substituted what those expansions produced, so a repo whose own name contains `{type}` made `{repo}/{desc}` write a type the pattern never mentions. Now single pass, which is also an *enlargement*: `BranchParser::compile` had been refusing that whole class rather than mirror a formatter that rewrote its own output, and those patterns round-trip. Fixing the root meant reverting part of #418, which had derived the form's fields after the resolution as a workaround
+- [x] [#473](https://github.com/kbrdn1/gwm-cli/issues/473) : a `.gwm.toml` is data from a repo nobody has vetted, and the commands that read it back skip the trust gate on purpose, so echoing a value verbatim handed that file a terminal escape channel out of a read-only command. Neutralised at each **sink** rather than each producer, which is what covers checks and rows nobody has written yet. The worst site was not in `gwm config` at all but in the TOFU prompt, whose bootstrap summary could be made to erase the row naming the shell it asks permission to run; and `toml`'s parse error quotes the offending source line, so `gwm list` inside the repo was enough
 - [ ] [#487](https://github.com/kbrdn1/gwm-cli/issues/487) : `worktree::add` creates the branch before the directory, so *any* late failure leaves it orphaned. #474 and #475 each closed one input set; a full disk is not an input set, so the ordering is what actually bounds the class
 
 ### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
