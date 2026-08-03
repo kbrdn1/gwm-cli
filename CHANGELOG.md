@@ -151,11 +151,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `base`, because `base` expands the same three tokens: a segment only it
   carries still names a real directory on disk.
 
+  The field set is derived after `{repo}` and `{home}` resolve, the way the
+  formatter does it, because a repo whose name itself contains `{type}` makes
+  `{repo}/{desc}` write a type the raw pattern never mentions.
+
+  Everything the form advertises follows the same source: the hint row drops
+  `↑/↓ type` where no pattern carries `{type}` and `field` where there is one
+  field, and the status line names the field Enter actually submits from. Where
+  a pattern presents no editable token at all the form says `enter: submit` and
+  names nothing.
+
   Two consequences worth stating. The type selector now sits below the live
   preview rather than above it, so that visual order matches focus order in
-  every pattern. And the rename form no longer refuses to open on a branch
-  whose pattern omits a segment; it refused because a form hardcoded to the
-  triple could not be submitted without one, which stopped being true.
+  every pattern. And the rename form's refusal is rescoped rather than removed:
+  it used to turn away any branch whose pattern omits a segment, which took the
+  form away from a repo that simply does not use that segment. It now refuses
+  exactly the case where a segment **is** written somewhere the form cannot read
+  back, `worktree.base` being the one that matters, since opening there would
+  show a default and submitting would write it over the real value on disk.
   ([#418](https://github.com/kbrdn1/gwm-cli/issues/418))
 
 ### Fixed
