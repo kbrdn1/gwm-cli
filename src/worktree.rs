@@ -372,7 +372,44 @@ pub fn add(
   let mut opts = WorktreeAddOptions::new();
   opts.reference(Some(&reference));
 
-  repo.worktree(name, target_path, Some(&opts))?;
+  if let Err(e) = repo.worktree(name, target_path, Some(&opts)) {
+    // The branch has to exist before this call, because
+    // `WorktreeAddOptions::reference` takes a live reference, so every
+    // failure here lands with a branch already on disk that the user never
+    // asked for (#487). Roll back only what *this* call created: a reused
+    // branch predates the command, and deleting it would destroy work.
+    //
+    // Best effort, and deliberately so. Once some checkout has the branch
+    // as its HEAD, the branch stays: deleting it leaves a worktree
+    // pointing at nothing, and that residue is reported by nothing at all,
+    // unlike an orphan branch. That covers both the worktree this call was
+    // binding, since libgit2 writes its HEAD just before the checkout, and
+    // any other one already standing on the name. The caller gets the
+    // underlying error in every case, since the rollback is not the story.
+    //
+    // The tip is re-checked because "what this call created" is a claim
+    // about an OID, not about a name: another process is free to move the
+    // ref while `repo.worktree` runs, and a branch that no longer points
+    // where this call put it is somebody else's now. Leaving an orphan is
+    // the smaller harm of the two.
+    //
+    // The ref goes rather than the branch, because `git_branch_delete`
+    // drops the whole `branch.<name>` config section and that section
+    // outlives its ref easily: `git update-ref -d` leaves it, and an
+    // upstream can be configured before the branch exists. Dropping the
+    // stamp `add` wrote is enough, and it is all this call put there.
+    if created_branch && !branch_is_checked_out_anywhere(repo, branch_name) {
+      if let Ok(b) = repo.find_branch(branch_name, git2::BranchType::Local) {
+        if b.get().target() == Some(head_commit.id()) {
+          let mut r = b.into_reference();
+          if r.delete().is_ok() {
+            let _ = remove_branch_created_at(repo, branch_name);
+          }
+        }
+      }
+    }
+    return Err(e.into());
+  }
 
   // Record the parent ref for the launcher's base resolution chain.
   if let Some(parent_ref) = head_short {
@@ -392,6 +429,48 @@ fn write_branch_created_at(repo: &Repository, branch: &str, unix_secs: i64) -> R
     &branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY),
     &unix_secs.to_string(),
   )?;
+  Ok(())
+}
+
+/// True when any checkout, main or linked, already has `branch` as its HEAD.
+/// That is `git_branch_is_checked_out`: what `git_worktree_add` refuses on and
+/// what `git_branch_delete` guards against. git2 binds neither, and the
+/// rollback deletes the reference rather than the branch, so it is spelled out
+/// here.
+///
+/// The admin directory is read from disk rather than through
+/// `repo.worktrees()`, because an entry a failed run left half-written has no
+/// `gitdir` file and libgit2 will not list it, while its `HEAD` still names a
+/// branch. `commondir` rather than `path`, since the latter is the
+/// per-worktree gitdir when gwm runs from inside a linked worktree.
+///
+/// A read that fails answers nothing, and folding that into "no" would make
+/// the rollback delete a ref on the strength of a failed read, which is the
+/// one outcome this check exists to prevent. So: absent is "no", unreadable is
+/// "assume yes".
+fn branch_is_checked_out_anywhere(repo: &Repository, branch: &str) -> bool {
+  let want = format!("ref: refs/heads/{}", branch);
+  let names_branch = |p: PathBuf| match std::fs::read_to_string(p) {
+    Ok(s) => s.trim() == want,
+    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+  };
+  let common = repo.commondir().to_path_buf();
+  if names_branch(common.join("HEAD")) {
+    return true;
+  }
+  match std::fs::read_dir(common.join("worktrees")) {
+    Ok(mut entries) => entries.any(|e| match e {
+      Ok(entry) => names_branch(entry.path().join("HEAD")),
+      Err(_) => true,
+    }),
+    // No linked worktrees at all is the ordinary case, and it is a "no".
+    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+  }
+}
+
+fn remove_branch_created_at(repo: &Repository, branch: &str) -> Result<()> {
+  let mut cfg = repo.config()?;
+  cfg.remove(&branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY))?;
   Ok(())
 }
 
