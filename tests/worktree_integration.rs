@@ -1927,3 +1927,36 @@ fn add_rollback_keeps_branch_config_it_did_not_write() {
     "and the branch itself must still be rolled back"
   );
 }
+
+#[test]
+fn add_keeps_the_branch_when_the_worktree_is_already_bound_to_it() {
+  // Codex review on PR #497 (P2, iter 3). `git_branch_delete` refuses a
+  // branch that is "the current HEAD of a linked repository";
+  // `git_reference_delete`, which the rollback moved to in order to spare
+  // the config section, carries no such check. Measured on a live
+  // worktree: the ref goes, `find_worktree` still resolves the entry and
+  // `prunable_worktrees` does not list it, so the residue is a worktree
+  // bound to a branch that no longer exists and nothing reports it. That
+  // is worse than the orphan branch this whole change is about.
+  //
+  // libgit2 writes `.git/worktrees/<name>/HEAD` near the end of
+  // `git_worktree_add`, right before the checkout, and a checkout failure
+  // is not reachable from an integration test. The fixture writes the
+  // binding directly, which is the state that failure leaves behind.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let admin = repo.path().join("worktrees").join("feat-487-bound");
+  std::fs::create_dir_all(&admin).unwrap();
+  std::fs::write(admin.join("HEAD"), "ref: refs/heads/feat/#487-bound\n").unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-bound");
+  worktree::add(&repo, "feat-487-bound", &target, "feat/#487-bound", false).unwrap_err();
+
+  assert!(
+    branch_exists(&repo, "feat/#487-bound"),
+    "a branch a worktree is already bound to must survive the rollback, \
+     otherwise the rollback trades an orphan branch for a worktree pointing \
+     at nothing that no check reports"
+  );
+}

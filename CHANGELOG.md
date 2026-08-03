@@ -191,10 +191,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would have taken an upstream setting the command never wrote.
 
   The error stays the underlying failure rather than a cleanup message. One
-  residue is out of reach and remains `gwm doctor`'s job: libgit2 refuses to
-  delete a branch that is already the HEAD of a linked repository, which is
-  the state it leaves when the failure came from the checkout itself rather
-  than from either mkdir.
+  window is left alone on purpose: once libgit2 has bound the worktree to the
+  branch, which it does just before the checkout, the branch stays. Deleting
+  it there leaves a worktree pointing at a ref that no longer exists, and
+  unlike an orphan branch that residue is reported by nothing, so a failure
+  that late behaves as it did before.
 
   This bounds the class that #474 (the 255-byte cap) and #475 (the Windows
   character and device set) each closed one input set of. Refusing a name up
