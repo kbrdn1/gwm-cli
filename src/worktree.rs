@@ -385,9 +385,17 @@ pub fn add(
     // from either mkdir; `gwm doctor` still catches that residue. The
     // caller gets the underlying error in every case, since the rollback
     // is not the story.
+    //
+    // The tip is re-checked because "what this call created" is a claim
+    // about an OID, not about a name: another process is free to move the
+    // ref while `repo.worktree` runs, and a branch that no longer points
+    // where this call put it is somebody else's now. Leaving an orphan is
+    // the smaller harm of the two.
     if created_branch {
       if let Ok(mut b) = repo.find_branch(branch_name, git2::BranchType::Local) {
-        let _ = b.delete();
+        if b.get().target() == Some(head_commit.id()) {
+          let _ = b.delete();
+        }
       }
     }
     return Err(e.into());
