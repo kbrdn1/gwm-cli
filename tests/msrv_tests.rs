@@ -139,4 +139,14 @@ fn ci_verifies_the_declared_msrv_and_derives_it_from_cargo_toml() {
      *resolve* time against the committed lockfile, which is what turns a \
      dependency raising its floor into a red job"
   );
+  for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+    assert!(
+      block.contains(os),
+      "the msrv job must run on {os}, like the `test` job. A single-platform \
+       run compiles neither the `[target.\"cfg(windows)\".dependencies]` block \
+       nor the `#[cfg(windows)]` code, so a Windows-only dependency raising \
+       its own floor stays green on Linux while `cargo install` breaks for \
+       those users"
+    );
+  }
 }

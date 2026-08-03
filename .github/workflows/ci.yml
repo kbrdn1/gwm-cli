@@ -47,8 +47,19 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   msrv:
-    name: msrv (declared floor)
-    runs-on: ubuntu-latest
+    name: msrv (declared floor, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # Same matrix as `test`, and for the same reason: a single-platform run
+    # sees neither the `[target."cfg(windows)".dependencies]` block nor the
+    # `#[cfg(windows)]` code, so a Windows-only dependency raising its floor
+    # (or a Windows-only use of a newer std API) would keep this job green on
+    # Linux while `cargo install` breaks for those users. That is the #491 bug
+    # again, one axis over.
+    #
     # The clippy job catches a *std API* newer than the declared floor
     # (`clippy::incompatible_msrv`), but nothing covered a **dependency**
     # whose floor is higher than ours: `Cargo.toml` said 1.86 for a whole
@@ -72,6 +83,8 @@ jobs:
           persist-credentials: false
       - name: read the declared MSRV
         id: msrv
+        # `windows-latest` defaults to PowerShell, which has no grep/cut.
+        shell: bash
         run: |
           version=$(grep -m1 '^rust-version = ' Cargo.toml | cut -d'"' -f2)
           [ -n "$version" ] || { echo "::error::no rust-version in Cargo.toml"; exit 1; }
