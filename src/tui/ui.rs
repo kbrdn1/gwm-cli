@@ -5,6 +5,12 @@ use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
+
+/// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
+/// default by the hint helpers that have no form in reach (issue #418). Every
+/// row those helpers can drop is present in it, so the default is "advertise
+/// everything", which is what they did before the field set became dynamic.
+const CANONICAL_TRIPLE: [Field; 3] = [Field::Type, Field::Issue, Field::Desc];
 use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
@@ -2276,9 +2282,45 @@ impl HintContext {
   /// overlay and the Issue/PR prompt use. An unbound action is dropped from
   /// the row rather than advertised with a phantom key.
   pub fn resolve(self, keymap: &super::keymap::Keymap, modal: &ModalKeymap) -> Vec<(String, String)> {
+    self.resolve_with_fields(keymap, modal, &CANONICAL_TRIPLE)
+  }
+
+  /// As [`Self::resolve`], but told which fields the create / rename form
+  /// actually presents (issue #418), so the structured rows stop advertising
+  /// verbs that do nothing.
+  ///
+  /// Two of them go inert once the field set follows the repo's patterns, and
+  /// this codebase's rule is to never name a key that does nothing (the reason
+  /// free-form drops the same two rows since #416):
+  ///
+  /// - `↑/↓ type` when no pattern carries `{type}`. The selector is not
+  ///   rendered and `handle_create_key` gates the cycling verbs on
+  ///   `Field::Type`, so the arrows are a no-op.
+  /// - `field` when the pattern presents one field. `next_field` rotates
+  ///   within a one-element list, so Tab does nothing.
+  ///
+  /// `fields` is ignored outside the structured create / rename contexts:
+  /// free-form drops both rows already, and no other context carries them.
+  pub fn resolve_with_fields(
+    self,
+    keymap: &super::keymap::Keymap,
+    modal: &ModalKeymap,
+    fields: &[Field],
+  ) -> Vec<(String, String)> {
+    let structured_form = matches!(self, HintContext::Create | HintContext::Rename);
     self
       .hint_specs()
       .iter()
+      .filter(|h| {
+        if !structured_form {
+          return true;
+        }
+        match h {
+          Hint::Lit("↑/↓", "type") => fields.contains(&Field::Type),
+          Hint::Modal(ModalAction::CreateNextField, _) => fields.len() > 1,
+          _ => true,
+        }
+      })
       .filter_map(|h| match h {
         // #219: a global verb whose key is claimed by a modal binding in the
         // active context is resolved as that modal verb first — the event loop
@@ -2487,7 +2529,19 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
 }
 
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
-  let resolved = ctx.resolve(keymap, modal);
+  modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
+}
+
+/// As [`modal_hint_for_context`], for the two footers whose form knows which
+/// fields it presents (issue #418). Every other modal keeps the plain call.
+pub fn modal_hint_for_context_with_fields(
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+  fields: &[Field],
+) -> Line<'static> {
+  let resolved = ctx.resolve_with_fields(keymap, modal, fields);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)
 }
@@ -2712,7 +2766,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Resolve the rebindable hint keys against the live keymap (issue #217
   // review) so a user override shows through, then borrow into the slice
   // `status_line` expects.
-  let resolved = ctx.resolve(&app.keymap, &app.modal_keymap);
+  // Same field set the two footers use (#418), so the bar behind a modal and
+  // the modal's own footer cannot advertise different verbs.
+  let resolved = ctx.resolve_with_fields(&app.keymap, &app.modal_keymap, app.create_form.fields());
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   let line = status_line(
     ctx.label(),
@@ -2986,11 +3042,17 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreateNextType, "next branch type"),
       modal_entry(ModalAction::CreateNextField, "next field"),
       modal_entry(ModalAction::CreatePrevField, "previous field"),
-      modal_entry(ModalAction::CreateSubmit, "submit (on description / name) / next field"),
-      modal_entry(ModalAction::CreateToggleMode, "toggle type/issue/desc ↔ free-form name"),
+      modal_entry(ModalAction::CreateSubmit, "submit (on the last field) / next field"),
+      modal_entry(
+        ModalAction::CreateToggleMode,
+        "toggle structured fields ↔ free-form name",
+      ),
       modal_entry(ModalAction::CreateCancel, "cancel"),
-      fixed("0-9", "type into the issue field (digits only)"),
-      fixed("any char", "type into the description / name field"),
+      fixed(
+        "0-9",
+        "type into the issue field, where the patterns ask for one (digits only)",
+      ),
+      fixed("any char", "type into the focused text field"),
       fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
@@ -3850,6 +3912,63 @@ fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
   )
 }
 
+/// One row per field the form presents, in the order the patterns write them
+/// (issue #418), blank-line separated.
+///
+/// Both the create overlay and the rename modal draw from this, so they cannot
+/// come to disagree about which inputs exist — they used to hardcode the same
+/// `Type` / `Issue` / `Desc` triple twice, which is two places to forget a
+/// pattern that carries only some of them.
+///
+/// Visual order is focus order by construction, which is the property that
+/// makes a custom pattern legible: `{desc}-{issue}` reads top-to-bottom in the
+/// same order it writes left-to-right. That does move the type selector below
+/// the preview, where the old layout kept it above.
+fn form_field_lines(app: &App, type_str: &str, type_desc: &str, value_w: usize, label_w: usize) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let surface = app.theme.selection_bg;
+  let label = |s: &str| format!("{:<label_w$}", s);
+
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  for field in app.create_form.fields() {
+    if !lines.is_empty() {
+      lines.push(Line::from(String::new()));
+    }
+    lines.push(match field {
+      Field::Type => type_selector_line(
+        &label("Type"),
+        type_str,
+        type_desc,
+        app.create_form.field == Field::Type,
+        accent,
+        muted,
+      ),
+      Field::Issue => field_input_line(
+        &label("Issue"),
+        &app.create_form.issue,
+        app.create_form.field == Field::Issue,
+        value_w,
+        accent,
+        muted,
+        surface,
+      ),
+      Field::Desc => field_input_line(
+        &label("Desc"),
+        &app.create_form.desc,
+        app.create_form.field == Field::Desc,
+        value_w,
+        accent,
+        muted,
+        surface,
+      ),
+      // `Name` belongs to free-form mode, which never reaches this list.
+      Field::Name => continue,
+    });
+  }
+  lines
+}
+
 fn draw_create(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -3893,21 +4012,10 @@ fn draw_create(f: &mut Frame, app: &App) {
     },
     clean,
   );
-  // Type selector first, then the live preview, then the editable fields —
-  // the preview sits above the inputs so the resulting names stay in view
-  // while typing (issue #217 follow-up). Free-form mode has no branch type,
-  // so the selector is absent rather than shown inert.
-  if !freeform {
-    lines.push(type_selector_line(
-      &label("Type"),
-      type_str,
-      type_desc,
-      app.create_form.field == Field::Type,
-      accent,
-      muted,
-    ));
-    lines.push(Line::from(String::new()));
-  }
+  // The live preview first, then the editable fields — the preview sits above
+  // the inputs so the resulting names stay in view while typing (issue #217
+  // follow-up). Which inputs those are comes from the patterns (#418), so a
+  // repo whose convention writes no issue number is not shown a field for one.
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -3928,25 +4036,7 @@ fn draw_create(f: &mut Frame, app: &App) {
       surface,
     ));
   } else {
-    lines.push(field_input_line(
-      &label("Issue"),
-      &app.create_form.issue,
-      app.create_form.field == Field::Issue,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
-    lines.push(Line::from(String::new()));
-    lines.push(field_input_line(
-      &label("Desc"),
-      &app.create_form.desc,
-      app.create_form.field == Field::Desc,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
+    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
@@ -3990,11 +4080,12 @@ fn draw_create(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(
+      Paragraph::new(modal_hint_for_context_with_fields(
         app.create_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
+        app.create_form.fields(),
       )),
       inner[4],
     );
@@ -5313,21 +5404,6 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     Span::styled(old_display, Style::default().fg(muted)),
   ]));
   lines.push(Line::from(String::new()));
-  // Issue #479: free-form has one field and no type selector, so the rows the
-  // structured triple needs are not rendered rather than rendered inert — the
-  // same shape `draw_create` uses, and the reason #474 suppressed the toggle
-  // here in the first place was that these rows did not exist.
-  if !freeform {
-    lines.push(type_selector_line(
-      &label("Type"),
-      type_str,
-      type_desc,
-      app.create_form.field == Field::Type,
-      accent,
-      muted,
-    ));
-    lines.push(Line::from(String::new()));
-  }
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -5346,6 +5422,11 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     ]));
   }
   lines.push(Line::from(String::new()));
+  // Issue #479: free-form has one field and no type selector, so the rows the
+  // structured triple needs are not rendered rather than rendered inert — the
+  // same shape `draw_create` uses, and the reason #474 suppressed the toggle
+  // here in the first place was that these rows did not exist. Which rows the
+  // structured side needs comes from the patterns (#418).
   if freeform {
     lines.push(field_input_line(
       &label("Name"),
@@ -5357,25 +5438,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       surface,
     ));
   } else {
-    lines.push(field_input_line(
-      &label("Issue"),
-      &app.create_form.issue,
-      app.create_form.field == Field::Issue,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
-    lines.push(Line::from(String::new()));
-    lines.push(field_input_line(
-      &label("Desc"),
-      &app.create_form.desc,
-      app.create_form.field == Field::Desc,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
+    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
@@ -5419,13 +5482,14 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(
+      Paragraph::new(modal_hint_for_context_with_fields(
         // One source with the statusbar (`App::rename_hint_context`), so the
         // footer and the bar behind it cannot disagree about the mode.
         app.rename_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
+        app.create_form.fields(),
       )),
       inner[4],
     );

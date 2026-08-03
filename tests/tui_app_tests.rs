@@ -10824,18 +10824,24 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
 }
 
 #[test]
-fn enter_edit_worktree_refuses_a_pattern_that_carries_no_issue() {
-  // Codex review on PR #476. Before #417 a branch written by `{type}/{desc}`
-  // did not parse at all, so the rename modal refused to open. Deriving the
-  // parser made it parse with `issue == ""`, which opened a form the user
-  // cannot submit: `submit_edit_worktree` runs `BranchSpec::new_with_types`,
-  // which rejects an empty issue, and inventing one would not help either
-  // since the pattern has no `{issue}` to write it into.
+fn enter_edit_worktree_opens_on_a_pattern_that_carries_no_issue() {
+  // This test used to assert the opposite, and the reversal *is* issue #418.
   //
-  // Refuse up front and name what is missing, the same shape as
-  // `gwm commit-prefix`.
+  // The guard it pinned (Codex review on PR #476) refused to open the rename
+  // modal when a segment came back empty, because "the form cannot be
+  // submitted without it": `BranchSpec::new_with_types` rejects an empty issue,
+  // and inventing one would not have helped since `{type}/{desc}` has no
+  // `{issue}` to write it into. Both halves were true of a form hardcoded to
+  // the canonical triple.
+  //
+  // Token-driven, neither holds. The form presents no Issue field on this
+  // pattern, `new_with_required` does not validate a segment the patterns
+  // discard, and the rename is perfectly submittable — so refusing took the
+  // modal away from a repo where it now works.
   let (_dir, mut app) = make_app();
   app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.apply_create_form_fields();
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("feat/my-desc".into());
   app.worktrees = vec![wt];
@@ -10843,12 +10849,17 @@ fn enter_edit_worktree_refuses_a_pattern_that_carries_no_issue() {
 
   app.enter_edit_worktree();
 
-  assert_eq!(app.view, View::List, "an unsubmittable form must not open");
-  assert!(app.edit_original_branch.is_none());
+  assert_eq!(app.view, View::Edit, "the form is submittable, so it must open");
+  assert_eq!(app.create_form.fields(), [Field::Type, Field::Desc]);
+  assert_eq!(app.create_form.desc, "my-desc");
   assert!(
-    app.status.contains("{issue}") && app.status.contains("branch pattern"),
-    "status must name the missing placeholder: {}",
-    app.status
+    app.create_form.issue.is_empty(),
+    "nothing to recover, and nothing asks for it"
+  );
+  assert!(
+    app.edit_target().is_ok(),
+    "and it composes a target: {:?}",
+    app.edit_target()
   );
 }
 
@@ -11253,4 +11264,306 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
     "editing the frozen description must still be refused: {:?}",
     app.edit_failure
   );
+}
+
+// --- token-driven create form (issue #418) --------------------------------
+
+/// Build an `App` on a throwaway repo whose `.gwm.toml` carries the given
+/// worktree patterns. `base` is included because it feeds the triple too.
+fn app_with_patterns(branch: &str, path: &str, base: &str) -> (tempfile::TempDir, App) {
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      "[worktree]\nbase = \"{}\"\nbranch_pattern = \"{}\"\npath_pattern = \"{}\"\n",
+      base, branch, path
+    ),
+  )
+  .unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).expect("app builds on the fixture repo");
+  (dir, app)
+}
+
+/// The form must present exactly the fields the repo's patterns ask for.
+#[test]
+fn the_create_form_presents_only_the_fields_the_repo_s_patterns_ask_for() {
+  let (_d, app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  assert_eq!(
+    app.create_form.fields(),
+    [Field::Type, Field::Desc],
+    "a pattern that writes no issue number must not present an Issue field"
+  );
+
+  // The union includes `base`: a value dropped there names a real directory.
+  let (_d2, app2) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt/{issue}");
+  assert_eq!(
+    app2.create_form.fields(),
+    [Field::Type, Field::Desc, Field::Issue],
+    "base carries {{issue}}, so the form still has to collect it"
+  );
+}
+
+/// The end-to-end point of #418. `BranchSpec::validate_against` refuses an
+/// empty issue, so before this the form on a `{type}/{desc}` repo demanded a
+/// number and then expanded patterns with nowhere to put it: mandatory *and*
+/// discarded, which left the TUI create path unusable on that convention.
+#[test]
+fn a_pattern_without_an_issue_token_can_be_submitted_without_an_issue_number() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  for c in "thing".chars() {
+    app.create_form.push_char(c);
+  }
+  assert!(
+    app.create_form.issue.is_empty(),
+    "nothing was typed into a hidden field"
+  );
+
+  let (branch, dirname) = app
+    .edit_target()
+    .expect("the form must compose a target without an issue number it cannot write");
+  assert_eq!(branch, "feat/thing");
+  assert_eq!(dirname, "feat-thing");
+}
+
+/// A segment the patterns *do* ask for is still required — relaxing validation
+/// must be scoped to what the pattern drops, not to validation in general.
+#[test]
+fn a_segment_the_pattern_does_ask_for_is_still_required() {
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  for c in "thing".chars() {
+    app.create_form.push_char(c);
+  }
+  assert!(
+    app.edit_target().is_err(),
+    "the pattern writes an issue number, so an empty one must still be refused"
+  );
+}
+
+/// `enter_create` opened on `Field::Issue` literally. On a pattern without one
+/// that focuses an input the renderer never draws, so the first keypress goes
+/// nowhere.
+#[test]
+fn entering_the_create_form_focuses_a_field_the_pattern_presents() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  assert_eq!(app.create_form.field, Field::Desc);
+
+  // And the canonical pattern keeps #217's behaviour: skip the cycle-only Type.
+  let (_d2, mut app2) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  app2.enter_create();
+  assert_eq!(app2.create_form.field, Field::Issue);
+}
+
+/// Enter submitted only from `Field::Desc` (or `Name`), because those were the
+/// last fields of the two hardcoded modes. Making `{desc}` optional turned that
+/// into a form that **cannot be submitted at all**: on `{type}/#{issue}` Enter
+/// just rotated forever. A bug this PR would have introduced, not a pre-existing
+/// one, and no state or render test can see it because the gate lives in the key
+/// handler.
+#[test]
+fn enter_submits_from_the_last_field_whatever_the_pattern_calls_it() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}", "{type}-{issue}", "{repo_parent}/wt");
+  app.enter_create();
+  assert_eq!(app.create_form.fields(), [Field::Type, Field::Issue]);
+
+  // Focus the last field the pattern presents, then submit.
+  app.create_form.field = app.create_form.last_field();
+  assert!(
+    matches!(
+      app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+      CreateKey::Submit
+    ),
+    "Enter on the pattern's last field must submit, not rotate"
+  );
+
+  // And from a non-final field it still advances rather than submitting.
+  app.create_form.field = Field::Type;
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert_eq!(app.create_form.field, Field::Issue, "it advanced instead");
+}
+
+/// The create path composes its own `BranchSpec`, separately from the rename
+/// path. Relaxing validation in `worktree_name_from_form` alone left the actual
+/// defect standing where the issue is about: pressing Enter on a `{type}/{desc}`
+/// repo still failed with `invalid issue number ''`.
+#[test]
+fn submitting_the_create_form_does_not_demand_a_segment_the_patterns_discard() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  for c in "thing".chars() {
+    app.create_form.push_char(c);
+  }
+
+  // Composition happens before the trust gate, so a validation failure surfaces
+  // as an `Err` here regardless of what the gate then decides.
+  let out = app.submit_create();
+  assert!(
+    out.is_ok(),
+    "the form must compose without an issue number it cannot write: {:?}",
+    out.err().map(|e| e.to_string())
+  );
+  assert!(
+    !app.status.contains("invalid issue"),
+    "and must not complain about one either: {}",
+    app.status
+  );
+}
+
+/// Codex review on PR #492. `enter_create` has its own status string, separate
+/// from the one the free-form toggle writes, and only the second was moved off
+/// `desc`. So the form opened telling the user to press enter on a field the
+/// pattern does not present, while Enter actually submitted from another.
+///
+/// Same class as the field set itself, applied half-way: when an invariant is
+/// written down, every consumer of the old hardcoded value has to move at once.
+#[test]
+fn the_opening_instruction_names_the_field_enter_actually_submits_from() {
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}", "{type}-{issue}", "{repo_parent}/wt");
+  app.enter_create();
+  assert!(
+    app.status.contains("enter on issue"),
+    "the pattern's last field is Issue, not Desc: {}",
+    app.status
+  );
+  assert!(!app.status.contains("enter on desc"), "and Desc does not exist here");
+
+  let (_d2, mut app2) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  app2.enter_create();
+  assert!(
+    app2.status.contains("enter on desc"),
+    "the canonical pattern is unchanged: {}",
+    app2.status
+  );
+}
+
+/// Codex review on PR #492, two passes, and the second reversed the first.
+///
+/// `worktree_spec` reads the branch and the directory name and never parses
+/// `base`, so a segment carried only by `base` comes back empty. My first fix
+/// treated that as "nothing to preserve" and defaulted the selector to index 0.
+/// That is wrong in the most expensive way available: the value is not absent,
+/// it is **on disk**. Under `base = ".../wt/{type}"` a worktree at
+/// `.../wt/fix/my-desc` would open showing `feat`, and submitting without
+/// touching the type would move the worktree to `.../wt/feat/`.
+///
+/// The rule is the conjunction, not either half: refuse when a segment some
+/// pattern *writes* is one the parse did *not* recover.
+#[test]
+fn the_rename_form_refuses_a_segment_it_cannot_read_back_from_the_name() {
+  let (_d, mut app) = app_with_patterns("{desc}", "{desc}", "{repo_parent}/wt/{type}");
+  assert!(
+    app.create_form.fields().contains(&Field::Type),
+    "base carries {{type}}, so the form would present a selector for it"
+  );
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "opening would overwrite the on-disk type");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("{type}") && app.status.contains("worktree.base"),
+    "the status must name the segment and where to look: {}",
+    app.status
+  );
+}
+
+/// The other half of that conjunction, and the #418 win it must not undo: a
+/// segment **no** pattern carries is not something the form shows or asks for,
+/// so its absence from the parse is not a reason to refuse.
+#[test]
+fn a_segment_no_pattern_carries_is_not_a_reason_to_refuse() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "status was: {}", app.status);
+  assert!(app.create_form.issue.is_empty());
+}
+
+/// The other side of the same guard: a parsed type that is real but not
+/// configured must still be refused, which is what #292 was actually about.
+#[test]
+fn a_parsed_but_unconfigured_type_is_still_refused() {
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("zzz/#7-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "an unconfigured type must not be silently rewritten"
+  );
+  assert!(app.status.contains("zzz"), "and must be named: {}", app.status);
+}
+
+/// Codex review on PR #492, sixth pass, P1, and it disproves a claim I wrote
+/// into the code two commits earlier: that `refuse_unwritable_segment_change`
+/// had become unreachable in structured mode.
+///
+/// It is reachable, and it blocks every structured rename on a pattern set that
+/// omits `{type}`. The form hides the Type field but `type_index` still points
+/// at the first configured type, so the guard compares `feat` against the empty
+/// type recovered from the branch, calls that a change to an unwritten segment,
+/// and refuses. Nothing the user can do clears it, because the field is not on
+/// screen to correct.
+///
+/// A hidden field has no value to defend: the guard must skip the segments the
+/// form does not present rather than compare their fallbacks.
+#[test]
+fn a_hidden_segment_cannot_block_the_rename_it_is_not_part_of() {
+  let (_d, mut app) = app_with_patterns("#{issue}-{desc}", "{issue}-{desc}", "{repo_parent}/wt");
+  assert!(
+    !app.create_form.fields().contains(&Field::Type),
+    "no pattern carries {{type}}, so the form must not present it"
+  );
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "status was: {}", app.status);
+
+  // Edit only what the pattern writes.
+  app.create_form.field = Field::Desc;
+  for _ in 0.."my-desc".len() {
+    app.create_form.pop_char();
+  }
+  for c in "renamed".chars() {
+    app.create_form.push_char(c);
+  }
+
+  let out = app.submit_edit_worktree();
+  assert!(
+    !app.edit_failure.as_deref().unwrap_or("").contains("{type}"),
+    "the hidden type must not be read as a change: {:?}",
+    app.edit_failure
+  );
+  assert!(
+    !app.status.contains("no {type} to write"),
+    "nor block the submit: {}",
+    app.status
+  );
+  let _ = out;
 }

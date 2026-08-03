@@ -1029,3 +1029,195 @@ fn the_rename_modal_stays_quiet_about_a_pr_that_is_already_closed() {
   let buf = render(&mut app);
   assert_absent(&buf, "closes PR", "a merged PR cannot be closed by a rename");
 }
+
+/// Issue #418. The overlay drew the canonical `Type` / `Issue` / `Desc` triple
+/// whatever the repo's patterns said, so a convention that writes no issue
+/// number was still shown a field for one — and `BranchSpec::validate_against`
+/// then refused to submit until it was filled with a value the patterns
+/// discard. The field set now comes from the patterns.
+#[test]
+fn the_create_modal_omits_a_field_the_patterns_never_write() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Type", "the pattern writes a type");
+  assert_present(&buf, "Desc", "and a description");
+  assert!(
+    !buffer_contains(&buf, "Issue"),
+    "no pattern carries {{issue}}, so no Issue field — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+/// `base` feeds the triple too (`BranchSpec::worktree_path` expands it), so a
+/// segment only `base` carries still names a real directory on disk and still
+/// has to be collected. A field set derived from the two obvious patterns
+/// would have dropped it.
+#[test]
+fn the_create_modal_keeps_a_field_only_the_base_path_writes() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt/{issue}".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Issue", "base writes the issue number into the path");
+}
+
+/// The rename modal draws the same set from the same place, so the two cannot
+/// disagree about which inputs exist — they used to hardcode the triple twice.
+#[test]
+fn the_rename_modal_omits_the_same_field_the_create_modal_does() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  let mut wt = deletable_worktree("foo");
+  wt.branch = Some("feat/my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, gwm::tui::View::Edit, "the rename form must open");
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Rename", "the rename modal is up");
+  assert_present(&buf, "Desc", "the pattern writes a description");
+  assert!(
+    !buffer_contains(&buf, "Issue"),
+    "no pattern carries {{issue}}, so no Issue field — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+/// Codex review on PR #492. Making the field set dynamic made two hint rows
+/// inert, and this codebase's rule is to never name a key that does nothing
+/// (the reason free-form drops the same two rows since #416). Introduced by
+/// #418, not pre-existing: before it, the structured form always presented the
+/// full triple, so both rows were always accurate.
+#[test]
+fn the_hint_row_drops_the_type_selector_when_no_pattern_carries_one() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}-{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_absent(&buf, "↑/↓", "no type selector is rendered, so its keys do nothing");
+  assert_present(&buf, "field", "two fields remain, so Tab still moves");
+}
+
+/// The other row: one field means `next_field` rotates within a one-element
+/// list, so Tab does nothing either.
+#[test]
+fn the_hint_row_drops_the_field_verb_when_the_pattern_presents_one_field() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wt/{desc}".into();
+  app.config.worktree.path_pattern = "{desc}".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  assert_eq!(app.create_form.fields().len(), 1);
+  let buf = render(&mut app);
+
+  assert_absent(&buf, "↑/↓", "no type selector either");
+  assert_absent(&buf, "field", "one field, so Tab is a no-op");
+  assert_present(&buf, "submit", "the verbs that still work stay");
+}
+
+/// And the canonical pattern is unchanged, so the fix cannot be a blanket
+/// removal of the two rows.
+#[test]
+fn the_hint_row_is_unchanged_on_the_canonical_pattern() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "↑/↓", "the default pattern has a type selector");
+  assert_present(&buf, "field", "and three fields to move between");
+}
+
+/// Codex review on PR #492, fifth pass, and the third finding of one class:
+/// a user-facing string that names a field the patterns do not present. Three
+/// passes each named one string, so this stops enumerating strings and
+/// enumerates the **property** instead.
+///
+/// **Invariant: on a repo whose patterns omit a segment, nothing the create or
+/// rename surface renders may name that segment.** That covers the modal body,
+/// its footer, and the statusbar behind it in one assertion, and it holds for
+/// strings nobody has written yet.
+#[test]
+fn no_create_surface_names_a_segment_the_patterns_omit() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::Mode;
+
+  // Each pattern set omits exactly one segment, so no single hardcoded string
+  // can pass all three.
+  for (branch, path, omitted) in [
+    ("{type}/{desc}", "{type}-{desc}", "issue"),
+    ("#{issue}-{desc}", "{issue}-{desc}", "type"),
+    ("{type}/#{issue}", "{type}-{issue}", "desc"),
+  ] {
+    for freeform in [false, true] {
+      let (_dir, mut app) = make_app();
+      app.config.worktree.branch_pattern = branch.into();
+      app.config.worktree.path_pattern = path.into();
+      app.config.worktree.base = "/tmp/wt".into();
+      app.apply_create_form_fields();
+      app.enter_create();
+      if freeform {
+        // Through the key handler, not `CreateForm::toggle_mode`: the status
+        // line is written by the handler, so calling the form method directly
+        // leaves the very string this test is about unexercised. (It did, on
+        // the first draft, and the test passed with the defect restored.)
+        app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.create_form.mode, Mode::Freeform);
+      }
+      let buf = render(&mut app);
+
+      assert!(
+        !buffer_contains(&buf, omitted),
+        "`{}` / `{}` (free-form: {}) writes no {{{}}}, but the surface names it — buffer rows:\n{}",
+        branch,
+        path,
+        freeform,
+        omitted,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+/// The degenerate end of the same rule: a pattern set with no editable token
+/// presents no field, so there is none to name. `last_field` falls back to
+/// `Type`, which the renderer is not drawing.
+#[test]
+fn an_all_literal_pattern_set_names_no_field_at_all() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wip".into();
+  app.config.worktree.path_pattern = "wip".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  assert!(app.create_form.fields().is_empty());
+
+  assert_eq!(app.status, "enter: submit — esc: cancel");
+  let buf = render(&mut app);
+  for absent in ["Type", "Issue", "Desc"] {
+    assert!(
+      !buffer_contains(&buf, absent),
+      "`{}` is not presented — buffer rows:\n{}",
+      absent,
+      row_strings(&buf).join("\n")
+    );
+  }
+}

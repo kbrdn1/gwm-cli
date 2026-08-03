@@ -66,6 +66,70 @@ const TOKENS: [Token; 5] = [
 /// goes to the one that can be sure about it.
 const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 
+/// Which of the three editable segments the given patterns ask the user to
+/// supply, in the order the patterns write them (issue #418).
+///
+/// These are the tokens [`crate::config::expand_placeholders`] fills from a
+/// value the user typed, as opposed to the ones gwm resolves from the repo and
+/// the environment (`{repo}`, `{home}`, `{repo_path}`, `{repo_parent}`). So this
+/// is exactly the field set the TUI create form has to present: a pattern that
+/// writes no issue number must not ask for one, and asking anyway is not merely
+/// noise — [`BranchSpec::validate_against`] then refuses to submit until the
+/// field is filled with a number the patterns discard.
+///
+/// **Order is the pattern's, not the canonical triple's.** `{desc}-{issue}` is a
+/// legitimate convention, and a form whose Tab order disagreed with the name
+/// being written would read backwards.
+///
+/// Pass every pattern the triple feeds. `base` is one of them:
+/// [`BranchSpec::worktree_path`] expands `{type}` / `{issue}` / `{desc}` in it,
+/// so a segment only `base` carries still names a real directory on disk and
+/// still has to be collected.
+///
+/// De-duplicated on first occurrence, which cannot be inherited from
+/// [`BranchParser::compile`]'s stricter contract: the compiler refuses a
+/// repeated capturing token, but `expand_placeholders` is a chain of
+/// `str::replace` and substitutes every occurrence quite happily.
+///
+/// Scanned **after** the context placeholders are resolved, because that is what
+/// the formatter does: `expand_placeholders` substitutes `{home}` / `{repo}`
+/// first and then substitutes what those expansions produced. A repo literally
+/// named `api-{type}` therefore makes `{repo}/{desc}` write a type the raw
+/// template never mentions, and reading the raw template hid the field while
+/// silently defaulting it (Codex review on PR #492).
+///
+/// Bounding that by "the compiler refuses this class anyway" was **false**, and
+/// worth recording because the bound looked solid: `branch_pattern_warning` is
+/// only ever called with `worktree.branch_pattern`, so the same repo name
+/// reaches the form through `path_pattern` or `base` with no diagnostic at all.
+/// The multi-pass substitution is still the root cause and still worth removing
+/// (#494); deriving from the same intermediate text is what makes this function
+/// agree with the formatter meanwhile.
+pub fn editable_segments(patterns: &[&str], repo: &str) -> Vec<&'static str> {
+  // `{home}` failing to resolve leaves it literal here, which matches what the
+  // caller is about to hit anyway: `expand_placeholders` errors outright on it.
+  let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
+  let mut out: Vec<&'static str> = Vec::new();
+  for pattern in patterns {
+    let mut resolved = (*pattern).to_string();
+    if let Some(home) = &home {
+      resolved = resolved.replace("{home}", home);
+    }
+    let resolved = resolved.replace("{repo}", repo);
+    let mut hits: Vec<(usize, &'static str)> = SEGMENTS
+      .into_iter()
+      .filter_map(|segment| resolved.find(&format!("{{{}}}", segment)).map(|at| (at, segment)))
+      .collect();
+    hits.sort_by_key(|(at, _)| *at);
+    for (_, segment) in hits {
+      if !out.contains(&segment) {
+        out.push(segment);
+      }
+    }
+  }
+  out
+}
+
 /// Where a placeholder stood, in the literal text [`literal_constants`] reads.
 ///
 /// Two jobs. It **separates**: the literals in `1{type}2-{desc}` are not one
@@ -155,6 +219,29 @@ impl BranchSpec {
     Ok(s)
   }
 
+  /// As [`Self::new_with_types`], but validating only the segments in
+  /// `required` (issue #418).
+  ///
+  /// `required` is [`editable_segments`] over the repo's patterns: a segment no
+  /// pattern carries is discarded by [`crate::config::expand_placeholders`],
+  /// so demanding a value for it makes the value mandatory *and* thrown away.
+  /// That is what left the TUI create form unusable on a `{type}/{desc}` repo.
+  pub fn new_with_required(
+    type_: impl Into<String>,
+    issue: impl Into<String>,
+    desc: impl Into<String>,
+    allowed: &[BranchType],
+    required: &[&str],
+  ) -> Result<Self> {
+    let s = Self {
+      type_: type_.into(),
+      issue: issue.into(),
+      desc: kebab(&desc.into()),
+    };
+    s.validate_with_required(allowed, required)?;
+    Ok(s)
+  }
+
   /// Validate against the built-in branch types. Convenience wrapper
   /// around [`Self::validate_against`] for legacy call sites.
   pub fn validate(&self) -> Result<()> {
@@ -166,17 +253,28 @@ impl BranchSpec {
   /// allowed names so the TUI status bar / CLI stderr always shows the
   /// repo-local truth (built-in or `.gwm.toml`-driven).
   pub fn validate_against(&self, allowed: &[BranchType]) -> Result<()> {
-    if !allowed.iter().any(|t| t.name == self.type_) {
+    self.validate_with_required(allowed, &SEGMENTS)
+  }
+
+  /// As [`Self::validate_against`], but checking only the segments in
+  /// `required` (issue #418). A segment the repo's patterns do not carry is
+  /// never written anywhere, so there is nothing to validate about it — and
+  /// refusing an empty one would refuse a form the user has filled completely.
+  ///
+  /// Additive: `validate_against` passes all three, so every existing caller
+  /// (the whole CLI surface included) keeps the same contract.
+  pub fn validate_with_required(&self, allowed: &[BranchType], required: &[&str]) -> Result<()> {
+    if required.contains(&"type") && !allowed.iter().any(|t| t.name == self.type_) {
       let names = allowed.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
       return Err(GwmError::InvalidBranchType {
         got: self.type_.clone(),
         allowed: names,
       });
     }
-    if !ISSUE_RE.is_match(&self.issue) {
+    if required.contains(&"issue") && !ISSUE_RE.is_match(&self.issue) {
       return Err(GwmError::InvalidIssue(self.issue.clone()));
     }
-    if !DESC_RE.is_match(&self.desc) {
+    if required.contains(&"desc") && !DESC_RE.is_match(&self.desc) {
       return Err(GwmError::InvalidDescription(self.desc.clone()));
     }
     Ok(())
