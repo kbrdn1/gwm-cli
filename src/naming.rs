@@ -196,6 +196,29 @@ impl BranchSpec {
     Ok(s)
   }
 
+  /// As [`Self::new_with_types`], but validating only the segments in
+  /// `required` (issue #418).
+  ///
+  /// `required` is [`editable_segments`] over the repo's patterns: a segment no
+  /// pattern carries is discarded by [`crate::config::expand_placeholders`],
+  /// so demanding a value for it makes the value mandatory *and* thrown away.
+  /// That is what left the TUI create form unusable on a `{type}/{desc}` repo.
+  pub fn new_with_required(
+    type_: impl Into<String>,
+    issue: impl Into<String>,
+    desc: impl Into<String>,
+    allowed: &[BranchType],
+    required: &[&str],
+  ) -> Result<Self> {
+    let s = Self {
+      type_: type_.into(),
+      issue: issue.into(),
+      desc: kebab(&desc.into()),
+    };
+    s.validate_with_required(allowed, required)?;
+    Ok(s)
+  }
+
   /// Validate against the built-in branch types. Convenience wrapper
   /// around [`Self::validate_against`] for legacy call sites.
   pub fn validate(&self) -> Result<()> {
@@ -207,17 +230,28 @@ impl BranchSpec {
   /// allowed names so the TUI status bar / CLI stderr always shows the
   /// repo-local truth (built-in or `.gwm.toml`-driven).
   pub fn validate_against(&self, allowed: &[BranchType]) -> Result<()> {
-    if !allowed.iter().any(|t| t.name == self.type_) {
+    self.validate_with_required(allowed, &SEGMENTS)
+  }
+
+  /// As [`Self::validate_against`], but checking only the segments in
+  /// `required` (issue #418). A segment the repo's patterns do not carry is
+  /// never written anywhere, so there is nothing to validate about it — and
+  /// refusing an empty one would refuse a form the user has filled completely.
+  ///
+  /// Additive: `validate_against` passes all three, so every existing caller
+  /// (the whole CLI surface included) keeps the same contract.
+  pub fn validate_with_required(&self, allowed: &[BranchType], required: &[&str]) -> Result<()> {
+    if required.contains(&"type") && !allowed.iter().any(|t| t.name == self.type_) {
       let names = allowed.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
       return Err(GwmError::InvalidBranchType {
         got: self.type_.clone(),
         allowed: names,
       });
     }
-    if !ISSUE_RE.is_match(&self.issue) {
+    if required.contains(&"issue") && !ISSUE_RE.is_match(&self.issue) {
       return Err(GwmError::InvalidIssue(self.issue.clone()));
     }
-    if !DESC_RE.is_match(&self.desc) {
+    if required.contains(&"desc") && !DESC_RE.is_match(&self.desc) {
       return Err(GwmError::InvalidDescription(self.desc.clone()));
     }
     Ok(())

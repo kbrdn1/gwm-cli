@@ -10824,18 +10824,24 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
 }
 
 #[test]
-fn enter_edit_worktree_refuses_a_pattern_that_carries_no_issue() {
-  // Codex review on PR #476. Before #417 a branch written by `{type}/{desc}`
-  // did not parse at all, so the rename modal refused to open. Deriving the
-  // parser made it parse with `issue == ""`, which opened a form the user
-  // cannot submit: `submit_edit_worktree` runs `BranchSpec::new_with_types`,
-  // which rejects an empty issue, and inventing one would not help either
-  // since the pattern has no `{issue}` to write it into.
+fn enter_edit_worktree_opens_on_a_pattern_that_carries_no_issue() {
+  // This test used to assert the opposite, and the reversal *is* issue #418.
   //
-  // Refuse up front and name what is missing, the same shape as
-  // `gwm commit-prefix`.
+  // The guard it pinned (Codex review on PR #476) refused to open the rename
+  // modal when a segment came back empty, because "the form cannot be
+  // submitted without it": `BranchSpec::new_with_types` rejects an empty issue,
+  // and inventing one would not have helped since `{type}/{desc}` has no
+  // `{issue}` to write it into. Both halves were true of a form hardcoded to
+  // the canonical triple.
+  //
+  // Token-driven, neither holds. The form presents no Issue field on this
+  // pattern, `new_with_required` does not validate a segment the patterns
+  // discard, and the rename is perfectly submittable — so refusing took the
+  // modal away from a repo where it now works.
   let (_dir, mut app) = make_app();
   app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{desc}".into();
+  app.apply_create_form_fields();
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("feat/my-desc".into());
   app.worktrees = vec![wt];
@@ -10843,12 +10849,17 @@ fn enter_edit_worktree_refuses_a_pattern_that_carries_no_issue() {
 
   app.enter_edit_worktree();
 
-  assert_eq!(app.view, View::List, "an unsubmittable form must not open");
-  assert!(app.edit_original_branch.is_none());
+  assert_eq!(app.view, View::Edit, "the form is submittable, so it must open");
+  assert_eq!(app.create_form.fields(), [Field::Type, Field::Desc]);
+  assert_eq!(app.create_form.desc, "my-desc");
   assert!(
-    app.status.contains("{issue}") && app.status.contains("branch pattern"),
-    "status must name the missing placeholder: {}",
-    app.status
+    app.create_form.issue.is_empty(),
+    "nothing to recover, and nothing asks for it"
+  );
+  assert!(
+    app.edit_target().is_ok(),
+    "and it composes a target: {:?}",
+    app.edit_target()
   );
 }
 
@@ -11253,4 +11264,95 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
     "editing the frozen description must still be refused: {:?}",
     app.edit_failure
   );
+}
+
+// --- token-driven create form (issue #418) --------------------------------
+
+/// Build an `App` on a throwaway repo whose `.gwm.toml` carries the given
+/// worktree patterns. `base` is included because it feeds the triple too.
+fn app_with_patterns(branch: &str, path: &str, base: &str) -> (tempfile::TempDir, App) {
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      "[worktree]\nbase = \"{}\"\nbranch_pattern = \"{}\"\npath_pattern = \"{}\"\n",
+      base, branch, path
+    ),
+  )
+  .unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).expect("app builds on the fixture repo");
+  (dir, app)
+}
+
+/// The form must present exactly the fields the repo's patterns ask for.
+#[test]
+fn the_create_form_presents_only_the_fields_the_repo_s_patterns_ask_for() {
+  let (_d, app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  assert_eq!(
+    app.create_form.fields(),
+    [Field::Type, Field::Desc],
+    "a pattern that writes no issue number must not present an Issue field"
+  );
+
+  // The union includes `base`: a value dropped there names a real directory.
+  let (_d2, app2) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt/{issue}");
+  assert_eq!(
+    app2.create_form.fields(),
+    [Field::Type, Field::Desc, Field::Issue],
+    "base carries {{issue}}, so the form still has to collect it"
+  );
+}
+
+/// The end-to-end point of #418. `BranchSpec::validate_against` refuses an
+/// empty issue, so before this the form on a `{type}/{desc}` repo demanded a
+/// number and then expanded patterns with nowhere to put it: mandatory *and*
+/// discarded, which left the TUI create path unusable on that convention.
+#[test]
+fn a_pattern_without_an_issue_token_can_be_submitted_without_an_issue_number() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  for c in "thing".chars() {
+    app.create_form.push_char(c);
+  }
+  assert!(
+    app.create_form.issue.is_empty(),
+    "nothing was typed into a hidden field"
+  );
+
+  let (branch, dirname) = app
+    .edit_target()
+    .expect("the form must compose a target without an issue number it cannot write");
+  assert_eq!(branch, "feat/thing");
+  assert_eq!(dirname, "feat-thing");
+}
+
+/// A segment the patterns *do* ask for is still required — relaxing validation
+/// must be scoped to what the pattern drops, not to validation in general.
+#[test]
+fn a_segment_the_pattern_does_ask_for_is_still_required() {
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  for c in "thing".chars() {
+    app.create_form.push_char(c);
+  }
+  assert!(
+    app.edit_target().is_err(),
+    "the pattern writes an issue number, so an empty one must still be refused"
+  );
+}
+
+/// `enter_create` opened on `Field::Issue` literally. On a pattern without one
+/// that focuses an input the renderer never draws, so the first keypress goes
+/// nowhere.
+#[test]
+fn entering_the_create_form_focuses_a_field_the_pattern_presents() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  assert_eq!(app.create_form.field, Field::Desc);
+
+  // And the canonical pattern keeps #217's behaviour: skip the cycle-only Type.
+  let (_d2, mut app2) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  app2.enter_create();
+  assert_eq!(app2.create_form.field, Field::Issue);
 }

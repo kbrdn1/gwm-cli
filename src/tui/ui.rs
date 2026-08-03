@@ -3850,6 +3850,63 @@ fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
   )
 }
 
+/// One row per field the form presents, in the order the patterns write them
+/// (issue #418), blank-line separated.
+///
+/// Both the create overlay and the rename modal draw from this, so they cannot
+/// come to disagree about which inputs exist — they used to hardcode the same
+/// `Type` / `Issue` / `Desc` triple twice, which is two places to forget a
+/// pattern that carries only some of them.
+///
+/// Visual order is focus order by construction, which is the property that
+/// makes a custom pattern legible: `{desc}-{issue}` reads top-to-bottom in the
+/// same order it writes left-to-right. That does move the type selector below
+/// the preview, where the old layout kept it above.
+fn form_field_lines(app: &App, type_str: &str, type_desc: &str, value_w: usize, label_w: usize) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let surface = app.theme.selection_bg;
+  let label = |s: &str| format!("{:<label_w$}", s);
+
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  for field in app.create_form.fields() {
+    if !lines.is_empty() {
+      lines.push(Line::from(String::new()));
+    }
+    lines.push(match field {
+      Field::Type => type_selector_line(
+        &label("Type"),
+        type_str,
+        type_desc,
+        app.create_form.field == Field::Type,
+        accent,
+        muted,
+      ),
+      Field::Issue => field_input_line(
+        &label("Issue"),
+        &app.create_form.issue,
+        app.create_form.field == Field::Issue,
+        value_w,
+        accent,
+        muted,
+        surface,
+      ),
+      Field::Desc => field_input_line(
+        &label("Desc"),
+        &app.create_form.desc,
+        app.create_form.field == Field::Desc,
+        value_w,
+        accent,
+        muted,
+        surface,
+      ),
+      // `Name` belongs to free-form mode, which never reaches this list.
+      Field::Name => continue,
+    });
+  }
+  lines
+}
+
 fn draw_create(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -3893,21 +3950,10 @@ fn draw_create(f: &mut Frame, app: &App) {
     },
     clean,
   );
-  // Type selector first, then the live preview, then the editable fields —
-  // the preview sits above the inputs so the resulting names stay in view
-  // while typing (issue #217 follow-up). Free-form mode has no branch type,
-  // so the selector is absent rather than shown inert.
-  if !freeform {
-    lines.push(type_selector_line(
-      &label("Type"),
-      type_str,
-      type_desc,
-      app.create_form.field == Field::Type,
-      accent,
-      muted,
-    ));
-    lines.push(Line::from(String::new()));
-  }
+  // The live preview first, then the editable fields — the preview sits above
+  // the inputs so the resulting names stay in view while typing (issue #217
+  // follow-up). Which inputs those are comes from the patterns (#418), so a
+  // repo whose convention writes no issue number is not shown a field for one.
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -3928,25 +3974,7 @@ fn draw_create(f: &mut Frame, app: &App) {
       surface,
     ));
   } else {
-    lines.push(field_input_line(
-      &label("Issue"),
-      &app.create_form.issue,
-      app.create_form.field == Field::Issue,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
-    lines.push(Line::from(String::new()));
-    lines.push(field_input_line(
-      &label("Desc"),
-      &app.create_form.desc,
-      app.create_form.field == Field::Desc,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
+    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
@@ -5313,21 +5341,6 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     Span::styled(old_display, Style::default().fg(muted)),
   ]));
   lines.push(Line::from(String::new()));
-  // Issue #479: free-form has one field and no type selector, so the rows the
-  // structured triple needs are not rendered rather than rendered inert — the
-  // same shape `draw_create` uses, and the reason #474 suppressed the toggle
-  // here in the first place was that these rows did not exist.
-  if !freeform {
-    lines.push(type_selector_line(
-      &label("Type"),
-      type_str,
-      type_desc,
-      app.create_form.field == Field::Type,
-      accent,
-      muted,
-    ));
-    lines.push(Line::from(String::new()));
-  }
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -5346,6 +5359,11 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     ]));
   }
   lines.push(Line::from(String::new()));
+  // Issue #479: free-form has one field and no type selector, so the rows the
+  // structured triple needs are not rendered rather than rendered inert — the
+  // same shape `draw_create` uses, and the reason #474 suppressed the toggle
+  // here in the first place was that these rows did not exist. Which rows the
+  // structured side needs comes from the patterns (#418).
   if freeform {
     lines.push(field_input_line(
       &label("Name"),
@@ -5357,25 +5375,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       surface,
     ));
   } else {
-    lines.push(field_input_line(
-      &label("Issue"),
-      &app.create_form.issue,
-      app.create_form.field == Field::Issue,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
-    lines.push(Line::from(String::new()));
-    lines.push(field_input_line(
-      &label("Desc"),
-      &app.create_form.desc,
-      app.create_form.field == Field::Desc,
-      value_w,
-      accent,
-      muted,
-      surface,
-    ));
+    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
