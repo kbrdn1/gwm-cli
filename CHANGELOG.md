@@ -136,6 +136,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell never re-parses metacharacters coming out of a variable. An explicit
   `env` entry of the same name still wins.
 
+- The TUI create and rename forms present the fields the repo's patterns
+  actually ask for, in the order those patterns write them, instead of the
+  canonical `Type` / `Issue` / `Desc` triple whatever `.gwm.toml` said. A repo
+  whose convention is `{type}/{desc}` is no longer shown an Issue field, and
+  `{desc}-{issue}` reads top to bottom in the order it writes left to right.
+
+  This was not cosmetic. The form demanded an issue number and then expanded a
+  pattern with nowhere to put it: the value was mandatory *and* discarded, so a
+  submission could not be composed without typing a number that went nowhere.
+  The submit now validates only the segments the patterns carry.
+
+  The field set is the union over `branch_pattern`, `path_pattern` **and**
+  `base`, because `base` expands the same three tokens: a segment only it
+  carries still names a real directory on disk.
+
+  Two consequences worth stating. The type selector now sits below the live
+  preview rather than above it, so that visual order matches focus order in
+  every pattern. And the rename form no longer refuses to open on a branch
+  whose pattern omits a segment; it refused because a form hardcoded to the
+  triple could not be submitted without one, which stopped being true.
+  ([#418](https://github.com/kbrdn1/gwm-cli/issues/418))
+
 ### Fixed
 
 - `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the branch of the
