@@ -2585,12 +2585,24 @@ fn a_token_produced_by_expanding_the_repo_name_stays_literal() {
   }
 }
 
-/// The same for `{home}`, which is substituted first of all and is the one
-/// token whose value the user does not choose directly.
+/// The same for `{home}`, which is substituted first of all and is the one token
+/// whose value the user does not choose directly.
+///
+/// **Unix only, and the gate is the point rather than a shortcut.** `dirs 6` on
+/// Windows resolves the home directory through `SHGetKnownFolderPath` and never
+/// reads `$HOME`, so swapping the variable there changes nothing and the
+/// assertion fails on every run. Caught by the `windows-latest` job on PR #495,
+/// which is the CLAUDE.md rule about pre-validating environment-dependent tests
+/// being paid for rather than followed.
+///
+/// The *property* is covered portably by the test above: `{home}` and `{repo}`
+/// are two arms of one `value_for` match, and that one exercises all five tokens
+/// arriving through a value. What this adds is the guarantee that `{home}` is
+/// not special-cased back into a pre-pass, which is exactly how the defect was
+/// shaped, so it is worth keeping on the platform that can express it.
+#[cfg(unix)]
 #[test]
 fn a_token_produced_by_expanding_home_stays_literal() {
-  // `$HOME` is read through `dirs::home_dir`, so drive it via the env var the
-  // way the other environment-sensitive tests in this file do.
   let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let previous = std::env::var("HOME").ok();
   unsafe { std::env::set_var("HOME", "/tmp/h-{issue}") };
