@@ -48,42 +48,6 @@ fn declared_msrv() -> String {
     .to_string()
 }
 
-/// The *executable* lines of the `ci.yml` block belonging to `job`, i.e. from
-/// its 2-space-indented key up to the next one, with YAML comments stripped.
-///
-/// Both halves are load-bearing. Without the slicing, a `--locked` or a
-/// `Cargo.toml` from some *other* job satisfies the assertions below. Without
-/// dropping comments, the job's own prose does: the first draft of this guard
-/// stayed green with `--locked` deleted from the `cargo check` line, because
-/// the comment right above it explains that `--locked` is load-bearing. A
-/// guard that matches its own documentation never fires.
-fn job_block(yaml: &str, job: &str) -> String {
-  let start = yaml
-    .find(&format!("\n  {job}:\n"))
-    .unwrap_or_else(|| panic!("ci.yml must declare a `{job}:` job (2-space indent)"))
-    + 1;
-  let rest = &yaml[start..];
-  let end = rest
-    .match_indices("\n  ")
-    .find(|(i, _)| {
-      let line = rest[i + 3..].lines().next().unwrap_or("");
-      // Next job key: `  <name>:` and nothing after the colon.
-      !line.starts_with(char::is_whitespace)
-        && line.ends_with(':')
-        && line
-          .trim_end_matches(':')
-          .chars()
-          .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    })
-    .map(|(i, _)| i + 1)
-    .unwrap_or(rest.len());
-  rest[..end]
-    .lines()
-    .filter(|line| !line.trim_start().starts_with('#'))
-    .collect::<Vec<_>>()
-    .join("\n")
-}
-
 /// Every *live* MSRV claim, as a pattern with `{msrv}` standing in for the
 /// declared floor. Historical statements are deliberately absent: the v0.10.0
 /// row in `ROADMAP.md`, the v0.9.0 / #35 paragraphs in `docs/7.roadmap.md`,
@@ -119,34 +83,116 @@ fn every_live_msrv_claim_matches_cargo_toml() {
   }
 }
 
+/// The `msrv` job, parsed. Reading the YAML rather than slicing it out of the
+/// text is what makes the assertions below say what they mean: a text search
+/// for `Cargo.toml` and `rust-version` is satisfied by a *leftover* read step
+/// whose output nothing consumes, so swapping the action input for a literal
+/// `toolchain: 1.95` while keeping that step would have kept the old guard
+/// green, reintroducing exactly the drift it exists to block. The value of the
+/// input is now compared to the step output it must reference.
+fn msrv_job() -> serde_yaml_ng::Value {
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&read(".github/workflows/ci.yml")).expect("ci.yml must be valid YAML");
+  workflow["jobs"]["msrv"].clone()
+}
+
+fn steps(job: &serde_yaml_ng::Value) -> Vec<serde_yaml_ng::Value> {
+  job["steps"].as_sequence().cloned().unwrap_or_default()
+}
+
 #[test]
-fn ci_verifies_the_declared_msrv_and_derives_it_from_cargo_toml() {
-  let block = job_block(&read(".github/workflows/ci.yml"), "msrv");
-  assert!(
-    !block.contains("rust-toolchain@1."),
-    "the msrv job must not pin a toolchain literal (`dtolnay/rust-toolchain@1.88`); \
-     read `rust-version` out of Cargo.toml and feed it to \
-     `dtolnay/rust-toolchain@master`, otherwise the job and the manifest drift \
-     apart exactly the way the manifest and the graph did (#491)"
-  );
-  assert!(
-    block.contains("Cargo.toml") && block.contains("rust-version"),
-    "the msrv job must derive its toolchain from Cargo.toml's `rust-version`"
-  );
-  assert!(
-    block.contains("--locked"),
-    "the msrv job must pass `--locked`: cargo's `rust-version` gate fires at \
-     *resolve* time against the committed lockfile, which is what turns a \
-     dependency raising its floor into a red job"
-  );
+fn ci_runs_the_msrv_check_on_every_supported_platform() {
+  let job = msrv_job();
+  let matrix = job["strategy"]["matrix"]["os"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|v| v.as_str().map(str::to_owned))
+    .collect::<Vec<_>>();
   for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
     assert!(
-      block.contains(os),
-      "the msrv job must run on {os}, like the `test` job. A single-platform \
-       run compiles neither the `[target.\"cfg(windows)\".dependencies]` block \
-       nor the `#[cfg(windows)]` code, so a Windows-only dependency raising \
-       its own floor stays green on Linux while `cargo install` breaks for \
-       those users"
+      matrix.iter().any(|m| m == os),
+      "the msrv job must run on {os}, like the `test` job (matrix is {matrix:?}). \
+       A single-platform run compiles neither the \
+       `[target.\"cfg(windows)\".dependencies]` block nor the `#[cfg(windows)]` \
+       code, so a Windows-only dependency raising its own floor stays green on \
+       Linux while `cargo install` breaks for those users"
     );
   }
+}
+
+#[test]
+fn ci_feeds_the_msrv_job_the_toolchain_declared_in_cargo_toml() {
+  let job = msrv_job();
+  let steps = steps(&job);
+
+  let reader = steps
+    .iter()
+    .find(|s| s["id"].as_str() == Some("msrv"))
+    .expect("the msrv job needs a step with `id: msrv` that reads the declared floor");
+  let script = reader["run"].as_str().unwrap_or_default();
+  assert!(
+    script.contains("rust-version") && script.contains("Cargo.toml"),
+    "the `id: msrv` step must read `rust-version` out of Cargo.toml, got: {script:?}"
+  );
+  assert!(
+    reader["shell"].as_str() == Some("bash"),
+    "the reader step must force `shell: bash`: windows-latest defaults to \
+     PowerShell, which has no grep or cut"
+  );
+
+  let toolchain = steps
+    .iter()
+    .find(|s| {
+      s["uses"]
+        .as_str()
+        .is_some_and(|u| u.starts_with("dtolnay/rust-toolchain@"))
+    })
+    .expect("the msrv job must install a toolchain via dtolnay/rust-toolchain");
+  assert_eq!(
+    toolchain["uses"].as_str(),
+    Some("dtolnay/rust-toolchain@master"),
+    "pin the action at @master and pass the version as an input; a \
+     `rust-toolchain@<version>` ref is a literal that drifts from the manifest"
+  );
+  assert_eq!(
+    toolchain["with"]["toolchain"].as_str(),
+    Some("${{ steps.msrv.outputs.version }}"),
+    "the installed toolchain must be the value read from Cargo.toml, not a \
+     literal. A literal here is the drift this whole job exists to catch (#491)"
+  );
+}
+
+#[test]
+fn ci_checks_the_msrv_locked_and_without_default_features() {
+  let commands = steps(&msrv_job())
+    .iter()
+    .filter_map(|s| s["run"].as_str().map(str::to_owned))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  let checks: Vec<&str> = commands
+    .lines()
+    .map(str::trim)
+    .filter(|l| l.starts_with("cargo check"))
+    .collect();
+  assert!(
+    !checks.is_empty(),
+    "the msrv job must run `cargo check` at the declared floor"
+  );
+  assert!(
+    checks.iter().all(|c| c.contains("--locked")),
+    "every msrv `cargo check` must pass `--locked`: cargo's `rust-version` gate \
+     fires at *resolve* time against the committed lockfile, which is what turns \
+     a dependency declaring a higher floor into a red job. Got: {checks:?}"
+  );
+  assert!(
+    checks.iter().any(|c| c.contains("--no-default-features")),
+    "the msrv job must also check `--no-default-features`. `daemon` is default-on, \
+     so the default-features check never compiles the \
+     `#[cfg(not(all(any(unix, windows), feature = \"daemon\")))]` arms of \
+     `cmd_daemon` / `cmd_statusline`, and that build is documented as supported. \
+     Got: {checks:?}"
+  );
 }
