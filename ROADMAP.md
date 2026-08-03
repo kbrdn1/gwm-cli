@@ -49,7 +49,11 @@ overlays ([#325](https://github.com/kbrdn1/gwm-cli/issues/325)). See the
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes. The
 MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys`, which
 declares no floor of its own; MSRV bumps ride a minor per the stability
-policy).
+policy). It is held by a CI job that installs the declared floor and both
+resolves and compiles the committed lockfile against it on all three runners
+([#491](https://github.com/kbrdn1/gwm-cli/issues/491) ✅), because the previous
+setup let `Cargo.toml` claim 1.86 for a whole release line while the graph
+needed more, silently.
 
 The 0.9.x stable line ships:
 
@@ -257,6 +261,11 @@ worktree → branch → PR → issue chain and can open on the current row direc
 ### Deferred
 
 - [#421](https://github.com/kbrdn1/gwm-cli/issues/421) — **container execution**: a `container:` block on the existing `exec` / aliases surface. Low cost (it wraps `docker run`, and anything exposing a Docker-compatible socket works for free), but no observed demand yet, so it waits until after the discovery push.
+
+### Maintenance
+
+- [#500](https://github.com/kbrdn1/gwm-cli/issues/500) — `exec_tests` flakes on Linux with `ETXTBSY`: the test writes an executable and runs it, which races against the fork-to-exec window of any other test in the harness that spawns a process. Seen once on a lockfile-only PR, green on a bare re-run. Retry on that one errno, with the reason written next to it so it does not read as flake-hiding later
+- The transitive graph needs a manual `cargo update` from time to time. `.github/dependabot.yml` sets no `allow: dependency-type: all`, so dependabot only ever PRs the direct dependencies. Last full refresh: [#499](https://github.com/kbrdn1/gwm-cli/pull/499), which also took the vendored libgit2 from 1.9.3 to 1.9.6. Do it **after** an MSRV change lands, never before: a lockfile refresh is exactly how a floor moves without anyone deciding to, so it has to be checked against a floor that is already settled
 
 ### Visibility
 
