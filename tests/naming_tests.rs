@@ -1336,10 +1336,16 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
     .1;
   let body = body.split_once("\n}\n").expect("the function has a body").0;
 
+  // Every `"{token}"` string literal in the body. Matched without the leading
+  // `(` that the first version of this scan assumed: #494 turned the chain of
+  // `replace("{token}", …)` calls into a `match token { "{token}" => … }`, so
+  // anchoring on the paren silently found nothing and the guard passed while
+  // classifying an empty set. The `found.len() >= 5` assertion below is what
+  // caught that, and is why it is written as a floor rather than a comment.
   let mut found: Vec<String> = Vec::new();
   let mut rest = body;
-  while let Some(open) = rest.find("(\"{") {
-    rest = &rest[open + 2..];
+  while let Some(open) = rest.find("\"{") {
+    rest = &rest[open + 1..];
     let Some(close) = rest.find("}\"") else { break };
     found.push(rest[..close + 1].to_string());
     rest = &rest[close + 1..];
@@ -1527,21 +1533,22 @@ fn every_pattern_1_5_0_read_is_read_the_same_way() {
   );
 }
 
-/// Codex review on PR #476, fourth and fifth passes — and the reason the
-/// mirror is now *checked* rather than argued.
+/// Codex review on PR #476, fourth and fifth passes, inverted by #494.
 ///
-/// `expand_placeholders` substitutes in a fixed order (`{home}`, `{repo}`,
-/// then the three capturing tokens) and each `str::replace` runs over what the
-/// previous ones produced, so an expansion can be substituted again. Both
-/// shapes below were reported separately, one review pass apart, because the
-/// first fix inspected the expansion in isolation and the second token was
-/// formed with the literals around it. Replaying the whole chain for inputs
-/// nobody has is not worth it; compiling a parser that recognises none of the
-/// branches the pattern creates is worse. So `compile` writes one probe branch
-/// with the real formatter and refuses the pattern when it cannot read it back
-/// — which closes the class rather than these two instances.
+/// These two patterns used to be **refused**, because `expand_placeholders` was
+/// a chain of `str::replace` in a fixed order and each call ran over what the
+/// previous ones produced, so an expansion could be substituted again. Both
+/// shapes were reported a review pass apart, one with the token inside the
+/// expansion and one with the token formed against the braces the pattern wrote
+/// around it. `compile` could not mirror a formatter that rewrote its own
+/// output, so it refused rather than build a parser recognising none of the
+/// branches the pattern creates.
+///
+/// #494 removed the cause: an expansion is a value, so there is nothing left to
+/// disagree about and the refusal became a restriction with no reason. Both now
+/// compile and round-trip, which is the widening that fix buys.
 #[test]
-fn a_pattern_the_parser_and_the_formatter_disagree_on_is_refused() {
+fn a_pattern_whose_expansion_carries_a_token_now_round_trips() {
   let types = default_branch_types();
   for (pattern, repo) in [
     // The token sits inside the expansion.
@@ -1549,23 +1556,25 @@ fn a_pattern_the_parser_and_the_formatter_disagree_on_is_refused() {
     // The token is formed with the braces the pattern wrote around it.
     ("{{repo}}/#{issue}-{desc}", "type"),
   ] {
-    // The formatter really does substitute twice — assert that rather than
-    // assume it, since the refusal is only correct if it does.
+    // Measured, not assumed: the `{type}` the old formatter substituted a
+    // second time is now written through as the text it is.
     let written =
       gwm::config::expand_placeholders(pattern, repo, Some("feat"), Some("42"), Some("x"), None).expect("formats");
     assert_eq!(
-      written, "feat/#42-x",
-      "`{}` in a repo called `{}` is expected to substitute twice",
+      written, "{type}/#42-x",
+      "`{}` in a repo called `{}` must substitute exactly once",
       pattern, repo
     );
 
-    let err = BranchParser::compile(pattern, repo, &types)
-      .map(|_| String::new())
-      .unwrap_or_else(|e| e.to_string());
-    assert!(
-      err.contains(pattern) && err.contains("does not read back"),
-      "the message must name the pattern and say the parser cannot read it back: {}",
-      err
+    let parser = BranchParser::compile(pattern, repo, &types)
+      .unwrap_or_else(|e| panic!("`{}` must no longer be refused: {}", pattern, e));
+    let back = parser
+      .parse(&written)
+      .expect("the parser reads what the formatter wrote");
+    assert_eq!((back.issue.as_str(), back.desc.as_str()), ("42", "x"));
+    assert_eq!(
+      back.type_, "",
+      "the pattern writes no type — `{{type}}` is literal text here, not a placeholder"
     );
   }
 
@@ -2133,22 +2142,22 @@ fn a_placeholder_between_two_literals_does_not_fuse_them() {
 #[test]
 fn the_editable_segments_come_back_in_the_order_the_pattern_writes_them() {
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/#{issue}-{desc}"], "gwm-cli"),
+    gwm::naming::editable_segments(&["{type}/#{issue}-{desc}"]),
     ["type", "issue", "desc"],
     "the canonical pattern keeps the canonical order"
   );
   assert_eq!(
-    gwm::naming::editable_segments(&["{desc}-{issue}"], "gwm-cli"),
+    gwm::naming::editable_segments(&["{desc}-{issue}"]),
     ["desc", "issue"],
     "a pattern that leads with the description is read in its own order"
   );
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/{desc}"], "gwm-cli"),
+    gwm::naming::editable_segments(&["{type}/{desc}"]),
     ["type", "desc"],
     "a pattern that writes no issue number must not ask for one"
   );
   assert!(
-    gwm::naming::editable_segments(&["wip"], "gwm-cli").is_empty(),
+    gwm::naming::editable_segments(&["wip"]).is_empty(),
     "a pattern that is pure literal asks the user for nothing"
   );
 }
@@ -2160,7 +2169,7 @@ fn the_editable_segments_come_back_in_the_order_the_pattern_writes_them() {
 #[test]
 fn a_segment_only_base_carries_is_still_asked_for() {
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/{desc}", "{type}-{desc}", "{home}/wt/{issue}"], "gwm-cli"),
+    gwm::naming::editable_segments(&["{type}/{desc}", "{type}-{desc}", "{home}/wt/{issue}"]),
     ["type", "desc", "issue"],
     "base carries the issue, so the form must still collect it"
   );
@@ -2173,7 +2182,7 @@ fn a_segment_only_base_carries_is_still_asked_for() {
 #[test]
 fn a_token_repeated_across_or_within_patterns_yields_one_field() {
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/{desc}-{desc}", "{type}-{desc}"], "gwm-cli"),
+    gwm::naming::editable_segments(&["{type}/{desc}-{desc}", "{type}-{desc}"]),
     ["type", "desc"]
   );
 }
@@ -2198,10 +2207,16 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
     .1;
   let body = body.split_once("\n}\n").expect("the function has a body").0;
 
+  // Every `"{token}"` string literal in the body. Matched without the leading
+  // `(` that the first version of this scan assumed: #494 turned the chain of
+  // `replace("{token}", …)` calls into a `match token { "{token}" => … }`, so
+  // anchoring on the paren silently found nothing and the guard passed while
+  // classifying an empty set. The `found.len() >= 5` assertion below is what
+  // caught that, and is why it is written as a floor rather than a comment.
   let mut found: Vec<String> = Vec::new();
   let mut rest = body;
-  while let Some(open) = rest.find("(\"{") {
-    rest = &rest[open + 2..];
+  while let Some(open) = rest.find("\"{") {
+    rest = &rest[open + 1..];
     let Some(close) = rest.find("}\"") else { break };
     found.push(rest[..close + 1].to_string());
     rest = &rest[close + 1..];
@@ -2219,7 +2234,7 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
 
   for token in &found {
     let segment = token.trim_start_matches('{').trim_end_matches('}');
-    let is_field = !gwm::naming::editable_segments(&[token.as_str()], "gwm-cli").is_empty();
+    let is_field = !gwm::naming::editable_segments(&[token.as_str()]).is_empty();
     assert!(
       FROM_CONTEXT.contains(&token.as_str()) || is_field,
       "`{}` is substituted by expand_placeholders but is neither resolved from context nor \
@@ -2231,24 +2246,21 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
   }
 }
 
-/// Codex review on PR #492, third and fourth passes. `expand_placeholders`
-/// substitutes `{repo}` / `{home}` first and then substitutes what those
-/// expansions produced, so a repo literally named `api-{type}` makes
-/// `{repo}/{desc}` write `api-fix/foo`: a type the raw template never mentions.
+/// Codex review on PR #492 (passes three and four), then inverted by #494.
 ///
-/// My first answer was to declare the raw scan bounded by a failure that
-/// already ships, since #417's compiler refuses this class and
-/// `branch_pattern_warning` reports it. **That bound was false**, and the fourth
-/// pass is what showed it: the warning is only ever called with
-/// `worktree.branch_pattern` (`doctor.rs`, `config_cli.rs`). Nothing validates
-/// `path_pattern` or `base`, so the same repo name reaches the form through
-/// either of them with no diagnostic at all.
+/// While `expand_placeholders` re-substituted its own output, a repo named
+/// `api-{type}` made `{repo}/{desc}` write `api-fix/foo`, so the create form
+/// had to resolve `{repo}` / `{home}` before scanning or it would hide a field
+/// the formatter was going to fill. #494 removed the cause, and that made the
+/// workaround wrong in the other direction: the pattern now writes the text
+/// `api-{type}` and asks for no type at all, so resolving here would invent a
+/// field for a token nothing substitutes.
 ///
-/// So the scan mirrors the formatter instead: context placeholders first, the
-/// editable ones after.
+/// The rule this leaves is worth stating plainly, because two passes of review
+/// were spent on either side of it: **the field set is read from the pattern as
+/// written, and that is correct exactly because an expansion is a value.**
 #[test]
-fn a_token_produced_by_expanding_the_repo_name_is_still_a_field() {
-  // The mechanism, measured on the formatter itself.
+fn the_field_set_reads_the_pattern_as_written() {
   assert_eq!(
     gwm::config::expand_placeholders(
       "{repo}/{desc}",
@@ -2259,29 +2271,29 @@ fn a_token_produced_by_expanding_the_repo_name_is_still_a_field() {
       None
     )
     .unwrap(),
-    "api-fix/foo"
+    "api-{type}/foo",
+    "the repo name is data, so the `{{type}}` inside it is never substituted"
   );
   assert_eq!(
-    gwm::naming::editable_segments(&["{repo}/{desc}"], "api-{type}"),
-    ["type", "desc"],
-    "the expansion writes a type, so the form has to collect one"
-  );
-
-  // The two patterns no diagnostic covers, which is what made the bound false.
-  assert_eq!(
-    gwm::naming::editable_segments(&["{desc}", "{repo}-{desc}", "~/wt"], "api-{issue}"),
-    ["desc", "issue"],
-    "path_pattern carries it through the repo name"
-  );
-  assert_eq!(
-    gwm::naming::editable_segments(&["{desc}", "{desc}", "~/wt/{repo}"], "api-{type}"),
-    ["desc", "type"],
-    "and so does base"
+    gwm::naming::editable_segments(&["{repo}/{desc}"]),
+    ["desc"],
+    "so the form must not ask for a type the pattern does not write"
   );
 
-  // An ordinary repo name is unaffected.
+  // The two patterns no diagnostic covers, which is what made the #492 bound
+  // false and is still the reason not to depend on one here.
   assert_eq!(
-    gwm::naming::editable_segments(&["{repo}/{type}/#{issue}-{desc}"], "gwm-cli"),
+    gwm::naming::editable_segments(&["{desc}", "{repo}-{desc}", "~/wt"]),
+    ["desc"]
+  );
+  assert_eq!(
+    gwm::naming::editable_segments(&["{desc}", "{desc}", "~/wt/{repo}"]),
+    ["desc"]
+  );
+
+  // An ordinary repo name is unaffected, in the order the pattern writes.
+  assert_eq!(
+    gwm::naming::editable_segments(&["{repo}/{type}/#{issue}-{desc}"]),
     ["type", "issue", "desc"]
   );
 }

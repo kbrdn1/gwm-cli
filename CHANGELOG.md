@@ -173,6 +173,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `worktree` patterns are expanded in a single pass, so an expansion is a value
+  rather than more template. `expand_placeholders` chained `str::replace` calls
+  and each one re-scanned what the previous had written, with `{home}` and
+  `{repo}` going first: on a repo whose own directory is named `api-{type}`,
+  `branch_pattern = "{repo}/{desc}"` wrote `api-fix/foo` and carried a branch
+  type the pattern never mentions.
+
+  Anything that reasons about a pattern by reading it was wrong there, and two
+  things do. The create form derived its fields from the wrong set, and the
+  branch parser could not mirror a formatter that rewrote its own output, so it
+  refused the whole class rather than build a parser recognising none of the
+  branches the pattern creates. Those patterns now compile and round-trip.
+
+  Two behaviours are preserved rather than tidied away: a token with no value
+  stays literal instead of collapsing to empty, which is what lets
+  `{repo_path}` and `{repo_parent}` survive into a branch name; and the token
+  starts at the last `{` before the closing brace, so `{{type}` keeps writing
+  `{feat` as it did in 1.5.0.
+
+  Hook placeholders were already single-pass and are unaffected.
+  ([#494](https://github.com/kbrdn1/gwm-cli/issues/494))
+
 - `gwm pr`, `gwm commit-prefix` and `gwm bootstrap` read the branch of the
   worktree they were pointed at, instead of the main checkout's.
   `worktree::discover_repo` walks back to the main working directory when it
