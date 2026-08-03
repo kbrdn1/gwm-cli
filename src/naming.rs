@@ -1512,22 +1512,86 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   ))
 }
 
-/// Neutralise control characters before echoing a config-supplied value.
+/// Neutralise control characters before echoing a config-supplied value on
+/// a **single row**.
 ///
-/// `branch_pattern` comes from a repo's `.gwm.toml`, and none of the commands
-/// that quote it — `gwm doctor`, `gwm config validate`, `gwm commit-prefix` —
-/// goes through the TOFU trust gate, because running them inside a repo you
-/// have not vetted is meant to be safe. Echoing the raw value would hand an
-/// untrusted `.gwm.toml` a terminal escape channel (an OSC 52 clipboard write,
-/// a title rewrite, cursor games). Same idiom as
+/// Config values come from a repo's `.gwm.toml`, and the commands that quote
+/// them (`gwm config get` / `list`, `gwm types`, `gwm aliases list`,
+/// `gwm doctor`, `gwm config validate`, `gwm commit-prefix`, and the TOFU
+/// prompt itself) do not go through the trust gate, because inspecting a repo
+/// you have not vetted is meant to be the safe thing to do. Echoing the raw
+/// value would hand an untrusted `.gwm.toml` a terminal escape channel (an
+/// OSC 52 clipboard write, a title rewrite, cursor games). Same idiom as
 /// [`crate::tui::wt_tree::sanitize_name`]: replace, don't strip, so the value
 /// stays recognisable and its length is not silently altered.
 ///
-/// `pub(crate)` rather than private because every site that quotes a
-/// config-supplied pattern has to use it; a second copy would be a second
-/// thing to forget.
-pub(crate) fn sanitise_for_terminal(s: &str) -> String {
+/// Line breaks are neutralised too, deliberately: a value that could emit a
+/// `\n` could forge an extra row in a report the user reads as a list of
+/// facts. Use [`sanitise_block_for_terminal`] for output that is *meant* to
+/// span rows.
+///
+/// Public because every site that echoes a config-supplied string has to use
+/// it, `main` included; a second copy would be a second thing to forget.
+pub fn sanitise_for_terminal(s: &str) -> String {
   s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
+/// Neutralise control characters in output whose **shape is rows**: a `toml`
+/// parse diagnostic with its caret-under-the-column snippet, or the raw
+/// `.gwm.toml` body the TOFU prompt shows on `show` (issue #473).
+///
+/// Keeps `\n` and `\t`, which carry the layout, and replaces everything else
+/// including `\r` (which returns the cursor to column zero and lets a value
+/// overwrite the line it was printed on). Sanitising these is not "breaking
+/// raw": an escape sequence inside the body defeats the very inspection the
+/// `show` view exists to provide.
+/// Neutralise a **diagnostic** headed for stderr: block-sanitise it, then
+/// indent every line after the first (issue #473).
+///
+/// The indent is the security part, not cosmetics. A diagnostic is one string
+/// that mixes layout `toml` generated with values it decoded out of the repo's
+/// file, and no classification can separate them: the same message carries a
+/// caret-under-the-column snippet AND an ``unknown field `<key>` `` naming a
+/// key the repo chose. Measured, a key written as `"bad\nerror: forged"`
+/// printed a second line at column zero reading exactly like a statement from
+/// gwm.
+///
+/// Owning the left margin makes that impossible without classifying anything:
+/// only the first line starts at column zero, and `\r` is already replaced, so
+/// nothing the config emits can get back there. The snippet stays readable,
+/// which is the whole reason the line breaks survive at all.
+pub fn sanitise_diagnostic_for_terminal(s: &str) -> String {
+  let cleaned = sanitise_block_for_terminal(s);
+  let mut out = String::with_capacity(cleaned.len());
+  for (i, line) in cleaned.split('\n').enumerate() {
+    if i > 0 {
+      out.push_str("\n  ");
+    }
+    out.push_str(line);
+  }
+  out
+}
+
+pub fn sanitise_block_for_terminal(s: &str) -> String {
+  // A CRLF pair is a line ending, so it normalises to `\n` rather than losing
+  // its `\r` to a `?`. Windows writes config files, ledgers and process output
+  // that way, and marking every one of their line ends as suspicious would
+  // make the neutralisation itself look like the corruption.
+  //
+  // A LONE `\r` is not a line ending: it returns the cursor to column zero and
+  // lets what follows overwrite the line already printed, which is the one
+  // thing the margin rule exists to prevent. That one still goes.
+  let normalised = s.replace("\r\n", "\n");
+  normalised
+    .chars()
+    .map(|c| {
+      if c.is_control() && c != '\n' && c != '\t' {
+        '?'
+      } else {
+        c
+      }
+    })
+    .collect()
 }
 
 pub fn kebab(input: &str) -> String {

@@ -3446,18 +3446,43 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
 }
 
 fn print_doctor_report(report: &doctor::DoctorReport) {
+  // Issue #473: several checks quote config-supplied strings in their detail
+  // (`base directory writable` renders `[worktree].base`, the guard checks
+  // name their entries). Neutralised here, at the single sink, rather than in
+  // each `Check::ok` / `failed` call, so a check added later is covered
+  // without anyone having to remember.
+  //
+  // A detail can span rows: `check_config_parses` puts `toml`'s whole
+  // caret-under-the-column diagnostic in it. Flattening that turned the output
+  // of the recovery command into `?  |?1 | [worktree?`, so line breaks survive
+  // here too. They are safe for the same reason they are safe in `main`: this
+  // printer owns the margin, and every row it emits is indented under the
+  // check that produced it.
+  let clean = crate::naming::sanitise_block_for_terminal;
+  let indented = |text: &str, first: &str| {
+    let cleaned = clean(text);
+    let mut lines = cleaned.split('\n');
+    let mut out = format!("{}{}", first, lines.next().unwrap_or_default());
+    for line in lines {
+      out.push_str("\n      ");
+      out.push_str(line);
+    }
+    out
+  };
   for c in &report.checks {
     let sigil = match c.status {
       CheckStatus::Ok => "✓",
       CheckStatus::Warning => "!",
       CheckStatus::Failed => "✗",
     };
-    println!("{} {}", sigil, c.name);
+    // The check name is a fixed label, never config text, but it shares the
+    // helper so a check that starts naming its subject cannot slip through.
+    println!("{} {}", sigil, crate::naming::sanitise_for_terminal(&c.name));
     if !c.detail.is_empty() {
-      println!("    {}", c.detail);
+      println!("{}", indented(&c.detail, "    "));
     }
     if let Some(hint) = &c.fix_hint {
-      println!("    → {}", hint);
+      println!("{}", indented(hint, "    → "));
     }
   }
 }
@@ -3495,8 +3520,15 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
   // When the gitmoji columns are active, align the shortcode column on
   // the widest shortcode (`:white_check_mark:`, currently 18 chars) so
   // the description column doesn't drift between rows.
+  // Issue #473: `description` (from `[[branch_types]]`) and the shortcodes
+  // (from `[gitmoji]`) are free text out of an unvetted `.gwm.toml`; `name` is
+  // not, it is already constrained to `^[a-z]+$` by `validate_branch_types`.
+  // Widths are measured on the neutralised strings so the columns still line
+  // up: a replaced C1 control character is two bytes narrower than the one
+  // it replaced.
+  let clean = crate::naming::sanitise_for_terminal;
   let sc_width = match &gitmoji_map {
-    Some(map) => map.iter().map(|(_, sc)| sc.len()).max().unwrap_or(0).max(10),
+    Some(map) => map.iter().map(|(_, sc)| clean(sc).len()).max().unwrap_or(0).max(10),
     None => 0,
   };
 
@@ -3506,20 +3538,20 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
         // Two extra columns: unicode glyph (1 cell wide, padded for
         // BMP code points; emoji ZWJ sequences would break alignment
         // but our built-in set is all single-glyph) + shortcode.
-        let shortcode = map.get(&t.name).unwrap_or(":question:");
-        let unicode = gitmoji::shortcode_to_unicode(shortcode);
+        let shortcode = clean(map.get(&t.name).unwrap_or(":question:"));
+        let unicode = gitmoji::shortcode_to_unicode(&shortcode);
         println!(
           "  {:<width$}  {}  {:<sw$}  {}",
           t.name,
           unicode,
           shortcode,
-          t.description,
+          clean(&t.description),
           width = width,
           sw = sc_width,
         );
       }
       None => {
-        println!("  {:<width$}  {}", t.name, t.description, width = width);
+        println!("  {:<width$}  {}", t.name, clean(&t.description), width = width);
       }
     }
   }
@@ -3635,7 +3667,11 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
 
   let map = gitmoji::load(workdir.as_deref())?;
   let prefix = gitmoji::resolve_prefix(&map, &spec, unicode);
-  println!("{}", prefix);
+  // Issue #473: the prefix is assembled from `[gitmoji]` shortcodes read out
+  // of `.gwm.toml`, and this command is ungated by design: shell prompts and
+  // the bundled commit-msg hook call it on every commit, in whatever repo the
+  // user happens to be sitting in.
+  println!("{}", crate::naming::sanitise_for_terminal(&prefix));
   Ok(())
 }
 
@@ -4235,14 +4271,33 @@ fn labels_forge(config: &Config) -> Result<std::sync::Arc<dyn forge::Forge>> {
 }
 
 fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) {
+  for line in labels_diff_lines(slug, declared, diff) {
+    println!("{}", line);
+  }
+}
+
+/// The rows `gwm labels list` / `push --dry-run` print, as values (issue
+/// #473). Same seam and same reason as [`milestones_diff_lines`].
+///
+/// A declared `name` is the least exposed field here: `labels::
+/// validate_label_name` already rejects it at load. But it rejects
+/// `is_ascii_control` only, which leaves the C1 range (U+0080..U+009F, CSI
+/// among them) through, and `remote.name` / `slug` come off the forge rather
+/// than the config and are validated by nobody.
+pub fn labels_diff_lines(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) -> Vec<String> {
+  let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
-  println!(
+  let mut lines = vec![format!(
     "declared in .gwm.toml: {} labels — diff against {}:",
     declared.len(),
-    slug
-  );
+    clean(slug)
+  )];
   for spec in &diff.to_create {
-    println!("  + {:<20} (will create — color #{})", spec.name, spec.color);
+    lines.push(format!(
+      "  + {:<20} (will create, color #{})",
+      clean(&spec.name),
+      clean(&spec.color)
+    ));
   }
   for upd in &diff.to_update {
     let detail = match (&upd.previous_color, &upd.previous_description) {
@@ -4250,15 +4305,16 @@ fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDif
       (None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
     };
-    println!("  ~ {:<20} ({})", upd.spec.name, detail);
+    lines.push(format!("  ~ {:<20} ({})", clean(&upd.spec.name), clean(&detail)));
   }
   for spec in &diff.matching {
-    println!("  = {:<20} (match)", spec.name);
+    lines.push(format!("  = {:<20} (match)", clean(&spec.name)));
   }
   for remote in &diff.extra_on_remote {
-    println!("  - {:<20} (on remote, not in config)", remote.name);
+    lines.push(format!("  - {:<20} (on remote, not in config)", clean(&remote.name)));
   }
-  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines.push(labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines
 }
 
 // ---- Milestones commands (issue #82) ------------------------------------
@@ -4350,20 +4406,35 @@ fn load_milestones_config() -> Result<Config> {
 }
 
 fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) {
+  for line in milestones_diff_lines(slug, declared, diff) {
+    println!("{}", line);
+  }
+}
+
+/// The rows `gwm milestones list` / `push --dry-run` print, as values rather
+/// than `println!` side effects (issue #473).
+///
+/// A value because the printer is only reachable after a live forge round
+/// trip (`fetch_remote_milestones`), so there is no way to assert on it from a
+/// test without mocking `gh`. Unlike a label name, a milestone `title` is free
+/// text that nothing validates on load, and `gwm milestones list` reads
+/// `.gwm.toml` without the trust gate.
+pub fn milestones_diff_lines(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) -> Vec<String> {
+  let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
-  println!(
+  let mut lines = vec![format!(
     "declared in .gwm.toml: {} milestones — diff against {}:",
     declared.len(),
-    slug
-  );
+    clean(slug)
+  )];
   for spec in &diff.to_create {
     let due = spec.due_on.as_deref().unwrap_or("no due date");
-    println!(
-      "  + {:<20} (will create — state {}, due {})",
-      spec.title,
+    lines.push(format!(
+      "  + {:<20} (will create, state {}, due {})",
+      clean(&spec.title),
       spec.state.as_str(),
-      due
-    );
+      clean(due)
+    ));
   }
   for upd in &diff.to_update {
     let detail = match (&upd.previous_due_on, &upd.previous_state, &upd.previous_description) {
@@ -4372,15 +4443,20 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
       (None, None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
     };
-    println!("  ~ {:<20} ({})", upd.spec.title, detail);
+    lines.push(format!("  ~ {:<20} ({})", clean(&upd.spec.title), clean(&detail)));
   }
   for spec in &diff.matching {
-    println!("  = {:<20} (match)", spec.title);
+    lines.push(format!("  = {:<20} (match)", clean(&spec.title)));
   }
   for remote in &diff.extra_on_remote {
-    println!("  - {:<20} (#{} on remote, not in config)", remote.title, remote.number);
+    lines.push(format!(
+      "  - {:<20} (#{} on remote, not in config)",
+      clean(&remote.title),
+      remote.number
+    ));
   }
-  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines.push(labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+  lines
 }
 
 // ---- Trust ledger commands (issue #95) ----------------------------------
@@ -4407,10 +4483,16 @@ fn cmd_trust_list() -> Result<()> {
     ledger.entries.len(),
     if ledger.entries.len() == 1 { "y" } else { "ies" }
   );
+  // Issue #473, Codex pass 2: `trust show` cats the ledger file, where TOML
+  // has already escaped any control byte in a value, but `load` DECODES it, so
+  // every command that reads the ledger back through `TrustLedger` handles the
+  // real character. `origin` is a remote URL that arrived with a clone, and
+  // this listing is exactly what someone runs to audit what they trusted.
+  let clean = crate::naming::sanitise_for_terminal;
   let origin_w = ledger
     .entries
     .iter()
-    .map(|e| e.origin.len())
+    .map(|e| clean(&e.origin).len())
     .max()
     .unwrap_or(6)
     .clamp(6, 60);
@@ -4423,10 +4505,10 @@ fn cmd_trust_list() -> Result<()> {
     let short_sha: String = e.config_sha.chars().take(12).collect();
     println!(
       "  {:<ow$}  {}  trusted_at {}  by {}",
-      e.origin,
-      short_sha,
+      clean(&e.origin),
+      clean(&short_sha),
       e.trusted_at.to_rfc3339(),
-      e.trusted_by,
+      clean(&e.trusted_by),
       ow = origin_w,
     );
   }
@@ -4437,8 +4519,11 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
   let path = trust::default_ledger_path()?;
   let mut ledger = TrustLedger::load(&path)?;
   let removed = ledger.revoke(&origin);
+  // Echoed back rather than read from the ledger, but it lands in the same
+  // terminal and costs one call (issue #473).
+  let shown = crate::naming::sanitise_for_terminal(&origin);
   if removed == 0 {
-    println!("0 entries matched origin {} (nothing to revoke).", origin);
+    println!("0 entries matched origin {} (nothing to revoke).", shown);
     return Ok(());
   }
   ledger.save(&path)?;
@@ -4446,7 +4531,7 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
     "✓ revoked {} entr{} for {}",
     removed,
     if removed == 1 { "y" } else { "ies" },
-    origin
+    shown
   );
   Ok(())
 }
@@ -4460,7 +4545,12 @@ fn cmd_trust_add() -> Result<()> {
   match trust::record_config(&workdir, &key, &trust::current_actor())? {
     Some(sha) => {
       let short: String = sha.chars().take(12).collect();
-      println!("✓ trusted {} (.gwm.toml {})", key, short);
+      // `key` is the repo's origin URL (issue #473).
+      println!(
+        "✓ trusted {} (.gwm.toml {})",
+        crate::naming::sanitise_for_terminal(&key),
+        short
+      );
       Ok(())
     }
     None => Err(GwmError::Other(format!(
@@ -4475,6 +4565,10 @@ fn cmd_trust_show() -> Result<()> {
   println!("ledger path: {}", path.display());
   match std::fs::read_to_string(&path) {
     Ok(body) => {
+      // Issue #473: the ledger records one origin key per trusted repo, and
+      // an origin is a remote URL that arrived with a clone. Block variant,
+      // the ledger is a file and its rows are its shape.
+      let body = crate::naming::sanitise_block_for_terminal(&body);
       println!("---");
       print!("{}", body);
       if !body.ends_with('\n') {
@@ -4545,7 +4639,11 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 
       ledger.record(&origin, &sha, &trust::current_actor());
       ledger.save(&ledger_path)?;
-      println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
+      println!(
+        "✓ recorded trust for {} in {}",
+        crate::naming::sanitise_for_terminal(&origin),
+        ledger_path.display()
+      );
       Ok(())
     }
   }
@@ -4570,7 +4668,10 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
   println!();
   println!("gwm: this repo's .gwm.toml has not been trusted yet.");
   println!("     path   : {}", cfg_path.display());
-  println!("     origin : {}", origin);
+  // Issue #473: `origin` is a remote URL out of `.git/config`, which travels
+  // with a clone just like `.gwm.toml` does. Nothing here has been vetted yet
+  // That is what the prompt below is asking.
+  println!("     origin : {}", crate::naming::sanitise_for_terminal(origin));
   println!("     hash   : {}", sha);
   if let Some(cfg) = parsed.as_ref() {
     print_bootstrap_summary(cfg);
@@ -4592,6 +4693,11 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
       "y" | "yes" => return Ok(true),
       "n" | "no" | "" => return Ok(false),
       "show" | "s" => {
+        // Issue #473: the block variant, because this IS the file and its
+        // line breaks are its shape. Neutralising the rest is not "breaking
+        // raw": an escape sequence buried in the body defeats the very
+        // inspection `show` exists to provide.
+        let body = crate::naming::sanitise_block_for_terminal(&body);
         println!("---");
         print!("{}", body);
         if !body.ends_with('\n') {
@@ -4600,36 +4706,59 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
         println!("---");
       }
       other => {
-        println!("unrecognised answer '{}' — answer y, N, or show", other);
+        println!(
+          "unrecognised answer '{}': answer y, N, or show",
+          crate::naming::sanitise_for_terminal(other)
+        );
       }
     }
   }
 }
 
 fn print_bootstrap_summary(cfg: &Config) {
+  for line in bootstrap_summary_lines(cfg) {
+    println!("{}", line);
+  }
+}
+
+/// The lines the TOFU prompt shows for an **untrusted** `.gwm.toml`, as
+/// values rather than as `println!` side effects (issue #473).
+///
+/// A value so the highest-stakes echo in the binary can be asserted on
+/// without driving a PTY: this summary is rendered immediately above
+/// `Trust this .gwm.toml? [y/N/show]:`, from a file the user has by
+/// definition not vetted, and it is the only thing standing between them
+/// and a `[[bootstrap.command]]` that runs arbitrary shell.
+pub fn bootstrap_summary_lines(cfg: &Config) -> Vec<String> {
   let bs = &cfg.bootstrap;
   if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
-    println!("     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)");
-    return;
+    return vec!["     bootstrap surface: (empty, no copies/commands/guards/no_symlinks declared)".to_string()];
   }
-  println!("     bootstrap surface:");
+  // Issue #473: every field below is verbatim text from a file the user has
+  // NOT trusted, which is the whole premise of the prompt this feeds. Left
+  // raw, `\u{1b}[1A\u{1b}[2K` in a `[[bootstrap.command]]` name walks the
+  // cursor up and erases the row above, so the malicious `run` line can
+  // delete the very evidence the summary exists to show.
+  let clean = crate::naming::sanitise_for_terminal;
+  let mut lines = vec!["     bootstrap surface:".to_string()];
   for c in &bs.copy {
-    println!("       - copy   {} → {}", c.from, c.to);
+    lines.push(format!("       - copy   {} → {}", clean(&c.from), clean(&c.to)));
   }
   for g in &bs.guard {
-    println!(
+    lines.push(format!(
       "       - guard  {} (on_match={}, deny={} pattern(s))",
-      g.name,
+      clean(&g.name),
       g.on_match,
       g.deny_patterns.len()
-    );
+    ));
   }
   for ns in &bs.no_symlink {
-    println!("       - no-symlink {}", ns.path);
+    lines.push(format!("       - no-symlink {}", clean(&ns.path)));
   }
   for c in &bs.command {
-    println!("       - run    {} ({})", c.name, c.run);
+    lines.push(format!("       - run    {} ({})", clean(&c.name), clean(&c.run)));
   }
+  lines
 }
 
 // ---- Aliases commands (issue #86) ---------------------------------------
@@ -4681,6 +4810,13 @@ fn cmd_aliases_list() -> Result<()> {
 
   let resolved = crate::aliases::load(repo_workdir.as_deref(), None)?;
 
+  // Issue #473: repo and user alias tables are arbitrary key/value text from
+  // a `.gwm.toml` this command reads WITHOUT the trust gate: auditing an
+  // unfamiliar repo's aliases before running anything is exactly what it is
+  // for. Built-ins are compiled in and need no cleaning, but they share the
+  // helper so a future built-in read from a file cannot slip through.
+  let clean = crate::naming::sanitise_for_terminal;
+
   // built-in section ---------------------------------------------------
   println!("built-in:");
   if resolved.built_in.is_empty() {
@@ -4688,7 +4824,7 @@ fn cmd_aliases_list() -> Result<()> {
   } else {
     let width = resolved.built_in.iter().map(|e| e.name.len()).max().unwrap_or(2).max(2);
     for e in &resolved.built_in {
-      println!("  {:<width$} → {}", e.name, e.expansion, width = width);
+      println!("  {:<width$} → {}", clean(e.name), clean(e.expansion), width = width);
     }
   }
 
@@ -4699,9 +4835,9 @@ fn cmd_aliases_list() -> Result<()> {
   } else if resolved.repo.is_empty() {
     println!("  (none declared)");
   } else {
-    let width = resolved.repo.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    let width = resolved.repo.keys().map(|k| clean(k).len()).max().unwrap_or(2).max(2);
     for (name, expansion) in &resolved.repo {
-      println!("  {:<width$} → {}", name, expansion, width = width);
+      println!("  {:<width$} → {}", clean(name), clean(expansion), width = width);
     }
   }
 
@@ -4714,13 +4850,22 @@ fn cmd_aliases_list() -> Result<()> {
   if resolved.user.is_empty() {
     println!("  (none declared)");
   } else {
-    let width = resolved.user.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    let width = resolved.user.keys().map(|k| clean(k).len()).max().unwrap_or(2).max(2);
     for (name, expansion) in &resolved.user {
       // Mark entries shadowed by a repo declaration so the user can
       // see why a `gwm <name>` does not pick up the user expansion.
+      // Shadowing is probed on the raw name, which is the identity the
+      // resolver matches on, and two distinct names must not look shadowed
+      // just because they neutralise to the same string.
       let shadowed = resolved.repo.contains_key(name);
       let suffix = if shadowed { "  (shadowed by repo)" } else { "" };
-      println!("  {:<width$} → {}{}", name, expansion, suffix, width = width);
+      println!(
+        "  {:<width$} → {}{}",
+        clean(name),
+        clean(expansion),
+        suffix,
+        width = width
+      );
     }
   }
 

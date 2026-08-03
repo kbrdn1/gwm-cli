@@ -148,7 +148,14 @@ pub fn list(prefix: Option<&str>) -> Result<()> {
       .map(|p| key == p || key.starts_with(&format!("{}.", p)) || key.starts_with(&format!("{}[", p)))
       .unwrap_or(true)
     {
-      println!("{} = {}", key, value);
+      // Issue #473: the *value* is already escaped by `format_list_value`'s
+      // `{:?}`, but the key is not, and a key is attacker-controlled wherever
+      // the schema is a map rather than fixed fields (`[aliases]`,
+      // `[forge_hosts]`, `[exec.profiles]`, `[clean.profiles]`, `[tui.keys]`).
+      // Sanitised at the print site rather than inside `flatten_value`, whose
+      // other callers compare keys across config layers to attribute a source
+      // and must keep seeing them byte-for-byte.
+      println!("{} = {}", crate::naming::sanitise_for_terminal(&key), value);
     }
   }
   Ok(())
@@ -179,7 +186,11 @@ pub fn validate() -> Result<()> {
   if let Some(warning) =
     crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern, &worktree::repo_name(&repo), &types)
   {
-    eprintln!("warning: {}", warning);
+    // Issue #473: `branch_pattern_warning` already neutralises the pattern it
+    // quotes, but it also embeds the repo name, and this `eprintln!` bypasses
+    // the sink in `main` (it is a warning, not a returned error). One row, so
+    // the row variant.
+    eprintln!("warning: {}", crate::naming::sanitise_for_terminal(&warning));
   }
   Ok(())
 }
@@ -470,7 +481,11 @@ fn remove_value(table: &mut Table, segments: &[Segment]) -> Result<()> {
 
 fn format_get_value(value: &toml::Value) -> String {
   match value {
-    toml::Value::String(s) => s.clone(),
+    // Issue #473: `gwm config get` prints the string bare (that is its
+    // contract, the output is meant to be pipeable), so unlike the
+    // `format_list_value` path below it gets no incidental protection from
+    // `Debug`'s escaping. Neutralise the control bytes here instead.
+    toml::Value::String(s) => crate::naming::sanitise_for_terminal(s),
     _ => crate::config::format_list_value(value),
   }
 }

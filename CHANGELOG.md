@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here.
 
 This file tracks the **in-progress** release only. Past releases live under
-[`changelogs/`](changelogs/) — one Markdown file per SemVer version.
+[`changelogs/`](changelogs/), one Markdown file per SemVer version.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- RELEASE NOTE: before publishing, rewrite BOTH sections below (Added and
      Fixed) in the advisory's own wording and reference the GHSA id. The full
-     write-up — impact, threat model, reproduction — lives in the draft
+     write-up (impact, threat model, reproduction) lives in the draft
      advisory, not in this file, until it is published. -->
 
 ### Added
@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pastille. ([#481](https://github.com/kbrdn1/gwm-cli/issues/481))
 
 - Free-form worktree naming. `gwm create --name spike-redis` skips the
-  `<type> <issue> <desc>` triple entirely — not every worktree corresponds to
+  `<type> <issue> <desc>` triple entirely: not every worktree corresponds to
   an issue. In the TUI, `Ctrl-T` toggles the create form between the
   structured triple and a single `Name` field. The flag is exclusive with the
   positionals, so a partial triple is still the typo it always was; the mode
@@ -91,8 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The name becomes the branch verbatim, and is validated verbatim: `--name
   " spike"` is refused rather than trimmed into `spike`, which would be a
   different branch from the one asked for. `branch_pattern` / `path_pattern`
-  do not apply — they are written in terms of `{type}` / `{issue}` / `{desc}`,
-  and a free-form name has none of them — while `[worktree].base` still does,
+  do not apply, being written in terms of `{type}` / `{issue}` / `{desc}`,
+  and a free-form name has none of them, while `[worktree].base` still does,
   so free-form worktrees land beside the structured ones. `base` is only
   expanded with the placeholders it documents, though: the structured path
   feeds `{type}` / `{issue}` / `{desc}` through `base` too, and since an
@@ -103,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-linking goes inactive (`gwm link` remains), `gwm commit-prefix` errors
   because a prefix is derived from the branch type and there is none, and
   create/remove/bootstrap hook placeholders resolve empty. PR/MR detection is
-  unaffected — it queries the forge with the whole branch name. `doctor`
+  unaffected: it queries the forge with the whole branch name. `doctor`
   treats the branch as user-managed and never flags it. All of which applies
   to a name that does *not* match the branch convention: nothing records how
   a worktree was named, only what its branch is, so `--name 'feat/#42-x'` is
@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The accepted-name rules are enumerated from the three things a free-form
   name has to be at once, rather than accreted one example at a time. It is a
-  **git branch** — validated with libgit2's branch-level oracle, which is
+  **git branch**, validated with libgit2's branch-level oracle, which is
   stricter than the reference-level one (`refs/heads/HEAD` is a valid
   reference name, `HEAD` is not a usable branch name). It is a **single
   filesystem path component**, which a branch name is not: no `.` / `..`
@@ -125,13 +125,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows path rules are covered by
   [#475](https://github.com/kbrdn1/gwm-cli/issues/475) below, on every
   platform rather than only that one.
-  No `SCHEMA_VERSION` bump — `JsonWorktree` carries no `type` / `desc`, so
+  No `SCHEMA_VERSION` bump: `JsonWorktree` carries no `type` / `desc`, so
   the wire format is unchanged.
   ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))
 
-- Lifecycle hooks receive their context as environment variables —
+- Lifecycle hooks receive their context as environment variables,
   `GWM_BRANCH`, `GWM_PATH`, `GWM_TYPE`, `GWM_ISSUE`, `GWM_DESC`, `GWM_USER`,
-  `GWM_OWNER`, `GWM_REPO` — alongside the existing `{placeholder}` syntax. A
+  `GWM_OWNER`, `GWM_REPO`, alongside the existing `{placeholder}` syntax. A
   hook can now read `"$GWM_BRANCH"` and not think about quoting at all: a
   shell never re-parses metacharacters coming out of a variable. An explicit
   `env` entry of the same name still wins.
@@ -172,6 +172,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#418](https://github.com/kbrdn1/gwm-cli/issues/418))
 
 ### Fixed
+
+- Config values no longer reach the terminal with their control bytes intact.
+  A `.gwm.toml` comes from a repo nobody has vetted, and the commands that read
+  it back skip the trust gate on purpose, because inspecting an unfamiliar repo
+  before trusting it is meant to be the safe move. Echoing a value verbatim
+  handed that file a terminal escape channel out of a read-only command: an
+  OSC 52 clipboard write, a window-title rewrite, cursor moves that erase the
+  line above.
+
+  `gwm config get`, `config list` (its keys, which are attacker-chosen wherever
+  the schema is a map), `types`, `aliases list`, `doctor`, `commit-prefix`,
+  `trust list` / `show` / `add` / `revoke`, the milestone and label diff rows,
+  and the TOFU prompt are all covered. So is every error message, which needed
+  no echo command at all: `toml`'s parse error quotes the offending source line
+  verbatim, so running `gwm list` inside the repo was enough.
+
+  The one that matters most is the prompt: its bootstrap summary renders
+  directly above `Trust this .gwm.toml? [y/N/show]:`, so a cursor-up-and-erase
+  in a `[[bootstrap.command]]` name could delete the row naming the shell it
+  was asking permission to run.
+
+  Values are replaced rather than stripped, so what is left stays recognisable
+  and no length changes silently. Errors keep their line breaks, because a
+  parse diagnostic points at the broken column across several rows, but every
+  line after the first now sits under gwm's own margin. That is what stops a
+  value carrying a newline from printing a second line at column zero that
+  reads like a statement from gwm rather than a quote from the repo.
+
+  One value is refused rather than neutralised: an `[aliases]` expansion
+  becomes argv before the CLI parser runs, and that parser prints its own
+  errors without passing through gwm's output path, so a control character
+  there is rejected when the config loads.
 
 - `worktree` patterns are expanded in a single pass, so an expansion is a value
   rather than more template. `expand_placeholders` chained `str::replace` calls
@@ -275,23 +307,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gwm doctor` and `gwm config validate` now warn when
   `worktree.branch_pattern` does not survive a format-then-parse round-trip.
   The pattern drives how a branch name is *written* but not how one is *read
-  back* — the parser is still a hardcoded regex — so a mismatched pattern
+  back* (the parser is still a hardcoded regex) so a mismatched pattern
   silently broke issue/PR auto-linking, gitmoji selection, lifecycle hook
   placeholders and the branch-convention check. The warning names whichever
   segments actually break: a custom pattern is not automatically a broken one
   (`{type}/#{issue}-prefix-{desc}` still recovers `type` and `issue`, only
   `desc` comes back wrong), and claiming otherwise would defeat the point of a
   warning whose whole value is accuracy. The probe enumerates the value space
-  `gwm create` admits rather than sampling it — every configured branch type,
+  `gwm create` admits rather than sampling it: every configured branch type,
   a single- and a multi-digit issue, a desc with and without the `-` it
-  allows, and the real repo name for `{repo}` — so a pattern that breaks on
+  allows, and the real repo name for `{repo}`, so a pattern that breaks on
   only some values is reported as breaking on only some values. `gwm config validate` prints it on
   stderr, reads the *effective* pattern so one set only in the global
   `~/.config/gwm/config.toml` is caught too, and still exits `0`: a custom
   pattern is valid configuration, not an error (`gwm doctor` reports it as a
   `!` check, so that command exits `1` like any other Warning). The
   config-supplied pattern is neutralised for control characters before it is
-  echoed — neither command goes through the trust gate, so an unvetted
+  echoed: neither command goes through the trust gate, so an unvetted
   `.gwm.toml` must not get a terminal escape channel out of a health check.
   This states the limitation; the entry below removes its cause, so the set of
   patterns it has anything to say about is much smaller than it was.
@@ -424,18 +456,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$`, backticks, parentheses and redirections in a ref name, and a ref can
   arrive from someone else's push, so an unescaped `{branch}` let a name
   decide what the hook actually ran. `env` values are deliberately left
-  unescaped — they go to the process environment and never see a shell, so
+  unescaped: they go to the process environment and never see a shell, so
   escaping them would put literal quote characters into what the hook reads
   back. `[[bootstrap.command]]` steps fold into the same path and get the
   same treatment.
 
   Expansion is also single-pass now. Chained replacements re-scanned what the
   previous one wrote, so a branch named `spike-{issue}` had the token inside
-  its own name rewritten — and with escaping in play that would have spliced
+  its own name rewritten, and with escaping in play that would have spliced
   quote characters into the middle of another value.
 
   An **empty** placeholder is left alone rather than escaped. It has nothing
-  to inject, and `shell_words::quote("")` is `''` — escaping it would mean
+  to inject, and `shell_words::quote("")` is `''`, so escaping it would mean
   `mycmd {issue}` started passing an empty argument where it passed none,
   on every branch that does not match the convention. Hooks therefore see no
   change at all beyond the one this fixes.
@@ -454,49 +486,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 In reverse chronological order:
 
-- [`1.5.0`](changelogs/1.5.0.md) — 2026-07-26
-- [`1.4.0`](changelogs/1.4.0.md) — 2026-07-25
-- [`1.3.0`](changelogs/1.3.0.md) — 2026-07-24
-- [`1.2.0`](changelogs/1.2.0.md) — 2026-07-21
-- [`1.1.1`](changelogs/1.1.1.md) — 2026-07-16
-- [`1.1.0`](changelogs/1.1.0.md) — 2026-07-15
-- [`1.0.3`](changelogs/1.0.3.md) — 2026-07-09
-- [`1.0.2`](changelogs/1.0.2.md) — 2026-07-06
-- [`1.0.1`](changelogs/1.0.1.md) — 2026-07-01
-- [`1.0.0`](changelogs/1.0.0.md) — 2026-06-26
-- [`0.9.0`](changelogs/0.9.0.md) — 2026-06-07
-- [`0.8.0`](changelogs/0.8.0.md) — 2026-06-01
-- [`0.7.0`](changelogs/0.7.0.md) — 2026-05-23
-- [`0.6.0`](changelogs/0.6.0.md) — 2026-05-21
-- [`0.5.0`](changelogs/0.5.0.md) — 2026-05-20
-- [`0.4.0`](changelogs/0.4.0.md) — 2026-05-19
-- [`0.3.0`](changelogs/0.3.0.md) — 2026-05-19
-- [`0.2.0`](changelogs/0.2.0.md) — 2026-05-18
-- [`0.1.0`](changelogs/0.1.0.md) — 2026-05-18
+- [`1.5.0`](changelogs/1.5.0.md), 2026-07-26
+- [`1.4.0`](changelogs/1.4.0.md), 2026-07-25
+- [`1.3.0`](changelogs/1.3.0.md), 2026-07-24
+- [`1.2.0`](changelogs/1.2.0.md), 2026-07-21
+- [`1.1.1`](changelogs/1.1.1.md), 2026-07-16
+- [`1.1.0`](changelogs/1.1.0.md), 2026-07-15
+- [`1.0.3`](changelogs/1.0.3.md), 2026-07-09
+- [`1.0.2`](changelogs/1.0.2.md), 2026-07-06
+- [`1.0.1`](changelogs/1.0.1.md), 2026-07-01
+- [`1.0.0`](changelogs/1.0.0.md), 2026-06-26
+- [`0.9.0`](changelogs/0.9.0.md), 2026-06-07
+- [`0.8.0`](changelogs/0.8.0.md), 2026-06-01
+- [`0.7.0`](changelogs/0.7.0.md), 2026-05-23
+- [`0.6.0`](changelogs/0.6.0.md), 2026-05-21
+- [`0.5.0`](changelogs/0.5.0.md), 2026-05-20
+- [`0.4.0`](changelogs/0.4.0.md), 2026-05-19
+- [`0.3.0`](changelogs/0.3.0.md), 2026-05-19
+- [`0.2.0`](changelogs/0.2.0.md), 2026-05-18
+- [`0.1.0`](changelogs/0.1.0.md), 2026-05-18
 
 ### Pre-releases
 
 Per-RC notes covering only the delta against the previous RC (or against the previous stable, for `rc.1`):
 
-- [`0.10.0-rc.4`](changelogs/pre-releases/0.10.0-rc.4.md) — 2026-06-17
-- [`0.10.0-rc.3`](changelogs/pre-releases/0.10.0-rc.3.md) — 2026-06-17
-- [`0.10.0-rc.2`](changelogs/pre-releases/0.10.0-rc.2.md) — 2026-06-16
-- [`0.10.0-rc.1`](changelogs/pre-releases/0.10.0-rc.1.md) — 2026-06-10
-- [`0.9.0-rc.3`](changelogs/pre-releases/0.9.0-rc.3.md) — 2026-06-07
-- [`0.9.0-rc.2`](changelogs/pre-releases/0.9.0-rc.2.md) — 2026-06-06
-- [`0.9.0-rc.1`](changelogs/pre-releases/0.9.0-rc.1.md) — 2026-06-02
-- [`0.8.0-rc.5`](changelogs/pre-releases/0.8.0-rc.5.md) — 2026-06-01
-- [`0.8.0-rc.4`](changelogs/pre-releases/0.8.0-rc.4.md) — 2026-05-29
-- [`0.8.0-rc.3`](changelogs/pre-releases/0.8.0-rc.3.md) — 2026-05-29
-- [`0.8.0-rc.2`](changelogs/pre-releases/0.8.0-rc.2.md) — 2026-05-23
-- [`0.8.0-rc.1`](changelogs/pre-releases/0.8.0-rc.1.md) — 2026-05-23
-- [`0.7.0-rc.3`](changelogs/pre-releases/0.7.0-rc.3.md) — 2026-05-23
-- [`0.7.0-rc.2`](changelogs/pre-releases/0.7.0-rc.2.md) — 2026-05-23
-- [`0.7.0-rc.1`](changelogs/pre-releases/0.7.0-rc.1.md) — 2026-05-22
-- [`0.6.0-rc.1`](changelogs/pre-releases/0.6.0-rc.1.md) — 2026-05-20
-- [`0.5.0-rc.2`](changelogs/pre-releases/0.5.0-rc.2.md) — 2026-05-19
-- [`0.5.0-rc.1`](changelogs/pre-releases/0.5.0-rc.1.md) — 2026-05-19
-- [`0.3.0-rc.3`](changelogs/pre-releases/0.3.0-rc.3.md) — 2026-05-19
-- [`0.3.0-rc.2`](changelogs/pre-releases/0.3.0-rc.2.md) — 2026-05-19
-- [`0.3.0-rc.1`](changelogs/pre-releases/0.3.0-rc.1.md) — 2026-05-19
-- [`0.2.0-rc.1`](changelogs/pre-releases/0.2.0-rc.1.md) — 2026-05-18
+- [`0.10.0-rc.4`](changelogs/pre-releases/0.10.0-rc.4.md), 2026-06-17
+- [`0.10.0-rc.3`](changelogs/pre-releases/0.10.0-rc.3.md), 2026-06-17
+- [`0.10.0-rc.2`](changelogs/pre-releases/0.10.0-rc.2.md), 2026-06-16
+- [`0.10.0-rc.1`](changelogs/pre-releases/0.10.0-rc.1.md), 2026-06-10
+- [`0.9.0-rc.3`](changelogs/pre-releases/0.9.0-rc.3.md), 2026-06-07
+- [`0.9.0-rc.2`](changelogs/pre-releases/0.9.0-rc.2.md), 2026-06-06
+- [`0.9.0-rc.1`](changelogs/pre-releases/0.9.0-rc.1.md), 2026-06-02
+- [`0.8.0-rc.5`](changelogs/pre-releases/0.8.0-rc.5.md), 2026-06-01
+- [`0.8.0-rc.4`](changelogs/pre-releases/0.8.0-rc.4.md), 2026-05-29
+- [`0.8.0-rc.3`](changelogs/pre-releases/0.8.0-rc.3.md), 2026-05-29
+- [`0.8.0-rc.2`](changelogs/pre-releases/0.8.0-rc.2.md), 2026-05-23
+- [`0.8.0-rc.1`](changelogs/pre-releases/0.8.0-rc.1.md), 2026-05-23
+- [`0.7.0-rc.3`](changelogs/pre-releases/0.7.0-rc.3.md), 2026-05-23
+- [`0.7.0-rc.2`](changelogs/pre-releases/0.7.0-rc.2.md), 2026-05-23
+- [`0.7.0-rc.1`](changelogs/pre-releases/0.7.0-rc.1.md), 2026-05-22
+- [`0.6.0-rc.1`](changelogs/pre-releases/0.6.0-rc.1.md), 2026-05-20
+- [`0.5.0-rc.2`](changelogs/pre-releases/0.5.0-rc.2.md), 2026-05-19
+- [`0.5.0-rc.1`](changelogs/pre-releases/0.5.0-rc.1.md), 2026-05-19
+- [`0.3.0-rc.3`](changelogs/pre-releases/0.3.0-rc.3.md), 2026-05-19
+- [`0.3.0-rc.2`](changelogs/pre-releases/0.3.0-rc.2.md), 2026-05-19
+- [`0.3.0-rc.1`](changelogs/pre-releases/0.3.0-rc.1.md), 2026-05-19
+- [`0.2.0-rc.1`](changelogs/pre-releases/0.2.0-rc.1.md), 2026-05-18
