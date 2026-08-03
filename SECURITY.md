@@ -7,8 +7,13 @@ on the latest minor line; older lines are not backported.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+| 1.6.x   | :white_check_mark: |
+| < 1.6   | :x:                |
+
+Every version up to and including 1.5.0 carries
+[GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm)
+(high): a branch name could inject a command into a lifecycle hook. There is no
+backport, so upgrading to 1.6.0 is the fix.
 
 ## Reporting a vulnerability
 
