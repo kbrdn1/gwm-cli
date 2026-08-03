@@ -6,19 +6,26 @@
 name = "gwm-cli"
 version = "1.5.0"
 edition = "2021"
-# MSRV is the floor required by every use in the crate, not just the
-# newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
-# wants 1.80; `std::iter::repeat_n` (existing code in src/tui/ui.rs's
-# countdown bar) wants 1.82; `tui-term 0.3.4` (issue #35 PTY overlay)
-# declares `rust-version = "1.86.0"`. The crate as a whole compiles at
-# 1.86+, so MSRV is set to the higher floor. CI's clippy job catches an
-# accidental *std-API* regression above this floor (`clippy::incompatible_msrv`
-# is warn-by-default, escalated to a hard error by `-D warnings`), but it does
-# NOT cover language/edition features or a dependency raising its own floor —
-# those are verified locally before an MSRV bump with `cargo msrv verify` (or
-# `cargo +1.86.0 build --all-targets --locked`). See
-# `docs/6.development/3.stability.md` §MSRV policy for the full story.
-rust-version = "1.86"
+# MSRV is the floor required by every use in the crate, not just the newest
+# one introduced here. Our own std usage sits far lower: `std::sync::LazyLock`
+# (src/naming.rs) wants 1.80, `std::iter::repeat_n` (src/tui/ui.rs's countdown
+# bar) wants 1.82. The floor comes from the dependency graph, and reading it
+# takes a build rather than `cargo metadata`: the highest *declared*
+# `rust-version` in the locked graph is 1.88 (the ratatui 0.30 stack, `time
+# 0.3.47`), but `libsqlite3-sys 0.38.1`, a normal dependency pulled in by
+# `rusqlite` with `bundled`, declares no `rust-version` at all and its build
+# script uses `cfg_select!`, stable only since 1.95.0. Measured against the
+# committed lockfile: `cargo +1.94 check --all-targets --locked` fails with
+# `error[E0658]`, `cargo +1.95 check --all-targets --locked` passes.
+#
+# Two CI jobs hold this line. The clippy job catches an accidental *std-API*
+# use above it (`clippy::incompatible_msrv` is warn-by-default, escalated to a
+# hard error by `-D warnings`). The `msrv` job (#491) installs the toolchain
+# declared right here and runs `cargo check --all-targets --locked`, which is
+# the only check that sees a language/edition feature or a dependency that
+# declares no floor of its own. See `docs/6.development/3.stability.md`
+# §MSRV policy for the full story.
+rust-version = "1.95"
 description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
 license = "MIT"
