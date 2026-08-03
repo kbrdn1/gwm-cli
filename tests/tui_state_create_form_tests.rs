@@ -26,7 +26,7 @@ fn reset_returns_form_to_initial_state() {
 }
 
 #[test]
-fn next_field_rotates_type_to_issue_to_desc_to_type() {
+fn next_field_rotates_through_the_fields_the_default_pattern_asks_for() {
   let mut form = CreateForm::new();
   assert_eq!(form.field, Field::Type);
   form.next_field();
@@ -304,4 +304,191 @@ fn reset_returns_to_structured_mode_and_clears_the_name() {
   f.reset();
   assert_eq!(f.mode, Mode::Structured);
   assert!(f.name.is_empty());
+}
+
+// --- token-driven fields (issue #418) ------------------------------------
+//
+// The form used to present the canonical triple whatever the repo's patterns
+// said. Issue #418's proposal has three parts and two of them shipped ahead of
+// it: the live branch/dir preview came with #217's follow-up and #416, and
+// `Ctrl-T` came with #416. What was left is this — the field set and the focus
+// order, derived from the patterns instead of hardcoded.
+
+use gwm::tui::state::create_form::fields_for;
+
+/// A pattern that writes no issue number must not present an Issue field.
+///
+/// Not a cosmetic point. `BranchSpec::validate_against` refuses an empty issue,
+/// so on a `{type}/{desc}` repo the old form demanded a number, then expanded a
+/// pattern that has nowhere to put it: the value was mandatory *and* discarded,
+/// which made the TUI create path unusable on that convention.
+#[test]
+fn a_pattern_without_an_issue_token_presents_no_issue_field() {
+  assert_eq!(
+    fields_for(&["{type}/{desc}", "{type}-{desc}", "{home}/wt"]),
+    [Field::Type, Field::Desc]
+  );
+}
+
+/// Focus order is the pattern's order, not the canonical triple's.
+#[test]
+fn the_field_order_follows_the_pattern_rather_than_the_canonical_triple() {
+  let mut form = CreateForm::new();
+  form.set_fields(fields_for(&["{desc}-{issue}", "{desc}-{issue}", "~/wt"]));
+  form.reset();
+
+  assert_eq!(form.field, Field::Desc, "the pattern leads with the description");
+  form.next_field();
+  assert_eq!(form.field, Field::Issue);
+  form.next_field();
+  assert_eq!(form.field, Field::Desc, "wraps within the pattern's own fields");
+  form.prev_field();
+  assert_eq!(form.field, Field::Issue, "and backwards too");
+}
+
+/// Rotation must never land on a field the pattern does not render. Walking one
+/// full turn plus one is enough to catch a rotation that still enumerates the
+/// hardcoded triple.
+#[test]
+fn rotation_never_lands_on_a_field_the_pattern_omits() {
+  for patterns in [
+    &["{type}/{desc}", "{type}-{desc}", "~/wt"][..],
+    &["#{issue}-{desc}", "{issue}-{desc}", "~/wt"][..],
+    &["{type}/#{issue}", "{type}-{issue}", "~/wt"][..],
+  ] {
+    let expected = fields_for(patterns);
+    let mut form = CreateForm::new();
+    form.set_fields(expected.clone());
+    form.reset();
+    for _ in 0..(expected.len() + 1) {
+      assert!(
+        expected.contains(&form.field),
+        "{:?} rotated onto {:?}, which it does not present",
+        patterns,
+        form.field
+      );
+      form.next_field();
+    }
+  }
+}
+
+/// Every entry point has to land on a field the pattern renders. Each one used
+/// to name a field literally — `reset` chose Type, `toggle_mode` chose Issue,
+/// and the rename modal chose Desc — so each is a separate way to focus an
+/// input that is not on screen, where typing goes nowhere.
+#[test]
+fn every_entry_point_focuses_a_field_the_pattern_actually_presents() {
+  // A pattern omitting each of the three in turn, so no single hardcoded
+  // choice can pass all three cases.
+  for patterns in [
+    &["{type}/{desc}", "{type}-{desc}", "~/wt"][..],
+    &["#{issue}-{desc}", "{issue}-{desc}", "~/wt"][..],
+    &["{type}/#{issue}", "{type}-{issue}", "~/wt"][..],
+  ] {
+    let expected = fields_for(patterns);
+    let mut form = CreateForm::new();
+    form.set_fields(expected.clone());
+
+    form.reset();
+    assert!(
+      expected.contains(&form.field),
+      "{:?}: reset focused {:?}",
+      patterns,
+      form.field
+    );
+
+    assert!(
+      expected.contains(&form.entry_field()),
+      "{:?}: entry_field is {:?}",
+      patterns,
+      form.entry_field()
+    );
+    assert!(
+      expected.contains(&form.last_field()),
+      "{:?}: last_field is {:?}",
+      patterns,
+      form.last_field()
+    );
+
+    // Free-form and back: the return leg used to name Issue unconditionally.
+    form.toggle_mode();
+    assert_eq!(form.field, Field::Name);
+    form.toggle_mode();
+    assert!(
+      expected.contains(&form.field),
+      "{:?}: toggling back focused {:?}",
+      patterns,
+      form.field
+    );
+  }
+}
+
+/// The form opens on the first field the user *types into*: Type is cycled
+/// rather than typed, so opening there makes the first keypress a silent no-op
+/// (#217). That rule has to survive being generalised.
+#[test]
+fn the_entry_field_skips_the_cycle_only_type_selector() {
+  let mut form = CreateForm::new();
+  assert_eq!(
+    form.entry_field(),
+    Field::Issue,
+    "the default pattern still opens on Issue"
+  );
+
+  form.set_fields(fields_for(&["{type}/{desc}", "{type}-{desc}", "~/wt"]));
+  assert_eq!(form.entry_field(), Field::Desc, "Type is skipped, Desc is next");
+
+  // A pattern whose only editable token is the type has nowhere else to go.
+  form.set_fields(fields_for(&["{type}/fixed", "{type}-fixed", "~/wt"]));
+  assert_eq!(form.entry_field(), Field::Type);
+}
+
+/// A field the pattern omits must not accept keystrokes either. Rotation alone
+/// is not enough: `App` seeds `field` directly on several paths, and a buffer
+/// filled behind a field that is never drawn is a value the user cannot see,
+/// cannot correct, and (where the pattern does carry the token elsewhere) may
+/// still be written.
+#[test]
+fn typing_into_a_field_the_pattern_omits_is_a_no_op() {
+  let mut form = CreateForm::new();
+  form.set_fields(fields_for(&["{type}/{desc}", "{type}-{desc}", "~/wt"]));
+  form.field = Field::Issue;
+  form.push_char('4');
+  form.push_char('2');
+  assert!(
+    form.issue.is_empty(),
+    "the Issue field is not presented, so it takes nothing"
+  );
+
+  form.issue.push_str("42");
+  form.pop_char();
+  assert_eq!(form.issue, "42", "and it gives nothing back either");
+}
+
+/// A pattern set with no editable token at all is degenerate (every worktree
+/// would get the same branch name, and git refuses the second), but it must not
+/// panic the form.
+#[test]
+fn a_pattern_set_with_no_editable_token_leaves_the_form_inert_rather_than_panicking() {
+  let mut form = CreateForm::new();
+  form.set_fields(fields_for(&["wip", "wip", "~/wt"]));
+  assert!(form.fields().is_empty());
+  form.reset();
+  form.next_field();
+  form.prev_field();
+  form.push_char('x');
+  assert!(form.issue.is_empty() && form.desc.is_empty());
+}
+
+/// `set_fields` carries the repo's configuration, not user input — a reset
+/// clears what was typed and must leave the field set standing.
+#[test]
+fn reset_clears_the_buffers_but_keeps_the_configured_field_set() {
+  let mut form = CreateForm::new();
+  let expected = fields_for(&["{desc}-{issue}", "{desc}-{issue}", "~/wt"]);
+  form.set_fields(expected.clone());
+  form.desc.push_str("thing");
+  form.reset();
+  assert_eq!(form.fields(), expected.as_slice());
+  assert!(form.desc.is_empty());
 }
