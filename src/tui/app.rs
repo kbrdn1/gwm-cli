@@ -863,11 +863,39 @@ impl App {
   /// reason: `next_field` rotates within a one-element list, so telling the
   /// user to press Tab names a key that does nothing.
   fn structured_form_instruction(&self) -> String {
-    let submit = format!("enter on {}: submit", self.submit_field_label());
-    if self.create_form.fields().len() > 1 {
-      format!("tab/shift-tab: switch field — {}", submit)
+    match self.create_form.fields().len() {
+      // A pattern set with no editable token at all presents no field, so
+      // there is none to name — `last_field` falls back to `Type`, which the
+      // renderer is not drawing (Codex review on PR #492, fifth pass).
+      0 => "enter: submit".into(),
+      1 => format!("enter on {}: submit", self.submit_field_label()),
+      _ => format!(
+        "tab/shift-tab: switch field — enter on {}: submit",
+        self.submit_field_label()
+      ),
+    }
+  }
+
+  /// How the free-form status line names the mode it toggles back to (#418):
+  /// the fields that mode actually presents, rather than the canonical triple.
+  /// On a `{type}/{desc}` repo "back to type/issue/desc" promised an Issue
+  /// field the structured form hides.
+  fn structured_mode_label(&self) -> String {
+    let names: Vec<&str> = self
+      .create_form
+      .fields()
+      .iter()
+      .map(|f| match f {
+        Field::Type => "type",
+        Field::Issue => "issue",
+        Field::Desc => "desc",
+        Field::Name => "name",
+      })
+      .collect();
+    if names.is_empty() {
+      "the structured form".into()
     } else {
-      submit
+      names.join("/")
     }
   }
 
@@ -4592,7 +4620,10 @@ impl App {
           .unwrap_or_default();
         self.status = match self.create_form.mode {
           Mode::Freeform if back.is_empty() => "free-form: name the worktree anything git accepts".into(),
-          Mode::Freeform => format!("free-form: name the worktree anything git accepts{back}back to type/issue/desc"),
+          Mode::Freeform => format!(
+            "free-form: name the worktree anything git accepts{back}back to {}",
+            self.structured_mode_label()
+          ),
           // The submit field is named from the patterns, not hardcoded to
           // `desc` (#418): a pattern without one told the user to press enter
           // on a field the form does not present.

@@ -1145,3 +1145,79 @@ fn the_hint_row_is_unchanged_on_the_canonical_pattern() {
   assert_present(&buf, "↑/↓", "the default pattern has a type selector");
   assert_present(&buf, "field", "and three fields to move between");
 }
+
+/// Codex review on PR #492, fifth pass, and the third finding of one class:
+/// a user-facing string that names a field the patterns do not present. Three
+/// passes each named one string, so this stops enumerating strings and
+/// enumerates the **property** instead.
+///
+/// **Invariant: on a repo whose patterns omit a segment, nothing the create or
+/// rename surface renders may name that segment.** That covers the modal body,
+/// its footer, and the statusbar behind it in one assertion, and it holds for
+/// strings nobody has written yet.
+#[test]
+fn no_create_surface_names_a_segment_the_patterns_omit() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::Mode;
+
+  // Each pattern set omits exactly one segment, so no single hardcoded string
+  // can pass all three.
+  for (branch, path, omitted) in [
+    ("{type}/{desc}", "{type}-{desc}", "issue"),
+    ("#{issue}-{desc}", "{issue}-{desc}", "type"),
+    ("{type}/#{issue}", "{type}-{issue}", "desc"),
+  ] {
+    for freeform in [false, true] {
+      let (_dir, mut app) = make_app();
+      app.config.worktree.branch_pattern = branch.into();
+      app.config.worktree.path_pattern = path.into();
+      app.config.worktree.base = "/tmp/wt".into();
+      app.apply_create_form_fields();
+      app.enter_create();
+      if freeform {
+        // Through the key handler, not `CreateForm::toggle_mode`: the status
+        // line is written by the handler, so calling the form method directly
+        // leaves the very string this test is about unexercised. (It did, on
+        // the first draft, and the test passed with the defect restored.)
+        app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.create_form.mode, Mode::Freeform);
+      }
+      let buf = render(&mut app);
+
+      assert!(
+        !buffer_contains(&buf, omitted),
+        "`{}` / `{}` (free-form: {}) writes no {{{}}}, but the surface names it — buffer rows:\n{}",
+        branch,
+        path,
+        freeform,
+        omitted,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+/// The degenerate end of the same rule: a pattern set with no editable token
+/// presents no field, so there is none to name. `last_field` falls back to
+/// `Type`, which the renderer is not drawing.
+#[test]
+fn an_all_literal_pattern_set_names_no_field_at_all() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wip".into();
+  app.config.worktree.path_pattern = "wip".into();
+  app.config.worktree.base = "/tmp/wt".into();
+  app.apply_create_form_fields();
+  app.enter_create();
+  assert!(app.create_form.fields().is_empty());
+
+  assert_eq!(app.status, "enter: submit — esc: cancel");
+  let buf = render(&mut app);
+  for absent in ["Type", "Issue", "Desc"] {
+    assert!(
+      !buffer_contains(&buf, absent),
+      "`{}` is not presented — buffer rows:\n{}",
+      absent,
+      row_strings(&buf).join("\n")
+    );
+  }
+}
