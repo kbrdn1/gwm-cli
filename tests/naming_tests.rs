@@ -2133,22 +2133,22 @@ fn a_placeholder_between_two_literals_does_not_fuse_them() {
 #[test]
 fn the_editable_segments_come_back_in_the_order_the_pattern_writes_them() {
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/#{issue}-{desc}"]),
+    gwm::naming::editable_segments(&["{type}/#{issue}-{desc}"], "gwm-cli"),
     ["type", "issue", "desc"],
     "the canonical pattern keeps the canonical order"
   );
   assert_eq!(
-    gwm::naming::editable_segments(&["{desc}-{issue}"]),
+    gwm::naming::editable_segments(&["{desc}-{issue}"], "gwm-cli"),
     ["desc", "issue"],
     "a pattern that leads with the description is read in its own order"
   );
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/{desc}"]),
+    gwm::naming::editable_segments(&["{type}/{desc}"], "gwm-cli"),
     ["type", "desc"],
     "a pattern that writes no issue number must not ask for one"
   );
   assert!(
-    gwm::naming::editable_segments(&["wip"]).is_empty(),
+    gwm::naming::editable_segments(&["wip"], "gwm-cli").is_empty(),
     "a pattern that is pure literal asks the user for nothing"
   );
 }
@@ -2160,7 +2160,7 @@ fn the_editable_segments_come_back_in_the_order_the_pattern_writes_them() {
 #[test]
 fn a_segment_only_base_carries_is_still_asked_for() {
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/{desc}", "{type}-{desc}", "{home}/wt/{issue}"]),
+    gwm::naming::editable_segments(&["{type}/{desc}", "{type}-{desc}", "{home}/wt/{issue}"], "gwm-cli"),
     ["type", "desc", "issue"],
     "base carries the issue, so the form must still collect it"
   );
@@ -2173,7 +2173,7 @@ fn a_segment_only_base_carries_is_still_asked_for() {
 #[test]
 fn a_token_repeated_across_or_within_patterns_yields_one_field() {
   assert_eq!(
-    gwm::naming::editable_segments(&["{type}/{desc}-{desc}", "{type}-{desc}"]),
+    gwm::naming::editable_segments(&["{type}/{desc}-{desc}", "{type}-{desc}"], "gwm-cli"),
     ["type", "desc"]
   );
 }
@@ -2219,7 +2219,7 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
 
   for token in &found {
     let segment = token.trim_start_matches('{').trim_end_matches('}');
-    let is_field = !gwm::naming::editable_segments(&[token.as_str()]).is_empty();
+    let is_field = !gwm::naming::editable_segments(&[token.as_str()], "gwm-cli").is_empty();
     assert!(
       FROM_CONTEXT.contains(&token.as_str()) || is_field,
       "`{}` is substituted by expand_placeholders but is neither resolved from context nor \
@@ -2231,44 +2231,57 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
   }
 }
 
-/// Codex review on PR #492, third pass. `expand_placeholders` substitutes
-/// `{repo}` / `{home}` first and then substitutes what those expansions
-/// produced, so a repo literally named `api-{type}` makes `{repo}/{desc}` write
-/// a branch carrying a type that the raw template never mentions.
-/// `editable_segments` scans the raw template, so it does not see it.
+/// Codex review on PR #492, third and fourth passes. `expand_placeholders`
+/// substitutes `{repo}` / `{home}` first and then substitutes what those
+/// expansions produced, so a repo literally named `api-{type}` makes
+/// `{repo}/{desc}` write `api-fix/foo`: a type the raw template never mentions.
 ///
-/// The gap is real and it is **bounded by a loud failure that already ships**:
-/// #417's compiler refuses exactly this class, and `branch_pattern_warning` is
-/// the predicate `gwm doctor` and `gwm config validate` both consume. gwm
-/// declares such a repo's pattern unusable before the form is ever opened, and
-/// the message names the cause.
+/// My first answer was to declare the raw scan bounded by a failure that
+/// already ships, since #417's compiler refuses this class and
+/// `branch_pattern_warning` reports it. **That bound was false**, and the fourth
+/// pass is what showed it: the warning is only ever called with
+/// `worktree.branch_pattern` (`doctor.rs`, `config_cli.rs`). Nothing validates
+/// `path_pattern` or `base`, so the same repo name reaches the form through
+/// either of them with no diagnostic at all.
 ///
-/// This test is what keeps that true. If the compiler ever starts accepting a
-/// pattern whose expansion carries a token, the field set becomes silently
-/// wrong on it and this goes red.
+/// So the scan mirrors the formatter instead: context placeholders first, the
+/// editable ones after.
 #[test]
-fn a_pattern_whose_expansion_carries_a_token_is_refused_before_the_form_sees_it() {
-  let repo = "api-{type}";
-  let pattern = "{repo}/{desc}";
-  let types = gwm::naming::default_branch_types();
-
-  // The mechanism, measured: the formatter really does write a type here.
+fn a_token_produced_by_expanding_the_repo_name_is_still_a_field() {
+  // The mechanism, measured on the formatter itself.
   assert_eq!(
-    gwm::config::expand_placeholders(pattern, repo, Some("fix"), Some("42"), Some("foo"), None).unwrap(),
+    gwm::config::expand_placeholders(
+      "{repo}/{desc}",
+      "api-{type}",
+      Some("fix"),
+      Some("42"),
+      Some("foo"),
+      None
+    )
+    .unwrap(),
     "api-fix/foo"
   );
-  // And the raw scan really does miss it.
-  assert_eq!(gwm::naming::editable_segments(&[pattern]), ["desc"]);
-
-  // Which is survivable only because gwm refuses the pattern outright.
-  assert!(
-    BranchParser::compile(pattern, repo, &types).is_err(),
-    "the compiler must keep refusing an expansion that carries a token"
+  assert_eq!(
+    gwm::naming::editable_segments(&["{repo}/{desc}"], "api-{type}"),
+    ["type", "desc"],
+    "the expansion writes a type, so the form has to collect one"
   );
-  let warning = gwm::naming::branch_pattern_warning(pattern, repo, &types).expect("doctor must report it");
-  assert!(
-    warning.contains("expands to text containing another placeholder"),
-    "and must keep naming the cause: {}",
-    warning
+
+  // The two patterns no diagnostic covers, which is what made the bound false.
+  assert_eq!(
+    gwm::naming::editable_segments(&["{desc}", "{repo}-{desc}", "~/wt"], "api-{issue}"),
+    ["desc", "issue"],
+    "path_pattern carries it through the repo name"
+  );
+  assert_eq!(
+    gwm::naming::editable_segments(&["{desc}", "{desc}", "~/wt/{repo}"], "api-{type}"),
+    ["desc", "type"],
+    "and so does base"
+  );
+
+  // An ordinary repo name is unaffected.
+  assert_eq!(
+    gwm::naming::editable_segments(&["{repo}/{type}/#{issue}-{desc}"], "gwm-cli"),
+    ["type", "issue", "desc"]
   );
 }

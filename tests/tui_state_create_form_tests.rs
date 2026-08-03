@@ -325,7 +325,7 @@ use gwm::tui::state::create_form::fields_for;
 #[test]
 fn a_pattern_without_an_issue_token_presents_no_issue_field() {
   assert_eq!(
-    fields_for(&["{type}/{desc}", "{type}-{desc}", "{home}/wt"]),
+    fields_for(&["{type}/{desc}", "{type}-{desc}", "{home}/wt"], "gwm-cli"),
     [Field::Type, Field::Desc]
   );
 }
@@ -334,7 +334,7 @@ fn a_pattern_without_an_issue_token_presents_no_issue_field() {
 #[test]
 fn the_field_order_follows_the_pattern_rather_than_the_canonical_triple() {
   let mut form = CreateForm::new();
-  form.set_fields(fields_for(&["{desc}-{issue}", "{desc}-{issue}", "~/wt"]));
+  form.set_fields(fields_for(&["{desc}-{issue}", "{desc}-{issue}", "~/wt"], "gwm-cli"));
   form.reset();
 
   assert_eq!(form.field, Field::Desc, "the pattern leads with the description");
@@ -356,7 +356,7 @@ fn rotation_never_lands_on_a_field_the_pattern_omits() {
     &["#{issue}-{desc}", "{issue}-{desc}", "~/wt"][..],
     &["{type}/#{issue}", "{type}-{issue}", "~/wt"][..],
   ] {
-    let expected = fields_for(patterns);
+    let expected = fields_for(patterns, "gwm-cli");
     let mut form = CreateForm::new();
     form.set_fields(expected.clone());
     form.reset();
@@ -385,7 +385,7 @@ fn every_entry_point_focuses_a_field_the_pattern_actually_presents() {
     &["#{issue}-{desc}", "{issue}-{desc}", "~/wt"][..],
     &["{type}/#{issue}", "{type}-{issue}", "~/wt"][..],
   ] {
-    let expected = fields_for(patterns);
+    let expected = fields_for(patterns, "gwm-cli");
     let mut form = CreateForm::new();
     form.set_fields(expected.clone());
 
@@ -435,11 +435,11 @@ fn the_entry_field_skips_the_cycle_only_type_selector() {
     "the default pattern still opens on Issue"
   );
 
-  form.set_fields(fields_for(&["{type}/{desc}", "{type}-{desc}", "~/wt"]));
+  form.set_fields(fields_for(&["{type}/{desc}", "{type}-{desc}", "~/wt"], "gwm-cli"));
   assert_eq!(form.entry_field(), Field::Desc, "Type is skipped, Desc is next");
 
   // A pattern whose only editable token is the type has nowhere else to go.
-  form.set_fields(fields_for(&["{type}/fixed", "{type}-fixed", "~/wt"]));
+  form.set_fields(fields_for(&["{type}/fixed", "{type}-fixed", "~/wt"], "gwm-cli"));
   assert_eq!(form.entry_field(), Field::Type);
 }
 
@@ -451,7 +451,7 @@ fn the_entry_field_skips_the_cycle_only_type_selector() {
 #[test]
 fn typing_into_a_field_the_pattern_omits_is_a_no_op() {
   let mut form = CreateForm::new();
-  form.set_fields(fields_for(&["{type}/{desc}", "{type}-{desc}", "~/wt"]));
+  form.set_fields(fields_for(&["{type}/{desc}", "{type}-{desc}", "~/wt"], "gwm-cli"));
   form.field = Field::Issue;
   form.push_char('4');
   form.push_char('2');
@@ -471,7 +471,7 @@ fn typing_into_a_field_the_pattern_omits_is_a_no_op() {
 #[test]
 fn a_pattern_set_with_no_editable_token_leaves_the_form_inert_rather_than_panicking() {
   let mut form = CreateForm::new();
-  form.set_fields(fields_for(&["wip", "wip", "~/wt"]));
+  form.set_fields(fields_for(&["wip", "wip", "~/wt"], "gwm-cli"));
   assert!(form.fields().is_empty());
   form.reset();
   form.next_field();
@@ -485,7 +485,7 @@ fn a_pattern_set_with_no_editable_token_leaves_the_form_inert_rather_than_panick
 #[test]
 fn reset_clears_the_buffers_but_keeps_the_configured_field_set() {
   let mut form = CreateForm::new();
-  let expected = fields_for(&["{desc}-{issue}", "{desc}-{issue}", "~/wt"]);
+  let expected = fields_for(&["{desc}-{issue}", "{desc}-{issue}", "~/wt"], "gwm-cli");
   form.set_fields(expected.clone());
   form.desc.push_str("thing");
   form.reset();

@@ -91,23 +91,34 @@ const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 /// repeated capturing token, but `expand_placeholders` is a chain of
 /// `str::replace` and substitutes every occurrence quite happily.
 ///
-/// ⚠️ **Precondition: the patterns must be ones [`BranchParser::compile`]
-/// accepts.** This reads the *raw* template, while `expand_placeholders`
-/// substitutes `{repo}` / `{home}` first and then substitutes what those
-/// expansions produced. So a repo literally named `api-{type}` makes
-/// `{repo}/{desc}` write a type the template never mentions, and this function
-/// does not see it (Codex review on PR #492). That is survivable only because
-/// the compiler refuses exactly this class, and `branch_pattern_warning` is the
-/// predicate `gwm doctor` and `gwm config validate` consume: such a pattern is
-/// reported unusable, by name, before any form opens on it. Pinned by
-/// `a_pattern_whose_expansion_carries_a_token_is_refused_before_the_form_sees_it`.
-/// The root cause is the multi-pass substitution itself, which the CLI shares.
-pub fn editable_segments(patterns: &[&str]) -> Vec<&'static str> {
+/// Scanned **after** the context placeholders are resolved, because that is what
+/// the formatter does: `expand_placeholders` substitutes `{home}` / `{repo}`
+/// first and then substitutes what those expansions produced. A repo literally
+/// named `api-{type}` therefore makes `{repo}/{desc}` write a type the raw
+/// template never mentions, and reading the raw template hid the field while
+/// silently defaulting it (Codex review on PR #492).
+///
+/// Bounding that by "the compiler refuses this class anyway" was **false**, and
+/// worth recording because the bound looked solid: `branch_pattern_warning` is
+/// only ever called with `worktree.branch_pattern`, so the same repo name
+/// reaches the form through `path_pattern` or `base` with no diagnostic at all.
+/// The multi-pass substitution is still the root cause and still worth removing
+/// (#494); deriving from the same intermediate text is what makes this function
+/// agree with the formatter meanwhile.
+pub fn editable_segments(patterns: &[&str], repo: &str) -> Vec<&'static str> {
+  // `{home}` failing to resolve leaves it literal here, which matches what the
+  // caller is about to hit anyway: `expand_placeholders` errors outright on it.
+  let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string());
   let mut out: Vec<&'static str> = Vec::new();
   for pattern in patterns {
+    let mut resolved = (*pattern).to_string();
+    if let Some(home) = &home {
+      resolved = resolved.replace("{home}", home);
+    }
+    let resolved = resolved.replace("{repo}", repo);
     let mut hits: Vec<(usize, &'static str)> = SEGMENTS
       .into_iter()
-      .filter_map(|segment| pattern.find(&format!("{{{}}}", segment)).map(|at| (at, segment)))
+      .filter_map(|segment| resolved.find(&format!("{{{}}}", segment)).map(|at| (at, segment)))
       .collect();
     hits.sort_by_key(|(at, _)| *at);
     for (_, segment) in hits {

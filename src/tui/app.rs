@@ -835,11 +835,14 @@ impl App {
   /// rather than round-tripping a `.gwm.toml`, and that shortcut has to be able
   /// to re-derive what construction derives.
   pub fn apply_create_form_fields(&mut self) {
-    self.create_form.set_fields(super::state::create_form::fields_for(&[
-      &self.config.worktree.branch_pattern,
-      &self.config.worktree.path_pattern,
-      &self.config.worktree.base,
-    ]));
+    self.create_form.set_fields(super::state::create_form::fields_for(
+      &[
+        &self.config.worktree.branch_pattern,
+        &self.config.worktree.path_pattern,
+        &self.config.worktree.base,
+      ],
+      &self.repo_name,
+    ));
   }
 
   /// The name of the field Enter submits from, for the status line (#418).
@@ -872,11 +875,14 @@ impl App {
   /// [`crate::naming::BranchSpec::new_with_required`] validates against, so the
   /// form never refuses a submission over a value the patterns discard (#418).
   fn required_segments(&self) -> Vec<&'static str> {
-    crate::naming::editable_segments(&[
-      &self.config.worktree.branch_pattern,
-      &self.config.worktree.path_pattern,
-      &self.config.worktree.base,
-    ])
+    crate::naming::editable_segments(
+      &[
+        &self.config.worktree.branch_pattern,
+        &self.config.worktree.path_pattern,
+        &self.config.worktree.base,
+      ],
+      &self.repo_name,
+    )
   }
 
   /// Mark the workspace selection stale AND close the open CI checks
