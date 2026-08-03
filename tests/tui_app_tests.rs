@@ -11417,3 +11417,81 @@ fn submitting_the_create_form_does_not_demand_a_segment_the_patterns_discard() {
     app.status
   );
 }
+
+/// Codex review on PR #492. `enter_create` has its own status string, separate
+/// from the one the free-form toggle writes, and only the second was moved off
+/// `desc`. So the form opened telling the user to press enter on a field the
+/// pattern does not present, while Enter actually submitted from another.
+///
+/// Same class as the field set itself, applied half-way: when an invariant is
+/// written down, every consumer of the old hardcoded value has to move at once.
+#[test]
+fn the_opening_instruction_names_the_field_enter_actually_submits_from() {
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}", "{type}-{issue}", "{repo_parent}/wt");
+  app.enter_create();
+  assert!(
+    app.status.contains("enter on issue"),
+    "the pattern's last field is Issue, not Desc: {}",
+    app.status
+  );
+  assert!(!app.status.contains("enter on desc"), "and Desc does not exist here");
+
+  let (_d2, mut app2) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  app2.enter_create();
+  assert!(
+    app2.status.contains("enter on desc"),
+    "the canonical pattern is unchanged: {}",
+    app2.status
+  );
+}
+
+/// Codex review on PR #492. `worktree_spec` reads the branch and the directory
+/// name; it never parses `base`. So a `{type}` carried only by `base` comes back
+/// empty, and because `required_segments` now counts `base`, the type-index
+/// lookup refused to open the rename form at all, blaming a branch type of `''`.
+///
+/// Refusing an unconfigured type (#292) is about a branch whose parsed type is
+/// real but unknown, where preselecting index 0 would silently rename it. An
+/// empty type recovered nothing, so there is nothing to preserve and the form's
+/// own default is not a silent change.
+#[test]
+fn the_rename_form_opens_when_only_the_base_path_carries_the_type() {
+  let (_d, mut app) = app_with_patterns("{desc}", "{desc}", "{repo_parent}/wt/{type}");
+  assert!(
+    app.create_form.fields().contains(&Field::Type),
+    "base carries {{type}}, so the form presents a selector for it"
+  );
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "status was: {}", app.status);
+  assert_eq!(
+    app.create_form.type_index, 0,
+    "the selector falls back to its own default"
+  );
+  assert_eq!(app.create_form.desc, "my-desc");
+}
+
+/// The other side of the same guard: a parsed type that is real but not
+/// configured must still be refused, which is what #292 was actually about.
+#[test]
+fn a_parsed_but_unconfigured_type_is_still_refused() {
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}-{desc}", "{type}-{issue}-{desc}", "{repo_parent}/wt");
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("zzz/#7-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "an unconfigured type must not be silently rewritten"
+  );
+  assert!(app.status.contains("zzz"), "and must be named: {}", app.status);
+}

@@ -4009,18 +4009,23 @@ impl App {
     // Refuse rather than silently preselect type index 0: a branch whose
     // parsed type isn't configured (config change, manual branch) would
     // otherwise be renamed to the first configured type on Enter (Codex
-    // review on PR #292). Scoped to patterns that carry `{type}` — where none
-    // does, the value is discarded by every expansion and the form shows no
-    // type selector to disagree with.
-    let required = self.required_segments();
-    let type_index = if required.contains(&"type") {
-      let Some(index) = self.branch_types.iter().position(|t| t.name == spec.type_) else {
+    // review on PR #292).
+    //
+    // Scoped to a type that was actually recovered (Codex review on PR #492).
+    // `worktree_spec` reads the branch and the directory name and never parses
+    // `base`, so a `{type}` carried only there comes back empty, and refusing
+    // on it blamed a branch type of `''` for a form that works fine: the
+    // selector is presented, the user picks, and the submit writes it into the
+    // path. An empty type recovered nothing, so there is nothing to preserve
+    // and index 0 is not a silent change. Where no pattern carries `{type}` at
+    // all the value is discarded by every expansion anyway.
+    let type_index = match self.branch_types.iter().position(|t| t.name == spec.type_) {
+      Some(index) => index,
+      None if spec.type_.is_empty() => 0,
+      None => {
         self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
         return;
-      };
-      index
-    } else {
-      0
+      }
     };
     self.create_form.reset();
     self.create_form.type_index = type_index;
@@ -4451,7 +4456,10 @@ impl App {
     // writes no issue number, `Field::Issue` focused an input the renderer
     // does not draw, so the first keypress went nowhere at all.
     self.create_form.field = self.create_form.entry_field();
-    self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
+    self.status = format!(
+      "tab/shift-tab: switch field — enter on {}: submit — esc: cancel",
+      self.submit_field_label()
+    );
   }
 
   pub fn create_next_field(&mut self) {
