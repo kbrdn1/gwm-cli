@@ -61,6 +61,25 @@ fn control_bytes(s: &str) -> Vec<char> {
   s.chars().filter(|c| c.is_control() && *c != '\n').collect()
 }
 
+/// Render `s` as the body of a TOML basic string, with every control
+/// character as TOML's own `\uXXXX` escape.
+///
+/// Not `str::escape_default`, which emits Rust's `\u{9b}` form: TOML rejects
+/// the braces, so the fixture would not parse, alias loading would fail for
+/// the wrong reason, and the test would pass without ever exercising the path.
+/// That is exactly how the C1 gap below survived its first test.
+fn toml_escaped(s: &str) -> String {
+  s.chars()
+    .map(|c| {
+      if c.is_control() {
+        format!("\\u{:04X}", c as u32)
+      } else {
+        c.to_string()
+      }
+    })
+    .collect()
+}
+
 fn gwm_in(dir: &Path) -> Command {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.current_dir(dir);
@@ -333,19 +352,27 @@ fn trust_list_neutralises_a_decoded_origin() {
 fn an_alias_expansion_cannot_smuggle_a_control_byte_through_clap() {
   // `main` expands `[aliases]` into argv BEFORE clap parses it, and clap
   // prints its own error and exits without ever reaching the error sink in
-  // `main`. Measured, that is not a hole: clap strips control characters from
-  // the token it quotes, and the expander splits on whitespace so a `\n` in
-  // an expansion becomes a second token rather than a forged output line.
+  // `main`. That sink cannot cover this path, so the expansion is refused at
+  // the boundary instead: `aliases::validate_aliases` rejects any control
+  // character, alias loading then fails closed and falls back to raw argv.
   //
-  // Pinned rather than trusted, for the same reason `config list`'s `{:?}` is
-  // pinned: the protection belongs to a dependency's rendering choice, so a
-  // clap upgrade that starts echoing argv verbatim has to fail here rather
-  // than ship quietly.
+  // The first draft of this test sampled BEL and a newline, saw clap swallow
+  // both, and concluded the path was safe. It is not: clap strips the ASCII
+  // controls but leaves the C1 range, and `\u{9b}` (CSI) came out intact.
+  // So the cases below are chosen to span the classes rather than to be two
+  // plausible examples: C0, the whitespace C0 that could forge a row, DEL,
+  // and two C1 codes that ARE terminal control functions.
   let (dir, _repo) = init_repo();
-  for expansion in ["nope\u{7}bell", "nope\ninjected-line"] {
+  for expansion in [
+    "nope\u{7}bell",
+    "nope\ninjected-line",
+    "nope\u{7f}del",
+    "nope\u{85}nel",
+    "nope\u{9b}2K",
+  ] {
     fs::write(
       dir.path().join(".gwm.toml"),
-      format!("[aliases]\nboom = \"{}\"\n", expansion.escape_default()),
+      format!("[aliases]\nboom = \"{}\"\n", toml_escaped(expansion)),
     )
     .unwrap();
 
