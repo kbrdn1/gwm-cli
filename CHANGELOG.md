@@ -185,9 +185,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleting it would destroy work. The predicate is "this call created it"
   rather than "reuse was off", because `gwm undo` and `gwm review` both pass
   the reuse flag against a branch that is usually absent, and then create it.
-  libgit2 drops the `branch.<name>` config section along with the ref, so the
-  creation stamp goes with it instead of ageing the next branch to take that
-  name.
+  The creation stamp `add` wrote goes too, so it cannot age the next branch to
+  take that name, but the rest of the `branch.<name>` section stays put: that
+  section outlives its ref easily, and deleting the branch rather than the ref
+  would have taken an upstream setting the command never wrote.
 
   The error stays the underlying failure rather than a cleanup message. One
   residue is out of reach and remains `gwm doctor`'s job: libgit2 refuses to

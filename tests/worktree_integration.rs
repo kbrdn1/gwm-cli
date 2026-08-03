@@ -1891,3 +1891,39 @@ fn add_rolls_back_after_a_permission_denial_on_the_target_parent() {
 
   std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+#[test]
+fn add_rollback_keeps_branch_config_it_did_not_write() {
+  // Codex review on PR #497 (P2, iter 2). "Roll back what this call
+  // created" has to hold for config too. A `branch.<name>` section
+  // outlives its ref easily (`git update-ref -d` leaves it behind, and an
+  // upstream can be configured before the branch exists), and
+  // `git_branch_delete` drops the whole section. Only the stamp `add`
+  // itself wrote is this call's to remove.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/#487-cfg.remote", "origin").unwrap();
+  }
+  wedge_admin_entry(&repo, "feat-487-cfg");
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-cfg");
+  worktree::add(&repo, "feat-487-cfg", &target, "feat/#487-cfg", false).unwrap_err();
+
+  let cfg = repo.config().unwrap();
+  assert_eq!(
+    cfg.get_string("branch.feat/#487-cfg.remote").ok().as_deref(),
+    Some("origin"),
+    "settings that predate the command must survive its rollback"
+  );
+  assert!(
+    cfg.get_string("branch.feat/#487-cfg.gwm-created-at").is_err(),
+    "the stamp this call wrote is still this call's to remove"
+  );
+  assert!(
+    !branch_exists(&repo, "feat/#487-cfg"),
+    "and the branch itself must still be rolled back"
+  );
+}

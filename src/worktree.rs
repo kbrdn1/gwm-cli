@@ -391,10 +391,19 @@ pub fn add(
     // ref while `repo.worktree` runs, and a branch that no longer points
     // where this call put it is somebody else's now. Leaving an orphan is
     // the smaller harm of the two.
+    //
+    // The ref goes rather than the branch, because `git_branch_delete`
+    // drops the whole `branch.<name>` config section and that section
+    // outlives its ref easily: `git update-ref -d` leaves it, and an
+    // upstream can be configured before the branch exists. Dropping the
+    // stamp `add` wrote is enough, and it is all this call put there.
     if created_branch {
-      if let Ok(mut b) = repo.find_branch(branch_name, git2::BranchType::Local) {
+      if let Ok(b) = repo.find_branch(branch_name, git2::BranchType::Local) {
         if b.get().target() == Some(head_commit.id()) {
-          let _ = b.delete();
+          let mut r = b.into_reference();
+          if r.delete().is_ok() {
+            let _ = remove_branch_created_at(repo, branch_name);
+          }
         }
       }
     }
@@ -419,6 +428,12 @@ fn write_branch_created_at(repo: &Repository, branch: &str, unix_secs: i64) -> R
     &branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY),
     &unix_secs.to_string(),
   )?;
+  Ok(())
+}
+
+fn remove_branch_created_at(repo: &Repository, branch: &str) -> Result<()> {
+  let mut cfg = repo.config()?;
+  cfg.remove(&branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY))?;
   Ok(())
 }
 
