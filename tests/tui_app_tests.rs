@@ -11356,3 +11356,64 @@ fn entering_the_create_form_focuses_a_field_the_pattern_presents() {
   app2.enter_create();
   assert_eq!(app2.create_form.field, Field::Issue);
 }
+
+/// Enter submitted only from `Field::Desc` (or `Name`), because those were the
+/// last fields of the two hardcoded modes. Making `{desc}` optional turned that
+/// into a form that **cannot be submitted at all**: on `{type}/#{issue}` Enter
+/// just rotated forever. A bug this PR would have introduced, not a pre-existing
+/// one, and no state or render test can see it because the gate lives in the key
+/// handler.
+#[test]
+fn enter_submits_from_the_last_field_whatever_the_pattern_calls_it() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+
+  let (_d, mut app) = app_with_patterns("{type}/#{issue}", "{type}-{issue}", "{repo_parent}/wt");
+  app.enter_create();
+  assert_eq!(app.create_form.fields(), [Field::Type, Field::Issue]);
+
+  // Focus the last field the pattern presents, then submit.
+  app.create_form.field = app.create_form.last_field();
+  assert!(
+    matches!(
+      app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+      CreateKey::Submit
+    ),
+    "Enter on the pattern's last field must submit, not rotate"
+  );
+
+  // And from a non-final field it still advances rather than submitting.
+  app.create_form.field = Field::Type;
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert_eq!(app.create_form.field, Field::Issue, "it advanced instead");
+}
+
+/// The create path composes its own `BranchSpec`, separately from the rename
+/// path. Relaxing validation in `worktree_name_from_form` alone left the actual
+/// defect standing where the issue is about: pressing Enter on a `{type}/{desc}`
+/// repo still failed with `invalid issue number ''`.
+#[test]
+fn submitting_the_create_form_does_not_demand_a_segment_the_patterns_discard() {
+  let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
+  app.enter_create();
+  for c in "thing".chars() {
+    app.create_form.push_char(c);
+  }
+
+  // Composition happens before the trust gate, so a validation failure surfaces
+  // as an `Err` here regardless of what the gate then decides.
+  let out = app.submit_create();
+  assert!(
+    out.is_ok(),
+    "the form must compose without an issue number it cannot write: {:?}",
+    out.err().map(|e| e.to_string())
+  );
+  assert!(
+    !app.status.contains("invalid issue"),
+    "and must not complain about one either: {}",
+    app.status
+  );
+}
