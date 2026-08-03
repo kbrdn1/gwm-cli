@@ -173,6 +173,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Config values no longer reach the terminal with their control bytes intact.
+  A `.gwm.toml` comes from a repo nobody has vetted, and the commands that read
+  it back skip the trust gate on purpose, because inspecting an unfamiliar repo
+  before trusting it is meant to be the safe move. Echoing a value verbatim
+  handed that file a terminal escape channel out of a read-only command: an
+  OSC 52 clipboard write, a window-title rewrite, cursor moves that erase the
+  line above.
+
+  `gwm config get`, `config list` (its keys, which are attacker-chosen wherever
+  the schema is a map), `types`, `aliases list`, `doctor`, `commit-prefix` and
+  the TOFU prompt are all covered. So is `toml`'s parse error, which quotes the
+  offending source line verbatim and therefore needed no echo command at all —
+  running `gwm list` inside the repo was enough.
+
+  The one that matters most is the prompt: its bootstrap summary renders
+  directly above `Trust this .gwm.toml? [y/N/show]:`, so a cursor-up-and-erase
+  in a `[[bootstrap.command]]` name could delete the row naming the shell it
+  was asking permission to run.
+
+  Values are replaced rather than stripped, so what is left stays recognisable
+  and no length changes silently. Output that is meant to span rows — a parse
+  diagnostic, the raw body shown by `show` — keeps its line breaks and loses
+  everything else.
+
 - `worktree` patterns are expanded in a single pass, so an expansion is a value
   rather than more template. `expand_placeholders` chained `str::replace` calls
   and each one re-scanned what the previous had written, with `{home}` and
