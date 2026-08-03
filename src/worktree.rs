@@ -379,12 +379,13 @@ pub fn add(
     // asked for (#487). Roll back only what *this* call created: a reused
     // branch predates the command, and deleting it would destroy work.
     //
-    // Best effort, and deliberately so. Once libgit2 has bound the
-    // worktree to the branch, which it does just before the checkout, the
-    // branch stays: deleting it there leaves a worktree pointing at
-    // nothing, and that residue is reported by nothing at all, unlike an
-    // orphan branch. The caller gets the underlying error in every case,
-    // since the rollback is not the story.
+    // Best effort, and deliberately so. Once some checkout has the branch
+    // as its HEAD, the branch stays: deleting it leaves a worktree
+    // pointing at nothing, and that residue is reported by nothing at all,
+    // unlike an orphan branch. That covers both the worktree this call was
+    // binding, since libgit2 writes its HEAD just before the checkout, and
+    // any other one already standing on the name. The caller gets the
+    // underlying error in every case, since the rollback is not the story.
     //
     // The tip is re-checked because "what this call created" is a claim
     // about an OID, not about a name: another process is free to move the
@@ -397,7 +398,7 @@ pub fn add(
     // outlives its ref easily: `git update-ref -d` leaves it, and an
     // upstream can be configured before the branch exists. Dropping the
     // stamp `add` wrote is enough, and it is all this call put there.
-    if created_branch && !worktree_head_points_at(repo, name, branch_name) {
+    if created_branch && !branch_is_checked_out_anywhere(repo, branch_name) {
       if let Ok(b) = repo.find_branch(branch_name, git2::BranchType::Local) {
         if b.get().target() == Some(head_commit.id()) {
           let mut r = b.into_reference();
@@ -431,16 +432,26 @@ fn write_branch_created_at(repo: &Repository, branch: &str, unix_secs: i64) -> R
   Ok(())
 }
 
-/// True when the worktree admin entry `name` is already bound to `branch`,
-/// which is `git_branch_delete`'s "current HEAD of a linked repository"
-/// condition. git2 exposes no binding for that check and the rollback deletes
-/// the reference rather than the branch, so it is spelled out here.
-/// `commondir` rather than `path`, since the latter is the per-worktree gitdir
-/// when gwm is run from inside a linked worktree.
-fn worktree_head_points_at(repo: &Repository, name: &str, branch: &str) -> bool {
-  let head = repo.commondir().join("worktrees").join(name).join("HEAD");
-  match std::fs::read_to_string(head) {
-    Ok(s) => s.trim() == format!("ref: refs/heads/{}", branch),
+/// True when any checkout, main or linked, already has `branch` as its HEAD.
+/// That is `git_branch_is_checked_out`: what `git_worktree_add` refuses on and
+/// what `git_branch_delete` guards against. git2 binds neither, and the
+/// rollback deletes the reference rather than the branch, so it is spelled out
+/// here.
+///
+/// The admin directory is read from disk rather than through
+/// `repo.worktrees()`, because an entry a failed run left half-written has no
+/// `gitdir` file and libgit2 will not list it, while its `HEAD` still names a
+/// branch. `commondir` rather than `path`, since the latter is the
+/// per-worktree gitdir when gwm runs from inside a linked worktree.
+fn branch_is_checked_out_anywhere(repo: &Repository, branch: &str) -> bool {
+  let want = format!("ref: refs/heads/{}", branch);
+  let names_branch = |p: PathBuf| std::fs::read_to_string(p).map(|s| s.trim() == want).unwrap_or(false);
+  let common = repo.commondir().to_path_buf();
+  if names_branch(common.join("HEAD")) {
+    return true;
+  }
+  match std::fs::read_dir(common.join("worktrees")) {
+    Ok(entries) => entries.flatten().any(|e| names_branch(e.path().join("HEAD"))),
     Err(_) => false,
   }
 }

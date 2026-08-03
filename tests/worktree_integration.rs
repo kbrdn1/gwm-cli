@@ -1960,3 +1960,29 @@ fn add_keeps_the_branch_when_the_worktree_is_already_bound_to_it() {
      at nothing that no check reports"
   );
 }
+
+#[test]
+fn add_keeps_a_branch_another_worktree_is_bound_to() {
+  // Codex review on PR #497 (P1, iter 4). The bound check is about the
+  // branch, not about the name this call happened to try. A *different*
+  // checkout can hold the branch as its HEAD while the ref itself is
+  // absent, which is what deleting a ref under a live worktree leaves, and
+  // `git_worktree_add` then refuses with "reference is already checked
+  // out". Rolling back there deletes the ref that other worktree is
+  // standing on.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let other = repo.path().join("worktrees").join("someone-else");
+  std::fs::create_dir_all(&other).unwrap();
+  std::fs::write(other.join("HEAD"), "ref: refs/heads/feat/#487-shared\n").unwrap();
+  wedge_admin_entry(&repo, "feat-487-shared");
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-487-shared");
+  worktree::add(&repo, "feat-487-shared", &target, "feat/#487-shared", false).unwrap_err();
+
+  assert!(
+    branch_exists(&repo, "feat/#487-shared"),
+    "the rollback must not delete a ref another worktree is standing on"
+  );
+}
