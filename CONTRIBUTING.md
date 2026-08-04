@@ -622,7 +622,8 @@ Same shape as the Homebrew tap, with a token scoped to the docs repo:
    - **Permissions**: Contents → **Read and write**. Nothing else: that is the documented requirement for `POST /repos/{owner}/{repo}/dispatches`.
    - **Expiration**: ≥ 1 year (set a calendar reminder to rotate).
 2. Add it as the `DOCS_SITE_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
-3. Flip `continue-on-error: true` to `false` on the `notify` job in [`docs-sync.yml`](.github/workflows/docs-sync.yml) after the first successful dispatch.
+3. Land `sync-gwm.yml` on the **default branch** of `kbrdn-docs`. This one is easy to miss because nothing reports it: GitHub only ever runs a `repository_dispatch` receiver from the default branch, so while that file sits on a feature branch the API call returns `204`, this workflow goes green, and nothing syncs. There is no failure anywhere to notice.
+4. Flip `continue-on-error: true` to `false` on the `notify` job in [`docs-sync.yml`](.github/workflows/docs-sync.yml) after the first successful dispatch.
 
 Note that this is a write credential for a **private** repository, held in a public repository's secrets. It sits at the same trust level as `HOMEBREW_TAP_TOKEN` and `SCOOP_BUCKET_TOKEN`, which push to repositories of their own.
 
