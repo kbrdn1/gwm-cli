@@ -1667,3 +1667,64 @@ fn branch_pattern_check_reads_the_on_disk_config_not_the_lenient_fallback() {
 
   assert_eq!(check.status, CheckStatus::Warning);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_file_exists_path_that_leaves_the_repo_through_a_symlink_is_not_evaluated() {
+  // The lexical check is not enough on its own: a repo can commit a symlink,
+  // so `outside/nope` is relative, carries no `..`, and still walks out of the
+  // repo the moment `Path::exists` follows it. That hands an unvetted
+  // `.gwm.toml` a presence oracle on the host running `gwm doctor`, which in
+  // CI is a runner, and can trip an automount on the way.
+  //
+  // The symlink target below holds no such file, so evaluating the predicate
+  // would return false and gate the step off. It stays probed instead, which
+  // is what proves the predicate was never evaluated.
+  let (dir, repo) = init_repo();
+  let outside = tempfile::TempDir::new().unwrap();
+  std::os::unix::fs::symlink(outside.path(), dir.path().join("outside")).unwrap();
+
+  let config = config_from_toml(
+    dir.path(),
+    "[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123\"\nwhen = \"file_exists:outside/definitely-nope-xyz123\"\n",
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-xyz123"),
+    "a path that resolves outside the repo must not be evaluated, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn an_env_option_that_takes_an_operand_does_not_become_the_binary() {
+  // `env -u NODE_OPTIONS npm ci` runs npm. Skipping `-u` but not its operand
+  // leaves `NODE_OPTIONS` looking like the executable, so the report warns
+  // `not on PATH: NODE_OPTIONS` on a hook that works, and takes the exit code
+  // to 1 with it.
+  for run in [
+    "env -u NODE_OPTIONS definitely-not-on-path-xyz123 ci",
+    "env -C sub definitely-not-on-path-xyz123",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"wrapped\"\nrun = \"{run}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{run}` must resolve past the option's operand, got: {}",
+      c.detail
+    );
+    assert!(
+      !c.detail.contains("NODE_OPTIONS"),
+      "the operand is not the binary, got: {}",
+      c.detail
+    );
+  }
+}
