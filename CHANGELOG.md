@@ -60,6 +60,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The TUI delete runs the remove hooks and records the undo journal**
+  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521)). `d` called
+  `worktree::remove` directly, so `[hooks.pre_remove]` / `[hooks.post_remove]`
+  never ran and nothing reached `gwm undo`: an interactive delete was
+  unrecoverable, and a hook written to guard a removal only held for whoever
+  used the CLI. Both paths now go through one sequence, so `gwm undo` puts
+  back what `d` removed, exactly as it does for `gwm remove`. `undo` stays
+  per-worktree: a batch of ten appends ten entries and pops one at a time.
+  Two consequences worth knowing before you upgrade. A `pre_remove` that
+  refuses now refuses in the TUI too, for that one target, with the batch
+  carrying on and the confirm overlay staying open on what failed. And
+  because running a hook means executing code out of `.gwm.toml`, a delete in
+  a repo whose config has remove hooks is gated on the TOFU trust ledger
+  (#95): unapproved, it refuses rather than silently skipping the guard hook.
+  The gate asks about the two remove phases only, so a config whose hooks are
+  all `post_create` runs nothing on a delete and is never asked. Hook output
+  lands on the Command Logs transcript (`3`) as it does everywhere else.
+- **A refused removal is no longer recorded as undoable**
+  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521)). `gwm remove` wrote
+  its journal entry before the destructive call, so a target that then got
+  refused (its path moved since it was resolved, git declining the removal)
+  still showed up in `gwm history` as something `gwm undo` would replay. The
+  branch OID is still captured beforehand, which is what the entry needs; only
+  the write moved after the removal succeeds.
 - **`cycle_sidebar_layout` moved from `Space` to `z`**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)), to make room for the
   row mark. Space-to-mark is the convention in lazygit, k9s and fzf, so the
