@@ -1627,3 +1627,209 @@ fn a_refetched_title_is_stamped_with_the_origin_that_produced_it() {
   assert_eq!(link.issue_state, Some(github::IssueState::Open));
   drop(dir);
 }
+
+// --- rich PR / issue payload (issue #420) ---------------------------------
+//
+// Two assertions per surface, deliberately: `pr_view_argv` (what gwm asks
+// `gh` for) and `parse_pr_json` (what it keeps) are independently wrong-able.
+// A fixture carrying `"body"` parses green even when the field list never
+// requests it — feature dead in production, suite green.
+
+#[test]
+fn issue_view_argv_requests_the_rich_fields() {
+  let argv = github::issue_view_argv("kbrdn1/gwm-cli", 420);
+  let fields = argv
+    .iter()
+    .position(|a| a == "--json")
+    .and_then(|i| argv.get(i + 1))
+    .expect("--json <fields> pair")
+    .split(',')
+    .collect::<Vec<_>>();
+
+  for f in ["number", "title", "state", "url", "labels", "updatedAt"] {
+    assert!(fields.contains(&f), "summary field {f} must survive");
+  }
+  for f in ["body", "author", "comments"] {
+    assert!(fields.contains(&f), "rich field {f} must be requested");
+  }
+}
+
+#[test]
+fn pr_view_argv_requests_the_rich_fields() {
+  let argv = github::pr_view_argv("kbrdn1/gwm-cli", 519);
+  let fields = argv
+    .iter()
+    .position(|a| a == "--json")
+    .and_then(|i| argv.get(i + 1))
+    .expect("--json <fields> pair")
+    .split(',')
+    .collect::<Vec<_>>();
+
+  for f in [
+    "number",
+    "title",
+    "state",
+    "isDraft",
+    "url",
+    "updatedAt",
+    "statusCheckRollup",
+  ] {
+    assert!(fields.contains(&f), "summary field {f} must survive");
+  }
+  for f in [
+    "body",
+    "author",
+    "additions",
+    "deletions",
+    "baseRefName",
+    "headRefName",
+    "reviews",
+    "comments",
+  ] {
+    assert!(fields.contains(&f), "rich field {f} must be requested");
+  }
+}
+
+#[test]
+fn parse_issue_json_extracts_the_rich_payload() {
+  // Shape taken from a real `gh issue view 484 --repo kbrdn1/gwm-cli --json
+  // number,…,body,author,comments` response, trimmed.
+  let json = r###"{
+    "number": 484,
+    "title": "space toggles the active row",
+    "state": "OPEN",
+    "url": "https://github.com/kbrdn1/gwm-cli/issues/484",
+    "labels": [{"name": "feature"}],
+    "updatedAt": "2026-08-01T10:00:00Z",
+    "body": "## Problem\n\nBulk cleanup needs a row mark.",
+    "author": {"id": "MDQ6VXNlcjM=", "is_bot": false, "login": "sassman", "name": "Sven Kanoldt"},
+    "comments": [
+      {"author": {"login": "kbrdn1"}, "authorAssociation": "OWNER",
+       "body": "Thanks Sven.", "createdAt": "2026-08-01T11:00:00Z",
+       "url": "https://github.com/kbrdn1/gwm-cli/issues/484#issuecomment-1"},
+      {"author": {"login": "coderabbitai"}, "authorAssociation": "NONE",
+       "body": "Review skipped.", "createdAt": "2026-08-01T12:00:00Z",
+       "url": "https://github.com/kbrdn1/gwm-cli/issues/484#issuecomment-2"}
+    ]
+  }"###;
+
+  let issue = parse_issue_json(json).unwrap();
+
+  assert_eq!(issue.detail.body, "## Problem\n\nBulk cleanup needs a row mark.");
+  assert_eq!(issue.detail.author, "sassman", "the login, not the display name");
+  assert_eq!(issue.detail.comments.len(), 2, "order preserved");
+  assert_eq!(issue.detail.comments[0].author, "kbrdn1");
+  assert_eq!(issue.detail.comments[0].body, "Thanks Sven.");
+  assert_eq!(issue.detail.comments[0].created_at, "2026-08-01T11:00:00Z");
+  assert_eq!(
+    issue.detail.comments[0].url.as_deref(),
+    Some("https://github.com/kbrdn1/gwm-cli/issues/484#issuecomment-1")
+  );
+  assert_eq!(issue.detail.comments[1].author, "coderabbitai");
+}
+
+#[test]
+fn parse_issue_json_tolerates_a_summary_only_payload() {
+  // The rich fields are additive: a response without them (a stubbed `gh`,
+  // an older CLI) must still parse into the summary tier rather than error.
+  let json = r#"{
+    "number": 7,
+    "title": "old bug",
+    "state": "CLOSED",
+    "url": "https://github.com/x/y/issues/7",
+    "labels": [],
+    "updatedAt": "2025-01-01T00:00:00Z"
+  }"#;
+
+  let issue = parse_issue_json(json).unwrap();
+
+  assert!(issue.detail.body.is_empty());
+  assert!(issue.detail.author.is_empty());
+  assert!(issue.detail.comments.is_empty());
+}
+
+#[test]
+fn parse_pr_json_extracts_the_rich_payload() {
+  // Shape taken from a real `gh pr view 514 --repo kbrdn1/gwm-cli --json
+  // …,body,author,additions,deletions,baseRefName,headRefName,reviews,comments`.
+  let json = r###"{
+    "number": 519,
+    "title": "feat(config): Symfony preset",
+    "state": "OPEN",
+    "isDraft": false,
+    "url": "https://github.com/kbrdn1/gwm-cli/pull/519",
+    "updatedAt": "2026-08-04T13:00:00Z",
+    "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    "body": "## Description\n\nA seventh preset.",
+    "author": {"id": "U_kgD", "is_bot": false, "login": "kbrdn1", "name": "Kylian Bardini"},
+    "additions": 1198,
+    "deletions": 12,
+    "baseRefName": "dev",
+    "headRefName": "feat/#392-symfony-preset",
+    "reviews": [
+      {"author": {"login": "coderabbitai"}, "authorAssociation": "NONE",
+       "body": "Actionable comments posted: 2", "state": "COMMENTED",
+       "submittedAt": "2026-08-04T13:40:21Z"},
+      {"author": {"login": "Copilot"}, "authorAssociation": "NONE",
+       "body": "", "state": "APPROVED", "submittedAt": "2026-08-04T14:00:00Z"}
+    ],
+    "comments": [
+      {"author": {"login": "kbrdn1"}, "body": "rebased", "createdAt": "2026-08-04T15:00:00Z",
+       "url": "https://github.com/kbrdn1/gwm-cli/pull/519#issuecomment-3"}
+    ]
+  }"###;
+
+  let pr = parse_pr_json(json).unwrap();
+
+  assert_eq!(pr.detail.body, "## Description\n\nA seventh preset.");
+  assert_eq!(pr.detail.author, "kbrdn1");
+  assert_eq!(pr.detail.additions, 1198);
+  assert_eq!(pr.detail.deletions, 12);
+  assert_eq!(pr.detail.base_ref, "dev");
+  assert_eq!(pr.detail.head_ref, "feat/#392-symfony-preset");
+  assert_eq!(pr.detail.reviews.len(), 2, "order preserved");
+  assert_eq!(pr.detail.reviews[0].author, "coderabbitai");
+  assert_eq!(pr.detail.reviews[0].state, gwm::github::ReviewState::Commented);
+  assert_eq!(pr.detail.reviews[0].body, "Actionable comments posted: 2");
+  assert_eq!(pr.detail.reviews[0].submitted_at, "2026-08-04T13:40:21Z");
+  assert_eq!(pr.detail.reviews[1].state, gwm::github::ReviewState::Approved);
+  assert_eq!(pr.detail.comments.len(), 1);
+  assert_eq!(pr.detail.comments[0].author, "kbrdn1");
+  assert_eq!(pr.detail.comments[0].body, "rebased");
+}
+
+#[test]
+fn parse_pr_json_tolerates_a_summary_only_payload() {
+  let json = r#"{
+    "number": 61,
+    "title": "feat(tui): fuzzy search",
+    "state": "OPEN",
+    "isDraft": false,
+    "url": "https://github.com/kbrdn1/gwm-cli/pull/61",
+    "updatedAt": "2026-05-19T10:00:00Z"
+  }"#;
+
+  let pr = parse_pr_json(json).unwrap();
+
+  assert!(pr.detail.body.is_empty());
+  assert!(pr.detail.author.is_empty());
+  assert_eq!(pr.detail.additions, 0);
+  assert!(pr.detail.reviews.is_empty());
+  assert!(pr.detail.comments.is_empty());
+}
+
+#[test]
+fn review_state_classifies_every_github_variant() {
+  use gwm::github::ReviewState;
+  assert_eq!(ReviewState::classify("APPROVED"), ReviewState::Approved);
+  assert_eq!(
+    ReviewState::classify("CHANGES_REQUESTED"),
+    ReviewState::ChangesRequested
+  );
+  assert_eq!(ReviewState::classify("COMMENTED"), ReviewState::Commented);
+  assert_eq!(ReviewState::classify("DISMISSED"), ReviewState::Dismissed);
+  assert_eq!(ReviewState::classify("PENDING"), ReviewState::Pending);
+  // Named honestly rather than folded into `Commented` (same rule as
+  // `CheckOutcome::Unknown`): a future state must not read as a verdict.
+  assert_eq!(ReviewState::classify("SOMETHING_NEW"), ReviewState::Unknown);
+}
