@@ -4977,8 +4977,11 @@ impl App {
     std::thread::spawn(move || {
       let mut outcome = DeleteBatchOutcome::default();
       for target in targets {
+        // `remove_verified`, not `remove`: the confirm named a PATH, and the
+        // id it resolved to can point elsewhere by the time the countdown
+        // fires (removed and recreated from another shell reuses the id).
         let result = worktree::discover_repo(Some(&target.workdir))
-          .and_then(|repo| worktree::remove(&repo, &target.id, delete_branch));
+          .and_then(|repo| worktree::remove_verified(&repo, &target.id, &target.path, delete_branch));
         match result {
           Ok(()) => outcome.removed.push((target.id, target.path)),
           Err(e) => outcome.failed.push(DeleteFailure {

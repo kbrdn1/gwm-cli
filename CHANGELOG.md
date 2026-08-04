@@ -28,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and for a batch it reports the size and how many targets carry a branch
   instead of listing rows, with `D` arming the branch deletion batch-wide. A
   batch never stops at the first error: every target is attempted through its
-  own repo handle, the confirm stays open narrowed to what failed (narrowed,
+  own repo handle and only after re-checking that its id still resolves to the
+  path the overlay named (a worktree removed and recreated from another shell
+  during the countdown gets the same id back, and removing by id alone would
+  have deleted it), the confirm stays open narrowed to what failed (narrowed,
   never recomputed: `worktree::remove` prunes the admin entry before deleting
   the directory, so a removal that fails on the filesystem drops its own row,
   and recomputing would have fallen back to the cursor row), and the status
