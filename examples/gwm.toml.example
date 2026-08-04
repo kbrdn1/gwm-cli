@@ -431,6 +431,28 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [exec.profiles.fmt]
 # command = ["cargo", "fmt", "--all"]
 # jobs = 4
+#
+# A profile can run its command in a container instead of on the host (issue
+# #421). `image` is required; `runtime` is auto-detected (docker first, then
+# podman) and accepts any Docker-compatible CLI; `extra_args` is forwarded to
+# `run` after gwm's own flags (so a repeated flag overrides them) and before
+# the image. The block rides a PROFILE only: an inline `gwm exec -- <cmd>`
+# always runs on the host, whatever this file says.
+#
+# gwm mirrors host paths and mounts the main checkout's gitdir alongside:
+#   <runtime> run --rm -v <wt>:<wt> -v <main>/.git:<main>/.git -w <wt> … <image> <cmd…>
+# That second mount is the point. A linked worktree's `.git` is a FILE holding
+# an absolute host path, so mounting the worktree alone yields a container in
+# which no git command answers. There is no `interactive` knob: `gwm exec` is a
+# fan-out over N worktrees, where a TTY per container means nothing.
+#
+# [exec.profiles.ci]
+# command = ["cargo", "test", "--all-features"]
+#
+#   [exec.profiles.ci.container]
+#   image      = "rust:1.90"
+#   runtime    = "podman"
+#   extra_args = ["-e", "CI=1", "-v", "gwm-cargo:/usr/local/cargo/registry"]
 
 # --- `gwm clean` profiles (issue #324) ---------------------------------------
 # Saved directory sets for `gwm clean --profile <name>`. A profile's `dirs` is

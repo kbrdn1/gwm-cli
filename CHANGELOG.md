@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Container execution on `gwm exec` profiles**
+  ([#421](https://github.com/kbrdn1/gwm-cli/issues/421)). A
+  `[exec.profiles.<name>.container]` block wraps that profile's command in
+  `docker run` / `podman run`: `image` is required, `runtime` is auto-detected
+  (docker first, then podman) and `extra_args` is spliced in before the image.
+  The block rides a **profile only**: an inline `gwm exec -- <cmd>` still runs
+  on the host, whatever the config says, so the frozen 1.0 surface keeps doing
+  what it did. The mount is the point rather than the wrapper: a linked
+  worktree's `.git` is a *file* holding an absolute host path, so gwm mirrors
+  host paths and mounts the main checkout's gitdir alongside
+  (`-v <worktree>:<worktree> -v <main>/.git:<main>/.git -w <worktree>`), which
+  is what makes `git status`, a commit or a hook answer inside the container;
+  mounting the worktree alone produces one where none of them do. gwm builds
+  an argv and never a shell string, no token is quoted or joined at any point,
+  and the per-worktree header names the run
+  (`━━ feat-1 (/path) [docker rust:1.90]`). Any Docker-compatible CLI works
+  (OrbStack, Colima, Rancher Desktop, Docker Desktop, native Docker), so there
+  is no runtime to integrate. No `interactive` / TTY knob: `gwm exec` is a
+  fan-out over N worktrees, and that belongs to the surfaces that can honour
+  it.
+
 - **Multi-row selection in the TUI, and a batch delete on top of it**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the
   highlighted worktree, `d` then deletes every marked row in one batch; with
