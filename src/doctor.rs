@@ -593,23 +593,37 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     .bootstrap
     .command
     .iter()
-    .map(|cmd| (&cmd.run, cmd.when.as_deref()))
+    .map(|cmd| (&cmd.run, cmd.when.as_deref(), &cmd.env))
     .chain(
       ctx
         .config
         .hooks
         .all_steps()
-        .map(|(_, step)| (&step.run, step.when.as_deref())),
+        .map(|(_, step)| (&step.run, step.when.as_deref(), &step.env)),
     );
-  for (run, when) in steps {
+  for (run, when, env) in steps {
     let gated_off =
       when.is_some_and(|w| predicate_is_safe_to_evaluate(w) && !crate::bootstrap::evaluate_when(w, ctx.repo_workdir));
     if gated_off {
       continue;
     }
-    if let Some(bin) = extract_binary(run) {
-      needed.insert(bin);
+    // A step that carries its own `PATH` resolves against that one, since
+    // both runners hand `env` to `Command::env`, so probing it against the
+    // doctor's ambient `$PATH` answers a question nobody asked.
+    if env.contains_key("PATH") {
+      continue;
     }
+    let Some(bin) = extract_binary(run) else { continue };
+    // `lifecycle::run_step` expands `{path}` / `{repo}` in `run` before
+    // spawning, so a hook reading `{path}/scripts/setup` would be probed as
+    // that literal string and always come back missing. Deliberately applied
+    // to `[[bootstrap.command]]` too, which does *not* expand its `run`: a
+    // first token carrying a `{…}` is not a binary name this check can
+    // resolve either way, and staying quiet beats a warning we know is wrong.
+    if bin.contains('{') {
+      continue;
+    }
+    needed.insert(bin);
   }
 
   let mut missing: Vec<String> = Vec::new();
