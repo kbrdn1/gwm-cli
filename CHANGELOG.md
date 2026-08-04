@@ -59,7 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{repo}` in `run` before spawning, so a hook reading `{path}/scripts/setup`
   was probed as that literal string and always came back missing, and a step
   that sets its own `PATH` in `env` resolves against that rather than against
-  the doctor's ambient one.
+  the doctor's ambient one. Same for a script that opens on a shell word: a
+  `run` is handed whole to `sh -c`, so `cd sub && ./setup.sh` or
+  `if [ -f composer.json ]; then …` used to be probed as `cd` and `if`. That
+  one bit hooks harder than bootstrap commands, since a hook is a script far
+  more often.
 
 ### Docs
 
