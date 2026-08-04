@@ -86,10 +86,6 @@ fn a_tui_delete_writes_the_undo_journal_entry() {
   let wt_root = TempDir::new().unwrap();
   let doomed = wt_root.path().join("wt-521-journal");
   worktree::add(&repo, "wt-521-journal", &doomed, "feat/#521-journal", false).unwrap();
-  // Canonicalised now, while the directory still exists: `paths_equal` falls
-  // back to the raw path once it is gone, and on macOS the tempdir is
-  // reachable as both `/var/...` and `/private/var/...`.
-  let doomed_real = doomed.canonicalize().unwrap();
 
   let sandbox = TempDir::new().unwrap();
   let journal_path = sandbox.path().join("history.toml");
@@ -106,6 +102,21 @@ fn a_tui_delete_writes_the_undo_journal_entry() {
 
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
   select_row(&mut app, "wt-521-journal");
+  // The path as gwm knows it, read before the removal. Not
+  // `doomed.canonicalize()`: `Worktree::path()` and a canonicalised tempdir
+  // carry different normalisations, and they disagree on two of the three
+  // runners — `/var` versus `/private/var` on macOS, and the `\\?\` verbatim
+  // prefix Windows prepends. `worktree::remove_verified` compares paths
+  // verbatim for the same reason, so the assertion below reads them the way
+  // the production code does.
+  let listed_path = app
+    .worktrees
+    .iter()
+    .find(|w| w.name == "wt-521-journal")
+    .expect("the worktree is listed")
+    .path
+    .clone();
+
   app.enter_confirm_delete();
   app.confirm_delete().unwrap();
   wait_for_delete(&mut app);
@@ -131,7 +142,7 @@ fn a_tui_delete_writes_the_undo_journal_entry() {
     entry.branch_oid.is_some(),
     "the branch tip must be captured so `gwm undo` can recreate the ref"
   );
-  assert_eq!(entry.path, doomed_real, "the entry names the worktree that was removed");
+  assert_eq!(entry.path, listed_path, "the entry names the worktree that was removed");
 
   // SAFETY: still under the `env_lock` guard taken at the top of this test.
   // Written out rather than factored into a helper: the #507 guard is
