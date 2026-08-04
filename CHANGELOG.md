@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`symfony` config preset**
+  ([#392](https://github.com/kbrdn1/gwm-cli/issues/392)). A seventh
+  `gwm init --preset`, next to `laravel` on the composer side but built on
+  Symfony's own dotenv convention, which is the mirror image of Laravel's:
+  `.env` is committed and holds the neutral defaults, `.env.local` is
+  gitignored and holds the secrets. So the preset copies `.env.local` and
+  `.env.test.local` rather than `.env`, and the `no-aws-rds` guard seeds from
+  the committed `.env` instead of an `.env.example`. `var/` joins `vendor/` in
+  the no-symlink invariants, because it holds the compiled service container
+  and the cached routes: sharing it between two worktrees running different
+  code is worse than a slow first request. `composer install` and
+  `direnv allow .` run on the same `when` predicates as the Laravel preset.
+
 ### Docs
 
 - **Retired the em dash across the whole `docs/` tree**

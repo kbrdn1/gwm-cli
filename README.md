@@ -26,7 +26,7 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 
 **What you get that a `git worktree add` wrapper doesn't:**
 
-- **Bootstrap that actually runs your project.** File copies with deny-list regexes (born from a real "AWS RDS credentials in a copied `.env`" incident), six lifecycle hook phases, stack presets for Laravel / Node / Rust / Go / Python.
+- **Bootstrap that actually runs your project.** File copies with deny-list regexes (born from a real "AWS RDS credentials in a copied `.env`" incident), six lifecycle hook phases, stack presets for Laravel / Symfony / Node / Rust / Go / Python.
 - **A TUI you can live in.** Embedded lazygit and shell overlays, a details sidebar with CI state and working-tree file explorer, remappable keys, themes, command palette.
 - **It knows which AI agent works where.** Sessions from Claude Code, Codex, opencode and Mistral Vibe are detected from their on-disk artefacts (no process enumeration, Windows included; on Unix a dead recorded PID drops the session to idle at once) and surfaced everywhere: an AGENT column in the table and TUI, a detail overlay on `a`, `gwm agents` with manual pinning, the JSON/daemon field and the statusline (fed by the daemon transport everywhere: a unix socket, or a named pipe on Windows).
 - **A machine surface, not just a human one.** `--format=json`, a JSON-RPC daemon with a push stream, and `gwm statusline` for your prompt. The schemas are frozen under SemVer.
@@ -63,7 +63,7 @@ Full install matrix and verification steps: [`docs/getting-started/install.md`](
 ```bash
 cd /path/to/your/repo
 gwm init                                          # write a default .gwm.toml
-gwm init --preset laravel                          # …or seed a stack preset (laravel/node/rust/go/python-uv)
+gwm init --preset laravel                          # …or seed a stack preset (laravel/symfony/node/rust/go/python-uv)
 gwm init --list-presets                            # list the built-in presets
 gwm create feat 42 user-authentication            # → ~/cc-worktree/<repo>/feat-42-user-authentication
                                                   # → branch feat/#42-user-authentication
@@ -81,7 +81,7 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 - **First daemon consumer — `gwm statusline`** ([#309](https://github.com/kbrdn1/gwm-cli/issues/309)) — a thin, dependency-free client that renders a compact one-line worktree summary (active branch · count · dirty/ahead/behind · issue/PR) for tmux / starship / zsh prompts off the daemon; `--watch` rides the `subscribe` stream, and with no daemon it degrades to a blank line. See [Integrations → Daemon consumers](docs/5.integrations/4.daemon-consumers.md).
 - **Multi-repo workspace mode** ([#36](https://github.com/kbrdn1/gwm-cli/issues/36)) — `gwm --workspace ~/Projects` opens the TUI across every git repo one level below a root (a REPO column tags each row; the active repo follows the selection); `gwm list --workspace ~/Projects` prints the merged table; `gwm create --repo <name>` picks the target. Bare `gwm` in a repo-free dir that holds child repos offers to open it as a workspace.
 - **Per-repo `.gwm.toml` + user-level global config** — branch / path conventions, file copies, regex guards, no-symlink invariants. A `~/.config/gwm/config.toml` deep-merges underneath each repo's `.gwm.toml`. Edit it git-config-style with `gwm config get / set / list / validate`.
-- **Config presets for `gwm init`** ([#37](https://github.com/kbrdn1/gwm-cli/issues/37)) — `gwm init --preset <name>` seeds an opinionated `.gwm.toml` for a known stack (`laravel` / `node` / `nuxt` / `rust` / `go` / `python-uv` / `generic`) instead of the generic template; `--list-presets` enumerates them, `--show` prints the resolved TOML without writing.
+- **Config presets for `gwm init`** ([#37](https://github.com/kbrdn1/gwm-cli/issues/37)) — `gwm init --preset <name>` seeds an opinionated `.gwm.toml` for a known stack (`laravel` / `symfony` / `node` / `nuxt` / `rust` / `go` / `python-uv` / `generic`) instead of the generic template; `--list-presets` enumerates them, `--show` prints the resolved TOML without writing.
 - **Lifecycle hooks `[hooks.*]`** — `pre_create` / `post_create` / `pre_bootstrap` / `post_bootstrap` / `pre_remove` / `post_remove` phases, each with `when:` predicates and per-step `on_fail = abort|warn|ignore`.
 - **CLI aliases + Gitmoji convention** — `[aliases]` expand `gwm <alias>` to argv before parsing; `gwm commit-prefix`, `gwm types --gitmoji`, and an opt-in `gwm hooks install commit-msg` hook enforce the repo's Gitmoji + Conventional Commits style.
 - **GitHub workflow** — branches matching `<type>/#<N>-<slug>` auto-link to their issue (with ephemeral PR auto-detection); `gwm new` opens an issue from a template then spins up the worktree, `gwm pr` renders the PR body; `gwm review <PR#>` ([#308](https://github.com/kbrdn1/gwm-cli/issues/308)) pulls an existing PR — including one from a fork — into an isolated worktree (fetch + link), the inbound counterpart to `gwm create` (safe-by-default: bootstrap/hooks are opt-in via `--bootstrap`, since a fork PR's setup commands are arbitrary code); live status surfaces in the TUI sidebar via `gh`.
