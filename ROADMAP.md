@@ -339,8 +339,8 @@ gwm against gwq and lazyworktree. Content rather than product work, but it is
 what decides whether any of the above is seen. gwq is the incumbent by star
 count and has been dormant since May.
 
-Last, and the position is the point: a comparison is worth writing once the
-features it compares are the ones shipping. That now includes container
+Last of the product steps, and the position is the point: a comparison is worth
+writing once the features it compares are the ones shipping. That now includes container
 execution (#421), which is why it moved behind that rather than behind the
 notes.
 
@@ -349,6 +349,29 @@ older read of the field: there was no container column in it, and the
 lazyworktree half has not been re-read since. Both have to be redone against
 what the two projects are now, otherwise the page ships a comparison of what
 they were.
+
+### 8. Documentation in German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/522))
+
+Five locales instead of two, immediately before the cut and after the comparison
+page. The audience data does not ask for this: of the 122 stargazers, 83 declare
+a location and no non-English bloc reaches 10%. It is a forward bet, and each
+language carries a different one. German is the largest non-English bloc already
+present. Spanish is not visible in the current stargazers at all, which is the
+point, since it buys reach that does not exist yet. Japanese is the only one with
+a competitive argument: gwq, the incumbent this project is positioned against, is
+Japanese-authored, and that community sustains a dense native technical-content
+culture that generates real inbound.
+
+The site side is tracked separately in `kbrdn1/kbrdn-docs#54` and is deliberately
+decoupled. The sync pipeline carries the locale as a boolean (`isFr`), and
+turning that into a locale key can land before a single translation exists,
+because a declared locale with no content falls back to English. The SEO wiring
+needs nothing: `hreflang` alternates plus an `x-default` on the unprefixed root
+are already emitted per page.
+
+⚠️ The content is 51,612 English words across 41 pages, so roughly 155,000 at
+three languages, and no native reader is lined up for any of the three. Worth
+naming before it is scheduled against a date.
 
 ### Deferred
 
@@ -362,9 +385,19 @@ they were.
 ### Visibility
 
 Not feature work, but tracked here because it gates whether any of the above is
-seen:
+seen. The launch itself happens at the v1.7.0 delivery, so these are its
+prerequisites rather than a parallel track.
 
-- The comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422)) is the remaining visibility item, and it now sits in the numbered line above as its last step rather than here
+Measured on 2026-08-04, and it reframes the section: the repository went from 30
+to 122 stars in fourteen days, and over that window the referrers put X first by
+a factor of three, from Terminal Trove and from the ratatui maintainer. Neither
+was solicited, and nothing in this repository was feeding them. What those relays
+republish is visual, which is why the first two items below are images.
+
+- [#523](https://github.com/kbrdn1/gwm-cli/issues/523) — **re-record the demo GIF**. Frame 0 is an empty terminal, and on GitHub, on X and in a Terminal Trove listing the first frame is the thumbnail. It also renders `gwm 1.0.1` in the version badge, six minor versions behind, and it predates the agent session pane, which is now the line the repository description leads on
+- [#524](https://github.com/kbrdn1/gwm-cli/issues/524) — **visual coverage of the docs**: 26 of the 41 English pages carry no image, including the whole CLI section and `configuration/gwm-toml.md`, the longest page in the tree and the one that answers the long-tail queries the site exists to capture. The agent session pane has neither a page nor a capture
+- [#525](https://github.com/kbrdn1/gwm-cli/issues/525) — **feed the relays**, before the launch rather than after, since they are what amplified the project last time: `awesome-ratatui` first because that is the circle that produced the traffic, then Terminal Trove and the ratatui showcase, then the generic awesome lists. Bing Webmaster Tools is the remaining indexing gap, and it also feeds DuckDuckGo; Google Search Console is done
+- The comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422)) sits in the numbered line above as its last product step rather than here, and the translations ([#522](https://github.com/kbrdn1/gwm-cli/issues/522)) follow it
 - [#516](https://github.com/kbrdn1/gwm-cli/issues/516) ✅ — the em dash is retired across `docs/`: 1586 occurrences in 78 of the 79 pages, English and French, replaced by whatever connector the dash was standing in for (a colon where it introduced a list or an explanation, a full stop where it joined two independent clauses, a comma or parentheses around an aside). Fenced code blocks are untouched, so 60 survive there. 45 headings changed shape and none was the target of an internal link, checked by resolving the tree's 194 internal anchors against the heading slugs of both the before and after trees. Merged in [#518](https://github.com/kbrdn1/gwm-cli/pull/518)
 - [#423](https://github.com/kbrdn1/gwm-cli/issues/423) ✅ — the documentation is published at **<https://gwm.kbrdn.dev>** and keeps itself there. A merge into `main` touching `docs/`, `changelogs/` or `Cargo.toml` posts a `repository_dispatch` to `kbrdn1/kbrdn-docs`, which reruns the conversion, commits whatever drifted and redeploys. The in-repo tree stays the source of truth: the site is generated from it, never edited on the other side
 
