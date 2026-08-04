@@ -11823,3 +11823,102 @@ fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
     "both repos must be tellable apart: {banner}"
   );
 }
+
+// ---- per-worktree notes (#515) -------------------------------------------
+
+#[test]
+fn preparing_a_note_edit_returns_the_editor_and_the_file() {
+  // The handoff is the `o`-with-`mode = "editor"` one, so `N` cannot feel
+  // different from `o`: same `editor_cmd` -> `$EDITOR` -> `vi` precedence.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+
+  let (command, path) = app.prepare_note_edit().expect("the main row carries a branch");
+
+  assert!(!command.is_empty(), "an editor command must always resolve");
+  // `paths_equal` canonicalises: on macOS the tempdir is `/var/...` and the
+  // resolved note is `/private/var/...`, the same inode spelled two ways.
+  assert!(
+    common::paths_equal(
+      path.parent().unwrap(),
+      &dir.path().join(".git").join("gwm").join("notes")
+    ),
+    "the note belongs in the main checkout's git dir, got {}",
+    path.display()
+  );
+  assert_eq!(path.file_name().unwrap(), "main.md", "keyed on the branch");
+  assert!(
+    path.parent().unwrap().is_dir(),
+    "the parent directory must exist before $EDITOR is spawned"
+  );
+  assert!(
+    !path.exists(),
+    "the file itself is the editor's to create — quitting without saving leaves no note"
+  );
+}
+
+#[test]
+fn preparing_a_note_edit_on_a_detached_row_says_why() {
+  // No branch, no filename. The rule `pinnable_branch` settled for the agent
+  // pin, restated so the key press explains itself instead of no-oping.
+  let (_dir, mut app) = make_app();
+  let mut row = worktree_fixture("detached");
+  row.branch = None;
+  app.worktrees = vec![row];
+  app.list_state.select(Some(0));
+
+  assert!(app.prepare_note_edit().is_none());
+  assert!(
+    app.status.contains("detached"),
+    "the status bar must carry the reason, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn preparing_a_note_edit_with_nothing_selected_says_so() {
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  assert!(app.prepare_note_edit().is_none());
+  assert_eq!(app.status, "nothing selected");
+}
+
+#[test]
+fn a_branch_name_no_filesystem_can_back_refuses_the_note_out_loud() {
+  // git accepts `feat/bad|name`; Windows does not. Refusing beats writing a
+  // file whose name means a different branch once the repo is cloned there.
+  let (_dir, mut app) = make_app();
+  let mut row = worktree_fixture("weird");
+  row.branch = Some("feat/bad|name".into());
+  app.worktrees = vec![row];
+  app.list_state.select(Some(0));
+
+  assert!(app.prepare_note_edit().is_none());
+  assert!(
+    app.status.contains("portable"),
+    "the status bar must say the name is the problem, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn the_marker_follows_what_the_editor_left_behind() {
+  // One file read for one row on the way back from `$EDITOR` — not a full
+  // `refresh()`, which would drop the mark set (#484) and re-shell every
+  // row's git config to repaint a single glyph.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let (_, path) = app.prepare_note_edit().unwrap();
+  assert!(!app.worktrees[0].has_note, "no note yet");
+
+  std::fs::write(&path, "what I had just figured out\n").unwrap();
+  app.sync_selected_note_marker();
+  assert!(app.worktrees[0].has_note, "the marker must light up after a save");
+
+  // Emptied rather than deleted: the marker must go back down.
+  std::fs::write(&path, "\n").unwrap();
+  app.sync_selected_note_marker();
+  assert!(!app.worktrees[0].has_note, "a blanked note must clear the marker");
+}

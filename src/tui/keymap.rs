@@ -127,6 +127,8 @@ define_actions! {
   Pull              => "pull",
   Push              => "push",
   EditWorktree      => "edit_worktree",
+  // #515: open the selected worktree's note in $EDITOR.
+  EditNote          => "edit_note",
   ExitToWorktree    => "exit_to_worktree",
   LazyGitPty        => "lazygit_pty",
   LazyGitFullscreen => "lazygit_fullscreen",
@@ -190,6 +192,10 @@ impl Action {
         | Action::Pull
         | Action::Push
         | Action::EditWorktree
+        // #515: the note path is derived from the ACTIVE repo's git dir, so
+        // a stale workspace selection would write the note into the
+        // previously active repo's `.git`.
+        | Action::EditNote
         | Action::LinkPrompt
         // FetchGithub persists detected PR/issue titles + states into the
         // active repo's git config, so it writes through `App.repo` too (#304).
@@ -536,6 +542,9 @@ impl Keymap {
       def(Action::Push, &["P"]),
       // #290: `c` opens the edit-worktree modal (rename branch).
       def(Action::EditWorktree, &["c"]),
+      // #515: `N` opens the selected worktree's note in $EDITOR. `i`, which
+      // the reference implementation uses, is taken here — it is LinkPrompt.
+      def(Action::EditNote, &["N"]),
       // #290: `e` exits the TUI and prints the selected worktree path to stdout.
       def(Action::ExitToWorktree, &["e"]),
       // #35/#290: `l` opens lazygit in an embedded PTY overlay.

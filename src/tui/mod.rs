@@ -990,6 +990,17 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Push if !app.picker_mode => app.request_push(),
     // #290: `c` opens the branch-rename modal.
     Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
+    // #515: `N` opens the selected worktree's note in $EDITOR, through the
+    // same suspend-and-restore loop `o` uses in `mode = "editor"`. The
+    // marker is re-read for that one row on the way back — the editor may
+    // have created the note, or emptied it.
+    Action::EditNote if !app.picker_mode => {
+      if let Some((command, path)) = app.prepare_note_edit() {
+        let path = path.to_string_lossy().to_string();
+        run_subshell(terminal, &command, &[&path], None, app, "note")?;
+        app.sync_selected_note_marker();
+      }
+    }
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
