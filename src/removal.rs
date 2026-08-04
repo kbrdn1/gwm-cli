@@ -164,14 +164,21 @@ pub fn remove_with_lifecycle(
 /// opened, and yields `None` on a detached HEAD, matching what the removal
 /// does with it.
 fn branch_at_removal_time(found: &WorktreeInfo) -> Option<String> {
-  let live = Repository::open(&found.path).ok().and_then(|wt_repo| {
-    let head = wt_repo.head().ok()?;
-    if !head.is_branch() {
-      return None;
-    }
-    head.shorthand().ok().map(String::from)
-  });
-  live.or_else(|| found.branch.clone())
+  // "Opened it and HEAD is detached" and "could not open it" are different
+  // answers and must not collapse into the same `None`: the first one means
+  // there is no branch, so falling back to the listing would have the entry
+  // name a branch the removal deletes nothing of (Codex review on PR #526).
+  match Repository::open(&found.path) {
+    Ok(wt_repo) => match wt_repo.head() {
+      Ok(head) if head.is_branch() => head.shorthand().ok().map(String::from),
+      // Detached: `worktree::remove` reads the same HEAD, gets a bare OID,
+      // finds no branch by that name and deletes none.
+      Ok(_) => None,
+      // Unborn or unreadable HEAD: nothing observed, so keep the listing's.
+      Err(_) => found.branch.clone(),
+    },
+    Err(_) => found.branch.clone(),
+  }
 }
 
 /// The undo-journal entry for a removal that is about to happen.

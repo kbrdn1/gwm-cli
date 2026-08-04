@@ -909,3 +909,69 @@ fn the_journal_names_the_branch_the_removal_actually_deletes() {
     }
   }
 }
+
+#[test]
+fn a_detached_head_is_recorded_as_no_branch() {
+  // Codex review on PR #526 (P2). `branch_at_removal_time` treated "opened
+  // the worktree and found a detached HEAD" and "could not open the worktree"
+  // as the same `None`, then fell back to the listing for both. A hook that
+  // detaches HEAD therefore produced an entry naming a branch the removal
+  // deleted nothing of, and `gwm undo` would recreate the worktree on it
+  // instead of reporting a detached-HEAD entry.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let doomed = wt_root.path().join("wt-521-detach");
+  worktree::add(&repo, "wt-521-detach", &doomed, "feat/#521-detach", false).unwrap();
+
+  // Attached at listing time, detached by the hook, so the fallback is what
+  // decides what the entry says.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      "\n[[hooks.pre_remove]]\nname = \"detach\"\nrun = \"git -C '{}' checkout --detach\"\n",
+      shell_path(&doomed)
+    ),
+  )
+  .unwrap();
+
+  let sandbox = TempDir::new().unwrap();
+  let journal_path = sandbox.path().join("history.toml");
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", &journal_path);
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None)
+    .unwrap()
+    .with_trust_mode(gwm::trust::TrustMode::Allow);
+  select_row(&mut app, "wt-521-detach");
+  app.enter_confirm_delete();
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+  assert!(!doomed.exists(), "the worktree is gone (status: {})", app.status);
+
+  let journal = history::Journal::load(&journal_path).unwrap();
+  let entry = journal.entries().first().expect("the removal is recorded");
+  assert_eq!(
+    entry.branch, None,
+    "a detached HEAD deletes no branch, so the entry must claim none"
+  );
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
