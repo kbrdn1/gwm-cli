@@ -2,6 +2,7 @@ use gwm::bootstrap::{self, BootstrapCtx, StepResult, StepStatus};
 #[cfg(unix)]
 use gwm::config::NoSymlink;
 use gwm::config::{CommandStep, Config, CopyStep, FallbackContent, Guard};
+use gwm::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -968,6 +969,23 @@ fn preset_ctx(name: &str) -> (TempDir, TempDir, Config) {
   (main, wt, cfg)
 }
 
+/// A hook context pointing at the pair of temp dirs, built by hand rather
+/// than through `HookContext::for_create` so the test needs no git repo.
+fn hook_ctx(main: &std::path::Path, wt: &std::path::Path) -> HookContext {
+  HookContext {
+    main_repo: main.to_path_buf(),
+    cwd: wt.to_path_buf(),
+    path: wt.to_path_buf(),
+    branch: "feat/#392-symfony-preset".into(),
+    branch_type: "feat".into(),
+    issue: "392".into(),
+    desc: "symfony-preset".into(),
+    user: "tester".into(),
+    owner: "kbrdn1".into(),
+    repo: "gwm-cli".into(),
+  }
+}
+
 #[test]
 fn symfony_preset_seeds_env_local_from_the_committed_env_when_the_guard_trips() {
   // The load-bearing difference with the laravel preset. Symfony commits
@@ -1075,4 +1093,65 @@ fn symfony_preset_refuses_inherited_vendor_and_var_symlinks() {
       "{dir}/ symlink must be removed so the worktree keeps its own"
     );
   }
+}
+
+#[test]
+fn symfony_preset_hooks_no_op_on_a_repo_that_is_not_symfony() {
+  // `bootstrap::run` never touches `[hooks.*]`, so the tests above prove the
+  // copies, the guard and the no-symlink invariants and nothing else. The two
+  // command hooks the preset ships go through `lifecycle::run_phase`, and this
+  // is the case that matters for anyone who writes the preset into the wrong
+  // repo: no `composer.json`, no `.envrc`, so both predicates are false and
+  // neither command is spawned.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  let ctx = hook_ctx(main.path(), wt.path());
+
+  let report = lifecycle::run_phase(&cfg, HookPhase::PostCreate, &ctx, &HookSkips::default(), false).unwrap();
+
+  assert_eq!(report.steps.len(), 2, "both hooks must be reported: {:?}", report.steps);
+  for step in &report.steps {
+    assert_eq!(
+      step.status,
+      StepStatus::Skipped,
+      "no composer.json and no .envrc, so nothing should run: {:?}",
+      step
+    );
+    assert!(
+      step.detail.contains("when condition"),
+      "the skip must name the predicate that switched the hook off, got: {}",
+      step.detail
+    );
+  }
+}
+
+#[test]
+fn symfony_preset_composer_hook_warns_instead_of_aborting() {
+  // `on_fail = "warn"` is the other half of the hook contract: a composer that
+  // is missing, or a project that does not build, must not take the worktree
+  // down with it. The `composer.json` here is deliberately unparseable so the
+  // command fails on its own file without reaching the network, and the
+  // assertion holds whether or not the runner has composer installed.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  std::fs::write(wt.path().join("composer.json"), "definitely not json").unwrap();
+  let ctx = hook_ctx(main.path(), wt.path());
+
+  let report = lifecycle::run_phase(&cfg, HookPhase::PostCreate, &ctx, &HookSkips::default(), false).unwrap();
+
+  let composer = report
+    .steps
+    .iter()
+    .find(|s| s.label.contains("composer"))
+    .expect("the composer hook must be selected once composer.json exists");
+  assert_ne!(
+    composer.status,
+    StepStatus::Skipped,
+    "composer.json exists, so the predicate must select the hook: {:?}",
+    composer
+  );
+  assert_ne!(
+    composer.status,
+    StepStatus::Failed,
+    "on_fail = warn must keep a failing install out of the abort path: {:?}",
+    composer
+  );
 }
