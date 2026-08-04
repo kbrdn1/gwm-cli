@@ -2045,7 +2045,8 @@ fn init_list_presets_enumerates_builtins() {
     .stdout(predicate::str::contains("laravel"))
     .stdout(predicate::str::contains("node"))
     .stdout(predicate::str::contains("rust"))
-    .stdout(predicate::str::contains("python-uv"));
+    .stdout(predicate::str::contains("python-uv"))
+    .stdout(predicate::str::contains("symfony"));
 }
 
 #[test]
@@ -2086,6 +2087,43 @@ fn init_preset_writes_stack_config() {
   let body = std::fs::read_to_string(&cfg_path).unwrap();
   assert!(body.contains("no-aws-rds"), "laravel preset missing the AWS-RDS guard");
   assert!(body.contains("vendor"), "laravel preset missing the vendor no-symlink");
+}
+
+#[test]
+fn init_preset_writes_symfony_config() {
+  // `--preset symfony` (issue #392) shares the composer story with laravel,
+  // so the markers that tell the two apart are the ones asserted here: the
+  // `.env.local` copy (Symfony commits `.env`, gitignores `.env.local`), the
+  // guard seeding from that committed `.env` rather than `.env.example`, and
+  // the `var/` no-symlink on top of `vendor/`.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "symfony"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(".gwm.toml"));
+
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(
+    body.contains("from = \".env.local\""),
+    "symfony preset missing the .env.local copy"
+  );
+  assert!(
+    body.contains("example_file = \".env\""),
+    "symfony preset must seed from the committed .env, not .env.example"
+  );
+  assert!(
+    body.contains("path = \"var\""),
+    "symfony preset missing the var/ no-symlink"
+  );
+  assert!(
+    body.contains("path = \"vendor\""),
+    "symfony preset missing the vendor/ no-symlink"
+  );
 }
 
 #[test]
