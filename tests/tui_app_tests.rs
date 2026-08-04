@@ -2669,6 +2669,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     url: "https://example.test".into(),
     labels: vec!["feature".into()],
     updated_at: "2026-05-19T00:00:00Z".into(),
+    detail: Default::default(),
   };
   let pr = PrStatus {
     number: 61,
@@ -2680,6 +2681,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     checks_total: 3,
     ci: CiState::Running,
     checks: vec![],
+    detail: Default::default(),
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -2708,6 +2710,7 @@ fn loaded_issue_status_persists_title_for_no_fetch_startup() {
     url: "https://example.test/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2752,6 +2755,7 @@ fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
         completed_at: None,
       },
     ],
+    detail: Default::default(),
   }));
 
   app.enter_ci_checks();
@@ -2784,6 +2788,7 @@ fn pr_summary_line_advertises_the_ci_checks_key_after_the_indicator() {
     ci,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -2840,6 +2845,7 @@ fn pr_line_ci_hint_follows_the_focus_context() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   let text_of = |app: &App| -> String {
@@ -3029,6 +3035,7 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   // Codex review on PR #455: the contextual routing lives on the KEY path
@@ -3096,6 +3103,7 @@ fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(
     61,
@@ -3182,6 +3190,7 @@ fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(vec![PrCheck {
     name: "a".into(),
@@ -3232,6 +3241,7 @@ fn app_with_open_ci_overlay_on_pr_61() -> (tempfile::TempDir, git2::Repository, 
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
@@ -3368,6 +3378,7 @@ fn ci_filter_cursor_clamps_when_a_refresh_shrinks_the_matches() {
     checks_total: checks.len() as u32,
     ci: CiState::Passing,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(vec![
     mk_check("check-a"),
@@ -3421,6 +3432,7 @@ fn ci_overlay_ticks_running_check_durations() {
       started_at,
       completed_at: None,
     }],
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Running, Some(started.clone()))));
   app.enter_ci_checks();
@@ -3475,6 +3487,7 @@ fn ci_overlay_ticks_survive_a_pr_cache_invalidation() {
       started_at: Some(started),
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.enter_ci_checks();
 
@@ -3520,6 +3533,7 @@ fn pr_line_ci_hint_is_hidden_in_picker_mode() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   let text: String = gwm::tui::github_status_lines(&app, 120)
     .iter()
@@ -3575,6 +3589,7 @@ fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   // Agents overlay opened (captures the target), then interrupted without
@@ -3632,6 +3647,7 @@ fn pr_line_ci_hint_disappears_when_the_binding_is_removed() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.focus_worktrees();
   app.keymap.apply_override(Action::CiChecks, Vec::new()).unwrap();
@@ -3685,6 +3701,7 @@ fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -3708,6 +3725,7 @@ fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -3867,6 +3885,7 @@ fn sample_issue_titled(n: u64, title: &str) -> gwm::github::IssueStatus {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }
 }
 
@@ -4269,6 +4288,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -4862,6 +4882,7 @@ fn refresh_github_status_message_celebrates_full_success() {
     url: "https://example.test".into(),
     labels: vec![],
     updated_at: "".into(),
+    detail: Default::default(),
   };
   app.apply_issue_fetch_result(Ok(issue));
   app.report_github_refresh_status();
@@ -5194,6 +5215,7 @@ fn table_marker_issue_pastille_uses_loaded_closed_issue_state() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   let theme = Theme::default();
@@ -5235,6 +5257,7 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let theme = Theme::default();
@@ -5878,6 +5901,7 @@ fn issue_summary_line_truncates_loaded_state_to_budget() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     828,
@@ -5910,6 +5934,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     ci: CiState::Passing,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     70,
@@ -5938,6 +5963,7 @@ fn issue_summary_line_keeps_short_title_intact() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     1,
@@ -6021,6 +6047,7 @@ fn issue_summary_line_loaded_icon_uses_issue_state_color() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = issue_summary_line(
@@ -6066,6 +6093,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6111,6 +6139,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -6142,6 +6171,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     ci: gwm::github::CiState::Failing,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -6177,6 +6207,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     ci: gwm::github::CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6224,6 +6255,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6287,6 +6319,7 @@ fn issue_summary_line_state_badge_is_a_reverse_video_chip() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     7,
@@ -10797,6 +10830,7 @@ fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
     url: "https://web.acme.internal:8443/team/proj/-/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   app.enter_open_menu();
@@ -10826,6 +10860,7 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
     url: "https://github.com/acme/widgets/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   repo.remote_delete("origin").unwrap();

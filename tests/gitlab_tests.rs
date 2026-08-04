@@ -1535,3 +1535,48 @@ fn a_confirmed_same_project_mr_outranks_an_unidentifiable_one() {
   assert_eq!(gitlab::parse_mr_list_number(fork_only).unwrap(), Some(9));
   assert_eq!(gitlab::parse_mr_list_number("[]").unwrap(), None);
 }
+
+// --- partial rich tier (issue #420) ---------------------------------------
+
+#[test]
+fn parse_issue_json_fills_the_rich_tier_it_can_serve() {
+  // `description` and `author` ride along in the payload gwm already asks
+  // for, so they cost nothing. Notes (comments) need a second `/notes`
+  // request and stay empty — the view says "no comments" honestly rather
+  // than claiming the thread was read.
+  let json = r#"{
+  "iid": 42,
+  "title": "TUI: fuzzy search",
+  "state": "opened",
+  "labels": [],
+  "updated_at": "2026-05-19T10:00:00.000Z",
+  "web_url": "https://gitlab.com/group/proj/-/issues/42",
+  "description": "Ripgrep-style filtering over the worktree list.",
+  "author": {"username": "alice", "name": "Alice"}
+}"#;
+
+  let issue = gitlab::parse_issue_json(json).unwrap();
+
+  assert_eq!(issue.detail.body, "Ripgrep-style filtering over the worktree list.");
+  assert_eq!(issue.detail.author, "alice", "the username, not the display name");
+  assert!(issue.detail.comments.is_empty(), "notes are a separate request");
+}
+
+#[test]
+fn parse_mr_json_fills_the_rich_tier_it_can_serve() {
+  let pr = gitlab::parse_mr_json(MR_JSON).unwrap();
+
+  assert_eq!(pr.detail.author, "alice");
+  assert_eq!(pr.detail.base_ref, "main");
+  assert_eq!(pr.detail.head_ref, "feat/fuzzy");
+  // MR_JSON carries no `description` key at all — the summary-only shape
+  // must still parse rather than error.
+  assert!(pr.detail.body.is_empty());
+  assert_eq!(
+    (pr.detail.additions, pr.detail.deletions),
+    (0, 0),
+    "GitLab reports a diff size only through a separate /changes request"
+  );
+  assert!(pr.detail.reviews.is_empty(), "approvals are a separate request");
+  assert!(pr.detail.comments.is_empty(), "notes are a separate request");
+}

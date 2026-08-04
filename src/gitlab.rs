@@ -549,6 +549,11 @@ struct RawIssue {
   updated_at: String,
   #[serde(default)]
   web_url: String,
+  /// GitLab's name for the issue body (issue #420).
+  #[serde(default)]
+  description: String,
+  #[serde(default)]
+  author: Option<RawAuthor>,
 }
 
 /// Parse `glab issue view <iid> --output json`.
@@ -569,6 +574,16 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
     url: raw.web_url,
     labels: raw.labels,
     updated_at: raw.updated_at,
+    // Partial rich tier (issue #420): the body and the author ride along
+    // in the payload gwm already asks for, so they cost nothing. Comments
+    // are GitLab *notes* behind a second `/notes` request and stay out —
+    // the rich view renders "no comments" from an honest empty vector
+    // rather than pretending the thread is empty.
+    detail: crate::forge::IssueDetail {
+      body: raw.description,
+      author: raw.author.unwrap_or_default().username,
+      comments: Vec::new(),
+    },
   })
 }
 
@@ -608,6 +623,9 @@ struct RawMr {
   author: Option<RawAuthor>,
   #[serde(default)]
   head_pipeline: Option<RawPipeline>,
+  /// GitLab's name for the MR body (issue #420).
+  #[serde(default)]
+  description: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -703,6 +721,19 @@ pub fn parse_mr_json(s: &str) -> Result<PrStatus> {
     checks_total,
     ci,
     checks,
+    // Partial rich tier (issue #420), same rule as the issue side: the
+    // body, the author and the branch pair are already in this payload.
+    // `additions` / `deletions` are not — GitLab only reports a diff size
+    // through a separate `/changes` request — so they stay 0 and the view
+    // omits the diff line rather than printing a fabricated `+0 −0`.
+    // Reviews (approvals) and comments (notes) are separate requests too.
+    detail: crate::forge::PrDetail {
+      body: raw.description,
+      author: raw.author.unwrap_or_default().username,
+      base_ref: raw.target_branch,
+      head_ref: raw.source_branch,
+      ..Default::default()
+    },
   })
 }
 

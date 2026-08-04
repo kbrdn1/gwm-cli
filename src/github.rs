@@ -27,8 +27,8 @@ use std::sync::LazyLock;
 // TUI and CLI keep resolving unchanged.
 pub use crate::forge::{cli_command_line as gh_command_line, repo_slug};
 pub use crate::forge::{
-  CheckOutcome, CiState, CreatedIssue, CreatedPr, IssueCreateRequest, IssueState, IssueStatus, PrCheck,
-  PrCreateRequest, PrHead, PrState, PrStatus,
+  CheckOutcome, CiState, CreatedIssue, CreatedPr, ForgeComment, ForgeReview, IssueCreateRequest, IssueDetail,
+  IssueState, IssueStatus, PrCheck, PrCreateRequest, PrDetail, PrHead, PrState, PrStatus, ReviewState,
 };
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
@@ -815,11 +815,70 @@ struct RawIssue {
   labels: Vec<RawLabel>,
   #[serde(rename = "updatedAt", default)]
   updated_at: String,
+  // Rich tier (issue #420). Every field is `default`ed: a summary-only
+  // payload — a stubbed `gh`, an older CLI that does not know a field —
+  // must degrade to the summary tier, not fail the whole parse.
+  #[serde(default)]
+  body: String,
+  #[serde(default)]
+  author: Option<RawActor>,
+  #[serde(default)]
+  comments: Vec<RawComment>,
 }
 
 #[derive(Deserialize)]
 struct RawLabel {
   name: String,
+}
+
+/// A GitHub actor. `Option` at the use site (not just `default`) so an
+/// explicit `"author": null` — a deleted account — reads as "no author"
+/// instead of erroring, the same guard the GitLab backend already carries.
+#[derive(Deserialize, Default)]
+struct RawActor {
+  #[serde(default)]
+  login: String,
+}
+
+#[derive(Deserialize)]
+struct RawComment {
+  #[serde(default)]
+  author: Option<RawActor>,
+  #[serde(default)]
+  body: String,
+  #[serde(rename = "createdAt", default)]
+  created_at: String,
+  #[serde(default)]
+  url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawReview {
+  #[serde(default)]
+  author: Option<RawActor>,
+  #[serde(default)]
+  state: String,
+  #[serde(default)]
+  body: String,
+  #[serde(rename = "submittedAt", default)]
+  submitted_at: String,
+}
+
+/// `login`, or an empty string for a missing / deleted actor.
+fn actor_login(a: Option<RawActor>) -> String {
+  a.unwrap_or_default().login
+}
+
+fn map_comments(raw: Vec<RawComment>) -> Vec<ForgeComment> {
+  raw
+    .into_iter()
+    .map(|c| ForgeComment {
+      author: actor_login(c.author),
+      body: c.body,
+      created_at: c.created_at,
+      url: c.url,
+    })
+    .collect()
 }
 
 #[derive(Deserialize)]
@@ -834,6 +893,23 @@ struct RawPr {
   updated_at: String,
   #[serde(rename = "statusCheckRollup", default)]
   status_check_rollup: Vec<RawCheck>,
+  // Rich tier (issue #420) — see `RawIssue` for why everything defaults.
+  #[serde(default)]
+  body: String,
+  #[serde(default)]
+  author: Option<RawActor>,
+  #[serde(default)]
+  additions: u32,
+  #[serde(default)]
+  deletions: u32,
+  #[serde(rename = "baseRefName", default)]
+  base_ref_name: String,
+  #[serde(rename = "headRefName", default)]
+  head_ref_name: String,
+  #[serde(default)]
+  reviews: Vec<RawReview>,
+  #[serde(default)]
+  comments: Vec<RawComment>,
 }
 
 /// One `statusCheckRollup` entry. GitHub returns two shapes here: a
@@ -885,6 +961,11 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
     url: raw.url,
     labels: raw.labels.into_iter().map(|l| l.name).collect(),
     updated_at: raw.updated_at,
+    detail: IssueDetail {
+      body: raw.body,
+      author: actor_login(raw.author),
+      comments: map_comments(raw.comments),
+    },
   })
 }
 
@@ -934,6 +1015,25 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     checks_total,
     ci,
     checks,
+    detail: PrDetail {
+      body: raw.body,
+      author: actor_login(raw.author),
+      additions: raw.additions,
+      deletions: raw.deletions,
+      base_ref: raw.base_ref_name,
+      head_ref: raw.head_ref_name,
+      reviews: raw
+        .reviews
+        .into_iter()
+        .map(|r| ForgeReview {
+          author: actor_login(r.author),
+          state: ReviewState::classify(&r.state),
+          body: r.body,
+          submitted_at: r.submitted_at,
+        })
+        .collect(),
+      comments: map_comments(raw.comments),
+    },
   })
 }
 
@@ -984,8 +1084,17 @@ fn derive_ci_state(checks: &[RawCheck]) -> CiState {
 
 // ---- gh CLI invocation ---------------------------------------------------
 
-const ISSUE_JSON_FIELDS: &str = "number,title,state,url,labels,updatedAt";
-const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusCheckRollup";
+// Summary tier + the rich tier the PR/issue view reads (issue #420). One
+// request, not two: `gh` returns the whole set in the same call, and a
+// second per-field tier would add a fourth failure mode to a fetch cache
+// that has already been raced three times (#138, #255, #458).
+//
+// Inline review comments (the ones anchored to a diff hunk) are absent on
+// purpose: `--json comments` returns conversation comments only, and the
+// review threads are reachable through GraphQL alone. Tracked separately.
+const ISSUE_JSON_FIELDS: &str = "number,title,state,url,labels,updatedAt,body,author,comments";
+const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusCheckRollup,\
+body,author,additions,deletions,baseRefName,headRefName,reviews,comments";
 
 /// Run `gh issue view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
