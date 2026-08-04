@@ -1,0 +1,65 @@
+name: docs-sync
+
+# The published documentation follows `main`, never `dev`.
+#
+# `main` is reached exclusively through a `dev` → `main` pull request, so what
+# lands here is what was delivered — which is exactly what the site should
+# serve. Triggering on `dev` would publish pages describing behaviour nobody
+# can install yet; triggering on tags would be worse still, since GitHub's
+# `v*.*.*` glob also matches `v0.8.0-rc.4` (the trap `release.yml` guards
+# against by hand) and every release candidate's docs would go live as stable.
+#
+# The split of work is deliberate: this repo owns the documentation sources
+# (`docs/`, `changelogs/`) and nothing else. The conversion script, the
+# Starlight site and the deploy live in `kbrdn1/kbrdn-docs`, so this workflow
+# only rings the bell. Doing the sync here would drag a Bun monorepo into the
+# CLI's CI for a build this repo cannot verify.
+#
+# Bootstrap: see CONTRIBUTING.md > Releases > Documentation site.
+
+on:
+  push:
+    branches: [main]
+    # Kept in step with the roots the site's sync script reads. A root dropped
+    # here fails silently — the site just stops refreshing — so
+    # `tests/release_workflow_tests.rs` pins the list.
+    paths:
+      - 'docs/**'
+      - 'changelogs/**'
+  workflow_dispatch:
+
+# The dispatch authenticates with a PAT scoped to the docs repository; the
+# workflow token needs nothing at all.
+permissions: {}
+
+jobs:
+  notify:
+    name: notify kbrdn-docs
+    runs-on: ubuntu-latest
+    # While DOCS_SITE_TOKEN is being provisioned the first time, a missing
+    # secret would paint the merge to `main` red for a docs refresh that can be
+    # re-driven by hand at any time (`gh workflow run docs-sync.yml`). Flip to
+    # false once the first dispatch has succeeded.
+    continue-on-error: true
+    steps:
+      - name: verify DOCS_SITE_TOKEN is configured
+        env:
+          DOCS_SITE_TOKEN: ${{ secrets.DOCS_SITE_TOKEN }}
+        run: |
+          if [ -z "${DOCS_SITE_TOKEN:-}" ]; then
+            echo "::error::DOCS_SITE_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > Documentation site."
+            exit 1
+          fi
+
+      # No checkout: the docs repository reads this repo itself, at the commit
+      # `main` points to when it runs. Two merges in quick succession therefore
+      # converge on the later one instead of racing, and this job stays a
+      # single API call with nothing on disk to leak.
+      - name: dispatch the docs sync
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_SITE_TOKEN }}
+        run: |
+          gh api repos/kbrdn1/kbrdn-docs/dispatches \
+            --method POST \
+            -f event_type=gwm-docs
