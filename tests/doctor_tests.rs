@@ -550,6 +550,38 @@ fn doctor_declines_to_evaluate_a_predicate_it_cannot_bound() {
   }
 }
 
+#[test]
+fn a_step_whose_binary_cannot_be_resolved_statically_is_not_probed() {
+  // Two ways the probed string is not the binary the step will launch, both
+  // ending in a Warning and exit code 1 on a step that works fine:
+  //
+  //   - `lifecycle::run_step` expands `{path}` / `{repo}` in `run` before
+  //     spawning, so the raw string names `{path}/scripts/setup` and `which`
+  //     would look that up literally;
+  //   - a step that sets its own `PATH` in `env` resolves against that, since
+  //     `run_step` hands it to `Command::env`, not against the ambient `$PATH`
+  //     `gwm doctor` happens to have.
+  //
+  // Not probing is the safe side here, the mirror of the predicate rule above:
+  // there, declining to evaluate leaves the step probed; here, declining to
+  // resolve leaves it unprobed. Both refuse to emit an answer we know is wrong.
+  for body in [
+    "[[hooks.post_create]]\nname = \"templated\"\nrun = \"{path}/definitely-not-on-path-xyz123\"\n",
+    "[[hooks.post_create]]\nname = \"own-path\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nenv = { PATH = \"/opt/project/bin\" }\n",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(dir.path(), body);
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      !c.detail.contains("definitely-not-on-path-xyz123"),
+      "a step whose binary cannot be resolved statically must not be probed, got: {}\nconfig: {}",
+      c.detail,
+      body
+    );
+  }
+}
+
 // --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
