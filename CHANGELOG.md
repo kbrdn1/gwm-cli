@@ -47,7 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default was picked on merit rather than on which verb was there first. Both
   pre-#484 defaults are one `[tui.keys]` line away
   (`cycle_sidebar_layout = ["Space"]`, `toggle_select = ["z"]`), and
-  `gwm tui keys` prints the resolved set with a per-row source.
+  `gwm tui keys` prints the resolved set with a per-row source. One upgrade
+  note: `z` is now a shipped default, so a `.gwm.toml` that binds a chord
+  *starting* with `z` (say `top = ["z z"]`) is a prefix conflict and is
+  refused at load time, the same way any chord/prefix pair has always been.
+  Rebind that chord, or move `cycle_sidebar_layout` elsewhere.
 
 ### Docs
 

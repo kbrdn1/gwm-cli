@@ -3158,6 +3158,69 @@ fn remove_deduplicates_patterns_that_resolve_to_the_same_worktree() {
 }
 
 #[test]
+fn a_batch_removal_continues_past_a_failing_target() {
+  // #484: one hook-blocked row must not strand the rest of the cleanup. The
+  // pre_remove hook runs in the worktree being removed, so `.block` fails
+  // exactly one target of the two.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("27", "batch-ok"), ("28", "batch-blocked")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+  std::fs::write(base.path().join("feat-28-batch-blocked").join(".block"), "").unwrap();
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "refuse blocked"
+run = "test ! -f .block"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "batch-ok", "batch-blocked"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("batch-blocked"))
+    .stderr(predicate::str::contains("1 of 2 removals failed"));
+
+  assert!(
+    !base.path().join("feat-27-batch-ok").exists(),
+    "the target that could be removed must be gone"
+  );
+  assert!(
+    base.path().join("feat-28-batch-blocked").exists(),
+    "the blocked one must survive"
+  );
+
+  // The blocked target is reported once, not twice: the per-row line names it,
+  // the returned error is the tally.
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert_eq!(
+    stderr.matches("refuse blocked").count(),
+    1,
+    "one line per failure, no duplicate: {stderr}"
+  );
+}
+
+#[test]
 fn remove_unknown_pattern_fails() {
   // Fuzzy lookup must error loudly when nothing matches — silently
   // doing nothing would mask a user typo and leave them wondering why

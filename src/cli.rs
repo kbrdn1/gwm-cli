@@ -3148,21 +3148,31 @@ fn cmd_remove(
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
 
-  // The batch does not stop at the first error (#484), mirroring the TUI: a
+  // One pattern is the pre-#484 command: propagate its error verbatim rather
+  // than wrapping it in batch prose. There is nothing to keep going for.
+  if let [only] = targets.as_slice() {
+    return remove_one(&repo, &workdir, &config, &skips, only, delete_branch);
+  }
+
+  // A batch does not stop at the first error (#484), mirroring the TUI: a
   // locked or hook-blocked row must not strand the rest of a cleanup the user
-  // explicitly asked for. Failures are collected and reported at the end, so
-  // the exit code still says the command did not fully succeed.
-  let mut failures: Vec<String> = Vec::new();
+  // explicitly asked for. Each failure is named as it happens, so a long batch
+  // reports live; the returned error is the tally, so nothing prints twice.
+  let mut failed = 0usize;
   for found in &targets {
     if let Err(e) = remove_one(&repo, &workdir, &config, &skips, found, delete_branch) {
       eprintln!("error: {}: {}", found.name, e);
-      failures.push(format!("{}: {}", found.name, e));
+      failed += 1;
     }
   }
-  if failures.is_empty() {
+  if failed == 0 {
     Ok(())
   } else {
-    Err(GwmError::Other(failures.join("; ")))
+    Err(GwmError::Other(format!(
+      "{} of {} removals failed (see the errors above)",
+      failed,
+      targets.len()
+    )))
   }
 }
 
