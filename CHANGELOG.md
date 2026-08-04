@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- **Retired the em dash across the whole `docs/` tree**
+  ([#516](https://github.com/kbrdn1/gwm-cli/issues/516)). 1592 occurrences in
+  78 of the 79 pages, English and French, replaced by whatever connector the
+  dash was standing in for: a colon where it introduced a list or an
+  explanation, a full stop where it joined two independent clauses, a comma or
+  parentheses around an aside. Fenced code blocks are untouched, since they
+  reproduce shell comments and program output. Schema and reference tables
+  used a bare dash as a cell value for two different things, "no default" and
+  "this preset adds nothing here"; those now read `_(required)_` and
+  `_(none)_`. 47 headings change shape, so their generated anchors change with
+  them; none of them was the target of an internal link, and the 194 internal
+  anchors in the tree resolve exactly as they did before.
+
 ## Past releases
 
 In reverse chronological order:

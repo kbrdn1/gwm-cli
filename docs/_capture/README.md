@@ -1,4 +1,4 @@
-# `docs/_capture/` — reproducible doc captures
+# `docs/_capture/`: reproducible doc captures
 
 Every screenshot and recording under `docs/**/_assets/` is generated from a
 committed [vhs](https://github.com/charmbracelet/vhs) `.tape` script here, driven
@@ -25,7 +25,7 @@ Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
   varied git states (clean, clean+ahead, staged, dirty+ahead). It also builds
   `~/gwm-demo/payments-svc`, an intentionally *untrusted* fixture used only for
   the TOFU trust-prompt capture. Dates are pinned so the graph is byte-stable.
-- **`<name>.tape`** — one capture each. Still PNGs use vhs's `Screenshot`
+- **`<name>.tape`**: one capture each. Still PNGs use vhs's `Screenshot`
   command (the tape's `Output …/.tmp/<name>.gif` is a throwaway vhs requires);
   animated captures `Output` their `.gif` directly.
 - **`theme.tape`** is generic: `generate.sh` injects each `[theme] preset` into
@@ -39,19 +39,19 @@ Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
 `gwm`'s default theme paints no background, so the TUI inherits the terminal's.
 Every tape sets a neutral grey vhs theme (`#2b2b2b`) so the default-theme
 captures read as grey, not the blue-tinted default of a bundled theme. The
-theme-gallery shots are the exception — each preset paints its own background on
+theme-gallery shots are the exception: each preset paints its own background on
 purpose.
 
 ## captured off the demo
 
 - `github-linking.tape` runs against the **real gwm-cli repo**, not the
-  acme-api demo — the Issue·PR pane needs a live, `gh`-detectable PR, and the
+  acme-api demo: the Issue·PR pane needs a live, `gh`-detectable PR, and the
   demo has no remote. It is not part of `generate.sh`'s demo-driven loop; run it
   directly (`vhs docs/_capture/github-linking.tape`) from a checkout whose
   current branch has an open PR, adjusting the `/206` filter to that PR.
 
 ## not covered here
 
-- `docs/3.cli/3.multiplexer.md` (`gwm tmux --split`) — vhs cannot host a tmux
+- `docs/3.cli/3.multiplexer.md` (`gwm tmux --split`): vhs cannot host a tmux
   client (`open terminal failed: not a terminal`); this one needs a real
   terminal recording.
