@@ -4,7 +4,7 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v1.6.1 stable
+## Current state: v1.6.1 stable
 
 The current **stable** line is **v1.6.1** (2026-08-04), a follow-up closing the
 gaps left by the v1.6.0 **security fix affecting every earlier version** (see
@@ -261,10 +261,30 @@ individual checks, reviews, conversation, and inline review comments. Modelled
 on `snacks.nvim`'s `snacks.gh`, whose key lesson is that inline diff comments are
 reachable only through GraphQL, not through `gh --json`.
 
-Comes last, and inherits both the detail overlay the agent pane (#408) already
-paid for and the `Forge` trait (#419), so it is born reading GitLab too. Where gwm can beat the reference: `snacks.gh` has no notion of a worktree,
-so the user picks from a flat list; gwm already knows the
+Comes first of the two queued features, and inherits both the detail overlay the
+agent pane (#408) already paid for and the `Forge` trait (#419), so it is born
+reading GitLab too. Where gwm can beat the reference: `snacks.gh` has no notion
+of a worktree, so the user picks from a flat list; gwm already knows the
 worktree → branch → PR → issue chain and can open on the current row directly.
+
+### 3. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515))
+
+gwm holds everything about a worktree except the part only its author can write:
+where they were. It knows the branch, the linked issue, the diff against base and
+the agent session, but not what had just been figured out, what is blocking, or
+what to check before opening the PR. With eight worktrees open that context lives
+outside gwm, so returning to one after two days means rebuilding it from
+`git log` and memory.
+
+A note attached to the worktree, editable from the TUI and flagged in the table.
+The design decision is storage, and it has no obvious answer: inside the worktree
+it dies with it and is unreadable from the main checkout, in the config dir it
+survives removal but becomes orphaned state that `gwm clean` then has to know
+about. Either way it should be plain text on disk, because a note is something
+one may want to `grep` or open without gwm running.
+
+Comes after the PR/Issue view, which pays for the overlay machinery it would
+reuse.
 
 ### Deferred
 
@@ -280,7 +300,8 @@ worktree → branch → PR → issue chain and can open on the current row direc
 Not feature work, but tracked here because it gates whether any of the above is
 seen:
 
-- [#422](https://github.com/kbrdn1/gwm-cli/issues/422) — comparison page covering gwm, gwq and lazyworktree (gwq is the incumbent by star count and has been dormant since May)
+- [#422](https://github.com/kbrdn1/gwm-cli/issues/422) : comparison page covering gwm, gwq and lazyworktree (gwq is the incumbent by star count and has been dormant since May). Queued **after** the PR/Issue view (#420) and per-worktree notes (#515): a comparison is worth writing once the features it compares are the ones shipping
+- [#516](https://github.com/kbrdn1/gwm-cli/issues/516) : retire the em dash habit across `docs/`, 1500 occurrences over 76 of its 79 files. Now that the tree is published, that is the punctuation the site carries. Worth doing page by page while they are touched for other reasons, not as one unreviewable diff
 - [#423](https://github.com/kbrdn1/gwm-cli/issues/423) ✅ — the documentation is published at **<https://gwm.kbrdn.dev>** and keeps itself there. A merge into `main` touching `docs/`, `changelogs/` or `Cargo.toml` posts a `repository_dispatch` to `kbrdn1/kbrdn-docs`, which reruns the conversion, commits whatever drifted and redeploys. The in-repo tree stays the source of truth: the site is generated from it, never edited on the other side
 
 ## Ambitious
