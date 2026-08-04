@@ -82,6 +82,16 @@ pub fn remove_with_lifecycle(
 ) -> std::result::Result<RemovalOutcome, Box<RemovalFailure>> {
   let mut outcome = RemovalOutcome::default();
 
+  // Before anything runs. A caller that re-resolves its target between the
+  // decision and this call (the TUI worker, to name the branch in the journal
+  // entry) hands us a `found` describing where the worktree is NOW, and the
+  // `pre_remove` hook runs with its cwd there. Leaving the check to
+  // `remove_verified` meant a destructive hook had already executed against a
+  // directory the user never confirmed (Codex review on PR #526).
+  if let Err(e) = worktree::verify_path(repo, &found.id, expected_path) {
+    return Err(Box::new(RemovalFailure { outcome, error: e }));
+  }
+
   let pre_ctx = HookContext::for_worktree(repo, workdir, &found.path, &found.path, found.branch.as_deref());
   match lifecycle::run_phase_quiet(config, HookPhase::PreRemove, &pre_ctx, skips, false) {
     Ok(report) => outcome.pre = report,
@@ -96,20 +106,27 @@ pub fn remove_with_lifecycle(
 
   // Issue #29: capture the branch OID via libgit2 BEFORE the destructive
   // call so `gwm undo` can resurrect the branch at the tip that was deleted.
-  // The entry is written after the removal succeeds, so a refused removal
-  // never shows up in `gwm history` as something to undo.
+  //
+  // Written here, after every refusal has had its say and before the first
+  // destructive effect. `worktree::remove` prunes the admin entry BEFORE
+  // deleting the directory (#98), so a filesystem failure mid-removal leaves
+  // the repo mutated, and with `--delete-branch` the branch tip gone: writing
+  // the entry afterwards would leave that case with no recovery anchor at all
+  // (Codex review on PR #526). Everything that refuses without mutating
+  // anything — the path check above, a `pre_remove` hook, the trust gate —
+  // happens earlier, so a refusal still records nothing.
   let entry = journal_entry(repo, found, delete_branch);
+  if let Err(e) = history::record(entry) {
+    outcome.journal_warning = Some(format!(
+      "failed to record undo journal entry: {} (continuing with the removal anyway)",
+      e
+    ));
+  }
 
   if let Err(e) = worktree::remove_verified(repo, &found.id, expected_path, delete_branch) {
     return Err(Box::new(RemovalFailure { outcome, error: e }));
   }
   outcome.removed = true;
-  if let Err(e) = history::record(entry) {
-    outcome.journal_warning = Some(format!(
-      "failed to record undo journal entry: {} (the worktree is still removed)",
-      e
-    ));
-  }
 
   let post_ctx = pre_ctx.with_cwd(workdir);
   match lifecycle::run_phase_quiet(config, HookPhase::PostRemove, &post_ctx, skips, false) {

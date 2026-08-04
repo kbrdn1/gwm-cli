@@ -6063,12 +6063,20 @@ impl RepoBatch {
     let repo = worktree::discover_repo(Some(workdir))?;
     let config = Config::load_layered(workdir, global_path)?;
     let worktrees = worktree::list(&repo)?;
-    // Gate on the phases this operation actually runs, not on the whole
-    // `[hooks]` table: a repo whose only hook is `post_create` executes no
-    // code on a removal, and asking it a trust question would refuse a
-    // delete that has always worked.
+    // Gate on the phases this operation actually runs, asked of the file the
+    // trust decision is about. Two narrowings, both load-bearing:
+    //
+    // - the phases, not the whole `[hooks]` table: a repo whose only hook is
+    //   `post_create` executes no code on a removal, so asking it a trust
+    //   question would refuse a delete that has always worked;
+    // - the repo's own `.gwm.toml`, not the layered config: a remove hook out
+    //   of `~/.config/gwm/config.toml` is the user's own and needs no
+    //   approval, yet it would make the merged config answer yes and send the
+    //   repo file to a ledger check that no line of it would survive to
+    //   justify (Codex review on PR #526).
+    let repo_only = Config::load_layered(workdir, None)?;
     let runs_hooks =
-      lifecycle::has_steps(&config, HookPhase::PreRemove) || lifecycle::has_steps(&config, HookPhase::PostRemove);
+      lifecycle::has_steps(&repo_only, HookPhase::PreRemove) || lifecycle::has_steps(&repo_only, HookPhase::PostRemove);
     let trust_refusal = if runs_hooks {
       let origin = crate::trust::origin_key_for_repo(&repo, workdir);
       crate::trust::evaluate_silent(workdir, &origin, trust_mode, crate::trust::APPROVE_VIA_TRUST_ADD)?
@@ -6083,6 +6091,16 @@ impl RepoBatch {
       trust_refusal,
     })
   }
+}
+
+/// The `on_fail = "warn"` steps of a phase report, as status-line lines.
+fn warned_steps(report: &BootstrapReport) -> Vec<String> {
+  report
+    .steps
+    .iter()
+    .filter(|s| s.status == StepStatus::Warning)
+    .map(|s| format!("{}: {}", s.label, s.detail))
+    .collect()
 }
 
 /// Run a delete batch on a worker thread (issue #484), through the same
@@ -6152,10 +6170,18 @@ fn run_delete_batch(
       delete_branch,
     ) {
       Ok(done) => {
+        // `on_fail = "warn"` is a success with a `Warning` step in the report.
+        // The CLI prints the whole report so the user sees the `!`; the TUI
+        // has no report to print, so the warning has to reach the status line
+        // or the phase silently means nothing here (Codex review on PR #526).
+        outcome.warnings.extend(warned_steps(&done.pre));
+        outcome.warnings.extend(warned_steps(&done.post));
         outcome.removed.push((target.id, target.path));
         outcome.warnings.extend(done.journal_warning);
       }
       Err(failure) => {
+        outcome.warnings.extend(warned_steps(&failure.outcome.pre));
+        outcome.warnings.extend(warned_steps(&failure.outcome.post));
         outcome.warnings.extend(failure.outcome.journal_warning.clone());
         if failure.outcome.removed {
           // A `post_remove` hook aborted on a worktree that IS gone. Calling

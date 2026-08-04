@@ -557,3 +557,211 @@ fn gwm_undo_restores_what_the_tui_deleted() {
     }
   }
 }
+
+#[test]
+fn a_moved_target_runs_no_hook_before_it_is_refused() {
+  // Codex review on PR #526 (P1). The worker re-resolves its target to name
+  // the branch in the journal entry, so `found.path` is where the worktree is
+  // NOW. `pre_remove` runs with its cwd there, and the mismatch with the
+  // confirmed path was only caught afterwards, inside `remove_verified`: a
+  // destructive hook had already run against a directory the user never
+  // confirmed. Nothing may execute before the path is checked.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let original = wt_root.path().join("wt-521-hook-race");
+  worktree::add(&repo, "wt-521-hook-race", &original, "feat/#521-race", false).unwrap();
+
+  // The hook writes outside the worktree, so the witness survives whatever
+  // happens to the directory.
+  let witness = wt_root.path().join("hook-ran.txt");
+  write_remove_hooks(dir.path(), &format!("printf ran > '{}'", shell_path(&witness)));
+
+  let sandbox = TempDir::new().unwrap();
+  let journal_path = sandbox.path().join("history.toml");
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", &journal_path);
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None)
+    .unwrap()
+    .with_trust_mode(gwm::trust::TrustMode::Allow);
+  select_row(&mut app, "wt-521-hook-race");
+  app.enter_confirm_delete();
+  assert_eq!(app.pending_delete().len(), 1, "status was: {}", app.status);
+
+  // It moves between the confirm and the keystroke that fires it.
+  let moved = wt_root.path().join("wt-521-hook-race-moved");
+  worktree::run_git(
+    dir.path(),
+    &[
+      "worktree",
+      "move",
+      &original.to_string_lossy(),
+      &moved.to_string_lossy(),
+    ],
+  )
+  .unwrap();
+
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+
+  assert!(moved.exists(), "the worktree at its new path must survive");
+  assert!(
+    !witness.exists(),
+    "no hook may run against a path the user did not confirm (status: {})",
+    app.status
+  );
+  assert!(
+    app.delete_failure.is_some(),
+    "the batch must report the refusal (status: {})",
+    app.status
+  );
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
+
+#[test]
+fn a_warn_hook_reaches_the_status_line() {
+  // Codex review on PR #526 (P2). `on_fail = "warn"` is a success carrying a
+  // Warning step. The CLI prints the whole report, so the user sees the `!`;
+  // the TUI prints no report, so unless the step reaches the status line the
+  // phase means nothing there.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let doomed = wt_root.path().join("wt-521-warn");
+  worktree::add(&repo, "wt-521-warn", &doomed, "feat/#521-warn", false).unwrap();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "\n[[hooks.post_remove]]\nname = \"noisy cleanup\"\nrun = \"false\"\non_fail = \"warn\"\n",
+  )
+  .unwrap();
+
+  let sandbox = TempDir::new().unwrap();
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", sandbox.path().join("history.toml"));
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None)
+    .unwrap()
+    .with_trust_mode(gwm::trust::TrustMode::Allow);
+  select_row(&mut app, "wt-521-warn");
+  app.enter_confirm_delete();
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+
+  assert!(!doomed.exists(), "a warn hook does not stop the removal");
+  assert_eq!(app.delete_failure, None, "a warning is not a failure");
+  assert!(
+    app.status.contains("noisy cleanup"),
+    "the warning must name its step, got: {}",
+    app.status
+  );
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
+
+#[test]
+fn a_remove_hook_from_the_global_config_needs_no_repo_approval() {
+  // Codex review on PR #526 (P2). The trust ledger is about the repo's
+  // `.gwm.toml`. A remove hook coming from `~/.config/gwm/config.toml` is the
+  // user's own, so gating on the MERGED config sent an unapproved repo file
+  // to the ledger even though no line of it would run during the removal.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let doomed = wt_root.path().join("wt-521-global-hook");
+  worktree::add(&repo, "wt-521-global-hook", &doomed, "feat/#521-global", false).unwrap();
+
+  // The repo file carries an executable surface the ledger has never seen,
+  // but nothing that runs on a removal.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "\n[[hooks.post_create]]\nname = \"unrelated\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+
+  let sandbox = TempDir::new().unwrap();
+  let witness = sandbox.path().join("global-hook-ran.txt");
+  let global = sandbox.path().join("config.toml");
+  std::fs::write(
+    &global,
+    format!(
+      "\n[[hooks.post_remove]]\nname = \"global cleanup\"\nrun = \"printf ran > '{}'\"\n",
+      shell_path(&witness)
+    ),
+  )
+  .unwrap();
+
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  // The ledger is empty, which is the point: this repo has never been
+  // approved.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", sandbox.path().join("history.toml"));
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  // `TrustMode::Prompt` is what a plain `gwm` launch carries.
+  let mut app = App::new_at_layered(Some(dir.path()), Some(&global)).unwrap();
+  select_row(&mut app, "wt-521-global-hook");
+  app.enter_confirm_delete();
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+
+  assert!(
+    !doomed.exists(),
+    "an unapproved repo file that runs nothing on a removal must not block it (status: {}, failure: {:?})",
+    app.status,
+    app.delete_failure
+  );
+  assert!(witness.exists(), "the user's own global hook still runs");
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
