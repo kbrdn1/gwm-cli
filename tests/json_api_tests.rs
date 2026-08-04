@@ -11,6 +11,20 @@ use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Process-global lock for this binary's environment rewrite, held across any
+/// read that could observe it (issue #507).
+///
+/// Only one test here rewrites `$GWM_AGENTS_HOME`, and it is also the only
+/// reader, so the lock is uncontended today. It exists so the next test on
+/// either side inherits the rule instead of having to notice it, which is what
+/// `tests/env_guard_invariant_tests.rs` checks. Distinct from the helpers in
+/// the other suites on purpose: separate cargo-test binaries are separate
+/// processes, so a shared one would buy nothing.
+fn env_lock() -> &'static std::sync::Mutex<()> {
+  static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+  LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 fn sample_worktree() -> WorktreeInfo {
   let mut link = BranchLink::empty();
   link.issue = Some(42);
@@ -206,6 +220,7 @@ fn json_worktree_vec_decodes_from_a_daemon_list_result() {
 /// attach_agents caller, so the env var and the cache stay uncontended.
 #[test]
 fn attach_agents_reuses_detection_within_the_ttl() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let home = tempfile::TempDir::new().unwrap();
   // SAFETY-of-intent: single test touching this var in this binary.
   std::env::set_var("GWM_AGENTS_HOME", home.path());

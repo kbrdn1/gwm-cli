@@ -16,9 +16,18 @@ use tempfile::TempDir;
 /// adding a test can answer, rather than "does this string contain `{home}`?",
 /// which looks answerable and is not.
 ///
-/// A layered load reads it too (`Config::load_layered` → `global_config_path`
-/// → `dirs::home_dir`). Those tests do not take the lock yet; widening it
-/// there would serialise most of the binary, so it is tracked separately.
+/// The other half of that rule is which functions can see `$HOME`, and the
+/// note here used to answer it wrongly (#507): it claimed a layered load reads
+/// it through `Config::load_layered`. It does not. `load_layered` and
+/// `resolved_rows` take the global config path as a **parameter**, so they
+/// resolve nothing; `Config::load_for_repo` is the one that calls
+/// `global_config_path()`, and no test in this binary calls it. So
+/// `expand_placeholders` is the only ambient reader reachable from here, and
+/// #503 covered it completely.
+///
+/// The rule is no longer only stated: `tests/env_guard_invariant_tests.rs`
+/// checks it by construction, for this binary and the three others that
+/// rewrite an environment variable.
 fn env_lock() -> &'static std::sync::Mutex<()> {
   static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
   LOCK.get_or_init(|| std::sync::Mutex::new(()))
