@@ -4,11 +4,21 @@ use gwm::config::{
 };
 use tempfile::TempDir;
 
-/// Process-global lock guarding every test in this binary that reads or
-/// mutates `$HOME`. `expand_placeholders` resolves `{home}` through
-/// `dirs::home_dir` and ends with `shellexpand::tilde`, so a test that swaps
-/// `$HOME` races every other one that expands a `{home}` pattern. `set_var` is
-/// `unsafe` for the same reason the other suites take this lock (#494).
+/// Process-global lock guarding every test in this binary that can **observe**
+/// `$HOME`, not only the ones whose template mentions `{home}` (#503).
+///
+/// The narrower rule this doc used to state was the bug: `expand_placeholders`
+/// resolves `dirs::home_dir` unconditionally, before it looks at a single
+/// token (`src/config.rs`), so *every* call is a concurrent reader whatever
+/// the pattern says. `set_var` is `unsafe` precisely because it races a
+/// concurrent `getenv`, and a mutex only serialises the participants that take
+/// it — so the rule has to be "can this test see `$HOME`?", which a reader
+/// adding a test can answer, rather than "does this string contain `{home}`?",
+/// which looks answerable and is not.
+///
+/// A layered load reads it too (`Config::load_layered` → `global_config_path`
+/// → `dirs::home_dir`). Those tests do not take the lock yet; widening it
+/// there would serialise most of the binary, so it is tracked separately.
 fn env_lock() -> &'static std::sync::Mutex<()> {
   static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
   LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -357,6 +367,7 @@ fn placeholders_no_optional_args_leave_repo_only() {
 
 #[test]
 fn placeholders_expand_repo_path_and_parent() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let repo_path = std::path::Path::new("/Users/me/Projects/Perso/gwm-cli");
   // Derive the expected prefixes from `repo_path` itself rather than
   // duplicating the literal parent string — the contract under test is
@@ -383,6 +394,7 @@ fn placeholders_expand_repo_path_and_parent() {
 
 #[test]
 fn placeholders_repo_path_tokens_left_literal_without_path() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // When no repo path is supplied the disk-path tokens are passed
   // through untouched rather than collapsing to an empty string.
   let out = expand_placeholders("{repo_parent}/x", "r", None, None, None, None).unwrap();
@@ -2551,6 +2563,7 @@ fn tui_clipboard_invalid_value_errors_at_parse_time() {
 /// (`97e4e09`), and for the same reason.
 #[test]
 fn a_token_produced_by_expanding_the_repo_name_stays_literal() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let out = expand_placeholders(
     "{repo}/{desc}",
     "api-{type}",
@@ -2624,6 +2637,7 @@ fn a_token_produced_by_expanding_home_stays_literal() {
 /// one got it by not calling `replace` at all.
 #[test]
 fn a_token_with_no_value_survives_the_single_pass_verbatim() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   assert_eq!(
     expand_placeholders("{repo_parent}/{type}/{issue}/{desc}", "r", None, None, None, None).unwrap(),
     "{repo_parent}/{type}/{issue}/{desc}"
@@ -2645,6 +2659,7 @@ fn a_token_with_no_value_survives_the_single_pass_verbatim() {
 /// token lookup has to state that, where the nested `if let` fell into it.
 #[test]
 fn a_repo_path_without_a_parent_resolves_only_the_path_token() {
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let root = std::path::Path::new("/");
   assert!(root.parent().is_none(), "the fixture must actually have no parent");
 
