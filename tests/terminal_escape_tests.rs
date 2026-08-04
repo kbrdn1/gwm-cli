@@ -321,6 +321,45 @@ fn config_get_neutralises_a_bidi_override() {
 }
 
 #[test]
+fn trust_show_neutralises_a_bidi_override_in_the_ledger() {
+  // The **block** sink, which neither test above reaches: `trust show`,
+  // `doctor`'s toml diagnostic and every rendered error go through
+  // `sanitise_block_for_terminal`, so a rule added only to the single-row
+  // variant would leave those outputs exposed with the suite still green.
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  std::fs::write(
+    &ledger,
+    format!(
+      "[[entry]]\norigin = \"git@example.com:acme/repo{}.git\"\nsha = \"abc\"\n",
+      '\u{202E}'
+    ),
+  )
+  .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["trust", "show"])
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    bidi_chars(&stdout).is_empty(),
+    "trust show replayed {:?} from the ledger:\n{:?}",
+    bidi_chars(&stdout),
+    stdout
+  );
+  // The rows this view exists to show are still rows: the block variant keeps
+  // the line breaks that carry the layout.
+  assert!(
+    stdout.contains("origin = ") && stdout.contains("sha = "),
+    "the ledger should still render as rows, got {:?}",
+    stdout
+  );
+}
+
+#[test]
 fn trust_show_neutralises_control_bytes_in_the_ledger() {
   // `trust show` prints the ledger verbatim, and a ledger row records an
   // origin key: a remote URL, which arrived with a clone like everything else
