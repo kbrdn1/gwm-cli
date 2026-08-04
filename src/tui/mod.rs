@@ -649,13 +649,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // overlay rooted at the selected worktree (mirrors `LazyGitPty`).
       View::ExecPicker => match app.handle_exec_picker_key(key) {
         ExecPickerKey::Submit => {
-          if let Some((argv, cwd)) = app.exec_picker_resolve() {
+          if let Some((argv, cwd, teardown)) = app.exec_picker_resolve() {
             let sz = terminal.size().unwrap_or_default();
             let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
             let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
             let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
             match PtyOverlay::spawn(PtyKind::Exec, &argv_refs, &cwd, inner_cols, inner_rows) {
-              Ok(pty) => app.open_pty_overlay(pty),
+              // A containerised profile carries a teardown: the container
+              // survives its own client, so closing the overlay must remove it.
+              Ok(pty) => app.open_pty_overlay(match teardown {
+                Some(argv) => pty.with_teardown(argv),
+                None => pty,
+              }),
               Err(e) => {
                 app.status = format!("exec overlay failed: {}", e);
                 app.close_exec_picker();

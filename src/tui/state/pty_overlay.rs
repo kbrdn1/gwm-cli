@@ -51,6 +51,14 @@ pub struct PtyOverlay {
   /// Set by the `ReviewOverlay` dispatcher when `[review].command` uses `{diff}`.
   /// Dropped (and thus unlinked) when the overlay closes.
   pub diff_file: Option<tempfile::NamedTempFile>,
+  /// Argv to run, best-effort, once the overlay is killed (issue #421).
+  /// A containerised exec profile is spawned through `docker run`, and
+  /// killing that client does NOT stop the container: the daemon owns it, and
+  /// `--rm` only fires when it exits. So a long command would keep writing to
+  /// the worktree after the overlay visibly closed. This tears it down by
+  /// name. `None` for every other overlay (lazygit, review, a host command),
+  /// which the process-group signal already covers.
+  teardown: Option<Vec<String>>,
   /// Set by the run loop when a [`PtyKind::Exec`] child has exited and the
   /// overlay is *lingering* so its final output stays on screen (issue #325).
   /// Unlike lazygit / a shell — which close the overlay the instant the child
@@ -162,11 +170,24 @@ impl PtyOverlay {
       cols,
       rows,
       diff_file: None,
+      teardown: None,
       finished: false,
       reaped: false,
       spawn_pid,
       signalled: false,
     })
+  }
+
+  /// Attach a teardown command run once on [`Self::kill`] (issue #421).
+  /// Builder form, so no existing `spawn` call site changes.
+  pub fn with_teardown(mut self, argv: Vec<String>) -> Self {
+    self.teardown = Some(argv);
+    self
+  }
+
+  /// The attached teardown argv, if any. Exposed for the state tests.
+  pub fn teardown_argv(&self) -> Option<&[String]> {
+    self.teardown.as_deref()
   }
 
   /// Drain the reader channel and feed pending bytes into the vt100 parser.
@@ -265,6 +286,14 @@ impl PtyOverlay {
   /// guards against the unexpected: after that we fall back to a blocking
   /// `wait()`.
   pub fn kill(&mut self) {
+    self.kill_client();
+    // Always, including the early returns of `kill_client`: the client being
+    // already reaped says nothing about the container, which outlives it.
+    self.run_teardown();
+  }
+
+  /// Kill the pty leader and its process group, then reap it.
+  fn kill_client(&mut self) {
     // Clean the process group (kills backgrounded descendants). Sent at most
     // once: for a lingering exec overlay `mark_finished` already sent it when
     // the leader exited, so this is a no-op here and the long-linger PGID is
@@ -295,6 +324,25 @@ impl PtyOverlay {
     }
     let _ = self.child.wait();
     self.reaped = true;
+  }
+
+  /// Run the teardown command once, ignoring its outcome. Best-effort by
+  /// design: the container may already be gone (the command finished on its
+  /// own), and a TUI has no channel for the error of a cleanup the user did
+  /// not ask about. Output is discarded so nothing can corrupt the frame.
+  fn run_teardown(&mut self) {
+    let Some(argv) = self.teardown.take() else {
+      return;
+    };
+    let Some((bin, args)) = argv.split_first() else {
+      return;
+    };
+    let _ = std::process::Command::new(bin)
+      .args(args)
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status();
   }
 
   /// `true` once the child leader has been observed exited and reaped.

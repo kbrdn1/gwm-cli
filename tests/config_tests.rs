@@ -2518,6 +2518,10 @@ command = ["cargo", "test"]
   assert_eq!(c.runtime.as_deref(), Some("podman"));
   assert_eq!(c.extra_args, vec!["-e", "CI=1"]);
   assert!(
+    !c.selinux_relabel,
+    "relabelling is off unless asked: it writes to the host"
+  );
+  assert!(
     cfg.exec.profiles["test"].container.is_some() && cfg.exec.jobs.is_none(),
     "the block is nested under the profile, not a new top-level section"
   );
@@ -2536,6 +2540,22 @@ command = ["cargo", "test"]
     cfg.exec.profiles["test"].container.is_none(),
     "no `[container]` ⇒ the command runs on the host"
   );
+}
+
+#[test]
+fn exec_container_parses_the_selinux_relabel_flag() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "fedora:41"
+  selinux_relabel = true
+"#,
+  )
+  .expect("selinux_relabel parses");
+  assert!(cfg.exec.profiles["test"].container.as_ref().unwrap().selinux_relabel);
 }
 
 #[test]

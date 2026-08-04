@@ -332,3 +332,71 @@ fn kill_after_reap_still_signals_the_process_group_once() {
   pty.kill();
   assert!(pty.group_signalled());
 }
+
+// ── teardown on close (issue #421) ─────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn kill_runs_the_attached_teardown() {
+  // A containerised exec profile is spawned through `docker run`, and killing
+  // that client leaves the container running: the daemon owns it, and `--rm`
+  // only fires when it exits. The overlay therefore runs a teardown on close.
+  // Stood in for by `touch`, which needs no daemon.
+  let (dir, app) = make_app();
+  let marker = dir.path().join("torn-down");
+  let mut pty = PtyOverlay::spawn(PtyKind::Exec, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix")
+    .with_teardown(vec![
+      "sh".to_string(),
+      "-c".to_string(),
+      format!("touch {}", marker.display()),
+    ]);
+  assert!(pty.teardown_argv().is_some(), "the teardown is attached");
+  assert!(!marker.exists(), "and has not run before the kill");
+
+  pty.kill();
+  assert!(marker.exists(), "kill runs the teardown: {}", marker.display());
+  assert!(pty.teardown_argv().is_none(), "and runs it once, not on every kill");
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_runs_the_teardown_even_when_the_client_already_exited() {
+  // The container outlives its client, so "the client is already reaped" says
+  // nothing about the container — that early return must not skip the
+  // teardown.
+  let (dir, app) = make_app();
+  let marker = dir.path().join("torn-down-late");
+  let mut pty = PtyOverlay::spawn(PtyKind::Exec, &["sh", "-c", "exit 0"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix")
+    .with_teardown(vec![
+      "sh".to_string(),
+      "-c".to_string(),
+      format!("touch {}", marker.display()),
+    ]);
+  // Let the leader exit and be reaped through the normal liveness path.
+  for _ in 0..100 {
+    if !pty.is_alive() {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+  }
+  assert!(pty.is_reaped(), "the client exited on its own");
+
+  pty.kill();
+  assert!(
+    marker.exists(),
+    "the container is still torn down: {}",
+    marker.display()
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_overlay_without_a_teardown_runs_nothing_extra() {
+  let (_dir, app) = make_app();
+  let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
+  assert!(pty.teardown_argv().is_none(), "host commands carry none");
+  pty.kill(); // must not panic
+}

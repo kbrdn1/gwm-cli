@@ -486,6 +486,7 @@ fn container_cfg(image: &str) -> ContainerConfig {
     image: image.to_string(),
     runtime: None,
     extra_args: Vec::new(),
+    selinux_relabel: false,
   }
 }
 
@@ -512,8 +513,9 @@ fn container_argv_mirrors_host_paths_and_runs_the_command_as_the_container_cmd()
     Path::new("/wt/feat-1"),
     Path::new("/main/.git"),
     &argv(&["cargo", "test"]),
-    false,
-  );
+    None,
+  )
+  .unwrap();
   assert_eq!(
     out,
     argv(&[
@@ -569,7 +571,7 @@ fn container_argv_mounts_the_main_checkout_gitdir_for_a_linked_worktree() {
 
   let linked = git2::Repository::open(&wt_path).unwrap();
   let plan = ContainerPlan::resolve(container_cfg("rust:1.90"), linked.commondir(), |_| true).unwrap();
-  let out = plan.wrap(&wt_path, &argv(&["git", "status"]));
+  let out = plan.wrap(&wt_path, &argv(&["git", "status"])).unwrap();
 
   // Canonicalise both sides: on macOS a TempDir is `/var/…` while git may
   // record `/private/var/…`, and this asserts coverage, not string equality.
@@ -602,8 +604,9 @@ fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
     Path::new("/repo"),
     Path::new("/repo/.git"),
     &argv(&["true"]),
-    false,
-  );
+    None,
+  )
+  .unwrap();
   assert_eq!(
     mount_sources(&out),
     vec!["/repo".to_string()],
@@ -618,8 +621,9 @@ fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
     Path::new("/repo/"),
     Path::new("/repo/.git"),
     &argv(&["true"]),
-    false,
-  );
+    None,
+  )
+  .unwrap();
   assert_eq!(
     mount_sources(&out),
     vec!["/repo".to_string()],
@@ -634,6 +638,7 @@ fn container_argv_places_extra_args_after_gwms_flags_and_before_the_image() {
     image: "node:22".to_string(),
     runtime: None,
     extra_args: argv(&["-e", "CI=1", "--network", "none"]),
+    selinux_relabel: false,
   };
   let out = build_container_argv(
     "docker",
@@ -641,8 +646,9 @@ fn container_argv_places_extra_args_after_gwms_flags_and_before_the_image() {
     Path::new("/wt/x"),
     Path::new("/main/.git"),
     &argv(&["npm", "test"]),
-    false,
-  );
+    None,
+  )
+  .unwrap();
   let image_at = out.iter().position(|t| t == "node:22").expect("image present");
   let extra_at = out.iter().position(|t| t == "--network").expect("extra arg present");
   let w_at = out.iter().position(|t| t == "-w").expect("-w present");
@@ -671,8 +677,9 @@ fn container_argv_never_quotes_or_joins_a_token() {
     Path::new("/wt/x"),
     Path::new("/main/.git"),
     &["echo".to_string(), nasty.clone()],
-    false,
-  );
+    None,
+  )
+  .unwrap();
   assert_eq!(out.last().unwrap(), &nasty, "the token is passed through verbatim");
   assert!(
     !out.iter().any(|t| t.contains('\'') || t.contains('\\')),
@@ -687,7 +694,7 @@ fn container_plan_normalises_a_trailing_separator_on_the_common_dir() {
   // path, not as a directory listing.
   let plan = ContainerPlan::resolve(container_cfg("alpine"), Path::new("/main/.git/"), |_| true).unwrap();
   assert_eq!(plan.common_dir, PathBuf::from("/main/.git"));
-  let out = plan.wrap(Path::new("/wt/x"), &argv(&["true"]));
+  let out = plan.wrap(Path::new("/wt/x"), &argv(&["true"])).unwrap();
   assert!(
     out.contains(&"/main/.git:/main/.git".to_string()),
     "mount carries no trailing separator: {out:?}"
@@ -804,8 +811,9 @@ fn container_argv_declares_every_mounted_path_safe_for_git() {
     Path::new("/wt/feat-1"),
     Path::new("/main/.git"),
     &argv(&["git", "status"]),
-    false,
-  );
+    None,
+  )
+  .unwrap();
   let env: Vec<&String> = out.windows(2).filter(|w| w[0] == "-e").map(|w| &w[1]).collect();
   assert!(env.contains(&&"GIT_CONFIG_COUNT=2".to_string()), "{out:?}");
   assert!(env.contains(&&"GIT_CONFIG_KEY_0=safe.directory".to_string()), "{out:?}");
@@ -825,8 +833,9 @@ fn container_argv_declares_every_mounted_path_safe_for_git() {
     Path::new("/repo"),
     Path::new("/repo/.git"),
     &argv(&["true"]),
-    false,
-  );
+    None,
+  )
+  .unwrap();
   assert!(
     out.contains(&"GIT_CONFIG_COUNT=1".to_string()),
     "the deduped mount declares one path, not two: {out:?}"
@@ -840,21 +849,40 @@ fn only_the_interactive_wrap_allocates_a_tty() {
   // nothing; the TUI overlay spawns into a real pty, where its absence would
   // cost a REPL its stdin and its terminal.
   let plan = ContainerPlan::resolve(container_cfg("rust:1.90"), Path::new("/main/.git"), |_| true).unwrap();
-  let fanout = plan.wrap(Path::new("/wt/x"), &argv(&["cargo", "test"]));
-  let overlay = plan.wrap_interactive(Path::new("/wt/x"), &argv(&["cargo", "test"]));
+  let fanout = plan.wrap(Path::new("/wt/x"), &argv(&["cargo", "test"])).unwrap();
+  let overlay = plan
+    .wrap_interactive(Path::new("/wt/x"), &argv(&["cargo", "test"]), "gwm-x-1")
+    .unwrap();
 
   assert!(
     !fanout.contains(&"-t".to_string()) && !fanout.contains(&"-i".to_string()),
     "the fan-out allocates no tty: {fanout:?}"
   );
   assert_eq!(
-    &overlay[..5],
-    &argv(&["docker", "run", "--rm", "-i", "-t"])[..],
-    "the overlay asks for stdin and a tty, right after `run`: {overlay:?}"
+    &overlay[..7],
+    &argv(&["docker", "run", "--rm", "-i", "-t", "--name", "gwm-x-1"])[..],
+    "the overlay asks for stdin, a tty and a name, right after `run`: {overlay:?}"
   );
-  // Nothing else differs: same mounts, same command.
-  let strip: Vec<String> = overlay.iter().filter(|t| *t != "-i" && *t != "-t").cloned().collect();
-  assert_eq!(strip, fanout, "the tty flags are the only difference");
+  // Nothing else differs: same mounts, same env, same command. The name is
+  // what lets the overlay tear the container down on close; the fan-out never
+  // kills its client mid-run, so it needs none.
+  let mut skip_next = false;
+  let strip: Vec<String> = overlay
+    .iter()
+    .filter(|t| {
+      if skip_next {
+        skip_next = false;
+        return false;
+      }
+      if *t == "--name" {
+        skip_next = true;
+        return false;
+      }
+      *t != "-i" && *t != "-t"
+    })
+    .cloned()
+    .collect();
+  assert_eq!(strip, fanout, "the tty flags and the name are the only difference");
 }
 
 #[cfg(windows)]
@@ -872,4 +900,144 @@ fn a_container_profile_is_refused_on_windows() {
     msg.contains("Windows") && msg.contains("container"),
     "the error names the platform and the feature: {msg}"
   );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mount_path_holding_a_colon_is_refused_with_a_reason() {
+  // `:` is legal in a Unix path but is the field separator of
+  // `-v source:destination`, so the mount cannot be expressed. The runtime
+  // would reject the spec with a message about neither the worktree nor gwm.
+  let err = build_container_argv(
+    "docker",
+    &container_cfg("alpine"),
+    Path::new("/wt/od:d"),
+    Path::new("/main/.git"),
+    &argv(&["true"]),
+    None,
+  )
+  .expect_err("a colon in the worktree path must be refused");
+  let msg = err.to_string();
+  assert!(
+    msg.contains("od:d") && msg.contains(':'),
+    "the error names the path: {msg}"
+  );
+
+  // The gitdir side is checked too, not only the worktree.
+  let err = build_container_argv(
+    "docker",
+    &container_cfg("alpine"),
+    Path::new("/wt/x"),
+    Path::new("/main:repo/.git"),
+    &argv(&["true"]),
+    None,
+  )
+  .expect_err("a colon in the gitdir path must be refused too");
+  assert!(err.to_string().contains("main:repo"), "{err}");
+
+  // And a path without one still builds.
+  assert!(build_container_argv(
+    "docker",
+    &container_cfg("alpine"),
+    Path::new("/wt/x"),
+    Path::new("/main/.git"),
+    &argv(&["true"]),
+    None,
+  )
+  .is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn selinux_relabel_suffixes_every_mount_gwm_builds() {
+  // `extra_args` cannot reach the mounts gwm builds itself, so an
+  // SELinux-enforcing host (Fedora, RHEL) has no way to relabel them without
+  // this field — and without a relabel the container gets EACCES on both.
+  let cfg = ContainerConfig {
+    image: "fedora:41".to_string(),
+    runtime: None,
+    extra_args: Vec::new(),
+    selinux_relabel: true,
+  };
+  let out = build_container_argv(
+    "podman",
+    &cfg,
+    Path::new("/wt/feat-1"),
+    Path::new("/main/.git"),
+    &argv(&["true"]),
+    None,
+  )
+  .unwrap();
+  let mounts: Vec<&String> = out.windows(2).filter(|w| w[0] == "-v").map(|w| &w[1]).collect();
+  assert_eq!(
+    mounts,
+    vec![
+      &"/wt/feat-1:/wt/feat-1:z".to_string(),
+      &"/main/.git:/main/.git:z".to_string()
+    ],
+    "both mounts carry `:z`: {out:?}"
+  );
+  // Off by default: relabelling writes to the host, recursively.
+  let out = build_container_argv(
+    "podman",
+    &container_cfg("fedora:41"),
+    Path::new("/wt/feat-1"),
+    Path::new("/main/.git"),
+    &argv(&["true"]),
+    None,
+  )
+  .unwrap();
+  assert!(
+    !out.iter().any(|t| t.ends_with(":z")),
+    "no relabel unless asked: {out:?}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_interactive_wrap_names_the_container_so_it_can_be_torn_down() {
+  // Killing the pty leader kills the `docker` client, not the container: the
+  // daemon owns it and `--rm` only fires when it exits. Without a name there
+  // is nothing to remove, and a long command keeps writing to the worktree
+  // after the overlay closed.
+  let plan = ContainerPlan::resolve(container_cfg("rust:1.90"), Path::new("/main/.git"), |_| true).unwrap();
+  let name = gwm::exec::container_run_name(Path::new("/wt/feat-421-container-exec"), 3);
+  assert_eq!(name, "gwm-feat-421-container-exec-3");
+
+  let out = plan
+    .wrap_interactive(Path::new("/wt/feat-1"), &argv(&["cargo", "test"]), &name)
+    .unwrap();
+  assert!(
+    out.windows(2).any(|w| w[0] == "--name" && w[1] == name),
+    "the run is named: {out:?}"
+  );
+  assert_eq!(
+    plan.container_teardown_argv(&name),
+    argv(&["docker", "rm", "-f", "gwm-feat-421-container-exec-3"]),
+    "and the teardown removes exactly that name, with the same runtime"
+  );
+  // The fan-out form names nothing: its client is never killed mid-run.
+  let fanout = plan.wrap(Path::new("/wt/feat-1"), &argv(&["cargo", "test"])).unwrap();
+  assert!(!fanout.contains(&"--name".to_string()), "{fanout:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_container_name_is_reduced_to_the_accepted_character_class() {
+  // A container name must match `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. A worktree
+  // directory is not held to that: `gwm link` adopts any path.
+  let name = gwm::exec::container_run_name(Path::new("/wt/feat/#421 spike:x"), 1);
+  assert_eq!(name, "gwm--421-spike-x-1");
+  assert!(
+    name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()),
+    "starts with an alphanumeric: {name}"
+  );
+  assert!(
+    name
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-'),
+    "every character is accepted: {name}"
+  );
+  // An unnameable directory still yields a legal name.
+  assert_eq!(gwm::exec::container_run_name(Path::new("/"), 7), "gwm--7");
 }

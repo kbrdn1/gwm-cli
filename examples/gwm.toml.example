@@ -449,8 +449,15 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # There is no `interactive` knob: `gwm exec` is a fan-out over N worktrees,
 # where a TTY per container means nothing. The TUI exec overlay owns a real
-# pty, so IT runs the container with `-i -t`. Not supported on Windows: host
-# paths cannot be mirrored into a Linux container.
+# pty, so IT runs the container with `-i -t`, names the container and removes
+# it when the overlay closes (killing a `docker run` client does not stop the
+# container). Not supported on Windows: host paths cannot be mirrored into a
+# Linux container. A worktree path containing a `:` is refused too, since that
+# is the field separator of `-v source:destination`.
+#
+# On an SELinux-enforcing host (Fedora, RHEL), add `selinux_relabel = true` to
+# suffix gwm's own mounts with `:z`. Off by default because relabelling
+# writes a shared label to the host tree, recursively.
 #
 # [exec.profiles.ci]
 # command = ["cargo", "test", "--all-features"]

@@ -1347,11 +1347,12 @@ struct ExecPlan {
 
 impl ExecPlan {
   /// The argv to run in `worktree` — the plain command, or the containerised
-  /// wrap (which mounts that worktree's own path, hence per-worktree).
-  fn argv_for(&self, worktree: &Path) -> Vec<String> {
+  /// wrap (which mounts that worktree's own path, hence per-worktree). Errors
+  /// when that worktree cannot be expressed as a mount (a `:` in its path).
+  fn argv_for(&self, worktree: &Path) -> Result<Vec<String>> {
     match &self.container {
       Some(plan) => plan.wrap(worktree, &self.argv),
-      None => self.argv.clone(),
+      None => Ok(self.argv.clone()),
     }
   }
 
@@ -1385,7 +1386,7 @@ fn exec_run(targets: &[worktree::WorktreeInfo], plan: &ExecPlan, tag: Option<&st
       // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv,
       // but split defensively rather than indexing — a panic would be
       // user-facing.
-      let argv = plan.argv_for(&w.path);
+      let argv = plan.argv_for(&w.path)?;
       let (program, args) = argv
         .split_first()
         .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
@@ -1404,8 +1405,8 @@ fn exec_run(targets: &[worktree::WorktreeInfo], plan: &ExecPlan, tag: Option<&st
     use std::io::Write;
     let items: Vec<(String, std::path::PathBuf, Vec<String>)> = targets
       .iter()
-      .map(|w| (w.name.clone(), w.path.clone(), plan.argv_for(&w.path)))
-      .collect();
+      .map(|w| Ok((w.name.clone(), w.path.clone(), plan.argv_for(&w.path)?)))
+      .collect::<Result<_>>()?;
     let results = exec::run_in_dirs_parallel(plan.job_count, &items);
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();

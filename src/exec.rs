@@ -205,18 +205,59 @@ impl ContainerPlan {
   /// Wrap `argv` for `worktree`, non-interactively. See
   /// [`build_container_argv`]. This is the fan-out form: `gwm exec` runs
   /// across N worktrees, where a TTY per container means nothing.
-  pub fn wrap(&self, worktree: &Path, argv: &[String]) -> Vec<String> {
-    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv, false)
+  pub fn wrap(&self, worktree: &Path, argv: &[String]) -> Result<Vec<String>> {
+    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv, None)
   }
 
-  /// Wrap `argv` for `worktree` **with `-i -t`**, for a caller that already
-  /// owns a terminal: the TUI exec overlay spawns into a real pty
-  /// (`portable_pty::openpty`), so without them a REPL, a debugger or any
-  /// prompting command would read EOF and see no terminal — capabilities the
-  /// same command has when it runs on the host in that overlay.
-  pub fn wrap_interactive(&self, worktree: &Path, argv: &[String]) -> Vec<String> {
-    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv, true)
+  /// Wrap `argv` for `worktree` **with `-i -t` and a `--name`**, for a caller
+  /// that already owns a terminal: the TUI exec overlay spawns into a real
+  /// pty (`portable_pty::openpty`), so without the tty flags a REPL, a
+  /// debugger or any prompting command would read EOF and see no terminal —
+  /// capabilities the same command has when it runs on the host there.
+  ///
+  /// The name is what makes the container **stoppable**: killing the client
+  /// leaves the container running (the daemon owns it, and `--rm` only fires
+  /// once it exits), so the overlay tears it down by name on close. See
+  /// [`container_teardown_argv`].
+  pub fn wrap_interactive(&self, worktree: &Path, argv: &[String], name: &str) -> Result<Vec<String>> {
+    build_container_argv(
+      &self.runtime,
+      &self.config,
+      worktree,
+      &self.common_dir,
+      argv,
+      Some(name),
+    )
   }
+
+  /// The argv that force-removes the named container, best-effort, when the
+  /// TUI overlay closes.
+  pub fn container_teardown_argv(&self, name: &str) -> Vec<String> {
+    vec![self.runtime.clone(), "rm".into(), "-f".into(), name.to_string()]
+  }
+}
+
+/// A container name for the TUI overlay: `gwm-<worktree>-<seq>`, reduced to
+/// the character class a container name accepts
+/// (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`). `seq` disambiguates two overlays opened on
+/// the same worktree within one session, where the pid alone would collide.
+pub fn container_run_name(worktree: &Path, seq: u64) -> String {
+  let stem: String = worktree
+    .file_name()
+    .map(|n| n.to_string_lossy().to_string())
+    .unwrap_or_default()
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+        c
+      } else {
+        '-'
+      }
+    })
+    .collect();
+  // Leading `gwm-` guarantees the required alphanumeric first character even
+  // when the worktree name starts with `.` or `-`, or is empty.
+  format!("gwm-{stem}-{seq}")
 }
 
 /// Build the argv that runs `argv` inside the container described by `cfg`.
@@ -259,20 +300,28 @@ impl ContainerPlan {
 /// any) receives it as arguments; `extra_args = ["--entrypoint", ""]` opts
 /// out. `extra_args` lands after gwm's own flags, so a repeated flag wins.
 ///
-/// `interactive` adds `-i -t`; see [`ContainerPlan::wrap_interactive`].
+/// `name` is `Some` for the interactive (TUI overlay) form, which adds
+/// `-i -t --name <name>`; see [`ContainerPlan::wrap_interactive`].
+///
+/// Errors when a path gwm must mount contains a `:`. That byte is legal in a
+/// Unix path but is the field separator of `-v source:destination`, so such a
+/// mount cannot be expressed; the runtime would reject the spec with a
+/// message about neither the worktree nor gwm.
 pub fn build_container_argv(
   runtime: &str,
   cfg: &ContainerConfig,
   worktree: &Path,
   common_dir: &Path,
   argv: &[String],
-  interactive: bool,
-) -> Vec<String> {
+  name: Option<&str>,
+) -> Result<Vec<String>> {
   let wt = mount_path(worktree);
   let mut out = vec![runtime.to_string(), "run".into(), "--rm".into()];
-  if interactive {
+  if let Some(name) = name {
     out.push("-i".into());
     out.push("-t".into());
+    out.push("--name".into());
+    out.push(name.to_string());
   }
   // The paths gwm mounts itself, in mount order — also the exact set it
   // declares safe below.
@@ -280,9 +329,19 @@ pub fn build_container_argv(
   if !common_dir.starts_with(worktree) {
     mounted.push(mount_path(common_dir));
   }
+  if let Some(bad) = mounted.iter().find(|p| p.contains(':')) {
+    return Err(GwmError::Config(format!(
+      "exec: `[container]` cannot mount `{bad}` — a `:` in the path is the separator of \
+       `-v source:destination`, so the mount cannot be expressed. Move the worktree (or the \
+       repository) to a path without a colon, or run the profile on the host."
+    )));
+  }
+  // `:z` relabels the bind mount for an SELinux-enforcing host. Opt-in: it
+  // writes a shared label to the host tree, recursively.
+  let suffix = if cfg.selinux_relabel { ":z" } else { "" };
   for path in &mounted {
     out.push("-v".into());
-    out.push(format!("{path}:{path}"));
+    out.push(format!("{path}:{path}{suffix}"));
   }
   out.push("-w".into());
   out.push(wt);
@@ -297,7 +356,7 @@ pub fn build_container_argv(
   out.extend(cfg.extra_args.iter().cloned());
   out.push(cfg.image.clone());
   out.extend(argv.iter().cloned());
-  out
+  Ok(out)
 }
 
 /// Render a path for a `-v` / `-w` argument: `components()` drops a trailing

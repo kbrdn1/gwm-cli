@@ -36,9 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gwm exec` allocates no TTY, since a terminal per container means nothing
   across a fan-out; the TUI exec overlay, which spawns into a real pty, runs
   the container with `-i -t` so a REPL or a debugger keeps working there.
-  Refused on Windows with a message saying why: host paths cannot be mirrored
-  into a Linux container, and a linked worktree's `.git` file would still name
-  a drive-letter path.
+  The TUI overlay also names its container and removes it on close, because
+  killing a `docker run` client leaves the container running and a long
+  command would keep writing to the worktree after the overlay closed.
+  `selinux_relabel = true` suffixes gwm's own mounts with `:z` for an
+  SELinux-enforcing host, which `extra_args` cannot reach; it stays off by
+  default because relabelling writes to the host recursively. Refused on
+  Windows with a message saying why (host paths cannot be mirrored into a
+  Linux container, and a linked worktree's `.git` file would still name a
+  drive-letter path), and refused for a worktree path containing a `:`, which
+  is the field separator of `-v source:destination`.
 
 - **Multi-row selection in the TUI, and a batch delete on top of it**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the

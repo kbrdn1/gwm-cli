@@ -185,6 +185,17 @@ pub struct ContainerConfig {
   /// flag (e.g. `-w`) overrides gwm's.
   #[serde(default)]
   pub extra_args: Vec<String>,
+  /// Suffix gwm's own bind mounts with `:z` (issue #421). Needed on an
+  /// SELinux-enforcing host (Fedora, RHEL, CentOS), where an unlabelled bind
+  /// mount leaves the container process with `EACCES` on the worktree and the
+  /// gitdir. Opt-in rather than detected, because relabelling **writes to the
+  /// host**: it applies a shared SELinux label recursively to the worktree and
+  /// to the main checkout's `.git`.
+  ///
+  /// `extra_args` cannot express this — it cannot reach the mounts gwm builds
+  /// itself — which is why it is a field.
+  #[serde(default)]
+  pub selinux_relabel: bool,
 }
 
 /// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).

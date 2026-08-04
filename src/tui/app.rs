@@ -554,6 +554,11 @@ pub struct App {
   /// it so git answers inside the container.
   exec_picker_common_dir: PathBuf,
 
+  /// Monotonic counter behind the container name of an overlay run (issue
+  /// #421). The pid alone would collide across two overlays opened on the
+  /// same worktree within one session.
+  exec_container_seq: u64,
+
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
   /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
@@ -720,6 +725,7 @@ impl App {
       exec_picker: ExecPicker::new(),
       exec_picker_cfg: ExecConfig::default(),
       exec_picker_common_dir: PathBuf::new(),
+      exec_container_seq: 0,
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
@@ -2952,13 +2958,17 @@ impl App {
     }
   }
 
-  /// Resolve the highlighted exec profile to an `(argv, cwd)` pair for the
-  /// run loop to spawn in a PTY overlay (issue #325). `None` (with a
+  /// Resolve the highlighted exec profile to an `(argv, cwd, teardown)` triple
+  /// for the run loop to spawn in a PTY overlay (issue #325). `None` (with a
   /// status-bar message) when nothing is selected or the profile fails to
   /// resolve — e.g. an empty `command` array. The argv is the frozen
   /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
   /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
-  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
+  ///
+  /// `teardown` is `Some` only for a containerised profile (issue #421):
+  /// killing the pty leader kills the `docker` client, never the container it
+  /// asked the daemon for, so the overlay removes it by name on close.
+  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf, Option<Vec<String>>)> {
     let profile = self.exec_picker.selected_profile()?.to_string();
     // Resolve against the worktree captured when the picker opened, NOT the
     // live selection (which an auto-refresh may have drifted) — #333 review.
@@ -2967,6 +2977,7 @@ impl App {
       return None;
     };
     // Resolve against the `[exec]` config captured at open, not the live one.
+    let mut teardown: Option<Vec<String>> = None;
     match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
       Ok(mut argv) => {
         // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
@@ -2991,7 +3002,20 @@ impl App {
               // the container gets `-i -t` and a REPL / debugger / prompting
               // command keeps working, exactly as it does when the same
               // profile runs on the host here.
-              Ok(plan) => argv = plan.wrap_interactive(&cwd, &argv),
+              Ok(plan) => {
+                self.exec_container_seq += 1;
+                let name = crate::exec::container_run_name(&cwd, self.exec_container_seq);
+                match plan.wrap_interactive(&cwd, &argv, &name) {
+                  Ok(wrapped) => {
+                    argv = wrapped;
+                    teardown = Some(plan.container_teardown_argv(&name));
+                  }
+                  Err(e) => {
+                    self.status = format!("exec profile {profile:?}: {e}");
+                    return None;
+                  }
+                }
+              }
               Err(e) => {
                 self.status = format!("exec profile {profile:?}: {e}");
                 return None;
@@ -3004,7 +3028,7 @@ impl App {
             return None;
           }
         }
-        Some((argv, cwd))
+        Some((argv, cwd, teardown))
       }
       Err(e) => {
         self.status = format!("exec profile {profile:?}: {e}");
