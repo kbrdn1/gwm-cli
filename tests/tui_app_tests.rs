@@ -8302,6 +8302,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
       DeleteBatchOutcome {
         removed: vec![("alpha".into(), "/tmp/alpha".into())],
         failed: vec![],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -8336,6 +8337,7 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
           path: "/tmp/alpha".into(),
           error: "permission denied".into(),
         }],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -8368,6 +8370,7 @@ fn drain_drops_a_superseded_delete_worktree_result() {
       DeleteBatchOutcome {
         removed: vec![("alpha".into(), "/tmp/alpha".into())],
         failed: vec![],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -11704,6 +11707,7 @@ fn the_batch_status_names_the_failures() {
   let single = DeleteBatchOutcome {
     removed: vec![("alpha".into(), "/tmp/alpha".into())],
     failed: vec![],
+    warnings: vec![],
   };
   assert_eq!(single.status_line(), "removed alpha (/tmp/alpha)");
 
@@ -11717,6 +11721,7 @@ fn the_batch_status_names_the_failures() {
       path: "/tmp/gamma".into(),
       error: "locked".into(),
     }],
+    warnings: vec![],
   };
   assert_eq!(batch.status_line(), "removed 2 of 3 worktrees; failed: gamma (locked)");
 
@@ -11726,8 +11731,50 @@ fn the_batch_status_names_the_failures() {
       ("beta".into(), "/tmp/beta".into()),
     ],
     failed: vec![],
+    warnings: vec![],
   };
   assert_eq!(all_ok.status_line(), "removed 2 worktrees");
+}
+
+#[test]
+fn a_warning_rides_the_status_line_without_becoming_a_failure() {
+  // Issue #521: a `post_remove` hook that aborts, or an undo-journal entry
+  // that could not be written, happens around a removal that DID happen.
+  // Counting it as a failure would report the opposite of what is on disk,
+  // and `failure_banner` is what keeps the confirm overlay open, so a
+  // warning must not reach it.
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+
+  let with_warning = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![],
+    warnings: vec!["hook post_remove 'cleanup' failed: exited with 1".into()],
+  };
+  assert_eq!(
+    with_warning.status_line(),
+    "removed alpha (/tmp/alpha); hook post_remove 'cleanup' failed: exited with 1"
+  );
+  assert_eq!(
+    with_warning.failure_banner(),
+    None,
+    "a warning must not hold the confirm overlay open"
+  );
+
+  // A real failure still owns the banner, and warnings ride along.
+  let both = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![DeleteFailure {
+      id: "beta".into(),
+      path: "/tmp/beta".into(),
+      error: "locked".into(),
+    }],
+    warnings: vec!["journal unwritable".into()],
+  };
+  assert_eq!(
+    both.status_line(),
+    "removed 1 of 2 worktrees; failed: beta (locked); journal unwritable"
+  );
+  assert_eq!(both.failure_banner(), Some("/tmp/beta: locked".into()));
 }
 
 #[test]
@@ -11774,6 +11821,7 @@ fn a_partial_batch_narrows_the_confirm_to_the_failures_never_to_the_cursor() {
           path: doomed.clone(),
           error: "directory not empty".into(),
         }],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -11813,6 +11861,7 @@ fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
         error: "dirty".into(),
       },
     ],
+    warnings: vec![],
   };
   let banner = outcome.failure_banner().expect("two failures produce a banner");
   assert!(

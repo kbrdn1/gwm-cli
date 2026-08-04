@@ -24,11 +24,13 @@ use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode}
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
+use crate::lifecycle::{self, HookPhase, HookSkips};
 use crate::naming::{BranchSpec, WorktreeName};
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -4963,23 +4965,9 @@ impl App {
   /// removed from the right one.
   fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
+    let trust_mode = self.trust_mode;
     std::thread::spawn(move || {
-      let mut outcome = DeleteBatchOutcome::default();
-      for target in targets {
-        // `remove_verified`, not `remove`: the confirm named a PATH, and the
-        // id it resolved to can point elsewhere by the time the countdown
-        // fires (removed and recreated from another shell reuses the id).
-        let result = worktree::discover_repo(Some(&target.workdir))
-          .and_then(|repo| worktree::remove_verified(&repo, &target.id, &target.path, delete_branch));
-        match result {
-          Ok(()) => outcome.removed.push((target.id, target.path)),
-          Err(e) => outcome.failed.push(DeleteFailure {
-            id: target.id,
-            path: target.path,
-            error: e.to_string(),
-          }),
-        }
-      }
+      let outcome = run_delete_batch(targets, delete_branch, trust_mode);
       let _ = tx.send(TaskMsg::DeleteWorktree(generation, outcome));
     });
   }
@@ -6048,6 +6036,138 @@ impl App {
     self.refresh_link();
     Ok(())
   }
+}
+
+/// What one repo in a batch needs, resolved once rather than per target: the
+/// config carrying its hooks, its worktree list, and whether the trust ledger
+/// cleared it to run `.gwm.toml` code. A ten-row batch in one repo used to
+/// mean ten `worktree::list` calls, each walking every worktree's git status.
+struct RepoBatch {
+  repo: git2::Repository,
+  workdir: PathBuf,
+  config: Config,
+  worktrees: Vec<crate::worktree::WorktreeInfo>,
+  /// `Some(message)` when the config carries remove hooks the ledger has not
+  /// approved. Every target in this repo refuses with it.
+  trust_refusal: Option<String>,
+}
+
+impl RepoBatch {
+  fn open(workdir: &Path, trust_mode: crate::trust::TrustMode) -> Result<Self> {
+    let repo = worktree::discover_repo(Some(workdir))?;
+    let config = Config::load_for_repo(workdir)?;
+    let worktrees = worktree::list(&repo)?;
+    // Gate on the phases this operation actually runs, not on the whole
+    // `[hooks]` table: a repo whose only hook is `post_create` executes no
+    // code on a removal, and asking it a trust question would refuse a
+    // delete that has always worked.
+    let runs_hooks =
+      lifecycle::has_steps(&config, HookPhase::PreRemove) || lifecycle::has_steps(&config, HookPhase::PostRemove);
+    let trust_refusal = if runs_hooks {
+      let origin = crate::trust::origin_key_for_repo(&repo, workdir);
+      crate::trust::evaluate_silent(workdir, &origin, trust_mode, crate::trust::APPROVE_VIA_TRUST_ADD)?
+    } else {
+      None
+    };
+    Ok(Self {
+      repo,
+      workdir: workdir.to_path_buf(),
+      config,
+      worktrees,
+      trust_refusal,
+    })
+  }
+}
+
+/// Run a delete batch on a worker thread (issue #484), through the same
+/// sequence `gwm remove` uses (issue #521): `pre_remove` hooks, undo-journal
+/// entry, destruction, `post_remove` hooks.
+///
+/// Never stops at the first error: a locked, hook-blocked or already-pruned
+/// row must not strand the rest of a cleanup the user asked for. Each target
+/// is acted on through its own repo, so a workspace batch spanning several
+/// repos is removed from the right one.
+fn run_delete_batch(
+  targets: Vec<DeleteTarget>,
+  delete_branch: bool,
+  trust_mode: crate::trust::TrustMode,
+) -> DeleteBatchOutcome {
+  let mut outcome = DeleteBatchOutcome::default();
+  let mut repos: HashMap<PathBuf, RepoBatch> = HashMap::new();
+  // The TUI has no `--skip-hooks`; `d` is the plain form of `gwm remove`.
+  let skips = HookSkips::default();
+
+  for target in targets {
+    let batch = match repos.entry(target.workdir.clone()) {
+      Entry::Occupied(e) => e.into_mut(),
+      Entry::Vacant(e) => match RepoBatch::open(&target.workdir, trust_mode) {
+        Ok(b) => e.insert(b),
+        Err(err) => {
+          outcome.failed.push(DeleteFailure {
+            id: target.id,
+            path: target.path,
+            error: err.to_string(),
+          });
+          continue;
+        }
+      },
+    };
+
+    if let Some(message) = &batch.trust_refusal {
+      outcome.failed.push(DeleteFailure {
+        id: target.id,
+        path: target.path,
+        error: message.clone(),
+      });
+      continue;
+    }
+
+    // The live row, for the branch and name the journal entry records. The
+    // path it commits to destroying stays `target.path` — the one the
+    // confirm overlay showed — because git hands a worktree id back to
+    // whoever recreates a worktree with that basename.
+    let Some(found) = batch.worktrees.iter().find(|w| w.id == target.id) else {
+      outcome.failed.push(DeleteFailure {
+        id: target.id,
+        path: target.path,
+        error: "no longer listed in this repository".into(),
+      });
+      continue;
+    };
+
+    match crate::removal::remove_with_lifecycle(
+      &batch.repo,
+      &batch.workdir,
+      &batch.config,
+      &skips,
+      found,
+      &target.path,
+      delete_branch,
+    ) {
+      Ok(done) => {
+        outcome.removed.push((target.id, target.path));
+        outcome.warnings.extend(done.journal_warning);
+      }
+      Err(failure) => {
+        outcome.warnings.extend(failure.outcome.journal_warning.clone());
+        if failure.outcome.removed {
+          // A `post_remove` hook aborted on a worktree that IS gone. Calling
+          // that a failed removal would report the opposite of what is on
+          // disk, and would keep the confirm overlay open offering to remove
+          // a row that no longer exists (Codex review on PR #520).
+          outcome.removed.push((target.id, target.path));
+          outcome.warnings.push(failure.error.to_string());
+        } else {
+          outcome.failed.push(DeleteFailure {
+            id: target.id,
+            path: target.path,
+            error: failure.error.to_string(),
+          });
+        }
+      }
+    }
+  }
+  outcome
 }
 
 /// Resolve the shell command for `mode = "shell"`. Precedence:
