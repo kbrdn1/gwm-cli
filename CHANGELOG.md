@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The rule that a test which can observe a rewritten environment variable must
+  hold its binary's lock is now checked by construction rather than stated in a
+  doc comment. That comment is what #503 was about: it named a boundary
+  narrower than the real one, and five tests were written against the sentence.
+  Its replacement then stated a second wrong boundary, that a layered load
+  reads `$HOME`. It does not: `Config::load_layered` and `resolved_rows` take
+  the global config path as a parameter, and `Config::load_for_repo`, which
+  does resolve it, is called by no test in that binary. A new test walks the
+  four test binaries that rewrite a variable and fails on any test calling an
+  ambient reader of it without the lock, ignoring mentions in comments and
+  identifiers that merely end with the name. Both mistakes came from a search
+  that could not tell those apart.
+  ([#507](https://github.com/kbrdn1/gwm-cli/issues/507))
+
 - A branch name no longer reaches the TUI table with its bidi controls intact.
   The sinks the CLI goes through are not on the TUI's path, and what protected
   the TUI so far was incidental: measured on ratatui 0.30, every render path
