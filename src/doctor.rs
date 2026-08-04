@@ -305,11 +305,16 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
 /// keyword lands in `bootstrap.rs::evaluate_when`.
 const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_set:", "env_eq:", "glob_exists:"];
 
-/// Check #3: every `[[bootstrap.command]].when` predicate uses one of the
-/// supported keywords. Unknown predicates default to `true` in
-/// `bootstrap::evaluate_when`, so the command runs anyway and the user's
-/// intended gating condition is silently ignored — that's still a footgun
-/// worth flagging, just not "command never runs".
+/// Check #3: every `when` predicate uses one of the supported keywords.
+/// Unknown predicates default to `true` in `bootstrap::evaluate_when`, so
+/// the command runs anyway and the user's intended gating condition is
+/// silently ignored — that's still a footgun worth flagging, just not
+/// "command never runs".
+///
+/// Both surfaces that carry a predicate are walked: `[[bootstrap.command]]`
+/// and the six `[hooks.*]` phases. Reading the first only made this check
+/// pass vacuously on a config built out of hooks, reporting "no `when:`
+/// predicates configured" about a file with plenty of them.
 ///
 /// Walks every atom in the expression (via `bootstrap::when_atoms`) so
 /// negated atoms (`!env_set:CI`) and compound expressions
@@ -317,21 +322,32 @@ const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_s
 /// being green-lit by their first keyword.
 fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let name = "`when` predicates supported";
-  let bs = &ctx.config.bootstrap;
+
+  let commands = ctx
+    .config
+    .bootstrap
+    .command
+    .iter()
+    .map(|cmd| (format!("command `{}`", cmd.name), cmd.when.as_ref()));
+  let hooks = ctx
+    .config
+    .hooks
+    .all_steps()
+    .map(|(phase, step)| (format!("hook {} `{}`", phase, step.name), step.when.as_ref()));
 
   let mut unknown: Vec<String> = Vec::new();
   let mut recognised: usize = 0;
-  for cmd in &bs.command {
-    let Some(w) = &cmd.when else { continue };
+  for (label, when) in commands.chain(hooks) {
+    let Some(w) = when else { continue };
     // Walk every atom in the expression (via `bootstrap::when_atoms`) so
     // negated atoms (`!env_set:CI`) and compound expressions (`file_exists:a
     // && bogus:1`) are validated as a whole rather than green-lit by their
-    // first keyword. A command is `recognised` only when all its atoms
+    // first keyword. A step is `recognised` only when all its atoms
     // pass — a single unknown atom kicks it into `unknown`.
     let mut had_unknown = false;
     for atom in crate::bootstrap::when_atoms(w) {
       if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| atom.starts_with(p)) {
-        unknown.push(format!("{} (on command `{}`)", atom, cmd.name));
+        unknown.push(format!("{} (on {})", atom, label));
         had_unknown = true;
       }
     }
@@ -518,9 +534,19 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     }
   }
 
-  // Whatever the user's own bootstrap commands invoke.
-  for cmd in &ctx.config.bootstrap.command {
-    if let Some(bin) = extract_binary(&cmd.run) {
+  // Whatever the user's own bootstrap commands and lifecycle hooks invoke.
+  // Both surfaces, not just the first: a `[hooks.post_create]` step naming a
+  // binary that is not installed used to produce a clean report right up to
+  // the moment `gwm create` ran it and failed.
+  let runs = ctx
+    .config
+    .bootstrap
+    .command
+    .iter()
+    .map(|cmd| &cmd.run)
+    .chain(ctx.config.hooks.all_steps().map(|(_, step)| &step.run));
+  for run in runs {
+    if let Some(bin) = extract_binary(run) {
       needed.insert(bin);
     }
   }
