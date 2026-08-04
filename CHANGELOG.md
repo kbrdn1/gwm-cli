@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LifecycleHooksConfig::all_steps()` enumerates the phases through an
   exhaustive destructuring, so adding a seventh phase without teaching the
   consumers about it is now a compile error rather than a silent blind spot.
+  The PATH probe also honours each step's `when` predicate now, on bootstrap
+  commands as well, which it never did: the `node` preset ships `bun install`
+  under `cmd_exists:bun` and `npm ci` under `!cmd_exists:bun`, so probing both
+  regardless warned about whichever one the predicate had switched off, and a
+  Warning takes `gwm doctor` to exit code 1. The predicate is evaluated
+  against the main checkout, the same approximation the `.envrc` probe already
+  made; an unrecognised keyword still evaluates to `true`, matching the step
+  running anyway at bootstrap time.
 
 ### Docs
 
