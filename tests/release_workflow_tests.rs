@@ -111,20 +111,44 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
   );
 }
 
-/// #433, the follow-up to #429/#432: the sibling workflows carry the same
-/// shape, and none of their checkouts pushes — `ci.yml` is entirely read-only
-/// and `pre-release.yml` publishes through `gh` with an env token, never
-/// `git push`. No checkout here has any business passing `token:`, so the rule
-/// is stricter than in release.yml: every checkout opts out, no exceptions.
-#[test]
-fn ci_and_prerelease_checkouts_do_not_persist_credentials() {
-  for (path, floor) in [
-    (".github/workflows/ci.yml", 6),
-    (".github/workflows/pre-release.yml", 2),
-  ] {
-    let mut audited = 0;
+/// Every workflow in the directory, so a file added later is audited by
+/// construction rather than by remembering to extend a hand-written list. The
+/// three sweeps below all enumerate from here: naming files individually is
+/// how a new workflow silently escapes an invariant that was supposed to be
+/// repo-wide.
+fn workflow_paths() -> Vec<String> {
+  let mut paths: Vec<String> = fs::read_dir(".github/workflows")
+    .expect("the workflows directory must exist")
+    .map(|e| e.unwrap().path())
+    .filter(|p| p.extension().is_some_and(|e| e == "yml" || e == "yaml"))
+    .map(|p| p.to_str().unwrap().to_string())
+    .collect();
+  paths.sort();
+  paths
+}
 
-    for (job, with) in workflow_checkout_steps(path) {
+/// #433, the follow-up to #429/#432: the sibling workflows carry the same
+/// shape, and none of their checkouts pushes — `ci.yml` is entirely read-only,
+/// `pre-release.yml` publishes through `gh` with an env token, never
+/// `git push`, and `docs-sync.yml` only calls an API. No checkout outside
+/// release.yml has any business passing `token:`, so the rule is stricter
+/// there: every checkout opts out, no exceptions.
+///
+/// The set is discovered, not listed: release.yml is the single exception
+/// (it owns the audited token split above), everything else is swept.
+#[test]
+fn sibling_workflow_checkouts_do_not_persist_credentials() {
+  let release = ".github/workflows/release.yml";
+  let mut swept = 0;
+  let mut audited = 0;
+
+  for path in workflow_paths() {
+    if path == release {
+      continue;
+    }
+    swept += 1;
+
+    for (job, with) in workflow_checkout_steps(&path) {
       assert!(
         with["token"].is_null(),
         "the checkout in `{path}` job `{job}` passes an explicit token, but nothing in this \
@@ -138,13 +162,21 @@ fn ci_and_prerelease_checkouts_do_not_persist_credentials() {
          `persist-credentials: false`"
       );
     }
-
-    assert!(
-      audited >= floor,
-      "expected at least {floor} checkouts in `{path}`, found {audited} — the parser is probably \
-       no longer seeing the steps"
-    );
   }
+
+  // A glob that matches nothing passes vacuously, and so does one that stops
+  // seeing the steps inside the files it matched. Both floors are the counts
+  // at the time of writing, minus release.yml.
+  assert!(
+    swept >= 3,
+    "expected at least 3 workflows besides release.yml, found {swept} — the directory listing is \
+     probably no longer seeing them"
+  );
+  assert!(
+    audited >= 8,
+    "expected at least 8 credential-free checkouts outside release.yml, found {audited} — the \
+     parser is probably no longer seeing the steps"
+  );
 }
 
 /// The mirror of the invariant above: the two checkouts that push must keep the
@@ -254,6 +286,74 @@ fn prerelease_workflow_does_not_match_stable_tags() {
     !workflow.contains("\n      - \"v*.*.*\""),
     "pre-release.yml must not trigger on stable tags"
   );
+}
+
+const DOCS_SYNC: &str = ".github/workflows/docs-sync.yml";
+
+fn docs_sync_triggers() -> serde_yaml_ng::Value {
+  let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&fs::read_to_string(DOCS_SYNC).unwrap()).unwrap();
+  workflow["on"].clone()
+}
+
+/// The published docs must only ever show what was *delivered*. `main` is the
+/// delivered state — it is reached exclusively through a `dev` → `main` PR —
+/// so the sync fires on pushes to `main` and on nothing else.
+///
+/// A `dev` trigger would publish pages describing unreleased behaviour. A tag
+/// trigger would be worse: GitHub's `v*.*.*` glob also matches `v0.8.0-rc.4`,
+/// the exact trap `release.yml` has to guard against by hand, so the docs of
+/// every release candidate would go live as if they were stable.
+#[test]
+fn docs_sync_fires_on_pushes_to_main_only() {
+  let on = docs_sync_triggers();
+  let push = &on["push"];
+
+  let branches: Vec<&str> = push["branches"]
+    .as_sequence()
+    .expect("docs-sync.yml must restrict its push trigger to a branch list")
+    .iter()
+    .filter_map(|b| b.as_str())
+    .collect();
+  assert_eq!(
+    branches,
+    ["main"],
+    "docs-sync.yml must fire on `main` alone: any other branch publishes undelivered docs"
+  );
+
+  assert!(
+    push["tags"].is_null(),
+    "docs-sync.yml must not trigger on tags: the `v*.*.*` glob matches pre-release tags too"
+  );
+  assert!(
+    on["pull_request"].is_null(),
+    "docs-sync.yml must not trigger on pull requests: it publishes, it does not check"
+  );
+}
+
+/// The paths filter is the one half of the contract this repo cannot see: the
+/// conversion script lives in `kbrdn1/kbrdn-docs` and reads exactly two roots
+/// of this repo. A root dropped here does not break anything loudly — it just
+/// stops waking the sync, and the site quietly serves stale pages.
+///
+/// So the list is pinned literally. If the site starts reading a third root,
+/// this test is where that gets recorded.
+#[test]
+fn docs_sync_watches_every_root_the_site_reads() {
+  let on = docs_sync_triggers();
+  let paths: Vec<&str> = on["push"]["paths"]
+    .as_sequence()
+    .expect("docs-sync.yml must filter its push trigger by path")
+    .iter()
+    .filter_map(|p| p.as_str())
+    .collect();
+
+  for root in ["docs/**", "changelogs/**"] {
+    assert!(
+      paths.contains(&root),
+      "docs-sync.yml must watch `{root}`: the site's sync script reads it, so a change there \
+       has to wake the sync (paths = {paths:?})"
+    );
+  }
 }
 
 #[test]
