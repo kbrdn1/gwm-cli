@@ -1,5 +1,6 @@
 # Responsive layout — wide terminal, sidebar pinned side-by-side.
-# `Space` cycles stacked(default) → auto → side-by-side; two presses pin it.
+# `z` cycles stacked(default) → auto → side-by-side; two presses pin it.
+# (`Space` marks a row since #484.)
 Output docs/_capture/.tmp/side-by-side.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
@@ -23,6 +24,6 @@ Enter
 Sleep 3s
 Down@500ms 1
 Sleep 700ms
-Space@600ms 2
+Type@600ms "zz"
 Sleep 1500ms
 Screenshot docs/2.tui/_assets/side-by-side.png
