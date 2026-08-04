@@ -195,9 +195,15 @@ fn ambient_readers(src: &[(String, String)], vars: &BTreeSet<String>) -> BTreeSe
     }
   }
 
+  // Direct readers are kept whatever their name collides with. The unique-name
+  // rule below exists to stop the *transitive* walk from reaching `new` and
+  // `default`, and applying it here instead dropped `expand_placeholders`,
+  // which `config.rs` and `lifecycle.rs` both define: the guard then stayed
+  // green with the lock deleted from the very test #503 was about. Measured,
+  // the direct readers are seven specific names, none of them generic, so
+  // there is nothing to protect against here.
   let mut readers: BTreeSet<String> = src
     .iter()
-    .filter(|(name, _)| unique.contains(name.as_str()))
     .filter(|(_, body)| code_lines(body).any(|l| seeds.iter().any(|s| l.contains(s.as_str()))))
     .map(|(name, _)| name.clone())
     .collect();
@@ -295,7 +301,7 @@ fn every_test_that_can_observe_a_rewritten_env_var_locks_first() {
     // over a list and calls `remove_var(v)`, so the literal scan finds nothing
     // and the binary would drop out of the audit entirely while the count
     // stayed plausible.
-    if !source.contains("set_var(") && !source.contains("remove_var(") {
+    if call_at(&source, "set_var").is_none() && call_at(&source, "remove_var").is_none() {
       continue;
     }
     audited += 1;
@@ -339,12 +345,14 @@ fn every_test_that_can_observe_a_rewritten_env_var_locks_first() {
   }
 
   // A sweep that silently stops finding binaries reports "no offenders" for
-  // the same reason an empty one does. Ten rewrite the environment today,
-  // eleven counting this file, which is skipped because its own fixtures
-  // contain the strings being searched for. The floor moves up when one is
-  // added, never down without saying why.
+  // the same reason an empty one does. Nine rewrite the environment today
+  // (this file is skipped: its own fixtures contain the strings being searched
+  // for). The floor moves up when a binary is added, never down without saying
+  // why. It read ten until the membership test became a call rather than a
+  // substring: `bootstrap_when_tests` mutates nothing, and was counted for the
+  // `set_var(` inside `env_set_false_for_unset_var()`.
   assert!(
-    audited >= 10,
+    audited >= 9,
     "expected the sweep to find the env-rewriting binaries, found {audited}"
   );
   assert!(
@@ -423,5 +431,32 @@ fn the_guard_can_actually_fire() {
     mutated_vars("  std::env::set_var(\"GWM_HISTORY_FILE\", p);\n"),
     vars,
     "the binary's own set_var is what says which variable it rewrites"
+  );
+}
+
+#[test]
+fn the_reader_that_started_all_this_is_derived_from_the_real_source() {
+  // #503 was `expand_placeholders` reached without the lock, so a guard that
+  // does not classify *that* function as a reader is worth nothing whatever
+  // else it checks. This is not hypothetical: the unique-name filter dropped
+  // it, because `config.rs` and `lifecycle.rs` both define a function by that
+  // name, and the sweep stayed green with the lock deleted from the very test
+  // the issue was about. Derived from the real tree, not a fixture, because
+  // that is the part that broke.
+  let src: Vec<(String, String)> = rs_files(&repo_root().join("src"))
+    .iter()
+    .flat_map(|p| functions(&read(p)))
+    .collect();
+  let home: BTreeSet<String> = ["HOME".to_string()].into_iter().collect();
+  let readers = ambient_readers(&src, &home);
+
+  assert!(
+    readers.contains("expand_placeholders"),
+    "the function #503 is about must be classified as a $HOME reader, got {} readers",
+    readers.len()
+  );
+  assert!(
+    readers.contains("global_config_path"),
+    "and so must the resolver behind Config::load_for_repo"
   );
 }
