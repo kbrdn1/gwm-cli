@@ -211,3 +211,21 @@ fn file_icon_maps_known_extensions_and_falls_back() {
   assert_eq!(file_icon("Makefile"), WT_FILE_ICON);
   assert_eq!(file_icon(".gitignore"), WT_FILE_ICON);
 }
+
+#[test]
+fn sanitize_name_replaces_bidi_controls() {
+  // Issue #506: `-z` emits filenames verbatim and a `Bidi_Control` character
+  // is legal in one, so a name can render in an order the bytes do not have.
+  // They are `Cf`, so the control-character rule above never saw them.
+  for c in [
+    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+    '\u{2067}', '\u{2068}', '\u{2069}',
+  ] {
+    assert_eq!(
+      sanitize_name(&format!("a{c}b.rs")),
+      "a?b.rs",
+      "U+{:04X} must be neutralised like a control character",
+      c as u32
+    );
+  }
+}
