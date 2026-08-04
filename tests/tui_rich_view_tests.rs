@@ -199,7 +199,9 @@ fn control_and_bidi_characters_are_neutralised() {
 
   for r in &rows {
     assert!(
-      !r.value.chars().any(|c| c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)),
+      !r.value
+        .chars()
+        .any(|c| c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)),
       "row {:?} still carries a control or bidi character",
       r.value
     );
@@ -269,10 +271,7 @@ fn a_summary_only_pr_renders_no_empty_sections() {
     value_for(&rows, "diff").is_none(),
     "a 0/0 diff is a missing measurement, not an empty one"
   );
-  assert!(
-    value_for(&rows, "branch").is_none(),
-    "no branch pair without the refs"
-  );
+  assert!(value_for(&rows, "branch").is_none(), "no branch pair without the refs");
 }
 
 #[test]
@@ -285,7 +284,10 @@ fn issue_rows_drop_what_an_issue_does_not_have() {
   assert_eq!(value_for(&rows, "labels").as_deref(), Some("feature, tui"));
   assert!(value_for(&rows, "checks").is_none(), "an issue has no CI");
   assert!(value_for(&rows, "diff").is_none(), "an issue has no diff");
-  assert!(!vals.iter().any(|v| v.starts_with("reviews")), "an issue has no reviews");
+  assert!(
+    !vals.iter().any(|v| v.starts_with("reviews")),
+    "an issue has no reviews"
+  );
   assert!(vals.iter().any(|v| v.contains("Sounds good.")), "the comment renders");
 }
 
