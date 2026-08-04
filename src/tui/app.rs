@@ -6062,6 +6062,14 @@ impl RepoBatch {
   fn open(workdir: &Path, global_path: Option<&Path>, trust_mode: crate::trust::TrustMode) -> Result<Self> {
     let repo = worktree::discover_repo(Some(workdir))?;
     let config = Config::load_layered(workdir, global_path)?;
+    // Read back to back with the one above, before the `worktree::list` below,
+    // which walks every worktree's git status and is the expensive part. The
+    // two reads still are not atomic — `trust::evaluate` opens the file a
+    // third time to hash it — but a `.gwm.toml` rewritten between them can no
+    // longer land in a window measured in hundreds of milliseconds (Codex
+    // review on PR #526). Closing it fully means handing `evaluate` bytes
+    // already read, which is a change to the trust surface, not to this one.
+    let repo_only = Config::load_layered(workdir, None)?;
     let worktrees = worktree::list(&repo)?;
     // Gate on the phases this operation actually runs, asked of the file the
     // trust decision is about. Two narrowings, both load-bearing:
@@ -6074,7 +6082,6 @@ impl RepoBatch {
     //   approval, yet it would make the merged config answer yes and send the
     //   repo file to a ledger check that no line of it would survive to
     //   justify (Codex review on PR #526).
-    let repo_only = Config::load_layered(workdir, None)?;
     let runs_hooks =
       lifecycle::has_steps(&repo_only, HookPhase::PreRemove) || lifecycle::has_steps(&repo_only, HookPhase::PostRemove);
     let trust_refusal = if runs_hooks {

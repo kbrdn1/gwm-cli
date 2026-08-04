@@ -507,20 +507,28 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
   remove_inner(repo, name, None, delete_branch)
 }
 
-/// Shared body of [`remove`] and [`remove_verified`].
-///
-/// The check lives here, on the handle the prune will actually act on, rather
-/// than in a wrapper that resolves the name a second time: re-resolving would
-/// reopen the very window the check exists to close, however narrow (Codex
-/// review on PR #520). `expected_path = None` is the historical, unverified
-/// removal.
+/// The refusal a path mismatch produces, shared so the two check sites word
+/// it identically whichever one catches the move.
+fn path_changed(name: &str, actual: &Path, expected: &Path) -> GwmError {
+  GwmError::Other(format!(
+    "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
+    name,
+    actual.display(),
+    expected.display()
+  ))
+}
+
 /// Refuse unless the worktree `name` currently sits at `expected_path`.
 ///
-/// Callable before the removal itself so nothing runs against a path the user
-/// never confirmed: `remove_verified` closes the window at the point of
-/// destruction, but a `pre_remove` hook executes *before* that, with its cwd
-/// at the worktree (Codex review on PR #526). Both call it, so a target that
-/// moved is refused with one wording whichever check catches it first.
+/// An *advance* check, for callers that run something before the removal
+/// itself: a `pre_remove` hook executes with its cwd at the worktree, so
+/// leaving the whole question to [`remove_verified`] let a destructive hook
+/// act on a directory the user never confirmed (Codex review on PR #526).
+///
+/// It does NOT replace the check inside [`remove_inner`], which resolves the
+/// name a second time here. That is the point: this one narrows the window,
+/// and the one on the prune handle closes it (Codex review on PR #526 again,
+/// after this function was first written as the only check).
 ///
 /// Compared verbatim: both sides come from `Worktree::path()`, so they carry
 /// the same normalisation.
@@ -529,23 +537,28 @@ pub fn verify_path(repo: &Repository, name: &str, expected_path: &Path) -> Resul
     .find_worktree(name)
     .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
   if wt.path() != expected_path {
-    return Err(GwmError::Other(format!(
-      "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
-      name,
-      wt.path().display(),
-      expected_path.display()
-    )));
+    return Err(path_changed(name, wt.path(), expected_path));
   }
   Ok(())
 }
 
+/// Shared body of [`remove`] and [`remove_verified`].
+///
+/// The check lives here, on the handle the prune will actually act on, rather
+/// than delegating to [`verify_path`], which resolves the name a second time:
+/// another process that removes and recreates the id between the two lookups
+/// would have the first handle validated and the second one destroyed (Codex
+/// review on PR #520, then again on #526). `expected_path = None` is the
+/// historical, unverified removal.
 fn remove_inner(repo: &Repository, name: &str, expected_path: Option<&Path>, delete_branch: bool) -> Result<()> {
-  if let Some(expected) = expected_path {
-    verify_path(repo, name, expected)?;
-  }
   let wt = repo
     .find_worktree(name)
     .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  if let Some(expected) = expected_path {
+    if wt.path() != expected {
+      return Err(path_changed(name, wt.path(), expected));
+    }
+  }
   let path = wt.path().to_path_buf();
 
   // Capture the branch (if any) so we can drop it after pruning.

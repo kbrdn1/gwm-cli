@@ -115,6 +115,15 @@ pub fn remove_with_lifecycle(
   // (Codex review on PR #526). Everything that refuses without mutating
   // anything — the path check above, a `pre_remove` hook, the trust gate —
   // happens earlier, so a refusal still records nothing.
+  // Checked again, because the hooks just ran and one of them can move the
+  // very worktree it was given: the advance check above passed, so without
+  // this the entry would claim a removal `remove_verified` is about to refuse,
+  // and `gwm undo` would pop that instead of a recoverable one (Codex review
+  // on PR #526).
+  if let Err(e) = worktree::verify_path(repo, &found.id, expected_path) {
+    return Err(Box::new(RemovalFailure { outcome, error: e }));
+  }
+
   let entry = journal_entry(repo, found, delete_branch);
   if let Err(e) = history::record(entry) {
     outcome.journal_warning = Some(format!(
@@ -143,9 +152,32 @@ pub fn remove_with_lifecycle(
   Ok(outcome)
 }
 
+/// The branch a removal will actually delete: the one checked out in the
+/// worktree right now, which is what `worktree::remove` reads.
+///
+/// Not `WorktreeInfo::branch`, which comes from a listing the caller may have
+/// taken a while ago. A batch resolves its listing once, so a `pre_remove`
+/// hook on an earlier target can check out another branch in a later one
+/// without moving it; recording the stale name would have `gwm undo` restore
+/// a ref that was never deleted while the deleted one stayed lost (Codex
+/// review on PR #526). Falls back to the listing when the worktree cannot be
+/// opened, and yields `None` on a detached HEAD, matching what the removal
+/// does with it.
+fn branch_at_removal_time(found: &WorktreeInfo) -> Option<String> {
+  let live = Repository::open(&found.path).ok().and_then(|wt_repo| {
+    let head = wt_repo.head().ok()?;
+    if !head.is_branch() {
+      return None;
+    }
+    head.shorthand().ok().map(String::from)
+  });
+  live.or_else(|| found.branch.clone())
+}
+
 /// The undo-journal entry for a removal that is about to happen.
 fn journal_entry(repo: &Repository, found: &WorktreeInfo, delete_branch: bool) -> OpEntry {
-  let branch_oid = found.branch.as_deref().and_then(|b| {
+  let branch = branch_at_removal_time(found);
+  let branch_oid = branch.as_deref().and_then(|b| {
     repo
       .find_branch(b, git2::BranchType::Local)
       .ok()
@@ -160,7 +192,7 @@ fn journal_entry(repo: &Repository, found: &WorktreeInfo, delete_branch: bool) -
     ts: chrono::Utc::now(),
     kind: OpKind::Remove,
     worktree: found.name.clone(),
-    branch: found.branch.clone(),
+    branch,
     branch_oid,
     path: found.path.clone(),
     deleted_branch: delete_branch,

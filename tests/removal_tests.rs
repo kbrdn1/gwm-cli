@@ -765,3 +765,147 @@ fn a_remove_hook_from_the_global_config_needs_no_repo_approval() {
     }
   }
 }
+
+#[test]
+fn a_hook_that_moves_the_target_leaves_no_journal_entry() {
+  // Codex review on PR #526 (P2). The advance path check runs before the
+  // hooks, so a `pre_remove` that moves the worktree itself passes it, and
+  // the journal entry was then written before `remove_verified` refused: the
+  // journal claimed a removal that never happened, and `gwm undo` would have
+  // popped that instead of a recoverable one.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let original = wt_root.path().join("wt-521-self-move");
+  worktree::add(&repo, "wt-521-self-move", &original, "feat/#521-self-move", false).unwrap();
+  let moved = wt_root.path().join("wt-521-self-move-elsewhere");
+
+  // The hook moves the very worktree being removed, out from under the plan.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      "\n[[hooks.pre_remove]]\nname = \"move myself\"\nrun = \"git -C '{}' worktree move '{}' '{}'\"\n",
+      shell_path(dir.path()),
+      shell_path(&original),
+      shell_path(&moved)
+    ),
+  )
+  .unwrap();
+
+  let sandbox = TempDir::new().unwrap();
+  let journal_path = sandbox.path().join("history.toml");
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", &journal_path);
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None)
+    .unwrap()
+    .with_trust_mode(gwm::trust::TrustMode::Allow);
+  select_row(&mut app, "wt-521-self-move");
+  app.enter_confirm_delete();
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+
+  assert!(moved.exists(), "the moved worktree survives (status: {})", app.status);
+  assert!(
+    history::Journal::load(&journal_path).unwrap().entries().is_empty(),
+    "nothing was removed, so nothing may claim to be undoable"
+  );
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
+
+#[test]
+fn the_journal_names_the_branch_the_removal_actually_deletes() {
+  // Codex review on PR #526 (P1). A batch resolves its listing once, so a
+  // `pre_remove` hook on an earlier target can change a later target's branch
+  // without changing its path: every path check still passes. `remove_inner`
+  // reads the branch to delete off the worktree's HEAD at removal time, while
+  // the journal entry took it from that stale listing, so `gwm undo` would
+  // restore the wrong ref and the branch really deleted would stay lost.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let first = wt_root.path().join("wt-521-lot-a");
+  let second = wt_root.path().join("wt-521-lot-b");
+  worktree::add(&repo, "wt-521-lot-a", &first, "feat/#521-lot-a", false).unwrap();
+  worktree::add(&repo, "wt-521-lot-b", &second, "feat/#521-b-before", false).unwrap();
+
+  // `when:` resolves against the hook's cwd, which is the worktree being
+  // removed, so the marker scopes the hook to the first target only.
+  std::fs::write(first.join(".trigger"), "").unwrap();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      "\n[[hooks.pre_remove]]\nname = \"swap the other branch\"\nwhen = \"file_exists:.trigger\"\nrun = \"git -C '{}' checkout -b feat/#521-b-after\"\n",
+      shell_path(&second)
+    ),
+  )
+  .unwrap();
+
+  let sandbox = TempDir::new().unwrap();
+  let journal_path = sandbox.path().join("history.toml");
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", &journal_path);
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None)
+    .unwrap()
+    .with_trust_mode(gwm::trust::TrustMode::Allow);
+  for name in ["wt-521-lot-a", "wt-521-lot-b"] {
+    select_row(&mut app, name);
+    app.toggle_select();
+  }
+  app.enter_confirm_delete();
+  assert_eq!(app.pending_delete().len(), 2, "status was: {}", app.status);
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+
+  assert!(!second.exists(), "both targets are gone (status: {})", app.status);
+
+  let journal = history::Journal::load(&journal_path).unwrap();
+  let entry = journal
+    .entries()
+    .iter()
+    .find(|e| e.worktree == "wt-521-lot-b")
+    .expect("the second removal is recorded");
+  assert_eq!(
+    entry.branch.as_deref(),
+    Some("feat/#521-b-after"),
+    "the entry must name the branch the removal saw, not the one the batch listing had"
+  );
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
