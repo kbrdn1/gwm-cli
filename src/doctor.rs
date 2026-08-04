@@ -435,7 +435,21 @@ fn extract_binary(run: &str) -> Option<String> {
   if iter.peek().is_some_and(|t| COMMAND_WRAPPERS.contains(&t.as_str())) {
     iter.next(); // consume the wrapper itself
     while let Some(t) = iter.peek() {
-      if t.starts_with('-') || (!t.starts_with('=') && t.contains('=')) {
+      if t.starts_with('-') {
+        // Some of `env`'s options take a separate operand, and skipping the
+        // flag without it leaves the operand looking like the executable:
+        // `env -u NODE_OPTIONS npm ci` used to resolve to `NODE_OPTIONS`. The
+        // attached forms (`--unset=NAME`) carry their own operand, so only
+        // the detached spellings consume the next token.
+        let takes_operand = matches!(
+          t.as_str(),
+          "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+        );
+        iter.next();
+        if takes_operand {
+          iter.next();
+        }
+      } else if !t.starts_with('=') && t.contains('=') {
         iter.next();
       } else {
         break;
@@ -532,27 +546,39 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
 /// boolean result would depend on it either way. Declining costs nothing: the
 /// step stays probed, which is exactly what this check did before it evaluated
 /// any predicate at all, so refusing to evaluate can never silence a warning.
-fn predicate_is_safe_to_evaluate(expr: &str) -> bool {
+fn predicate_is_safe_to_evaluate(expr: &str, repo_workdir: &Path) -> bool {
   crate::bootstrap::when_atoms(expr).iter().all(|atom| {
     if let Some(path) = atom.strip_prefix("file_exists:") {
-      return path_stays_in_repo(path.trim());
+      return path_stays_in_repo(path.trim(), repo_workdir);
     }
     atom.starts_with("cmd_exists:") || atom.starts_with("env_set:") || atom.starts_with("env_eq:")
   })
 }
 
-/// A path that cannot reach outside the repo: non-empty, relative, no `..`,
-/// and no Windows drive prefix (`C:foo` is not absolute per `is_absolute`,
-/// yet it makes `join` drop the base).
-fn path_stays_in_repo(value: &str) -> bool {
+/// A path that cannot reach outside the repo.
+///
+/// Lexically first: non-empty, relative, no `..`, and no Windows drive prefix
+/// (`C:foo` is not absolute per `is_absolute`, yet it makes `join` drop the
+/// base). That alone is not enough, because a repo can commit a symlink, so
+/// `outside/etc/passwd` with `outside -> /` passes every lexical test and
+/// still leaves the repo the moment `Path::exists` follows it. That would
+/// hand an unvetted `.gwm.toml` a presence oracle on whatever machine runs
+/// `gwm doctor`, a CI runner included, and can trip an automount on the way.
+/// So the resolved path is checked too, through the same `ensure_within` the
+/// bootstrap copies use (issue #94).
+fn path_stays_in_repo(value: &str, repo_workdir: &Path) -> bool {
   if value.is_empty() {
     return false;
   }
   let p = Path::new(value);
-  !p.is_absolute()
-    && !p
+  if p.is_absolute()
+    || p
       .components()
       .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
+  {
+    return false;
+  }
+  crate::bootstrap::ensure_within(repo_workdir, &repo_workdir.join(p)).is_ok()
 }
 
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
@@ -635,8 +661,9 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
         .map(|(_, step)| (&step.run, step.when.as_deref(), &step.env)),
     );
   for (run, when, env) in steps {
-    let gated_off =
-      when.is_some_and(|w| predicate_is_safe_to_evaluate(w) && !crate::bootstrap::evaluate_when(w, ctx.repo_workdir));
+    let gated_off = when.is_some_and(|w| {
+      predicate_is_safe_to_evaluate(w, ctx.repo_workdir) && !crate::bootstrap::evaluate_when(w, ctx.repo_workdir)
+    });
     if gated_off {
       continue;
     }

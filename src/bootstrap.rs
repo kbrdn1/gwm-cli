@@ -711,7 +711,7 @@ pub fn copy_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// final `open` returns `ELOOP` / `EEXIST` rather than writing
 /// through. `ensure_within` and the no-follow writers are
 /// complementary; neither alone is sufficient.
-fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
   let base_canon = base.canonicalize()?;
   let mut anc: &Path = path;
   let canon_anc = loop {
