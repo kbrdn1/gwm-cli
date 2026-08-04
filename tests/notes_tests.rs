@@ -225,3 +225,90 @@ fn renaming_a_branch_without_a_note_is_a_no_op() {
   assert!(!notes::rename(&repo, "feat/#515-old", "feat/#515-new").unwrap());
   assert_eq!(notes::read(&repo, "feat/#515-new"), None);
 }
+
+// ---------------------------------------------------------------------------
+// Never destroy prose (Codex review, PR #530)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rename_refuses_to_overwrite_a_note_already_at_the_destination() {
+  // `git branch -m old new` fails when `new` already exists, so a note found
+  // under `new` at this point is necessarily an orphan left by a previous
+  // branch of that name. `fs::rename` replaces it silently on Unix, which
+  // destroys prose that nothing else can recover.
+  let (_dir, repo) = init_repo();
+  write_note(&repo, "feat/#515-old", "the note I am carrying over\n");
+  write_note(&repo, "feat/#515-new", "prose from a previous life of this name\n");
+
+  assert!(
+    !notes::rename(&repo, "feat/#515-old", "feat/#515-new").unwrap(),
+    "an occupied destination must not be moved onto"
+  );
+  assert_eq!(
+    notes::read(&repo, "feat/#515-old").as_deref(),
+    Some("the note I am carrying over\n"),
+    "the source note stays put rather than vanishing"
+  );
+  assert_eq!(
+    notes::read(&repo, "feat/#515-new").as_deref(),
+    Some("prose from a previous life of this name\n"),
+    "and the destination is untouched"
+  );
+}
+
+#[test]
+fn a_blank_note_at_the_destination_does_not_block_the_move() {
+  // Presence is non-blank everywhere, this rule included: overwriting a file
+  // an editor left empty loses nothing.
+  let (_dir, repo) = init_repo();
+  write_note(&repo, "feat/#515-old", "still relevant\n");
+  write_note(&repo, "feat/#515-new", "\n");
+
+  assert!(notes::rename(&repo, "feat/#515-old", "feat/#515-new").unwrap());
+  assert_eq!(notes::read(&repo, "feat/#515-new").as_deref(), Some("still relevant\n"));
+}
+
+#[test]
+fn occupied_by_answers_what_a_move_would_destroy() {
+  let (_dir, repo) = init_repo();
+  assert_eq!(notes::occupied_by(&repo, "feat/#515-new"), None);
+
+  write_note(&repo, "feat/#515-new", "prose\n");
+  assert_eq!(
+    notes::occupied_by(&repo, "feat/#515-new"),
+    notes::path_for(&repo, "feat/#515-new")
+  );
+}
+
+#[test]
+fn a_parent_component_never_ends_in_the_note_extension() {
+  // `foo` maps to the FILE `foo.md`, so a branch `foo.md/bar` would want the
+  // DIRECTORY `foo.md`. Both branches are legal in git and can coexist, and
+  // whichever note is written first makes the other impossible. Files always
+  // end in `.md` and directories now never do, so the two sets are disjoint
+  // by construction.
+  assert_eq!(notes::relative_path("foo.md/bar"), None);
+  assert_eq!(notes::relative_path("a/b.md/c"), None);
+  // The final component is free: `foo.md` is the file `foo.md.md`, which
+  // collides with nothing.
+  assert_eq!(
+    notes::relative_path("foo.md"),
+    Some(PathBuf::from("foo.md.md")),
+    "a branch may still be named after a Markdown file"
+  );
+}
+
+#[test]
+fn neither_order_of_the_colliding_pair_can_break_the_other() {
+  let (_dir, repo) = init_repo();
+
+  // `foo` first, then the branch that would want `foo.md` as a directory.
+  write_note(&repo, "foo", "the flat one\n");
+  assert_eq!(notes::prepare(&repo, "foo.md/bar").unwrap(), None);
+  assert_eq!(notes::read(&repo, "foo").as_deref(), Some("the flat one\n"));
+
+  // And the reverse order, on a name nothing has touched yet.
+  assert_eq!(notes::prepare(&repo, "baz.md/qux").unwrap(), None);
+  write_note(&repo, "baz", "still writable\n");
+  assert_eq!(notes::read(&repo, "baz").as_deref(), Some("still writable\n"));
+}

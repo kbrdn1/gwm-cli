@@ -2179,3 +2179,38 @@ fn a_path_only_move_leaves_the_note_where_it_is() {
 
   assert_eq!(gwm::notes::read(&repo, "feat/#1-here").as_deref(), Some("unchanged\n"));
 }
+
+#[test]
+fn rename_worktree_refuses_when_a_note_already_sits_at_the_destination() {
+  // Preflight, not cleanup: a note under the new name is an orphan from a
+  // previous branch of that name, and moving onto it would destroy prose
+  // nothing can regenerate. Refused before any ref is touched, like the
+  // pre-existing target path above it, so nothing is left half-done.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  write_note(&repo, "feat/#1-old", "the note I am carrying over\n");
+  write_note(&repo, "feat/#1-new", "prose from a previous life of this name\n");
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "feat/#1-new").unwrap_err();
+
+  assert!(
+    err.to_string().contains("a note already exists"),
+    "the error must name the problem, got: {err}"
+  );
+  // Nothing moved: not the directory, not the branch, and neither note.
+  assert!(old_path.exists(), "the worktree directory must not have moved");
+  assert!(!new_path.exists());
+  assert!(repo.find_branch("feat/#1-old", git2::BranchType::Local).is_ok());
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-old").as_deref(),
+    Some("the note I am carrying over\n")
+  );
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-new").as_deref(),
+    Some("prose from a previous life of this name\n")
+  );
+}

@@ -100,6 +100,17 @@ pub fn relative_path(branch: &str) -> Option<PathBuf> {
   if !components.iter().all(|c| component_is_portable(c)) {
     return None;
   }
+  // A parent component becomes a DIRECTORY, and every note is a FILE ending
+  // in `.md`. Let a directory end in `.md` too and the two sets meet: branch
+  // `foo` wants the file `foo.md`, branch `foo.md/bar` wants the directory
+  // `foo.md`, both branches are legal in git and can coexist, and whichever
+  // note is written first makes the other impossible (Codex review, PR
+  // #530). Keeping the suffix off directory names makes the sets disjoint by
+  // construction rather than by ordering luck. The LAST component is free:
+  // branch `foo.md` is the file `foo.md.md`, which collides with nothing.
+  if parents.iter().any(|c| c.ends_with(NOTE_EXT)) {
+    return None;
+  }
   let mut out = PathBuf::new();
   for parent in parents {
     out.push(parent);
@@ -205,14 +216,32 @@ fn collect_files(dir: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
   }
 }
 
+/// The note a move onto `branch` would destroy, if any.
+///
+/// `None` when the destination is free, blank, or unreadable: overwriting a
+/// file an editor left empty loses nothing, so the presence predicate is the
+/// same one every other surface uses. Preflighted by
+/// [`crate::worktree::rename_worktree`], which refuses the whole rename
+/// before touching a ref rather than reporting the loss afterwards.
+pub fn occupied_by(repo: &git2::Repository, branch: &str) -> Option<PathBuf> {
+  read(repo, branch)?;
+  path_for(repo, branch)
+}
+
 /// Follow a branch rename (#479). Returns `true` when a note was actually
-/// moved, `false` when there was nothing to move or either name cannot
-/// back a file.
+/// moved, `false` when there was nothing to move, either name cannot back a
+/// file, or the destination already carries a note.
+///
+/// Never overwrites (Codex review, PR #530). `git branch -m old new` fails
+/// when `new` already exists, so a note found there is necessarily an orphan
+/// left by a previous branch of that name, and `fs::rename` would replace it
+/// silently on Unix. Prose nothing can regenerate is not something to lose
+/// to a name reuse.
 pub fn rename(repo: &git2::Repository, old_branch: &str, new_branch: &str) -> Result<bool> {
   let (Some(from), Some(to)) = (path_for(repo, old_branch), path_for(repo, new_branch)) else {
     return Ok(false);
   };
-  if from == to || !from.is_file() {
+  if from == to || !from.is_file() || occupied_by(repo, new_branch).is_some() {
     return Ok(false);
   }
   if let Some(parent) = to.parent() {

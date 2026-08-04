@@ -641,6 +641,25 @@ pub fn rename_worktree(
     )));
   }
 
+  // 1b. Preflight the note too (issue #515, Codex review on PR #530). A note
+  //     already sitting under `new_branch` is an orphan left by a previous
+  //     branch of that name, and the move below would replace it silently on
+  //     Unix. Refused up front, like the pre-existing target path above, so
+  //     nothing is half-done and the message names the file to deal with:
+  //     `gwm doctor` already reports it as an orphan. A blank leftover does
+  //     not block, since overwriting it loses nothing.
+  if new_branch != old_branch {
+    if let Some(note) = Repository::open(workdir)
+      .ok()
+      .and_then(|repo| crate::notes::occupied_by(&repo, new_branch))
+    {
+      return Err(GwmError::CommandFailed(format!(
+        "a note already exists for `{new_branch}`: {} — move or delete it first (it is an orphan `gwm doctor` reports)",
+        note.display()
+      )));
+    }
+  }
+
   // 2. Move the worktree directory first: it is the most failure-prone step
   //    (main/locked worktree, busy dir), and failing here leaves all refs
   //    untouched.
