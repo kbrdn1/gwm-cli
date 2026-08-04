@@ -12024,3 +12024,78 @@ fn a_resize_rewraps_the_rich_view() {
     "a narrower terminal must produce more wrapped rows ({narrow} vs {wide})"
   );
 }
+
+#[test]
+fn rich_view_does_not_silently_open_the_issue_while_the_pr_is_loading() {
+  // Codex review #529: the contract is "the PR wins when both are linked",
+  // but the side was picked from the CACHE, so an issue that landed first
+  // opened instead — and the PR landing could not replace it, since the
+  // landing refresh requires the overlay to already be `RichPr`. The choice
+  // follows the LINK now; the cache only decides whether it can open yet.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.mark_pr_loading_for_test(61);
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::List, "the issue is not a stand-in for the PR");
+  assert!(
+    app.status.contains("loading"),
+    "the status must say the PR is still in flight: {}",
+    app.status
+  );
+
+  // Once it lands, `I` opens the PR.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn rich_view_falls_back_to_the_issue_when_the_pr_fetch_failed() {
+  // The other half of the same rule: a PR whose fetch ERRORED is never
+  // going to land, so refusing to show the issue would leave the user with
+  // nothing. Only an in-flight PR holds the view back.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Err("gh: not found".into()));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+}
+
+#[test]
+fn a_resize_still_rewraps_after_the_cache_was_flushed() {
+  // Codex review #529: the rebuild read the fetch CACHE, so a resize while
+  // a refresh was in flight found no `Loaded` and gave up. If that refresh
+  // then failed, nothing ever rebuilt and the view stayed wrapped for the
+  // old terminal for good. The overlay owns its source instead, the same
+  // fix `ci_overlay_checks` already carries for the duration tick (#455).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = "word ".repeat(120);
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  let wide = app.detail_overlay.rows.len();
+
+  // The `F` refresh flushes the cache before re-requesting.
+  app.refresh_link();
+  assert_eq!(app.view, View::DetailOverlay, "same link, the overlay stays up");
+
+  app.set_term_width(60);
+
+  assert!(
+    app.detail_overlay.rows.len() > wide,
+    "the overlay must re-wrap from its own source, not from a flushed cache"
+  );
+}
