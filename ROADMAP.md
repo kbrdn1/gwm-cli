@@ -4,10 +4,11 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v1.6.0 stable
+## Current state — v1.6.1 stable
 
-The current **stable** line is **v1.6.0** (2026-08-03), which carries a
-**security fix affecting every earlier version** (see the highlights table). The machine-readable
+The current **stable** line is **v1.6.1** (2026-08-04), a follow-up closing the
+gaps left by the v1.6.0 **security fix affecting every earlier version** (see
+the highlights table). The machine-readable
 contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
 the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
 section set will not break without a major bump (see
@@ -153,6 +154,8 @@ For reference (each linked to its closing PR):
 
 | [GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm) + [#415](https://github.com/kbrdn1/gwm-cli/issues/415) / [#416](https://github.com/kbrdn1/gwm-cli/issues/416) / [#417](https://github.com/kbrdn1/gwm-cli/issues/417) / [#418](https://github.com/kbrdn1/gwm-cli/issues/418) / [#479](https://github.com/kbrdn1/gwm-cli/issues/479) + [#491](https://github.com/kbrdn1/gwm-cli/issues/491) | v1.6.0 | **Security fix + naming flexibility.** A branch name could inject a command into a lifecycle hook: placeholders were expanded into `sh -c` unescaped, and git permits `;`, `|`, `&`, `$`, backticks and redirections in a ref name, so a branch someone else pushed ran arbitrary commands as anyone who had trusted their own repo's hooks, with no trust prompt in the path (the gate covers the repo's hooks, never the branch name entering them). Affects every version up to and including 1.5.0, no backport. Values are shell-escaped on expansion, `env` values stay raw because they never see a shell, and hooks additionally get `GWM_*` environment variables that need no quoting. Alongside it: `gwm create --name` drops the `<type> <issue> <desc>` requirement (#416), the TUI create and rename forms present the fields the repo's patterns actually ask for in pattern order, in both directions (#418), and the declared MSRV becomes an honest 1.95 held by a CI job that resolves and compiles the locked graph at the floor (#491). Verifying the sequence produced the Fixed section: terminal-escape neutralisation of echoed config (#473), single-pass placeholder expansion (#494), branch rollback on a failed `gwm create` (#487), Windows path rules on free-form names (#475), and worktree-aware branch reads (#477) |
 
+| [#502](https://github.com/kbrdn1/gwm-cli/issues/502) / [#506](https://github.com/kbrdn1/gwm-cli/issues/506) / [#507](https://github.com/kbrdn1/gwm-cli/issues/507) + [#423](https://github.com/kbrdn1/gwm-cli/issues/423) / [#511](https://github.com/kbrdn1/gwm-cli/issues/511) | v1.6.1 | **Bidi follow-up to the security release, and the documentation pipeline.** The 1.6.0 neutralisation rests on `char::is_control`, which covers C0, DEL and C1: it does not cover the twelve characters carrying the `Bidi_Control` property, which are `Cf`, not `Cc`, and reorder how a terminal renders the text around them without ever being a control byte. The pre-trust bootstrap summary inherited the gap, the one output whose job is to let someone authorise a shell command out of an unvetted repo. The TUI worktrees table was never on the path the CLI sinks protect at all: measured on ratatui 0.30, every render path drops the zero-width bytes but `List` and `Table` keep the `Bidi_Control` ones, so a fetched ref could read in an order it is not stored in. Both closed, the neutralisation landing in the width-clipping funnel so a column added later inherits it, plus an alias expansion refused rather than neutralised because it becomes argv before clap is reached. Alongside: the published documentation now resyncs and redeploys itself when `main` moves ([#423](https://github.com/kbrdn1/gwm-cli/issues/423), <https://gwm.kbrdn.dev>), and `herdr-plugin-gwm` gets an integration page in English and French ([#511](https://github.com/kbrdn1/gwm-cli/issues/511)) |
+
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
 ## Next up
@@ -269,7 +272,7 @@ worktree → branch → PR → issue chain and can open on the current row direc
 
 ### Maintenance
 
-- [#500](https://github.com/kbrdn1/gwm-cli/issues/500) — `exec_tests` flakes on Linux with `ETXTBSY`: the test writes an executable and runs it, which races against the fork-to-exec window of any other test in the harness that spawns a process. Seen once on a lockfile-only PR, green on a bare re-run. Retry on that one errno, with the reason written next to it so it does not read as flake-hiding later
+- [#500](https://github.com/kbrdn1/gwm-cli/issues/500) ✅ — `exec_tests` flaked on Linux with `ETXTBSY`: the test writes an executable and runs it, which races against the fork-to-exec window of any other test in the harness that spawns a process. Fixed in v1.6.1 by retrying on that one errno, with the reason written next to it so it does not read as flake-hiding later
 - The transitive graph needs a manual `cargo update` from time to time. `.github/dependabot.yml` sets no `allow: dependency-type: all`, so dependabot only ever PRs the direct dependencies. Last full refresh: [#499](https://github.com/kbrdn1/gwm-cli/pull/499), which also took the vendored libgit2 from 1.9.3 to 1.9.6. Do it **after** an MSRV change lands, never before: a lockfile refresh is exactly how a floor moves without anyone deciding to, so it has to be checked against a floor that is already settled
 
 ### Visibility
@@ -278,7 +281,7 @@ Not feature work, but tracked here because it gates whether any of the above is
 seen:
 
 - [#422](https://github.com/kbrdn1/gwm-cli/issues/422) — comparison page covering gwm, gwq and lazyworktree (gwq is the incumbent by star count and has been dormant since May)
-- [#423](https://github.com/kbrdn1/gwm-cli/issues/423) — sync `docs/` to the Astro docs site, with the in-repo tree as the source of truth
+- [#423](https://github.com/kbrdn1/gwm-cli/issues/423) ✅ — the documentation is published at **<https://gwm.kbrdn.dev>** and keeps itself there. A merge into `main` touching `docs/`, `changelogs/` or `Cargo.toml` posts a `repository_dispatch` to `kbrdn1/kbrdn-docs`, which reruns the conversion, commits whatever drifted and redeploys. The in-repo tree stays the source of truth: the site is generated from it, never edited on the other side
 
 ## Ambitious
 
