@@ -53,7 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `glob_exists:` pattern picks its own root, so `glob_exists:/**/nope` would
   walk the whole disk on a check meant to be instant, and one such atom leaves
   the entire expression unevaluated. Declining costs nothing, the step simply
-  stays probed, which is what the check did before it evaluated anything.
+  stays probed, which is what the check did before it evaluated anything. A
+  `file_exists:` path is checked as resolved, not just lexically: a repo can
+  commit a symlink, so `outside/etc/passwd` with `outside -> /` passes every
+  spelling test and still walks out of the repo the moment `Path::exists`
+  follows it.
   A step whose binary cannot be resolved statically is left alone for the
   same reason, from the other side: `lifecycle::run_step` expands `{path}` /
   `{repo}` in `run` before spawning, so a hook reading `{path}/scripts/setup`
