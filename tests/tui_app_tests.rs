@@ -8320,7 +8320,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
 
 #[test]
 fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
-  use gwm::tui::state::async_task::{DeleteBatchOutcome, TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, DeleteFailure, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
@@ -8331,7 +8331,11 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
       generation,
       DeleteBatchOutcome {
         removed: vec![],
-        failed: vec![("alpha".into(), "permission denied".into())],
+        failed: vec![DeleteFailure {
+          id: "alpha".into(),
+          path: "/tmp/alpha".into(),
+          error: "permission denied".into(),
+        }],
       },
     ))
     .unwrap();
@@ -11696,7 +11700,7 @@ fn entering_the_confirm_overlay_snapshots_the_batch() {
 
 #[test]
 fn the_batch_status_names_the_failures() {
-  use gwm::tui::DeleteBatchOutcome;
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
   let single = DeleteBatchOutcome {
     removed: vec![("alpha".into(), "/tmp/alpha".into())],
     failed: vec![],
@@ -11708,7 +11712,11 @@ fn the_batch_status_names_the_failures() {
       ("alpha".into(), "/tmp/alpha".into()),
       ("beta".into(), "/tmp/beta".into()),
     ],
-    failed: vec![("gamma".into(), "locked".into())],
+    failed: vec![DeleteFailure {
+      id: "gamma".into(),
+      path: "/tmp/gamma".into(),
+      error: "locked".into(),
+    }],
   };
   assert_eq!(batch.status_line(), "removed 2 of 3 worktrees; failed: gamma (locked)");
 
@@ -11720,4 +11728,67 @@ fn the_batch_status_names_the_failures() {
     failed: vec![],
   };
   assert_eq!(all_ok.status_line(), "removed 2 worktrees");
+}
+
+#[test]
+fn a_partial_batch_narrows_the_confirm_to_the_failures_never_to_the_cursor() {
+  // Codex review on PR #520 (P1). `worktree::remove` prunes the admin entry
+  // BEFORE deleting the directory (#98), so a removal that fails on the
+  // filesystem still drops its row from `repo.worktrees()`. The refresh in
+  // the drain then prunes its mark, and a batch RECOMPUTED from an empty
+  // mark set falls back to the cursor row: a second confirm would delete a
+  // worktree the user never marked. The batch may only ever narrow.
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, DeleteFailure, TaskKind, TaskMsg};
+
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let doomed = base.path().join("wt-doomed");
+  let bystander = base.path().join("wt-bystander");
+  gwm::worktree::add(&repo, "wt-doomed", &doomed, "feat/#484-doomed", false).unwrap();
+  gwm::worktree::add(&repo, "wt-bystander", &bystander, "feat/#484-bystander", false).unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let doomed_row = app
+    .worktrees
+    .iter()
+    .position(|w| w.name == "wt-doomed")
+    .expect("the doomed worktree is listed");
+  app.list_state.select(Some(doomed_row));
+  app.toggle_select();
+  app.enter_confirm_delete();
+  assert_eq!(app.pending_delete().len(), 1, "status was: {}", app.status);
+  let confirmed: Vec<std::path::PathBuf> = app.pending_delete().iter().map(|t| t.path.clone()).collect();
+
+  // The worktree is gone from git's list (pruned) but its removal reported a
+  // failure — the exact shape a mid-removal filesystem error leaves behind.
+  gwm::worktree::remove(&repo, "wt-doomed", false).unwrap();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      DeleteBatchOutcome {
+        removed: vec![],
+        failed: vec![DeleteFailure {
+          id: "wt-doomed".into(),
+          path: doomed.clone(),
+          error: "directory not empty".into(),
+        }],
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Confirm, "the failure keeps the overlay open");
+  for target in app.pending_delete() {
+    assert!(
+      confirmed.contains(&target.path),
+      "the retry batch must only ever contain rows the user confirmed, got {:?}",
+      target.path
+    );
+  }
+  assert!(
+    !app.pending_delete().iter().any(|t| t.path == bystander),
+    "and never the row the cursor landed on after the refresh"
+  );
 }

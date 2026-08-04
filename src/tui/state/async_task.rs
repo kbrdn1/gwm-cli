@@ -217,8 +217,19 @@ pub struct DeleteTarget {
 pub struct DeleteBatchOutcome {
   /// `(id, path)` per removed worktree, in batch order.
   pub removed: Vec<(String, PathBuf)>,
-  /// `(id, error)` per failed removal, in batch order.
-  pub failed: Vec<(String, String)>,
+  /// One entry per failed removal, in batch order.
+  pub failed: Vec<DeleteFailure>,
+}
+
+/// A target the batch could not remove. Carries the `path` as well as the id
+/// because the drain narrows the open confirm overlay to the failures by
+/// path: ids are only unique inside one repo, and a workspace batch spans
+/// several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteFailure {
+  pub id: String,
+  pub path: PathBuf,
+  pub error: String,
 }
 
 impl DeleteBatchOutcome {
@@ -236,12 +247,12 @@ impl DeleteBatchOutcome {
     let failures = self
       .failed
       .iter()
-      .map(|(id, e)| format!("{} ({})", id, e))
+      .map(|f| format!("{} ({})", f.id, f.error))
       .collect::<Vec<_>>()
       .join(", ");
     if self.removed.is_empty() && total == 1 {
       // Single target, single failure: the pre-#484 wording.
-      return format!("delete failed: {}", self.failed[0].1);
+      return format!("delete failed: {}", self.failed[0].error);
     }
     format!(
       "removed {} of {} worktrees; failed: {}",
@@ -258,13 +269,13 @@ impl DeleteBatchOutcome {
       return None;
     }
     if self.removed.is_empty() && self.failed.len() == 1 {
-      return Some(self.failed[0].1.clone());
+      return Some(self.failed[0].error.clone());
     }
     Some(
       self
         .failed
         .iter()
-        .map(|(id, e)| format!("{}: {}", id, e))
+        .map(|f| format!("{}: {}", f.id, f.error))
         .collect::<Vec<_>>()
         .join(" · "),
     )

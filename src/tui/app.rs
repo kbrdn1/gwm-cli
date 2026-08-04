@@ -2,7 +2,8 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{
-  CreateWorktreeResult, DeleteBatchOutcome, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner,
+  CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
+  TaskRunner,
 };
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
@@ -1905,9 +1906,16 @@ impl App {
               };
             }
             Some(_) => {
-              // Stay on the overlay so the failure is read, retargeted at
-              // what is left: the rows that failed are still marked.
-              self.pending_delete = self.delete_targets();
+              // Stay on the overlay so the failure is read, narrowed to the
+              // targets that actually failed. NARROWED, never recomputed:
+              // `worktree::remove` prunes the admin entry before deleting the
+              // directory (#98), so a removal that fails on the filesystem
+              // still drops its row from the list, the refresh above prunes
+              // its mark, and a recomputed batch would fall back to the
+              // CURSOR row. A second confirm would then delete a worktree the
+              // user never marked (Codex review on PR #520).
+              let failed: std::collections::BTreeSet<&Path> = outcome.failed.iter().map(|f| f.path.as_path()).collect();
+              self.pending_delete.retain(|t| failed.contains(t.path.as_path()));
               self.view = View::Confirm;
               self.status = status;
             }
@@ -4973,7 +4981,11 @@ impl App {
           .and_then(|repo| worktree::remove(&repo, &target.id, delete_branch));
         match result {
           Ok(()) => outcome.removed.push((target.id, target.path)),
-          Err(e) => outcome.failed.push((target.id, e.to_string())),
+          Err(e) => outcome.failed.push(DeleteFailure {
+            id: target.id,
+            path: target.path,
+            error: e.to_string(),
+          }),
         }
       }
       let _ = tx.send(TaskMsg::DeleteWorktree(generation, outcome));

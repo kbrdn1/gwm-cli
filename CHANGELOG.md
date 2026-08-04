@@ -28,8 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and for a batch it reports the size and how many targets carry a branch
   instead of listing rows, with `D` arming the branch deletion batch-wide. A
   batch never stops at the first error: every target is attempted through its
-  own repo handle, the rows that failed stay marked for a one-keystroke retry,
-  and the status line names them.
+  own repo handle, the confirm stays open narrowed to what failed (narrowed,
+  never recomputed: `worktree::remove` prunes the admin entry before deleting
+  the directory, so a removal that fails on the filesystem drops its own row,
+  and recomputing would have fallen back to the cursor row), and the status
+  line names the failures.
 - **`gwm remove` takes several patterns**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `gwm remove a b c`
   removes the batch in one command and `--dry-run` prints one plan per

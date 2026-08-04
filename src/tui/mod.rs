@@ -31,7 +31,9 @@ pub use app::{
   read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
   OpenTarget, RepoMeta, View, WorkspaceState,
 };
-pub use state::async_task::{CreateWorktreeResult, DeleteBatchOutcome, DeleteTarget, TaskKind, TaskMsg, TaskRunner};
+pub use state::async_task::{
+  CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
+};
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
