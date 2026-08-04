@@ -1896,7 +1896,11 @@ fn build_row(
 
   // The path column paints with the `path` role (issue #210; default
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
-  let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(worktree_path_style(theme));
+  // Not width-constrained, so it does not pass through `trunc`'s funnel and
+  // has to say so itself: a path carries the worktree directory name, which is
+  // as unvetted as the branch (issue #506).
+  let path_cell =
+    Cell::from(crate::naming::sanitise_for_terminal(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
   let mut cells = vec![age_cell];
   if let Some((repo_name, repo_w)) = repo {
@@ -4766,9 +4770,27 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   format!("{head_str}…{tail_str}")
 }
 
+/// Clip `s` to `max` columns, neutralising what must never reach the terminal
+/// first (issue #506).
+///
+/// The sanitisation is here rather than at each call site because this is the
+/// one funnel every width-constrained cell already goes through, table rows
+/// included, so a cell added later inherits it instead of having to remember
+/// it. It is a no-op on ordinary text.
+///
+/// Measured, ratatui 0.30 drops zero-width control bytes on every render path,
+/// but `List` and `Table` keep the `Bidi_Control` characters, which is exactly
+/// where a branch name lands: git's ref rules refuse the ASCII controls and
+/// `~^:?*[`, not the Unicode format characters, so a fetched ref can carry one
+/// and a row can then read in an order the ref is not stored in.
+///
+/// It runs **before** the width count, so what is measured is what is drawn: a
+/// replacement is one char for one char, but a `Bidi_Control` character can
+/// measure zero columns where `?` measures one.
 fn trunc(s: &str, max: usize) -> String {
+  let s = crate::naming::sanitise_for_terminal(s);
   if s.chars().count() <= max {
-    s.to_string()
+    s
   } else {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');

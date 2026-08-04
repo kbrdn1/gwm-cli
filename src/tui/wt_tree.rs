@@ -135,8 +135,14 @@ pub fn file_icon(name: &str) -> &'static str {
 /// otherwise break the sidebar layout or inject terminal escape sequences;
 /// the real bytes still live in git, this only guards what reaches the
 /// screen.
+///
+/// Delegates rather than keeping its own copy of the rule (issue #506): this
+/// had the same body as [`crate::naming::sanitise_for_terminal`] until that
+/// one grew the `Bidi_Control` characters, and a filename carrying one
+/// reorders a sidebar row exactly as it reorders a config value. A second copy
+/// is a second thing to forget.
 pub fn sanitize_name(name: &str) -> String {
-  name.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+  crate::naming::sanitise_for_terminal(name)
 }
 
 /// A node in the Working Tree file-explorer model. A `Dir` carries its

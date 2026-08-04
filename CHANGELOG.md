@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 In reverse chronological order:
 
+- [`1.6.1`](changelogs/1.6.1.md), 2026-08-04
 - [`1.6.0`](changelogs/1.6.0.md), 2026-08-03
 - [`1.5.0`](changelogs/1.5.0.md), 2026-07-26
 - [`1.4.0`](changelogs/1.4.0.md), 2026-07-25

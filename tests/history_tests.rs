@@ -65,6 +65,7 @@ fn load_returns_empty_on_missing_file() {
 
 #[test]
 fn append_then_load_roundtrips_entry() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // Append an entry, persist to disk, reload. The reloaded journal
   // must contain the exact same entry — TOML round-trip is the IO
   // backbone of the whole feature.
@@ -90,6 +91,7 @@ fn append_then_load_roundtrips_entry() {
 
 #[test]
 fn rotation_caps_at_one_hundred_entries() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // Cap is 100 entries TOTAL across all repos. On append #101, drop
   // the oldest. This pins the rotation contract — the journal must
   // not grow unbounded.
@@ -121,6 +123,7 @@ fn rotation_caps_at_one_hundred_entries() {
 
 #[test]
 fn entries_for_repo_filters_by_repo_root() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // The journal is global (one file across all repos). `entries_for_repo`
   // must return only the ops whose `repo_root` matches verbatim — that
   // is the per-repo separation `gwm undo` and `gwm history` rely on so
@@ -148,6 +151,7 @@ fn entries_for_repo_filters_by_repo_root() {
 
 #[test]
 fn last_for_repo_returns_most_recent_entry() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // `gwm undo` pulls the *most recent* op for the current repo. Pin
   // the ordering contract: entries are listed newest-first via
   // `last_for_repo` regardless of insertion order.
@@ -174,6 +178,7 @@ fn last_for_repo_returns_most_recent_entry() {
 
 #[test]
 fn last_for_repo_returns_none_for_unknown_repo() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // If no ops have been recorded for the current repo, `last_for_repo`
   // returns `None` — `gwm undo` then prints "nothing to undo" rather
   // than crashing.
@@ -192,6 +197,7 @@ fn last_for_repo_returns_none_for_unknown_repo() {
 
 #[test]
 fn pop_last_for_repo_removes_and_returns_entry() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // After a successful undo, `gwm undo` needs to drop the entry so a
   // second `undo` resurfaces the previous op instead of replaying the
   // same one. `pop_last_for_repo` must atomically return-and-remove
