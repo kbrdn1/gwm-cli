@@ -450,6 +450,67 @@ fn missing_hook_binary_is_warning() {
   }
 }
 
+#[test]
+fn a_step_its_predicate_switches_off_is_not_probed() {
+  // The `node` preset ships two mutually exclusive install hooks: `bun
+  // install` when bun is on PATH, `npm ci` when it is not. Probing a step's
+  // binary regardless of its `when` warns about whichever of the two the
+  // predicate has just switched off, and a Warning takes `gwm doctor` to exit
+  // code 1, so a built-in preset that works perfectly reports as not green.
+  //
+  // Both surfaces, because both feed the same probe. The bootstrap-command
+  // half predates the hooks fix and was wrong the same way, it just had no
+  // preset with mutually exclusive steps to make it visible.
+  let off = "cmd_exists:definitely-not-a-command-xyz123";
+  let mut bodies: Vec<String> = vec![format!(
+    "[[bootstrap.command]]\nname = \"off\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{off}\"\n"
+  )];
+  bodies.extend(HOOK_PHASES.iter().map(|phase| {
+    format!("[[hooks.{phase}]]\nname = \"off\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{off}\"\n")
+  }));
+
+  for body in &bodies {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(dir.path(), body);
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      !c.detail.contains("definitely-not-on-path-xyz123"),
+      "a step gated off by its predicate must not be probed, got: {}\nconfig: {}",
+      c.detail,
+      body
+    );
+  }
+}
+
+#[test]
+fn a_step_its_predicate_switches_on_is_still_probed() {
+  // The other polarity, so the fix above cannot be "stop probing anything
+  // that carries a `when`". `.gwm.toml` is written by `config_from_toml`, so
+  // `file_exists:.gwm.toml` is true by construction.
+  let on = "file_exists:.gwm.toml";
+  let mut bodies: Vec<String> = vec![format!(
+    "[[bootstrap.command]]\nname = \"on\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{on}\"\n"
+  )];
+  bodies.extend(HOOK_PHASES.iter().map(|phase| {
+    format!("[[hooks.{phase}]]\nname = \"on\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{on}\"\n")
+  }));
+
+  for body in &bodies {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(dir.path(), body);
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert_eq!(c.status, CheckStatus::Warning, "config: {}\n{}", body, c.detail);
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "a step its predicate switches on must still be probed, got: {}\nconfig: {}",
+      c.detail,
+      body
+    );
+  }
+}
+
 // --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
