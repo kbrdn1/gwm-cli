@@ -293,8 +293,10 @@ fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
   let (repo, _) = init_repo();
   let home = tempfile::tempdir().unwrap();
   let global = home.path().join("gwm").join("config.toml");
-  // The global layer binds `top` to a two-stroke chord.
-  set_array_at(&global, "tui.keys.top", &["z z".to_string()]).unwrap();
+  // The global layer binds `top` to a two-stroke chord. `u` rather than `z`
+  // since #484 moved `cycle_sidebar_layout` onto `z`, and a shipped default
+  // is a prefix conflict for any chord starting with the same key.
+  set_array_at(&global, "tui.keys.top", &["u u".to_string()]).unwrap();
 
   let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
   app.enter_config_panel();
@@ -308,10 +310,10 @@ fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
     .unwrap();
   app.config_panel.selected = idx;
 
-  // `z` alone is a prefix of the global `z z` — valid in the repo file by
+  // `u` alone is a prefix of the global `u u` — valid in the repo file by
   // itself, invalid once the layers merge.
   app.config_panel.begin_capture();
-  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
   app.commit_key_capture();
 
   assert!(app.status.starts_with("keys:"), "rejection surfaced: {}", app.status);
@@ -8287,7 +8289,7 @@ fn drain_drops_a_superseded_sync_result() {
 
 #[test]
 fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
-  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
@@ -8297,9 +8299,10 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
     .task_result_sender()
     .send(TaskMsg::DeleteWorktree(
       generation,
-      "alpha".into(),
-      "/tmp/alpha".into(),
-      Ok(()),
+      DeleteBatchOutcome {
+        removed: vec![("alpha".into(), "/tmp/alpha".into())],
+        failed: vec![],
+      },
     ))
     .unwrap();
   let applied = app.drain_task_results();
@@ -8317,7 +8320,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
 
 #[test]
 fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
-  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, DeleteFailure, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
@@ -8326,9 +8329,14 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
     .task_result_sender()
     .send(TaskMsg::DeleteWorktree(
       generation,
-      "alpha".into(),
-      "/tmp/alpha".into(),
-      Err("permission denied".into()),
+      DeleteBatchOutcome {
+        removed: vec![],
+        failed: vec![DeleteFailure {
+          id: "alpha".into(),
+          path: "/tmp/alpha".into(),
+          error: "permission denied".into(),
+        }],
+      },
     ))
     .unwrap();
   let applied = app.drain_task_results();
@@ -8346,7 +8354,7 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
 
 #[test]
 fn drain_drops_a_superseded_delete_worktree_result() {
-  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let stale = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.tasks.invalidate(TaskKind::DeleteWorktree);
@@ -8357,9 +8365,10 @@ fn drain_drops_a_superseded_delete_worktree_result() {
     .task_result_sender()
     .send(TaskMsg::DeleteWorktree(
       stale,
-      "alpha".into(),
-      "/tmp/alpha".into(),
-      Ok(()),
+      DeleteBatchOutcome {
+        removed: vec![("alpha".into(), "/tmp/alpha".into())],
+        failed: vec![],
+      },
     ))
     .unwrap();
   app.drain_task_results();
@@ -9951,8 +9960,9 @@ fn destructive_overlay_open_flags_exec_and_clean_views() {
   assert!(app.destructive_overlay_open());
   app.view = View::CleanReport;
   assert!(app.destructive_overlay_open());
-  // The delete-confirm modal is not in this class — it has no captured target
-  // to protect and reads the live selection by design.
+  // The delete-confirm modal is not in this class: since #484 it does capture
+  // its targets, but by path rather than by row index, so a refresh landing
+  // mid-countdown cannot retarget it and there is nothing to suspend for.
   app.view = View::Confirm;
   assert!(!app.destructive_overlay_open());
 }
@@ -11573,4 +11583,240 @@ fn a_hidden_segment_cannot_block_the_rename_it_is_not_part_of() {
     app.status
   );
   let _ = out;
+}
+
+// --- #484: multi-row selection + bulk delete -----------------------------
+//
+// The cursor row (`list_state`) and the marked set are two different things:
+// `d` acts on the marked set when it is non-empty, on the cursor row
+// otherwise. Every assertion below is on the pure state, no ratatui.
+
+fn app_with_rows(names: &[&str]) -> (tempfile::TempDir, App) {
+  let (dir, mut app) = make_app();
+  app.worktrees = names.iter().map(|n| worktree_fixture(n)).collect();
+  app.list_state.select(Some(0));
+  (dir, app)
+}
+
+#[test]
+fn toggle_select_marks_and_unmarks_the_cursor_row() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1, "status was: {}", app.status);
+  assert!(app.is_marked(&PathBuf::from("/tmp/gwm-test/alpha")));
+
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 0, "a second press must unmark the row");
+}
+
+#[test]
+fn the_main_worktree_can_never_be_marked() {
+  // `d` refuses the main worktree, so marking it would build a batch with a
+  // target that can only fail.
+  let (_d, mut app) = app_with_rows(&["main"]);
+  app.worktrees[0].is_main = true;
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 0, "status was: {}", app.status);
+  assert!(app.status.contains("main"), "and it must say why: {}", app.status);
+}
+
+#[test]
+fn delete_targets_are_the_marked_rows_in_list_order() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta", "gamma"]);
+  // Mark gamma first, then alpha: the batch must still run in list order.
+  app.list_state.select(Some(2));
+  app.toggle_select();
+  app.list_state.select(Some(0));
+  app.toggle_select();
+
+  let ids: Vec<String> = app.delete_targets().into_iter().map(|t| t.id).collect();
+  assert_eq!(ids, vec!["alpha".to_string(), "gamma".to_string()]);
+}
+
+#[test]
+fn delete_targets_fall_back_to_the_cursor_row_when_nothing_is_marked() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.list_state.select(Some(1));
+  let ids: Vec<String> = app.delete_targets().into_iter().map(|t| t.id).collect();
+  assert_eq!(ids, vec!["beta".to_string()]);
+}
+
+#[test]
+fn a_mark_on_a_row_that_no_longer_exists_targets_nothing() {
+  // Marks are keyed by path; a row that vanished must not survive as a
+  // phantom target, and must NOT silently fall back to the cursor row
+  // either — that would delete a worktree the user never marked.
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  app.worktrees.remove(0);
+  app.list_state.select(Some(0));
+  assert!(app.delete_targets().is_empty(), "a stale mark must target nothing");
+}
+
+#[test]
+fn a_refresh_prunes_the_marks_whose_row_is_gone() {
+  // The background auto-refresh must not clear a selection mid-build, but it
+  // has to drop the rows that no longer exist. Refreshing against the real
+  // repo replaces the synthetic rows, so every mark below is stale.
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1);
+  app.refresh().unwrap();
+  assert_eq!(app.marked_count(), 0, "a mark whose row is gone must be pruned");
+}
+
+#[test]
+fn opening_the_filter_clears_the_marks() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  app.enter_filter();
+  assert_eq!(app.marked_count(), 0);
+}
+
+#[test]
+fn the_manual_refresh_clears_the_marks() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  app.request_refresh();
+  assert_eq!(app.marked_count(), 0);
+}
+
+#[test]
+fn entering_the_confirm_overlay_snapshots_the_batch() {
+  // The countdown can run while an auto-refresh lands and reorders the list,
+  // so the targets are resolved once, at open time.
+  let (_d, mut app) = app_with_rows(&["alpha", "beta", "gamma"]);
+  app.toggle_select();
+  app.list_state.select(Some(1));
+  app.toggle_select();
+
+  app.enter_confirm_delete();
+  assert_eq!(app.view, View::Confirm, "status was: {}", app.status);
+  assert_eq!(app.pending_delete().len(), 2);
+
+  app.worktrees.clear();
+  assert_eq!(app.pending_delete().len(), 2, "the snapshot must not track the list");
+}
+
+#[test]
+fn the_batch_status_names_the_failures() {
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+  let single = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![],
+  };
+  assert_eq!(single.status_line(), "removed alpha (/tmp/alpha)");
+
+  let batch = DeleteBatchOutcome {
+    removed: vec![
+      ("alpha".into(), "/tmp/alpha".into()),
+      ("beta".into(), "/tmp/beta".into()),
+    ],
+    failed: vec![DeleteFailure {
+      id: "gamma".into(),
+      path: "/tmp/gamma".into(),
+      error: "locked".into(),
+    }],
+  };
+  assert_eq!(batch.status_line(), "removed 2 of 3 worktrees; failed: gamma (locked)");
+
+  let all_ok = DeleteBatchOutcome {
+    removed: vec![
+      ("alpha".into(), "/tmp/alpha".into()),
+      ("beta".into(), "/tmp/beta".into()),
+    ],
+    failed: vec![],
+  };
+  assert_eq!(all_ok.status_line(), "removed 2 worktrees");
+}
+
+#[test]
+fn a_partial_batch_narrows_the_confirm_to_the_failures_never_to_the_cursor() {
+  // Codex review on PR #520 (P1). `worktree::remove` prunes the admin entry
+  // BEFORE deleting the directory (#98), so a removal that fails on the
+  // filesystem still drops its row from `repo.worktrees()`. The refresh in
+  // the drain then prunes its mark, and a batch RECOMPUTED from an empty
+  // mark set falls back to the cursor row: a second confirm would delete a
+  // worktree the user never marked. The batch may only ever narrow.
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, DeleteFailure, TaskKind, TaskMsg};
+
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let doomed = base.path().join("wt-doomed");
+  let bystander = base.path().join("wt-bystander");
+  gwm::worktree::add(&repo, "wt-doomed", &doomed, "feat/#484-doomed", false).unwrap();
+  gwm::worktree::add(&repo, "wt-bystander", &bystander, "feat/#484-bystander", false).unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let doomed_row = app
+    .worktrees
+    .iter()
+    .position(|w| w.name == "wt-doomed")
+    .expect("the doomed worktree is listed");
+  app.list_state.select(Some(doomed_row));
+  app.toggle_select();
+  app.enter_confirm_delete();
+  assert_eq!(app.pending_delete().len(), 1, "status was: {}", app.status);
+  let confirmed: Vec<std::path::PathBuf> = app.pending_delete().iter().map(|t| t.path.clone()).collect();
+
+  // The worktree is gone from git's list (pruned) but its removal reported a
+  // failure — the exact shape a mid-removal filesystem error leaves behind.
+  gwm::worktree::remove(&repo, "wt-doomed", false).unwrap();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      DeleteBatchOutcome {
+        removed: vec![],
+        failed: vec![DeleteFailure {
+          id: "wt-doomed".into(),
+          path: doomed.clone(),
+          error: "directory not empty".into(),
+        }],
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Confirm, "the failure keeps the overlay open");
+  for target in app.pending_delete() {
+    assert!(
+      confirmed.contains(&target.path),
+      "the retry batch must only ever contain rows the user confirmed, got {:?}",
+      target.path
+    );
+  }
+  assert!(
+    !app.pending_delete().iter().any(|t| t.path == bystander),
+    "and never the row the cursor landed on after the refresh"
+  );
+}
+
+#[test]
+fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
+  // Codex review on PR #520 (P2): a workspace batch spans repos, and two of
+  // them can hold the same worktree id. The banner is where the user goes to
+  // fix things, so it names each failure by path.
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+  let outcome = DeleteBatchOutcome {
+    removed: vec![],
+    failed: vec![
+      DeleteFailure {
+        id: "feat-1-auth".into(),
+        path: "/repos/alpha/feat-1-auth".into(),
+        error: "locked".into(),
+      },
+      DeleteFailure {
+        id: "feat-1-auth".into(),
+        path: "/repos/beta/feat-1-auth".into(),
+        error: "dirty".into(),
+      },
+    ],
+  };
+  let banner = outcome.failure_banner().expect("two failures produce a banner");
+  assert!(
+    banner.contains("/repos/alpha/feat-1-auth") && banner.contains("/repos/beta/feat-1-auth"),
+    "both repos must be tellable apart: {banner}"
+  );
 }

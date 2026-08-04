@@ -173,3 +173,69 @@ fn a_worktree_path_cannot_carry_a_bidi_control_into_the_table() {
     );
   }
 }
+
+// --- mark column (issue #484) ---------------------------------------------
+//
+// Same conditional-column contract as AGENT above: a user who never presses
+// `Space` keeps the exact pre-#484 table, and the column appears with the
+// first mark.
+
+/// A synthetic non-main row, the only kind that can be marked.
+fn markable_row(name: &str) -> gwm::worktree::WorktreeInfo {
+  gwm::worktree::WorktreeInfo {
+    name: name.into(),
+    id: name.into(),
+    path: std::path::PathBuf::from(format!("/tmp/gwm-test/{}", name)),
+    branch: Some(format!("feat/#484-{}", name)),
+    head: None,
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: gwm::worktree::BranchStatus::default(),
+    link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
+    age: None,
+  }
+}
+
+#[test]
+fn the_mark_column_is_absent_until_a_row_is_marked() {
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  // The sidebar paints `State ✓ clean`, so leaving it open would satisfy the
+  // glyph search below from outside the table and pass both tests vacuously.
+  app.sidebar.open = false;
+  app.worktrees.push(markable_row("feat-484-plain"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+
+  let text = draw_once(&mut app);
+  assert!(
+    !text.contains('\u{2713}'),
+    "nothing marked -> the table must stay visually pre-#484: {text}"
+  );
+  assert!(
+    !text.contains("marked"),
+    "and the footer must not carry a mark count: {text}"
+  );
+}
+
+#[test]
+fn a_marked_row_shows_the_glyph_and_the_footer_count() {
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  // Sidebar closed for the same reason as above: its `State ✓ clean` row
+  // would make the glyph assertion pass without a mark column at all.
+  app.sidebar.open = false;
+  app.worktrees.push(markable_row("feat-484-batch"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1, "status was: {}", app.status);
+
+  let text = draw_once(&mut app);
+  assert!(text.contains('\u{2713}'), "the marked row must carry the glyph");
+  assert!(
+    text.contains("1 marked"),
+    "and the pane footer must carry the count: {text}"
+  );
+}

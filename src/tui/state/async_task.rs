@@ -190,6 +190,103 @@ pub struct EditWorktreeResult {
   pub remote_renamed: bool,
 }
 
+/// One row of a delete batch (issue #484). Resolved once, when the confirm
+/// overlay opens, so a background auto-refresh landing mid-countdown cannot
+/// retarget the deletion by reordering the list under the cursor.
+///
+/// `workdir` is the owning repo's workdir, resolved per row rather than read
+/// from `App`'s active repo handle: in workspace mode (#36) a batch can span
+/// several repos, and routing it through the active handle would delete the
+/// wrong repo's worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTarget {
+  pub workdir: PathBuf,
+  /// Internal git worktree id — `worktree::remove` resolves by id, which can
+  /// diverge from the display name after a rename (#290).
+  pub id: String,
+  /// On-disk path. Doubles as the status-line label and as the key the mark
+  /// set is stored under.
+  pub path: PathBuf,
+}
+
+/// Outcome of a delete batch (issue #484). The batch never stops at the first
+/// error: every target is attempted, and the drain reports what landed.
+/// A single-target batch is the pre-#484 delete, and its status line is
+/// unchanged.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeleteBatchOutcome {
+  /// `(id, path)` per removed worktree, in batch order.
+  pub removed: Vec<(String, PathBuf)>,
+  /// One entry per failed removal, in batch order.
+  pub failed: Vec<DeleteFailure>,
+}
+
+/// A target the batch could not remove. Carries the `path` as well as the id
+/// because the drain narrows the open confirm overlay to the failures by
+/// path: ids are only unique inside one repo, and a workspace batch spans
+/// several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteFailure {
+  pub id: String,
+  pub path: PathBuf,
+  pub error: String,
+}
+
+impl DeleteBatchOutcome {
+  /// The status-bar line for this outcome. Singular forms are verbatim what
+  /// the pre-#484 single-row delete printed, so the common case reads
+  /// exactly as it did.
+  pub fn status_line(&self) -> String {
+    let total = self.removed.len() + self.failed.len();
+    if self.failed.is_empty() {
+      return match self.removed.as_slice() {
+        [(id, path)] => format!("removed {} ({})", id, path.display()),
+        _ => format!("removed {} worktrees", self.removed.len()),
+      };
+    }
+    let failures = self
+      .failed
+      .iter()
+      .map(|f| format!("{} ({})", f.id, f.error))
+      .collect::<Vec<_>>()
+      .join(", ");
+    if self.removed.is_empty() && total == 1 {
+      // Single target, single failure: the pre-#484 wording.
+      return format!("delete failed: {}", self.failed[0].error);
+    }
+    format!(
+      "removed {} of {} worktrees; failed: {}",
+      self.removed.len(),
+      total,
+      failures
+    )
+  }
+
+  /// The `delete_failure` banner for the confirm overlay: `None` when every
+  /// target landed, else the failures joined into one line.
+  pub fn failure_banner(&self) -> Option<String> {
+    if self.failed.is_empty() {
+      return None;
+    }
+    if self.removed.is_empty() && self.failed.len() == 1 {
+      return Some(self.failed[0].error.clone());
+    }
+    // The banner is where the user goes to fix things, so it names each
+    // failure by PATH: a workspace batch spans repos, and two of them can hold
+    // the same worktree id, which would make two rows indistinguishable
+    // (Codex review on PR #520). The status line keeps the shorter ids — it
+    // has one line to fit in, and the banner carries the detail.
+    Some(
+      self
+        .failed
+        .iter()
+        .map(|f| format!("{}: {}", f.path.display(), f.error))
+        .collect::<Vec<_>>()
+        .join(" · "),
+    )
+  }
+}
+
 /// Result of an off-thread task, posted from a worker thread back to the
 /// event loop over `App`'s task channel (issue #231). Carries owned,
 /// `Send` data only (no `git2::Repository` crosses the thread boundary)
@@ -219,10 +316,10 @@ pub enum TaskMsg {
   /// drain sets `App::report` and flips to `View::Report`; a superseded
   /// late result is dropped by [`TaskRunner::complete`].
   Bootstrap(u64, std::result::Result<BootstrapReport, String>),
-  /// A delete-worktree result (issue #257): the worker's generation, the
-  /// deleted worktree's display name + path label for the status line, and
-  /// the deletion outcome.
-  DeleteWorktree(u64, String, String, std::result::Result<(), String>),
+  /// A delete result (issue #257, batched in #484): the worker's generation
+  /// and the per-target outcome of the batch. A single-row `d` is a batch of
+  /// one, so there is one arm rather than two code paths.
+  DeleteWorktree(u64, DeleteBatchOutcome),
   /// A `git pull` result (#290): the worker's generation, the worktree's
   /// display name, and the outcome (a one-line status string on success or
   /// a stringified error).

@@ -10,6 +10,8 @@ Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI
 
 Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.6.0`** (machine contracts frozen since 1.0.0 — MSRV 1.95).
 
+**Unreleased on `dev`: multi-row selection + bulk delete (#484).** `Space` marks the highlighted worktree in the TUI and `d` deletes every marked row in one batch, behind one confirm that reports `N selected` rather than listing them, with `D` arming the branch deletion for the whole batch. Nothing marked means `d` is the single-row delete it has always been, and only `d` reads the mark set: every other verb keeps acting on the cursor row, which the pane footer makes visible by carrying the count. Marks are keyed by path, cleared by the filter and the manual `f`, and only pruned (never cleared) by the background auto-refresh. `cycle_sidebar_layout` moved off `Space` to `z` to make room; both old defaults are one `[tui.keys]` line away. The non-interactive half is `gwm remove a b c`, which resolves every pattern before touching anything, so an unknown or ambiguous one fails the whole command with nothing removed.
+
 **Security, 1.6.0 (GHSA-fffq-vg6f-gxqm, high).** Every version up to and including 1.5.0 expanded lifecycle-hook placeholders into `sh -c` unescaped, so a branch name carrying `;` / `|` / `$` / backticks (all legal in a git ref, and a branch can arrive from someone else's push) ran arbitrary commands as the user, with no trust prompt in the path: the TOFU gate covers the repo's hooks, never the branch name flowing into them. Values are shell-escaped on expansion in 1.6.0, and hooks also get their context as `GWM_*` environment variables, which need no quoting at all. No backport: upgrade.
 
 **Free-form naming, shipped in 1.6.0 (#416 / #418).** `gwm create --name spike-redis` skips the `<type> <issue> <desc>` triple; the name becomes the branch verbatim, so `branch_pattern` / `path_pattern` do not apply and branch-name-derived features (issue auto-linking, gitmoji) stay inactive on it, with `gwm link` as the way back. The TUI create and rename forms present the fields the repo's own patterns ask for, in pattern order, instead of the canonical triple, and move between the structured and free-form shapes in both directions.
@@ -26,6 +28,7 @@ Shipped since 1.0.0: **free-form naming** in 1.6.0 (#416 / #418, above) alongsid
 - User wants a **multi-repo workspace** (`gwm --workspace <dir>`), the **JSON API / daemon** (`--format=json`, `gwm daemon`, `gwm statusline` for shell prompts), or **stack presets** (`gwm init --preset laravel|node|rust|go|python-uv|generic`).
 - User asks **which AI agents are working where**: `gwm agents` (per-worktree sessions + an `unmatched` section), `gwm agents attach <wt> <id>` / `detach <wt> [<id>]` (multi-pins), the TUI `a` overlay (select `j`/`k`, pin `a`, unpin `d`, attach-by-id `i`), the pinned-only `Agents` sidebar pane, or the `GWM_AGENTS_HOME` test seam.
 - User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
+- User wants to **delete several worktrees at once**: `Space` to mark rows in the TUI then `d` (#484), or `gwm remove a b c` from the shell.
 - User asks about the redesigned TUI: PTY overlays (`l`/`L` lazygit, `r`/`R` review, `o`/`O` shell, #35), the Settings panel (`4`) and its live-editable Keys tab (#294), the Command Logs modal (`3`), the Working Tree file-explorer pane (#300), the current-PR CI indicator (#299), `[tui.keys.modal.<context>]` rebindable overlay keys (#219), and `[tui.macro1]`/`[tui.macro2]` (`h`/`H`).
 - User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[tui.open]`, `[git_tui]`, `[review]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
 - User asks about composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`) and the `!` / `&&` / `||` operators.
@@ -123,7 +126,10 @@ gwm bootstrap <pattern>                   # ...or on a named worktree
 gwm sync                                  # fetch + rebase the cwd worktree onto its upstream
 gwm sync <pattern>                        # ...or a fuzzy-matched worktree
 gwm sync <pattern> --merge                # merge the upstream instead of rebasing
-gwm remove <pattern> [--delete-branch] [--dry-run] [--force]   # remove (fuzzy); -b drops the branch
+gwm remove <PATTERN>... [--delete-branch] [--dry-run] [--force]   # remove (fuzzy); -b drops the branch
+#   several patterns = one batch (#484): every one is resolved BEFORE anything is
+#   touched, so an unknown / ambiguous pattern removes nothing at all; duplicates
+#   collapse; the destructive loop does not stop at the first error and exits non-zero
 gwm prune [--dry-run]                     # clean stale .git/worktrees entries
 
 gwm doctor [--format text|json]           # diagnose setup. Exit: 0=green, 1=warn, 2=fail
@@ -281,9 +287,12 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 
 ## TUI key map
 
-Built-in defaults after the **v0.10 keymap redesign (#290)**. Every binding is
+Built-in defaults after the **v0.10 keymap redesign (#290)**, plus the `Space` /
+`z` swap that made room for the row mark (#484). Every binding is
 rebindable via `[tui.keys]` (list view) and `[tui.keys.modal.<context>]`
-(overlays, #219). Run `gwm tui keys` for the full resolved map incl. every modal
+(overlays, #219). One upgrade note: `z` is now a shipped default, so a
+`.gwm.toml` binding a chord that *starts* with `z` (`top = ["z z"]`) is a prefix
+conflict and is refused at load time. Run `gwm tui keys` for the full resolved map incl. every modal
 context.
 
 | Key             | Action                                                                      |
@@ -293,7 +302,8 @@ context.
 | `Tab`           | swap focus between the worktree list and the Status sidebar                  |
 | `1` / `2`       | focus the worktrees pane / the Status pane                                  |
 | `3` / `4`       | open the Command Logs modal / the Settings (config) panel (#290 / #294)     |
-| `n` / `d` / `b` | new worktree modal / delete selected / re-run bootstrap (TOFU gate)         |
+| `n` / `d` / `b` | new worktree modal / delete the marked rows (or the cursor row) / re-run bootstrap (TOFU gate) |
+| `Space`         | mark / unmark the cursor row for the bulk delete (#484); only `d` reads the set |
 | `D`             | toggle "delete branch on remove" (arms the safety countdown when ON)        |
 | `p` / `P`       | pull / push the selected worktree's branch                                  |
 | `s` / `f`       | sync (fetch + rebase) / refresh the worktree list                           |
@@ -308,7 +318,7 @@ context.
 | `a`             | agent sessions overlay (#408) — `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
 | `F`             | refresh GitHub issue/PR status via `gh` (off-thread; statusbar spinner)     |
 | `V` / `v`       | toggle the sidebar / flip its position left ↔ right                         |
-| `S` / `Space`   | sidebar Details mode (commits ↔ stashes) / cycle layout (auto→side→stacked) |
+| `S` / `z`       | sidebar Details mode (commits ↔ stashes) / cycle layout (auto→side→stacked; `Space` before #484) |
 | `.` / `?`       | open the docs in `$BROWSER` / help overlay                                  |
 | `:` / `/`       | command palette (fuzzy-fire any action) / fuzzy filter bar (`Esc` clears)   |
 | `Enter`         | show path in status bar (picker mode: print path to stdout + exit)          |
@@ -327,7 +337,7 @@ category tabs (Theme / Worktree / TUI / Keys / All) with a per-layer selector
 
 ## Details sidebar
 
-When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `V` cycles `auto → side-by-side → stacked → auto`; `H` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically — no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
+When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `z` cycles `auto → side-by-side → stacked → auto` (`Space` before #484, `V` before #290); `v` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically — no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
 
 ```
 ╭─ Worktree ──────────────────────╮      ●  status dot tracks the linked PR / issue
@@ -880,7 +890,7 @@ gwm path|cd <pat>            # print path
 gwm switch | gwm s | gcd     # interactive picker (cd via shell wrapper)
 gwm bootstrap [pat]          # re-run bootstrap
 gwm sync [pat] [--merge]     # fetch + rebase (or merge) onto upstream
-gwm remove <pat> [-b]        # remove (-b drops branch)
+gwm remove <pat>... [-b]     # remove one or several (-b drops branch); resolve-all-first
 gwm prune                    # clean stale refs
 gwm exec [slug...] -- <cmd>  # run <cmd> in each worktree (✓/✗ rollup)
 gwm clean [slug...] [--yes]  # report / reclaim build artifacts

@@ -451,6 +451,19 @@ pub fn pane_counter(selected: usize, visible: usize) -> Option<String> {
   }
 }
 
+/// Worktrees-pane counter, with the mark count appended while rows are marked
+/// (issue #484). Only `d` reads the mark set: every other verb acts on the
+/// cursor row, so a live selection has to stay visible or `b` / `s` / `p`
+/// would silently look like they ignored it. `marked = 0` is the pre-#484
+/// counter, verbatim.
+pub fn list_pane_counter(selected: usize, visible: usize, marked: usize) -> Option<String> {
+  let base = pane_counter(selected, visible)?;
+  if marked == 0 {
+    return Some(base);
+  }
+  Some(format!("{}· {} marked ", base, marked))
+}
+
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Filter-aware: the visible rows are the filtered subset (issue #21). When
   // there is no active filter, this is the identity over `app.worktrees`.
@@ -491,10 +504,21 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let name_w = column_width(visible.iter().map(|w| w.name.as_str()), 18, 38);
   let branch_w = column_width(visible.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
   let status_w: u16 = 16;
+  let row_widths = RowWidths {
+    name: name_w,
+    branch: branch_w,
+    status: status_w,
+  };
 
   // Header cells, with an optional REPO column after the (caption-less) age
   // column in workspace mode.
-  let mut header_cells = vec![Cell::from("")];
+  // #484: the mark column leads, right under the cursor arrow. Caption-less,
+  // like the age and I/P columns.
+  let mut header_cells = if app.marked_count() > 0 {
+    vec![Cell::from(""), Cell::from("")]
+  } else {
+    vec![Cell::from("")]
+  };
   if is_workspace {
     header_cells.push(Cell::from("REPO"));
   }
@@ -521,13 +545,25 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| agent_cell_label(app.agents_for(w), now))
     .collect();
 
+  // #484: the mark column only exists while something is marked, so a user
+  // who never presses `Space` keeps the exact pre-#484 table instead of an
+  // empty column eating two cells on a narrow terminal (same rule the AGENT
+  // column follows).
+  let marked_count = app.marked_count();
+  let marks: Vec<bool> = if marked_count > 0 {
+    visible.iter().map(|w| app.is_marked(&w.path)).collect()
+  } else {
+    Vec::new()
+  };
+
   let rows: Vec<Row> = visible
     .iter()
     .enumerate()
     .map(|(vi, w)| {
       let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
       let agent = show_agent.then_some(agent_cells[vi]);
-      build_row(w, repo, name_w, branch_w, status_w, agent, &theme)
+      let mark = marks.get(vi).copied();
+      build_row(w, mark, repo, row_widths, agent, &theme)
     })
     .collect();
 
@@ -544,7 +580,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   //   - `Fill(1)` for path: takes whatever's left, vanishes last.
   // Verified by standalone probe down to 40-cell terminals: col 0
   // stays at 4 cells across every size.
-  let mut widths = vec![Constraint::Length(4)];
+  let mut widths = if marked_count > 0 {
+    // #484: mark glyph + its trailing space.
+    vec![Constraint::Length(2), Constraint::Length(4)]
+  } else {
+    vec![Constraint::Length(4)]
+  };
   if is_workspace {
     // REPO column sits between age and the I/P marker; a hard length so the
     // solver doesn't starve it on narrow terminals.
@@ -578,7 +619,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Recent Commits footer. `list_state.selected()` is 0-based; render it
   // 1-based. Blank when nothing is visible so the footer disappears.
   let selected_1based = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
-  let counter = pane_counter(selected_1based, visible.len());
+  let counter = list_pane_counter(selected_1based, visible.len(), marked_count);
 
   let mut block = Block::default()
     .borders(Borders::ALL)
@@ -1853,21 +1894,49 @@ pub fn agent_cell_label(
   Some((top.kind.display(), freshness))
 }
 
+/// The mark cell for one row (issue #484). Plain `✓` in the danger role: the
+/// only verb that reads the mark set is the destructive one, so the column
+/// says up front what the batch is for. Unmarked rows keep the slot blank so
+/// the columns stay aligned.
+fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
+  if marked {
+    Cell::from("✓").style(Style::default().fg(theme.prunable).add_modifier(Modifier::BOLD))
+  } else {
+    Cell::from("")
+  }
+}
+
+/// The three width-constrained column budgets a row truncates against.
+/// Grouped rather than passed one by one so the mark column (#484) could join
+/// `build_row`'s signature without pushing it past the argument limit.
+#[derive(Debug, Clone, Copy)]
+struct RowWidths {
+  name: u16,
+  branch: u16,
+  status: u16,
+}
+
 /// Build one worktree table row. In workspace mode (issue #36) `repo` is
 /// `Some((name, width))` and a leading `REPO` cell is inserted after the age
 /// column, painted in the `accent` role; in single-repo mode it is `None` and
 /// the row keeps its historical shape.
 fn build_row(
   w: &WorktreeInfo,
+  // #484: `Some(is_marked)` while the mark column is shown (i.e. at least one
+  // row is marked anywhere in the list), `None` when it is absent entirely.
+  mark: Option<bool>,
   repo: Option<(&str, u16)>,
-  name_w: u16,
-  branch_w: u16,
-  status_w: u16,
+  widths: RowWidths,
   // Outer `Option` = is the AGENT column shown at all (round D:
   // conditional on any detected session); inner = this row's top agent.
   agent: Option<Option<(&'static str, crate::agent_sessions::Freshness)>>,
   theme: &Theme,
 ) -> Row<'static> {
+  let RowWidths {
+    name: name_w,
+    branch: branch_w,
+    status: status_w,
+  } = widths;
   let marker = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
@@ -1902,7 +1971,11 @@ fn build_row(
   let path_cell =
     Cell::from(crate::naming::sanitise_for_terminal(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
-  let mut cells = vec![age_cell];
+  let mut cells = Vec::with_capacity(8);
+  if let Some(marked) = mark {
+    cells.push(mark_cell(marked, theme));
+  }
+  cells.push(age_cell);
   if let Some((repo_name, repo_w)) = repo {
     cells.push(
       Cell::from(trunc(repo_name, repo_w as usize))
@@ -2112,6 +2185,8 @@ impl HintContext {
         // Worktree lifecycle.
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
+        // #484: the mark sits next to the verb it feeds.
+        Hint::Key(ToggleSelect, "mark"),
         Hint::Key(Bootstrap, "boot"),
         // Act on the selected worktree. #453 re-audit: exec and agent
         // sessions joined the family; clean / mux / macros stay
@@ -2907,7 +2982,15 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
   } else {
     rows.push(entry(Action::Create, "new worktree"));
-    rows.push(entry(Action::DeleteConfirm, "delete selected"));
+    // #484: the mark set is what `d` acts on when it is non-empty.
+    rows.push(entry(
+      Action::ToggleSelect,
+      "mark / unmark this worktree for a bulk delete",
+    ));
+    rows.push(entry(
+      Action::DeleteConfirm,
+      "delete the marked worktrees (or this one)",
+    ));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
   rows.push(entry(
@@ -4261,6 +4344,16 @@ pub fn delete_worktree_title() -> &'static str {
   "Delete Worktree"
 }
 
+/// Title of the confirm overlay for a batch of `count` targets (issue #484).
+/// A batch of one is the pre-#484 single delete, title included.
+pub fn delete_batch_title(count: usize) -> String {
+  if count > 1 {
+    format!("Delete {} Worktrees", count)
+  } else {
+    delete_worktree_title().to_string()
+  }
+}
+
 pub fn confirm_delete_branch_line(
   enabled: bool,
   key: &str,
@@ -4330,7 +4423,10 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
   let block = overlay_block(danger);
 
-  let Some(w) = app.selected() else {
+  // #484: the overlay is about the batch snapshotted when it opened, not
+  // about wherever the cursor sits now.
+  let targets = app.pending_delete();
+  if targets.is_empty() {
     let mut lines = overlay_title_lines(delete_worktree_title(), danger);
     lines.push(Line::from("nothing selected").centered());
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
@@ -4338,7 +4434,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
     return;
-  };
+  }
 
   // Width first (a fixed % of the terminal) so a long path / name can be
   // middle-ellipsized to one line instead of wrapping mid-path (#187
@@ -4349,35 +4445,61 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let label_w = "Delete Branch".chars().count();
   let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
-  let name = ellipsize_middle(&w.name, value_w);
-  let path = ellipsize_middle(&tilde_compress(&w.path.display().to_string()), value_w);
-
   // Title stays centred; details use an aligned label/value grid so the
   // destructive target is easier to scan (#220 visual follow-up).
-  let mut content: Vec<Line> = overlay_title_lines(delete_worktree_title(), danger);
-  content.push(confirm_detail_line(
-    "Worktree",
-    name,
-    label_w,
-    muted,
-    Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
-  ));
-  content.push(confirm_detail_line(
-    "Path",
-    path,
-    label_w,
-    muted,
-    Style::default().fg(muted),
-  ));
-  if let Some(b) = &w.branch {
-    let branch = ellipsize_middle(b, value_w);
+  let mut content: Vec<Line> = overlay_title_lines(&delete_batch_title(targets.len()), danger);
+  if targets.len() > 1 {
+    // A batch reports its size, not its members (#484): the user picked the
+    // rows deliberately and the list is already on screen behind the modal.
     content.push(confirm_detail_line(
-      "Branch",
-      branch,
+      "Worktrees",
+      format!("{} selected", targets.len()),
+      label_w,
+      muted,
+      Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
+    ));
+    let with_branch = targets
+      .iter()
+      .filter(|t| app.worktrees.iter().any(|w| w.path == t.path && w.branch.is_some()))
+      .count();
+    content.push(confirm_detail_line(
+      "Branches",
+      format!("{} of {} carry a branch", with_branch, targets.len()),
       label_w,
       muted,
       Style::default().fg(app.theme.branch),
     ));
+  } else {
+    // Resolve the row from the snapshot's path rather than from the cursor:
+    // a refresh landing during the countdown can have moved the cursor.
+    let target = &targets[0];
+    let row = app.worktrees.iter().find(|w| w.path == target.path);
+    let name = ellipsize_middle(row.map(|w| w.name.as_str()).unwrap_or(&target.id), value_w);
+    let path = ellipsize_middle(&tilde_compress(&target.path.display().to_string()), value_w);
+    content.push(confirm_detail_line(
+      "Worktree",
+      name,
+      label_w,
+      muted,
+      Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
+    ));
+    content.push(confirm_detail_line(
+      "Path",
+      path,
+      label_w,
+      muted,
+      Style::default().fg(muted),
+    ));
+    if let Some(b) = row.and_then(|w| w.branch.as_deref()) {
+      let branch = ellipsize_middle(b, value_w);
+      content.push(confirm_detail_line(
+        "Branch",
+        branch,
+        label_w,
+        muted,
+        Style::default().fg(app.theme.branch),
+      ));
+    }
   }
   content.push(Line::from(""));
   content.push(confirm_delete_branch_line(

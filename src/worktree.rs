@@ -483,11 +483,51 @@ fn branch_created_age(repo: &Repository, branch: &str) -> Option<Duration> {
   Some(Duration::from_secs((now - created).max(0) as u64))
 }
 
+/// [`remove`], but only if `name` still resolves to `expected_path`.
+///
+/// For callers that resolve a target and remove it later (issue #484: the TUI
+/// confirm overlay snapshots its batch when it opens, then fires after a
+/// safety countdown). A worktree id is just the `.git/worktrees/<id>` entry
+/// name, and git hands the same id back to whoever recreates a worktree with
+/// that basename: remove and recreate from another shell during the countdown
+/// and the id now points somewhere else, so removing by id alone would delete
+/// a worktree the user never saw. The path is what the overlay showed, so the
+/// path is what has to still hold.
+///
+/// Compared verbatim rather than canonicalised: both sides come from
+/// `Worktree::path()`, so they carry the same normalisation, and the directory
+/// may be gone by now, which would make `canonicalize` fail rather than
+/// disagree.
+pub fn remove_verified(repo: &Repository, name: &str, expected_path: &Path, delete_branch: bool) -> Result<()> {
+  remove_inner(repo, name, Some(expected_path), delete_branch)
+}
+
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
 pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> {
+  remove_inner(repo, name, None, delete_branch)
+}
+
+/// Shared body of [`remove`] and [`remove_verified`].
+///
+/// The check lives here, on the handle the prune will actually act on, rather
+/// than in a wrapper that resolves the name a second time: re-resolving would
+/// reopen the very window the check exists to close, however narrow (Codex
+/// review on PR #520). `expected_path = None` is the historical, unverified
+/// removal.
+fn remove_inner(repo: &Repository, name: &str, expected_path: Option<&Path>, delete_branch: bool) -> Result<()> {
   let wt = repo
     .find_worktree(name)
     .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  if let Some(expected) = expected_path {
+    if wt.path() != expected {
+      return Err(GwmError::Other(format!(
+        "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
+        name,
+        wt.path().display(),
+        expected.display()
+      )));
+    }
+  }
   let path = wt.path().to_path_buf();
 
   // Capture the branch (if any) so we can drop it after pruning.

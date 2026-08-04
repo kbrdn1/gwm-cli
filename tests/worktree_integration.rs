@@ -2021,3 +2021,52 @@ fn add_keeps_the_branch_when_the_checkouts_cannot_be_inspected() {
     "an unreadable admin directory must hold the rollback back, not wave it through"
   );
 }
+
+#[test]
+fn remove_verified_refuses_an_id_that_now_points_elsewhere() {
+  // Issue #484 / Codex review on PR #520 (P1). A worktree id is the
+  // `.git/worktrees/<id>` entry name, and git hands the same id back to
+  // whoever recreates a worktree with that basename. The TUI confirm
+  // overlay snapshots its targets when it opens and fires after a safety
+  // countdown, so removing by id alone could delete a worktree recreated
+  // under that id in the meantime, not the one the overlay named.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let first_root = TempDir::new().unwrap();
+  let first = first_root.path().join("feat-484-recycled");
+  worktree::add(&repo, "feat-484-recycled", &first, "feat/#484-first", false).unwrap();
+  // What the overlay would have captured.
+  let confirmed = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-484-recycled")
+    .unwrap();
+
+  // Someone removes it and recreates one under the same id, elsewhere.
+  worktree::remove(&repo, &confirmed.id, false).unwrap();
+  let second_root = TempDir::new().unwrap();
+  let second = second_root.path().join("feat-484-recycled");
+  worktree::add(&repo, "feat-484-recycled", &second, "feat/#484-second", false).unwrap();
+
+  let err = worktree::remove_verified(&repo, &confirmed.id, &confirmed.path, true)
+    .expect_err("the id no longer names the confirmed worktree");
+  let msg = err.to_string();
+  assert!(
+    msg.contains("changed since it was confirmed"),
+    "the error must say why nothing was removed: {msg}"
+  );
+  assert!(second.exists(), "the worktree the user never confirmed must survive");
+  assert!(
+    repo.find_branch("feat/#484-second", git2::BranchType::Local).is_ok(),
+    "and so must its branch, despite delete_branch"
+  );
+
+  // The matching case still removes.
+  let live = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-484-recycled")
+    .unwrap();
+  worktree::remove_verified(&repo, &live.id, &live.path, false).unwrap();
+  assert!(!second.exists(), "a target that still matches is removed");
+}

@@ -272,7 +272,7 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #   "stacked"       table on top, sidebar below (default since #217)
 #   "side-by-side"  always beside the table, even on a narrow terminal
 #   "auto"          side-by-side at >= 120 columns, stacked below that
-# Cycle it live with `Space`. Before #365 this reset on every launch; set it here to
+# Cycle it live with `z`. Before #365 this reset on every launch; set it here to
 # make the choice stick. An unknown value is a hard error at load time.
 #
 # [tui]

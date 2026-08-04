@@ -115,6 +115,8 @@ define_actions! {
   FocusStatus       => "focus_status",
   // Filter
   Filter            => "filter",
+  // #484: mark the cursor row for a bulk action (delete today).
+  ToggleSelect      => "toggle_select",
   // Lifecycle / mutating
   Refresh           => "refresh",
   Sync              => "sync",
@@ -496,10 +498,12 @@ impl Keymap {
       def(Action::WtScrollDown, &["J"]),
       def(Action::WtScrollUp, &["K"]),
       // #290: V=toggle show/hide, S=cycle content (Commits↔Stashes),
-      // Space=cycle orientation (auto/side-by-side/stacked), v=toggle position.
+      // v=toggle position. #484: the layout cycle moved off `Space` to `z`,
+      // which the row mark took (space-to-mark is the lazygit / k9s / fzf
+      // convention). Both pre-#484 defaults are one `[tui.keys]` line away.
       def(Action::ToggleSidebar, &["V"]),
       def(Action::ToggleSidebarMode, &["S"]),
-      def(Action::CycleSidebarLayout, &["Space"]),
+      def(Action::CycleSidebarLayout, &["z"]),
       def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::FocusWorktrees, &["1"]),
@@ -516,6 +520,8 @@ impl Keymap {
       // #325: `X` opens the clean reclaim overlay.
       def(Action::CleanOverlay, &["X"]),
       def(Action::Filter, &["/"]),
+      // #484: Space marks / unmarks the cursor row for a bulk delete.
+      def(Action::ToggleSelect, &["Space"]),
       def(Action::Refresh, &["f"]),
       // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
       def(Action::Sync, &["s"]),
