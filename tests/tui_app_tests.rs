@@ -9607,6 +9607,49 @@ fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
 }
 
 #[test]
+fn exec_picker_wraps_a_container_profile_the_same_way_the_cli_does() {
+  // Issue #421: the same profile must not mean "in a container" on the CLI
+  // and "on the host" in the TUI. `runtime` is explicit so the test never
+  // depends on the runner having docker or podman installed.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  app.enter_exec_picker();
+  let cwd = app.selected().unwrap().path.clone();
+  let (argv, _) = app.exec_picker_resolve().expect("a container profile resolves");
+  assert_eq!(argv[0], "docker", "argv[0] is the runtime the PTY overlay spawns");
+  assert_eq!(argv[1], "run");
+  // The selected worktree here is the main checkout, whose gitdir lives
+  // inside it: one mount, its own path (the CLI dedupe, exercised through
+  // the TUI path).
+  let wt = cwd.components().collect::<std::path::PathBuf>().display().to_string();
+  assert!(
+    argv.windows(2).any(|w| w[0] == "-v" && w[1] == format!("{wt}:{wt}")),
+    "the worktree path is mirrored: {argv:?}"
+  );
+  assert_eq!(
+    argv.iter().filter(|t| *t == "-v").count(),
+    1,
+    "the gitdir already lives inside this worktree: {argv:?}"
+  );
+  assert_eq!(
+    &argv[argv.len() - 2..],
+    &["cargo".to_string(), "test".to_string()],
+    "the profile's command is the container's CMD"
+  );
+}
+
+#[test]
+fn exec_picker_leaves_a_hostless_profile_alone() {
+  // The complement: no `[container]` ⇒ the argv is the command verbatim, the
+  // pre-#421 behaviour.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.plain]\ncommand = [\"cargo\", \"test\"]\n");
+  app.enter_exec_picker();
+  let (argv, _) = app.exec_picker_resolve().expect("resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+}
+
+#[test]
 fn exec_picker_close_returns_to_the_list() {
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
   app.enter_exec_picker();

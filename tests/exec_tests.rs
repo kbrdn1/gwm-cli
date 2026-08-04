@@ -6,12 +6,15 @@
 //! repo. Spawning uses `sh -c`, present at `/bin/sh` even on a stripped
 //! CI PATH, so these stay environment-independent (CLAUDE.md).
 
+mod common;
+
 use clap::Parser;
 use gwm::cli::{Cli, Command};
-use gwm::config::{ExecConfig, ExecProfile};
+use gwm::config::{ContainerConfig, ExecConfig, ExecProfile};
 use gwm::exec::{
-  exec_capture_in_dir, exec_in_dir, format_outcome, resolve_exec_command, resolve_jobs, resolve_program,
-  rollup_exit_code, run_in_dirs_parallel, ExecOutcome, ExecStatus,
+  build_container_argv, exec_capture_in_dir, exec_in_dir, format_outcome, resolve_container_runtime,
+  resolve_exec_command, resolve_exec_container, resolve_jobs, resolve_program, rollup_exit_code, run_in_dirs_parallel,
+  validate_exec_profile, ContainerPlan, ExecOutcome, ExecStatus, CONTAINER_RUNTIMES,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +30,7 @@ fn exec_cfg(profiles: &[(&str, &[&str])]) -> ExecConfig {
       ExecProfile {
         command: argv.iter().map(|s| s.to_string()).collect(),
         jobs: None,
+        container: None,
       },
     );
   }
@@ -241,6 +245,7 @@ fn exec_cfg_jobs(global: Option<u32>, profiles: &[(&str, &[&str], Option<u32>)])
       ExecProfile {
         command: argv.iter().map(|s| s.to_string()).collect(),
         jobs: *jobs,
+        container: None,
       },
     );
   }
@@ -310,16 +315,20 @@ fn run_parallel_captures_each_dirs_output_in_input_order() {
   // proves per-worktree capture, and the results must come back in INPUT
   // order regardless of completion order (bounded at 2 workers).
   let dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
-  let items: Vec<(String, PathBuf)> = dirs
+  let items: Vec<(String, PathBuf, Vec<String>)> = dirs
     .iter()
     .enumerate()
     .map(|(i, d)| {
       std::fs::write(d.path().join("id.txt"), format!("dir-{i}")).unwrap();
-      (format!("wt{i}"), d.path().to_path_buf())
+      (
+        format!("wt{i}"),
+        d.path().to_path_buf(),
+        vec!["sh".to_string(), "-c".to_string(), "cat id.txt".to_string()],
+      )
     })
     .collect();
 
-  let results = run_in_dirs_parallel(2, &items, "sh", &["-c".into(), "cat id.txt".into()]);
+  let results = run_in_dirs_parallel(2, &items);
 
   assert_eq!(results.len(), 3);
   for (i, (outcome, output)) in results.iter().enumerate() {
@@ -335,16 +344,20 @@ fn run_parallel_captures_each_dirs_output_in_input_order() {
 #[test]
 fn run_parallel_clamps_jobs_above_item_count() {
   let dir = TempDir::new().unwrap();
-  let items = vec![("only".to_string(), dir.path().to_path_buf())];
+  let items = vec![(
+    "only".to_string(),
+    dir.path().to_path_buf(),
+    vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+  )];
   // jobs far exceeds the single item — must not panic, returns the one result.
-  let results = run_in_dirs_parallel(64, &items, "sh", &["-c".into(), "true".into()]);
+  let results = run_in_dirs_parallel(64, &items);
   assert_eq!(results.len(), 1);
   assert_eq!(results[0].0.status, ExecStatus::Ok);
 }
 
 #[test]
 fn run_parallel_on_empty_items_returns_empty() {
-  let results = run_in_dirs_parallel(4, &[], "true", &[]);
+  let results = run_in_dirs_parallel(4, &[]);
   assert!(results.is_empty());
 }
 
@@ -456,5 +469,301 @@ fn resolve_rejects_a_profile_with_an_empty_command() {
   assert!(
     err.to_string().contains("empty"),
     "error should flag the empty command: {err}"
+  );
+}
+
+// --- container execution (issue #421) --------------------------------------
+//
+// `build_container_argv` is pure — no spawn, no `PATH` read, no filesystem —
+// so these are hermetic on a CI runner that has neither docker nor podman.
+// The one test that touches disk builds a REAL linked worktree, because the
+// bug this feature exists to avoid is only visible there: a linked worktree's
+// `.git` is a file holding an absolute host path.
+
+/// A minimal `[container]` block: just the required image.
+fn container_cfg(image: &str) -> ContainerConfig {
+  ContainerConfig {
+    image: image.to_string(),
+    runtime: None,
+    extra_args: Vec::new(),
+  }
+}
+
+/// `&["a", "b"]` → `vec!["a".to_string(), "b".to_string()]`.
+fn argv(tokens: &[&str]) -> Vec<String> {
+  tokens.iter().map(|s| s.to_string()).collect()
+}
+
+/// The `-v` mount sources in `out`, in order (`-v <src>:<dst>` → `<src>`).
+fn mount_sources(out: &[String]) -> Vec<String> {
+  out
+    .windows(2)
+    .filter(|w| w[0] == "-v")
+    .filter_map(|w| w[1].rsplit_once(':').map(|(src, _)| src.to_string()))
+    .collect()
+}
+
+#[test]
+fn container_argv_mirrors_host_paths_and_runs_the_command_as_the_container_cmd() {
+  let out = build_container_argv(
+    "docker",
+    &container_cfg("rust:1.90"),
+    Path::new("/wt/feat-1"),
+    Path::new("/main/.git"),
+    &argv(&["cargo", "test"]),
+  );
+  assert_eq!(
+    out,
+    argv(&[
+      "docker",
+      "run",
+      "--rm",
+      "-v",
+      "/wt/feat-1:/wt/feat-1",
+      "-v",
+      "/main/.git:/main/.git",
+      "-w",
+      "/wt/feat-1",
+      "rust:1.90",
+      "cargo",
+      "test",
+    ]),
+    "host paths are mirrored (no /workspace), the image comes last before the command"
+  );
+}
+
+#[test]
+fn container_argv_mounts_the_main_checkout_gitdir_for_a_linked_worktree() {
+  // THE test of this feature. A linked worktree's `.git` is a file holding
+  // the absolute HOST path of `<main>/.git/worktrees/<id>`; mount the
+  // worktree alone and that path does not exist in the container, so no git
+  // command answers inside it. The assertion is therefore not "an extra -v is
+  // present" but "the path git will follow is covered by a mount".
+  let (main_dir, repo) = common::init_repo();
+  let wt_parent = TempDir::new().unwrap();
+  let wt_path = wt_parent.path().join("feat-1");
+  repo.worktree("feat-1", &wt_path, None).expect("linked worktree");
+
+  let dot_git = wt_path.join(".git");
+  assert!(dot_git.is_file(), "a linked worktree's .git is a file, not a directory");
+  let gitdir = std::fs::read_to_string(&dot_git).unwrap();
+  let referenced = gitdir
+    .trim()
+    .strip_prefix("gitdir:")
+    .expect("the .git file points at the admin dir")
+    .trim()
+    .to_string();
+
+  let linked = git2::Repository::open(&wt_path).unwrap();
+  let plan = ContainerPlan::resolve(container_cfg("rust:1.90"), linked.commondir(), |_| true).unwrap();
+  let out = plan.wrap(&wt_path, &argv(&["git", "status"]));
+
+  // Canonicalise both sides: on macOS a TempDir is `/var/…` while git may
+  // record `/private/var/…`, and this asserts coverage, not string equality.
+  let referenced = Path::new(&referenced).canonicalize().unwrap();
+  let covered = mount_sources(&out)
+    .iter()
+    .filter_map(|src| Path::new(src).canonicalize().ok())
+    .any(|src| referenced.starts_with(&src));
+  assert!(
+    covered,
+    "no mount covers {} — git would not answer inside the container. argv: {out:?}",
+    referenced.display()
+  );
+  // And the mount is the main checkout's gitdir, not the worktree's own path.
+  assert!(
+    referenced.starts_with(main_dir.path().canonicalize().unwrap().join(".git")),
+    "the referenced admin dir lives under the main checkout's .git"
+  );
+}
+
+#[test]
+fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
+  // The main checkout (reachable via an explicit slug — `find_fuzzy` does not
+  // filter it out) carries its own `.git`, so the first mount already covers
+  // it. A second, nested mount would be redundant.
+  let out = build_container_argv(
+    "podman",
+    &container_cfg("alpine"),
+    Path::new("/repo"),
+    Path::new("/repo/.git"),
+    &argv(&["true"]),
+  );
+  assert_eq!(
+    mount_sources(&out),
+    vec!["/repo".to_string()],
+    "one mount only, the worktree's own path: {out:?}"
+  );
+  // The main worktree's path comes out of git2 with a TRAILING SEPARATOR, and
+  // the containment check runs on the raw path (`Path::starts_with` compares
+  // components, so it holds) while the mount is normalised.
+  let out = build_container_argv(
+    "podman",
+    &container_cfg("alpine"),
+    Path::new("/repo/"),
+    Path::new("/repo/.git"),
+    &argv(&["true"]),
+  );
+  assert_eq!(
+    mount_sources(&out),
+    vec!["/repo".to_string()],
+    "a trailing separator changes neither the dedupe nor the mount: {out:?}"
+  );
+}
+
+#[test]
+fn container_argv_places_extra_args_after_gwms_flags_and_before_the_image() {
+  let cfg = ContainerConfig {
+    image: "node:22".to_string(),
+    runtime: None,
+    extra_args: argv(&["-e", "CI=1", "--network", "none"]),
+  };
+  let out = build_container_argv(
+    "docker",
+    &cfg,
+    Path::new("/wt/x"),
+    Path::new("/main/.git"),
+    &argv(&["npm", "test"]),
+  );
+  let image_at = out.iter().position(|t| t == "node:22").expect("image present");
+  let extra_at = out.iter().position(|t| t == "--network").expect("extra arg present");
+  let w_at = out.iter().position(|t| t == "-w").expect("-w present");
+  assert!(w_at < extra_at, "extra_args come after gwm's own flags, so they win");
+  assert!(
+    extra_at < image_at,
+    "extra_args are `run` flags, so they precede the image"
+  );
+  assert_eq!(
+    &out[image_at + 1..],
+    &argv(&["npm", "test"])[..],
+    "command follows the image"
+  );
+}
+
+#[test]
+fn container_argv_never_quotes_or_joins_a_token() {
+  // The invariant: gwm builds argv, never a shell string (the reference
+  // implementation joins + shell-quotes because it feeds tmux). A token with
+  // spaces and metachars must survive as ONE token, unquoted.
+  let nasty = "hello world; rm -rf /".to_string();
+  let out = build_container_argv(
+    "docker",
+    &container_cfg("alpine"),
+    Path::new("/wt/x"),
+    Path::new("/main/.git"),
+    &["echo".to_string(), nasty.clone()],
+  );
+  assert_eq!(out.last().unwrap(), &nasty, "the token is passed through verbatim");
+  assert!(
+    !out.iter().any(|t| t.contains('\'') || t.contains('\\')),
+    "no token is shell-quoted: {out:?}"
+  );
+}
+
+#[test]
+fn container_plan_normalises_a_trailing_separator_on_the_common_dir() {
+  // git2's `commondir()` returns `<main>/.git/`; the mount must read as a
+  // path, not as a directory listing.
+  let plan = ContainerPlan::resolve(container_cfg("alpine"), Path::new("/main/.git/"), |_| true).unwrap();
+  assert_eq!(plan.common_dir, PathBuf::from("/main/.git"));
+  let out = plan.wrap(Path::new("/wt/x"), &argv(&["true"]));
+  assert!(
+    out.contains(&"/main/.git:/main/.git".to_string()),
+    "mount carries no trailing separator: {out:?}"
+  );
+}
+
+#[test]
+fn runtime_detection_prefers_docker_then_podman() {
+  assert_eq!(resolve_container_runtime(None, |_| true).unwrap(), "docker");
+  assert_eq!(
+    resolve_container_runtime(None, |bin| bin == "podman").unwrap(),
+    "podman",
+    "podman is the fallback, not the preference"
+  );
+  assert_eq!(CONTAINER_RUNTIMES, &["docker", "podman"]);
+}
+
+#[test]
+fn an_explicit_runtime_wins_even_when_absent_from_path() {
+  // A missing binary reports better as a spawn error naming it than as a
+  // config error second-guessing the user (`nerdctl`, a wrapper script, …).
+  assert_eq!(
+    resolve_container_runtime(Some("nerdctl"), |_| false).unwrap(),
+    "nerdctl"
+  );
+}
+
+#[test]
+fn runtime_detection_errors_when_no_runtime_is_available() {
+  let err = resolve_container_runtime(None, |_| false).expect_err("no runtime must error");
+  let msg = err.to_string();
+  assert!(
+    msg.contains("docker") && msg.contains("podman") && msg.contains("runtime"),
+    "error should name what was looked for and the way out: {msg}"
+  );
+}
+
+/// An [`ExecConfig`] with one profile carrying a `[container]` block.
+fn exec_cfg_container(name: &str, command: &[&str], container: Option<ContainerConfig>) -> ExecConfig {
+  let mut map = BTreeMap::new();
+  map.insert(
+    name.to_string(),
+    ExecProfile {
+      command: argv(command),
+      jobs: None,
+      container,
+    },
+  );
+  ExecConfig {
+    jobs: None,
+    profiles: map,
+  }
+}
+
+#[test]
+fn the_inline_surface_is_never_containerised() {
+  // The frozen 1.0 surface (#319): `gwm exec -- <cmd>` runs on the host, and
+  // no config can change that. The block rides a profile the user has to name.
+  let cfg = exec_cfg_container("test", &["cargo", "test"], Some(container_cfg("rust:1.90")));
+  assert_eq!(
+    resolve_exec_container(None, &cfg).unwrap(),
+    None,
+    "an inline command is not containerised even when a profile declares one"
+  );
+  assert_eq!(
+    resolve_exec_command(None, &argv(&["cargo", "check"]), &cfg).unwrap(),
+    argv(&["cargo", "check"]),
+    "and the inline argv is forwarded verbatim, unchanged by #421"
+  );
+}
+
+#[test]
+fn a_named_profile_carries_its_container_block() {
+  let cfg = exec_cfg_container("test", &["cargo", "test"], Some(container_cfg("rust:1.90")));
+  let resolved = resolve_exec_container(Some("test"), &cfg).unwrap();
+  assert_eq!(resolved.map(|c| c.image), Some("rust:1.90".to_string()));
+}
+
+#[test]
+fn a_profile_without_a_container_block_runs_on_the_host() {
+  let cfg = exec_cfg_container("test", &["cargo", "test"], None);
+  assert_eq!(resolve_exec_container(Some("test"), &cfg).unwrap(), None);
+}
+
+#[test]
+fn a_container_block_with_an_empty_image_is_rejected() {
+  let cfg = exec_cfg_container("test", &["cargo", "test"], Some(container_cfg("  ")));
+  let err = resolve_exec_container(Some("test"), &cfg).expect_err("empty image must error");
+  assert!(
+    err.to_string().contains("image") && err.to_string().contains("test"),
+    "error should name the field and the profile: {err}"
+  );
+  // Same rejection on the config-validation path, so `gwm config validate` /
+  // `gwm doctor` refuse exactly what `gwm exec --profile` would.
+  let err = validate_exec_profile("test", cfg.profiles.get("test").unwrap()).expect_err("validator must agree");
+  assert!(
+    err.to_string().contains("image"),
+    "validator flags the empty image: {err}"
   );
 }

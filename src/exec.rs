@@ -8,7 +8,7 @@
 //! — deterministic, readable output for the MVP; parallel fan-out is a
 //! deliberate follow-up.
 
-use crate::config::ExecConfig;
+use crate::config::{ContainerConfig, ExecConfig, ExecProfile};
 use crate::error::{GwmError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,7 +59,7 @@ pub fn resolve_exec_command(profile: Option<&str>, inline: &[String], cfg: &Exec
         .profiles
         .get(name)
         .ok_or_else(|| GwmError::Config(format!("exec: no profile named `{name}` in [exec.profiles]")))?;
-      validate_exec_profile_command(name, &p.command)?;
+      validate_exec_profile(name, p)?;
       Ok(p.command.clone())
     }
     (None, false) => Ok(inline.to_vec()),
@@ -69,17 +69,191 @@ pub fn resolve_exec_command(profile: Option<&str>, inline: &[String], cfg: &Exec
   }
 }
 
-/// Validate a `[exec.profiles.<name>]` entry's `command`: it must be a
-/// non-empty argv array. Surfaced for the config validation path so
-/// `gwm config validate` / `gwm doctor` reject what `gwm exec --profile`
-/// would (issue #324 review).
-pub fn validate_exec_profile_command(profile: &str, command: &[String]) -> Result<()> {
+/// Validate one `[exec.profiles.<name>]` entry. Surfaced for the config
+/// validation path so `gwm config validate` / `gwm doctor` reject what
+/// `gwm exec --profile` would (issue #324 review).
+///
+/// The profile is destructured **exhaustively**: adding a field to
+/// [`ExecProfile`] without deciding whether it needs validating no longer
+/// compiles, so a checker can't silently read half the config (the `gwm
+/// doctor` failure mode from #392).
+pub fn validate_exec_profile(profile: &str, entry: &ExecProfile) -> Result<()> {
+  let ExecProfile {
+    command,
+    jobs: _, // any u32 is valid; `resolve_jobs` clamps 0 to 1.
+    container,
+  } = entry;
   if command.is_empty() {
     return Err(GwmError::Config(format!(
       "exec: profile `{profile}` has an empty `command` — give it an argv array like `command = [\"cargo\", \"test\"]`"
     )));
   }
+  if let Some(c) = container {
+    validate_container_image(profile, &c.image)?;
+  }
   Ok(())
+}
+
+/// Reject an empty `[exec.profiles.<name>.container] image` (issue #421) —
+/// the one field of the block that carries no default.
+pub fn validate_container_image(profile: &str, image: &str) -> Result<()> {
+  if image.trim().is_empty() {
+    return Err(GwmError::Config(format!(
+      "exec: profile `{profile}` has a `[container]` with an empty `image` — give it one like `image = \"rust:1.90\"`"
+    )));
+  }
+  Ok(())
+}
+
+/// The container CLIs gwm auto-detects, **in preference order**. Docker
+/// first: it is the CLI the ecosystem's tooling assumes, and every
+/// Docker-compatible engine (OrbStack, Colima, Rancher Desktop, Docker
+/// Desktop) exposes it. The reference implementation prefers podman; gwm
+/// states its own order rather than inheriting one by accident (issue #421).
+pub const CONTAINER_RUNTIMES: &[&str] = &["docker", "podman"];
+
+/// Resolve the container block for this invocation: `Some` only when a
+/// `--profile` carrying `[container]` was named. The inline
+/// `gwm exec -- <cmd>` surface is **never** containerised, whatever the
+/// config says — that surface is frozen (#319) and containerising it would
+/// change what an unchanged command line does.
+pub fn resolve_exec_container(profile: Option<&str>, cfg: &ExecConfig) -> Result<Option<ContainerConfig>> {
+  let Some(name) = profile else {
+    return Ok(None);
+  };
+  let Some(p) = cfg.profiles.get(name) else {
+    return Ok(None); // `resolve_exec_command` already reports the unknown profile.
+  };
+  let Some(container) = p.container.clone() else {
+    return Ok(None);
+  };
+  validate_container_image(name, &container.image)?;
+  Ok(Some(container))
+}
+
+/// Resolve which container CLI to run: an explicit `runtime` wins outright
+/// (it is honoured even when absent from `PATH` — the spawn failure reports
+/// it better than a config error could), else the first of
+/// [`CONTAINER_RUNTIMES`] that `available` accepts.
+///
+/// `available` is injected rather than read from `PATH` here so the caller
+/// owns the environment lookup and the tests stay hermetic (CI runners have
+/// neither docker nor podman).
+pub fn resolve_container_runtime(configured: Option<&str>, available: impl Fn(&str) -> bool) -> Result<String> {
+  if let Some(r) = configured.map(str::trim).filter(|r| !r.is_empty()) {
+    return Ok(r.to_string());
+  }
+  CONTAINER_RUNTIMES
+    .iter()
+    .find(|bin| available(bin))
+    .map(|bin| (*bin).to_string())
+    .ok_or_else(|| {
+      GwmError::Config(format!(
+        "exec: no container runtime found on PATH (looked for {}) — install one or set `runtime` in the profile's `[container]`",
+        CONTAINER_RUNTIMES.join(", ")
+      ))
+    })
+}
+
+/// Everything a containerised fan-out needs, resolved once per repo: the
+/// runtime binary, the profile's block, and the main checkout's gitdir to
+/// mount. Held by the CLI across the whole run so the per-worktree wrap is a
+/// pure [`build_container_argv`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerPlan {
+  /// Resolved container CLI (`docker`, `podman`, …) — see
+  /// [`resolve_container_runtime`].
+  pub runtime: String,
+  /// The profile's `[container]` block.
+  pub config: ContainerConfig,
+  /// `repo.commondir()` — `<main>/.git` for every worktree of the repo,
+  /// normalised (no trailing separator) so the mount argument reads like a
+  /// path rather than a directory listing.
+  pub common_dir: PathBuf,
+}
+
+impl ContainerPlan {
+  /// Resolve the runtime and normalise `common_dir`. `available` is the
+  /// `PATH` lookup, injected so tests never depend on the runner having a
+  /// container runtime installed.
+  pub fn resolve(config: ContainerConfig, common_dir: &Path, available: impl Fn(&str) -> bool) -> Result<Self> {
+    let runtime = resolve_container_runtime(config.runtime.as_deref(), available)?;
+    Ok(Self {
+      runtime,
+      config,
+      // `components()` drops a trailing separator (git2 returns
+      // `<main>/.git/`) and any `.` component, without touching symlinks —
+      // canonicalising here would rewrite the path the host actually uses.
+      common_dir: common_dir.components().collect(),
+    })
+  }
+
+  /// Wrap `argv` for `worktree`. See [`build_container_argv`].
+  pub fn wrap(&self, worktree: &Path, argv: &[String]) -> Vec<String> {
+    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv)
+  }
+}
+
+/// Build the argv that runs `argv` inside the container described by `cfg`.
+///
+/// **argv, never a shell string.** The result is handed to
+/// [`exec_in_dir`] / [`exec_capture_in_dir`] as `Command` arguments, so no
+/// token is ever quoted, joined or re-parsed by a shell. GHSA-fffq-vg6f-gxqm
+/// was branch-name injection through a shell hook; this is stated as an
+/// invariant rather than left as a happy consequence.
+///
+/// The shape:
+///
+/// ```text
+/// <runtime> run --rm -v <wt>:<wt> -v <common>:<common> -w <wt> <extra…> <image> <argv…>
+/// ```
+///
+/// Two decisions are baked in:
+///
+/// - **Host paths are mirrored.** `/workspace` buys nothing once the gitdir
+///   mount has to reproduce an absolute host path anyway, and mirroring keeps
+///   `{path}` / `GWM_PATH` true on both sides.
+/// - **`common_dir` is mounted too.** A linked worktree's `.git` is a *file*
+///   holding the absolute host path of `<main>/.git/worktrees/<id>`; without
+///   that mount the container has a worktree in which no git command answers.
+///   It is skipped when it already lives inside the worktree (the main
+///   checkout, reachable via an explicit slug), where the first mount covers
+///   it.
+///
+/// `argv` becomes the container's **command**, so an image's `ENTRYPOINT` (if
+/// any) receives it as arguments; `extra_args = ["--entrypoint", ""]` opts
+/// out. `extra_args` lands after gwm's own flags, so a repeated flag wins.
+pub fn build_container_argv(
+  runtime: &str,
+  cfg: &ContainerConfig,
+  worktree: &Path,
+  common_dir: &Path,
+  argv: &[String],
+) -> Vec<String> {
+  let wt = mount_path(worktree);
+  let mut out = vec![runtime.to_string(), "run".into(), "--rm".into()];
+  out.push("-v".into());
+  out.push(format!("{wt}:{wt}"));
+  if !common_dir.starts_with(worktree) {
+    let common = mount_path(common_dir);
+    out.push("-v".into());
+    out.push(format!("{common}:{common}"));
+  }
+  out.push("-w".into());
+  out.push(wt);
+  out.extend(cfg.extra_args.iter().cloned());
+  out.push(cfg.image.clone());
+  out.extend(argv.iter().cloned());
+  out
+}
+
+/// Render a path for a `-v` / `-w` argument: `components()` drops a trailing
+/// separator (git2 hands out both `<main>/.git/` as a commondir and a main
+/// worktree path with a trailing slash) and any `.` component, without
+/// touching symlinks — canonicalising would rewrite the very path the host
+/// uses, and the container has to see that one.
+fn mount_path(p: &Path) -> String {
+  p.components().collect::<PathBuf>().display().to_string()
 }
 
 /// Run `program args…` with the working directory set to `dir`.
@@ -134,17 +308,15 @@ pub fn exec_capture_in_dir(dir: &Path, program: &str, args: &[String]) -> (ExecS
   }
 }
 
-/// Run `program args…` in each `(name, dir)` of `items` with up to `jobs`
-/// concurrent workers, capturing each one's output. Returns one
+/// Run each `(name, dir, argv)` of `items` with up to `jobs` concurrent
+/// workers, capturing each one's output. Returns one
 /// `(ExecOutcome, captured_output)` per item **in input order** (not
 /// completion order), so the caller prints deterministic per-worktree blocks
 /// regardless of which finished first. `jobs` is clamped to `[1, items.len()]`.
-pub fn run_in_dirs_parallel(
-  jobs: usize,
-  items: &[(String, PathBuf)],
-  program: &str,
-  args: &[String],
-) -> Vec<CapturedRun> {
+///
+/// The argv is **per item**, not shared: a containerised run (issue #421)
+/// mounts the worktree's own path, so no two worktrees run the same argv.
+pub fn run_in_dirs_parallel(jobs: usize, items: &[(String, PathBuf, Vec<String>)]) -> Vec<CapturedRun> {
   if items.is_empty() {
     return Vec::new();
   }
@@ -158,8 +330,13 @@ pub fn run_in_dirs_parallel(
         if i >= items.len() {
           break;
         }
-        let (name, path) = &items[i];
-        let (status, output) = exec_capture_in_dir(path, program, args);
+        let (name, path, argv) = &items[i];
+        let (status, output) = match argv.split_first() {
+          Some((program, args)) => exec_capture_in_dir(path, program, args),
+          // Unreachable via the CLI (`exec_plan` guarantees a non-empty
+          // argv), but a panic here would be user-facing.
+          None => (ExecStatus::SpawnError("exec: no command resolved".into()), Vec::new()),
+        };
         // `.lock()` never poisons: the worker body cannot panic (the spawn
         // primitive returns `SpawnError` instead of unwinding).
         *slots[i].lock().expect("exec worker mutex never poisoned") = Some((

@@ -199,3 +199,61 @@ fn list_workspace_names_format_lists_worktrees_per_repo() {
     .stdout(predicate::str::contains("alpha/alpha"))
     .stdout(predicate::str::contains("beta/beta"));
 }
+
+/// A containerised `[exec.profiles.ci]` whose `runtime` is `echo`, so the
+/// "container" run prints the argv gwm built instead of needing a daemon.
+/// `runtime` is explicit, which the resolver honours without a `PATH` probe.
+#[cfg(unix)]
+fn container_profile_toml() -> &'static str {
+  "[exec.profiles.ci]\ncommand = [\"marker\"]\n\n[exec.profiles.ci.container]\nimage = \"the-image\"\nruntime = \"echo\"\n"
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_workspace_mounts_each_repos_own_gitdir() {
+  // Issue #421 through the whole CLI path, workspace included: every repo
+  // resolves its own plan, so a worktree of `beta` must be handed `beta`'s
+  // gitdir. Crossing them would be worse than the bug this feature fixes —
+  // git would answer, against the wrong repository.
+  let root = workspace_root();
+  let worktrees = TempDir::new().unwrap();
+  for name in ["alpha", "beta"] {
+    let repo_path = root.path().join(name);
+    fs::write(repo_path.join(".gwm.toml"), container_profile_toml()).unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    repo
+      .worktree(&format!("{name}-wt"), &worktrees.path().join(name), None)
+      .unwrap();
+  }
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let out = cmd
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ci"])
+    .assert()
+    .success();
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+  // `echo` printed the argv, one line per worktree, under its repo header.
+  for name in ["alpha", "beta"] {
+    let other = if name == "alpha" { "beta" } else { "alpha" };
+    let line = stdout
+      .lines()
+      .find(|l| l.starts_with("run --rm") && l.contains(&format!("/{name}/.git")))
+      .unwrap_or_else(|| panic!("no run line carrying {name}'s gitdir in:\n{stdout}"));
+    assert!(
+      !line.contains(&format!("/{other}/.git")),
+      "{name}'s run must not mount {other}'s gitdir: {line}"
+    );
+    assert!(
+      line.ends_with("the-image marker"),
+      "the image and command close it: {line}"
+    );
+  }
+  // And the header names the run so a containerised fan-out is never silent.
+  assert!(
+    stdout.contains("[echo the-image]"),
+    "the per-worktree header announces the container: {stdout}"
+  );
+}

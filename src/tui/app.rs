@@ -547,6 +547,13 @@ pub struct App {
   /// config (Codex #333 review).
   exec_picker_cfg: ExecConfig,
 
+  /// The active repo's `commondir` (`<main>/.git`), captured alongside
+  /// [`Self::exec_picker_cfg`] for the same reason: in workspace mode the
+  /// active repo can swap while the overlay is open. Only read when the
+  /// picked profile carries a `[container]` block (issue #421), which mounts
+  /// it so git answers inside the container.
+  exec_picker_common_dir: PathBuf,
+
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
   /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
@@ -712,6 +719,7 @@ impl App {
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
       exec_picker_cfg: ExecConfig::default(),
+      exec_picker_common_dir: PathBuf::new(),
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
@@ -2919,6 +2927,7 @@ impl App {
     // *this* worktree against *this* config — not whatever is live later
     // (Codex #333 review).
     self.exec_picker_cfg = self.config.exec.clone();
+    self.exec_picker_common_dir = self.repo.commondir().to_path_buf();
     self.exec_picker.open(names, cwd);
     self.view = View::ExecPicker;
   }
@@ -2967,6 +2976,29 @@ impl App {
         // (PATH lookup / as-is).
         if let Some(first) = argv.first_mut() {
           *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
+        }
+        // A profile carrying `[container]` runs in a container here too
+        // (issue #421) — the same profile must not mean "on the host" in the
+        // TUI and "in a container" on the CLI. The wrap comes AFTER the
+        // relative-program anchoring: host paths are mirrored inside the
+        // container, so the anchored absolute path is valid on both sides.
+        match crate::exec::resolve_exec_container(Some(&profile), &self.exec_picker_cfg) {
+          Ok(Some(container)) => {
+            match crate::exec::ContainerPlan::resolve(container, &self.exec_picker_common_dir, |bin| {
+              which::which(bin).is_ok()
+            }) {
+              Ok(plan) => argv = plan.wrap(&cwd, &argv),
+              Err(e) => {
+                self.status = format!("exec profile {profile:?}: {e}");
+                return None;
+              }
+            }
+          }
+          Ok(None) => {}
+          Err(e) => {
+            self.status = format!("exec profile {profile:?}: {e}");
+            return None;
+          }
         }
         Some((argv, cwd))
       }
