@@ -49,6 +49,7 @@ fn sample_worktree() -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: Some(Duration::from_secs(3600)),
+    has_note: false,
   }
 }
 
@@ -297,6 +298,7 @@ fn json_worktree_path_stays_the_plain_lossy_absolute_path() {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   };
   let a = JsonWorktree::from(&mk(b"wt-\xff"));
   let b = JsonWorktree::from(&mk(b"wt-\xfe"));

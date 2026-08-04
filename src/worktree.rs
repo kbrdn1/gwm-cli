@@ -60,6 +60,12 @@ pub struct WorktreeInfo {
   /// per row per frame (issue #103). `None` for trunk branches and for
   /// worktrees whose repo can't be opened — the UI renders `-`.
   pub age: Option<Duration>,
+  /// Whether this row's branch carries a non-blank note (issue #515).
+  /// Resolved once per [`list`] call from a single walk of
+  /// `.git/gwm/notes`, for the same reason `link` and `age` are: the table
+  /// marker must not put a filesystem read back on the render path (issue
+  /// #343). Always `false` on a detached row — no branch, no note.
+  pub has_note: bool,
 }
 
 #[cfg(test)]
@@ -201,6 +207,12 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   // recompile the regex for every worktree in the listing.
   let parser = crate::naming::BranchParser::for_repo(repo);
 
+  // Issue #515: one walk of `.git/gwm/notes` for the whole listing, so the
+  // table's note marker is a set lookup per row instead of a file read per
+  // row per frame (the render path #343 cleared).
+  let noted = crate::notes::branches_with_notes(repo);
+  let carries_note = |branch: Option<&str>| branch.is_some_and(|b| noted.contains(b));
+
   // The main worktree is not listed by git2::Repository::worktrees(); add it manually.
   if let Some(workdir) = repo.workdir() {
     let head_ref = repo.head().ok();
@@ -222,6 +234,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       id: main_name.clone(),
       name: main_name,
       path: workdir.to_path_buf(),
+      has_note: carries_note(branch.as_deref()),
       branch,
       head,
       is_main: true,
@@ -290,6 +303,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       name: display_name,
       id: name.to_string(),
       path,
+      has_note: carries_note(branch.as_deref()),
       branch,
       head,
       is_main: false,
@@ -828,6 +842,20 @@ pub fn rename_worktree(
       ],
     );
     remote_renamed = true;
+  }
+
+  // 5. Follow the note (issue #515). Keyed on the branch, so a rename that
+  //    did not move it would orphan the note silently. Last, after every
+  //    step that can roll the rename back — a note sitting under a branch
+  //    name the repo reverted to is exactly the orphan this avoids. Gated
+  //    on `renames_branch` above: a path-only move leaves the key alone.
+  //
+  //    Best-effort: the rename itself has already landed in git, so a
+  //    filesystem hiccup here must not report a failure that would send the
+  //    user looking for a half-renamed worktree. A note left behind is
+  //    reported by `gwm doctor`, which is where the orphan rule lives.
+  if let Ok(repo) = Repository::open(workdir) {
+    let _ = crate::notes::rename(&repo, old_branch, new_branch);
   }
 
   Ok(remote_renamed)

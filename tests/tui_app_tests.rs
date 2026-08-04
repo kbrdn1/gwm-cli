@@ -44,6 +44,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -5370,6 +5371,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -6334,6 +6336,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 

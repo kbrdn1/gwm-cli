@@ -196,6 +196,7 @@ fn markable_row(name: &str) -> gwm::worktree::WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 

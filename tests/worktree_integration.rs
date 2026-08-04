@@ -2070,3 +2070,112 @@ fn remove_verified_refuses_an_id_that_now_points_elsewhere() {
   worktree::remove_verified(&repo, &live.id, &live.path, false).unwrap();
   assert!(!second.exists(), "a target that still matches is removed");
 }
+
+// ---- notes (#515) ---------------------------------------------------------
+
+fn write_note(repo: &Repository, branch: &str, body: &str) {
+  let path = gwm::notes::prepare(repo, branch).unwrap().unwrap();
+  std::fs::write(path, body).unwrap();
+}
+
+#[test]
+fn list_flags_the_row_whose_branch_carries_a_note() {
+  // The marker is resolved at list time, once for the whole set, so the TUI
+  // render path never touches the filesystem (the property #343 established
+  // for the per-row git reads).
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let noted = wt_root.path().join("feat-1-noted");
+  let bare = wt_root.path().join("feat-2-bare");
+  worktree::add(&repo, "feat-1-noted", &noted, "feat/#1-noted", false).unwrap();
+  worktree::add(&repo, "feat-2-bare", &bare, "feat/#2-bare", false).unwrap();
+  write_note(&repo, "feat/#1-noted", "the ETXTBSY retry is expected\n");
+
+  let trees = worktree::list(&repo).unwrap();
+  let flag = |name: &str| trees.iter().find(|w| w.name == name).unwrap().has_note;
+
+  assert!(flag("feat-1-noted"), "the noted row must carry the marker");
+  assert!(!flag("feat-2-bare"), "a row without a note must not");
+}
+
+#[test]
+fn a_blank_note_does_not_flag_the_row() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let path = wt_root.path().join("feat-1-blank");
+  worktree::add(&repo, "feat-1-blank", &path, "feat/#1-blank", false).unwrap();
+  write_note(&repo, "feat/#1-blank", "\n");
+
+  let trees = worktree::list(&repo).unwrap();
+  assert!(!trees.iter().find(|w| w.name == "feat-1-blank").unwrap().has_note);
+}
+
+#[test]
+fn a_note_written_from_the_main_checkout_is_read_from_the_linked_worktree() {
+  // The store is resolved through `commondir`, not `path`: a handle opened
+  // on a linked worktree must find the same tree as one opened on the main
+  // checkout. Get this wrong and every linked worktree gets its own private
+  // notes directory under `.git/worktrees/<id>/`.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let path = wt_root.path().join("feat-1-shared");
+  worktree::add(&repo, "feat-1-shared", &path, "feat/#1-shared", false).unwrap();
+  write_note(&repo, "feat/#1-shared", "written from the main checkout\n");
+
+  let from_worktree = Repository::open(&path).unwrap();
+  assert_eq!(
+    gwm::notes::read(&from_worktree, "feat/#1-shared").as_deref(),
+    Some("written from the main checkout\n")
+  );
+}
+
+#[test]
+fn rename_worktree_moves_the_note_with_the_branch() {
+  // The note is keyed on the branch, so a rename that did not move the file
+  // would orphan it silently — #479 renames the local branch, the remote
+  // branch and the directory, and this is the fourth thing it owns.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  write_note(&repo, "feat/#1-old", "still relevant after the rename\n");
+
+  let new_path = wt_root.path().join("feat-1-new");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "feat/#1-new").unwrap();
+
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-old"),
+    None,
+    "the old key must be empty"
+  );
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-new").as_deref(),
+    Some("still relevant after the rename\n")
+  );
+  let trees = worktree::list(&repo).unwrap();
+  assert!(
+    trees.iter().find(|w| w.name == "feat-1-new").unwrap().has_note,
+    "the renamed row must still show the marker"
+  );
+}
+
+#[test]
+fn a_path_only_move_leaves_the_note_where_it_is() {
+  // Same branch, different directory (a changed `[worktree].base`): the key
+  // did not change, so there is nothing to move.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-here");
+  worktree::add(&repo, "feat-1-here", &old_path, "feat/#1-here", false).unwrap();
+  write_note(&repo, "feat/#1-here", "unchanged\n");
+
+  let new_path = wt_root.path().join("feat-1-there");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#1-here", &new_path, "feat/#1-here").unwrap();
+
+  assert_eq!(gwm::notes::read(&repo, "feat/#1-here").as_deref(), Some("unchanged\n"));
+}
