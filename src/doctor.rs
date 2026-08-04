@@ -538,14 +538,34 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   // Both surfaces, not just the first: a `[hooks.post_create]` step naming a
   // binary that is not installed used to produce a clean report right up to
   // the moment `gwm create` ran it and failed.
-  let runs = ctx
+  //
+  // A step its `when` switches off is not probed, because it is not going to
+  // run. The `node` preset is the case that makes this load-bearing: it ships
+  // `bun install` under `cmd_exists:bun` and `npm ci` under `!cmd_exists:bun`,
+  // so probing both regardless warns about whichever one the predicate has
+  // just switched off, and a Warning takes the exit code to 1. The predicate
+  // is evaluated against the main checkout rather than the future worktree,
+  // the same approximation the `.envrc` probe above already makes: the
+  // worktree gets the same tracked files. An unknown keyword evaluates to
+  // `true` in `evaluate_when`, so it stays probed, which matches the step
+  // still running at bootstrap time.
+  let steps = ctx
     .config
     .bootstrap
     .command
     .iter()
-    .map(|cmd| &cmd.run)
-    .chain(ctx.config.hooks.all_steps().map(|(_, step)| &step.run));
-  for run in runs {
+    .map(|cmd| (&cmd.run, cmd.when.as_deref()))
+    .chain(
+      ctx
+        .config
+        .hooks
+        .all_steps()
+        .map(|(_, step)| (&step.run, step.when.as_deref())),
+    );
+  for (run, when) in steps {
+    if when.is_some_and(|w| !crate::bootstrap::evaluate_when(w, ctx.repo_workdir)) {
+      continue;
+    }
     if let Some(bin) = extract_binary(run) {
       needed.insert(bin);
     }
