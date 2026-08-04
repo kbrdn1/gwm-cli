@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   walk the whole disk on a check meant to be instant, and one such atom leaves
   the entire expression unevaluated. Declining costs nothing, the step simply
   stays probed, which is what the check did before it evaluated anything.
+  A step whose binary cannot be resolved statically is left alone for the
+  same reason, from the other side: `lifecycle::run_step` expands `{path}` /
+  `{repo}` in `run` before spawning, so a hook reading `{path}/scripts/setup`
+  was probed as that literal string and always came back missing, and a step
+  that sets its own `PATH` in `env` resolves against that rather than against
+  the doctor's ambient one.
 
 ### Docs
 
