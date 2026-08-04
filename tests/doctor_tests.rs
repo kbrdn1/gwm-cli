@@ -622,6 +622,82 @@ fn a_shell_keyword_is_not_probed_as_a_binary() {
   }
 }
 
+#[test]
+fn a_wrapper_word_still_leads_to_the_real_binary() {
+  // `exec composer install` runs composer. Treating `exec` as a shell word to
+  // skip drops the whole step, so a missing composer goes unreported, which is
+  // the opposite of the point. It belongs with `env` and `command`: a wrapper
+  // to step over on the way to the binary, not a reason to stop looking.
+  for run in [
+    "exec definitely-not-on-path-xyz123 install",
+    "env FOO=bar definitely-not-on-path-xyz123",
+    "command definitely-not-on-path-xyz123",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"wrapped\"\nrun = \"{run}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{run}` must be probed past the wrapper, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn source_is_probed_because_sh_is_not_always_bash() {
+  // `source` is a bashism. Where `/bin/sh` is dash, which is most Linux
+  // distributions, it is neither a keyword nor a builtin and the step dies
+  // with "source: not found" at bootstrap time. Skipping it as a shell word
+  // would suppress exactly the warning that is worth having, and the fix the
+  // warning points at is the portable `.` form.
+  let (dir, repo) = init_repo();
+  let config = config_from_toml(
+    dir.path(),
+    "[[hooks.post_create]]\nname = \"sourced\"\nrun = \"source ./env.sh\"\n",
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("source"),
+    "`source` is not portable to sh, so it must stay probed, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn an_env_path_key_is_matched_regardless_of_case() {
+  // Windows environment variable names are case-insensitive, so
+  // `env = { Path = "C:\\project\\bin" }` really does replace the child's
+  // PATH, and an exact match on "PATH" would miss it and warn about a hook
+  // that resolves fine. Matched case-insensitively everywhere rather than
+  // behind `cfg(windows)`, so the behaviour is one thing and this test runs
+  // on every runner instead of only one of them.
+  for key in ["PATH", "Path", "path"] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!(
+        "[[hooks.post_create]]\nname = \"own-path\"\nrun = \"definitely-not-on-path-xyz123\"\nenv = {{ {key} = \"/opt/project/bin\" }}\n"
+      ),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      !c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{key}` sets the step's own PATH, so it must not be probed against ours; got: {}",
+      c.detail
+    );
+  }
+}
+
 // --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
