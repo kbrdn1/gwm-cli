@@ -378,6 +378,29 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
 /// would risk consuming and ending up with the wrong binary.
 const COMMAND_WRAPPERS: &[&str] = &["env", "command"];
 
+/// Shell keywords and builtins that can legitimately open a `run` script.
+///
+/// A step's `run` is handed whole to `sh -c`, so it is a script, not an argv,
+/// and its first token is a shell word at least as often as it is a program
+/// name: `cd sub && ./setup.sh`, `set -e; …`, `if [ -f composer.json ]; then …`.
+/// A few of these do ship an external binary on some systems (`cd` has a
+/// `/usr/bin/cd` on macOS), but the shell resolves the builtin first, so
+/// probing `$PATH` for any of them answers a question the shell never asks
+/// and warns about a step that works.
+///
+/// Names with a real external binary everywhere (`echo`, `test`, `printf`,
+/// `true`) are deliberately absent: probing them costs nothing because they
+/// resolve, and leaving them out keeps this list to the words that would
+/// produce a false warning.
+const SHELL_KEYWORDS: &[&str] = &[
+  // Reserved words.
+  "!", "case", "do", "done", "elif", "else", "esac", "fi", "for", "if", "in", "then", "until", "while", "{", "}",
+  // Special builtins, plus the regular ones that commonly open a script.
+  ".", ":", "alias", "bg", "break", "cd", "continue", "eval", "exec", "exit", "export", "fg", "getopts", "hash", "jobs",
+  "local", "read", "readonly", "return", "set", "shift", "source", "times", "trap", "type", "ulimit", "umask",
+  "unalias", "unset", "wait",
+];
+
 /// Extract the executable name from a shell command string. Tokenises
 /// via `shell_words` so quoted args (`"my tool" --flag`) and escaped
 /// whitespace are handled the way the shell would, then skips leading
@@ -621,6 +644,10 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     // first token carrying a `{…}` is not a binary name this check can
     // resolve either way, and staying quiet beats a warning we know is wrong.
     if bin.contains('{') {
+      continue;
+    }
+    // A script that opens on a shell word names no binary to probe.
+    if SHELL_KEYWORDS.contains(&bin.as_str()) {
       continue;
     }
     needed.insert(bin);
