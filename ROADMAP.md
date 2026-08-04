@@ -270,15 +270,33 @@ worktree is selected. Landing a multi-row selection model after them means
 reopening both. Landing it before means they are written against the final
 model once.
 
-### 3. Symfony preset ([#392](https://github.com/kbrdn1/gwm-cli/issues/392))
+### 3. Symfony preset ([#392](https://github.com/kbrdn1/gwm-cli/issues/392) ✅)
 
-A seventh `gwm init --preset`, modelled on the Laravel one, offered by the
-requester as a contribution.
+A seventh `gwm init --preset`. Modelled on the Laravel one, but not a copy of
+it: Symfony's dotenv convention is the reverse of Laravel's, `.env` is committed
+and carries the neutral defaults while `.env.local` is gitignored and carries
+the secrets. So the preset copies `.env.local` and `.env.test.local` rather than
+`.env`, and the `no-aws-rds` guard seeds from the committed `.env` instead of an
+`.env.example` a Symfony project does not have. `var/` joins `vendor/` in the
+no-symlink invariants, because it holds the compiled service container and the
+cached routes.
 
-Placed here because it is the only item in the lot that is not sequenced against
-the others: it touches `src/presets/` and `examples/presets/`, disjoint from the
-TUI files the rest of the line lives in, so it can run in parallel with any of
-them without a merge conflict.
+Placed here because it looked like the only item in the lot that is not
+sequenced against the others: it touches `src/presets.rs` and
+`examples/presets/`, disjoint from the TUI files the rest of the line lives in,
+so it can run in parallel with any of them without a merge conflict.
+
+That held for the merge order and not for the blast radius. Every stack preset
+puts its commands in `[hooks.*]` rather than `[[bootstrap.command]]`, and two
+`gwm doctor` checks walked the bootstrap commands alone, so this one arrived
+with a clean report about a file the doctor had barely read: a typo in a hook's
+`when` predicate came back as "no `when:` predicates configured", and a hook
+invoking a binary that is not installed passed as fine right up to the moment
+`gwm create` ran it. Fixed in the same PR rather than deferred, since it applied
+to every hooks-based config and the preset was only the thing that made it
+visible. `LifecycleHooksConfig::all_steps()` now enumerates the six phases
+through an exhaustive destructuring, so the next consumer cannot quietly read
+half the config.
 
 ### 4. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
