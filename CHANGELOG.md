@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code is worse than a slow first request. `composer install` and
   `direnv allow .` run on the same `when` predicates as the Laravel preset.
 
+### Fixed
+
+- **`gwm doctor` now reads `[hooks.*]`, not just `[[bootstrap.command]]`.**
+  Two checks walked the bootstrap commands alone, so a config whose commands
+  all live in lifecycle hooks got a report about a file the doctor had barely
+  read: a typo in a hook's `when` predicate was announced as "no `when:`
+  predicates configured", and a hook invoking a binary that is not installed
+  produced a clean bill of health right up to the moment `gwm create` ran it
+  and failed. Both now walk the six phases as well, and the `when` failure
+  names the phase and step it came from (`bogus:1 (on hook post_create
+  \`install\`)`). Surfaced by the `symfony` preset, whose commands are all
+  hooks, but it applied to every hooks-based config since the phases landed.
+  `LifecycleHooksConfig::all_steps()` enumerates the phases through an
+  exhaustive destructuring, so adding a seventh phase without teaching the
+  consumers about it is now a compile error rather than a silent blind spot.
+
 ### Docs
 
 - **Retired the em dash across the whole `docs/` tree**
