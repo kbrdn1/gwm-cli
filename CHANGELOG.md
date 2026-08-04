@@ -47,7 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Warning takes `gwm doctor` to exit code 1. The predicate is evaluated
   against the main checkout, the same approximation the `.envrc` probe already
   made; an unrecognised keyword still evaluates to `true`, matching the step
-  running anyway at bootstrap time.
+  running anyway at bootstrap time. Only predicates the doctor can bound are
+  evaluated, since a `.gwm.toml` never went through the trust gate: a `$PATH`
+  lookup, an environment read, or a `stat` on a repo-relative path. A
+  `glob_exists:` pattern picks its own root, so `glob_exists:/**/nope` would
+  walk the whole disk on a check meant to be instant, and one such atom leaves
+  the entire expression unevaluated. Declining costs nothing, the step simply
+  stays probed, which is what the check did before it evaluated anything.
 
 ### Docs
 
