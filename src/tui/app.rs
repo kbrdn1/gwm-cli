@@ -1167,24 +1167,13 @@ impl App {
   ///   (`gwm bootstrap` from another terminal).
   /// * `Err(e)` — ledger I/O / config read error propagated verbatim.
   pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
-    use crate::trust::{self, TrustOutcome};
-
-    let origin = trust::origin_key_for_repo(&self.repo, &self.workdir);
-
-    match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
-      TrustOutcome::Proceed => Ok(None),
-      TrustOutcome::Refuse { message } => Ok(Some(message)),
-      TrustOutcome::Prompt { cfg_path, sha, .. } => {
-        let short_sha: String = sha.chars().take(12).collect();
-        Ok(Some(format!(
-          ".gwm.toml at {} not in trust ledger (hash {}) — \
-           run `gwm bootstrap` from a CLI in another terminal to approve, \
-           or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap",
-          cfg_path.display(),
-          short_sha
-        )))
-      }
-    }
+    let origin = crate::trust::origin_key_for_repo(&self.repo, &self.workdir);
+    crate::trust::evaluate_silent(
+      &self.workdir,
+      &origin,
+      self.trust_mode,
+      crate::trust::APPROVE_VIA_BOOTSTRAP,
+    )
   }
 
   /// Constructor for `gwm switch`: same App, but picker mode is on and the

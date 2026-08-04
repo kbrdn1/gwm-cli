@@ -289,6 +289,35 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
   })
 }
 
+/// How a caller that cannot prompt tells the user to grant trust. The two
+/// variants differ only in which command re-runs the operation through the
+/// CLI gate.
+pub const APPROVE_VIA_BOOTSTRAP: &str = "run `gwm bootstrap` from a CLI in another terminal to approve, \
+   or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
+pub const APPROVE_VIA_TRUST_ADD: &str = "run `gwm trust add` from a CLI in another terminal to approve, \
+   or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
+
+/// [`evaluate`] for a caller that owns the terminal and so cannot host the
+/// stdin prompt: the TUI. `Ok(None)` clears the caller to execute
+/// `.gwm.toml` code, `Ok(Some(message))` is a refusal to show the user.
+/// A `Prompt` outcome becomes a refusal here — the alternate screen has
+/// nowhere to ask — with `approve_hint` naming the command that grants it.
+pub fn evaluate_silent(workdir: &Path, origin: &str, mode: TrustMode, approve_hint: &str) -> Result<Option<String>> {
+  match evaluate(workdir, origin, mode)? {
+    TrustOutcome::Proceed => Ok(None),
+    TrustOutcome::Refuse { message } => Ok(Some(message)),
+    TrustOutcome::Prompt { cfg_path, sha, .. } => {
+      let short_sha: String = sha.chars().take(12).collect();
+      Ok(Some(format!(
+        ".gwm.toml at {} not in trust ledger (hash {}) — {}",
+        cfg_path.display(),
+        short_sha,
+        approve_hint
+      )))
+    }
+  }
+}
+
 /// On-disk ledger schema. `serde` defaults make adding new optional
 /// fields backward-compatible: older binaries still parse newer files,
 /// they just ignore the extra keys.
