@@ -483,6 +483,45 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
 
 /// Missing binaries are surfaced as Warning, not Failed — the user may not
 /// rely on that step at all, but the visibility matters.
+/// Whether `gwm doctor` is willing to evaluate a `when` expression it read
+/// out of a `.gwm.toml`.
+///
+/// That file has not been through the trust gate (issue #473), so a predicate
+/// coming from it is input from a repo nobody has vetted, evaluated by a
+/// command anyone runs, including the advisory CI job on every PR.
+/// `cmd_exists:` is a `$PATH` lookup, `env_set:` / `env_eq:` read the process
+/// environment, and `file_exists:` on a repo-relative path is a single `stat`:
+/// all bounded, all cheap. `glob_exists:` walks the filesystem from wherever
+/// its pattern points, so `glob_exists:/**/nope` is a whole-disk walk on a
+/// check that is supposed to be instant, and it is never evaluated here.
+///
+/// A single atom we will not evaluate taints the whole expression, since the
+/// boolean result would depend on it either way. Declining costs nothing: the
+/// step stays probed, which is exactly what this check did before it evaluated
+/// any predicate at all, so refusing to evaluate can never silence a warning.
+fn predicate_is_safe_to_evaluate(expr: &str) -> bool {
+  crate::bootstrap::when_atoms(expr).iter().all(|atom| {
+    if let Some(path) = atom.strip_prefix("file_exists:") {
+      return path_stays_in_repo(path.trim());
+    }
+    atom.starts_with("cmd_exists:") || atom.starts_with("env_set:") || atom.starts_with("env_eq:")
+  })
+}
+
+/// A path that cannot reach outside the repo: non-empty, relative, no `..`,
+/// and no Windows drive prefix (`C:foo` is not absolute per `is_absolute`,
+/// yet it makes `join` drop the base).
+fn path_stays_in_repo(value: &str) -> bool {
+  if value.is_empty() {
+    return false;
+  }
+  let p = Path::new(value);
+  !p.is_absolute()
+    && !p
+      .components()
+      .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
+}
+
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   let name = "external binaries on PATH";
   let mut needed: BTreeSet<String> = BTreeSet::new();
@@ -563,7 +602,9 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
         .map(|(_, step)| (&step.run, step.when.as_deref())),
     );
   for (run, when) in steps {
-    if when.is_some_and(|w| !crate::bootstrap::evaluate_when(w, ctx.repo_workdir)) {
+    let gated_off =
+      when.is_some_and(|w| predicate_is_safe_to_evaluate(w) && !crate::bootstrap::evaluate_when(w, ctx.repo_workdir));
+    if gated_off {
       continue;
     }
     if let Some(bin) = extract_binary(run) {
