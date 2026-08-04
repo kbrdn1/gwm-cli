@@ -298,9 +298,14 @@ pub enum Command {
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
   },
-  /// Remove a worktree by fuzzy name match.
+  /// Remove one or more worktrees by fuzzy name match.
+  ///
+  /// Every pattern is resolved before anything is touched (issue #484), so an
+  /// unknown or ambiguous one fails the whole command with nothing removed.
+  /// Patterns resolving to the same worktree are removed once.
   Remove {
-    pattern: String,
+    #[arg(value_name = "PATTERN", required = true, num_args = 1..)]
+    patterns: Vec<String>,
     /// Also delete the branch.
     #[arg(long)]
     delete_branch: bool,
@@ -1086,12 +1091,12 @@ pub fn run(cli: Cli) -> Result<()> {
       skip_hooks,
     } => cmd_review(number, name, bootstrap, skip_hooks, mode),
     Command::Remove {
-      pattern,
+      patterns,
       delete_branch,
       dry_run,
       force,
       skip_hooks,
-    } => cmd_remove(pattern, delete_branch, dry_run, force, skip_hooks, mode),
+    } => cmd_remove(patterns, delete_branch, dry_run, force, skip_hooks, mode),
     Command::Path { pattern, format } => cmd_path(pattern, format),
     Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
     Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
@@ -3093,7 +3098,7 @@ pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
 }
 
 fn cmd_remove(
-  pattern: String,
+  patterns: Vec<String>,
   delete_branch: bool,
   dry_run: bool,
   force: bool,
@@ -3102,7 +3107,20 @@ fn cmd_remove(
 ) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  let found = worktree::find_fuzzy(&repo, &pattern)?;
+
+  // Issue #484: resolve the whole batch first. A typo in the middle of a
+  // cleanup must not leave the first half removed and the rest untouched,
+  // which is exactly what `... | xargs -n1 gwm remove` did. Two patterns
+  // naming the same worktree collapse to one removal — the second pass would
+  // otherwise fail on an already-gone row.
+  let mut targets: Vec<worktree::WorktreeInfo> = Vec::with_capacity(patterns.len());
+  for pattern in &patterns {
+    let found = worktree::find_fuzzy(&repo, pattern)?;
+    if !targets.iter().any(|t| t.id == found.id) {
+      targets.push(found);
+    }
+  }
+
   if dry_run {
     // Issue #31: print the would-remove plan and exit. Resolution
     // already happened above — an ambiguous pattern surfaced via
@@ -3111,11 +3129,13 @@ fn cmd_remove(
     // contract" requirement. The journal hook MUST NOT fire here —
     // a preview that wrote to the journal would let the user "undo"
     // something that never happened.
-    worktree::remove_dry_run(&repo, &found.id)?;
-    print!(
-      "{}",
-      format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
-    );
+    for found in &targets {
+      worktree::remove_dry_run(&repo, &found.id)?;
+      print!(
+        "{}",
+        format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
+      );
+    }
     return Ok(());
   }
 
@@ -3127,8 +3147,38 @@ fn cmd_remove(
   if config.hooks.has_any() {
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
-  let pre_ctx = HookContext::for_worktree(&repo, &workdir, &found.path, &found.path, found.branch.as_deref());
-  let report = lifecycle::run_phase(&config, HookPhase::PreRemove, &pre_ctx, &skips, false)?;
+
+  // The batch does not stop at the first error (#484), mirroring the TUI: a
+  // locked or hook-blocked row must not strand the rest of a cleanup the user
+  // explicitly asked for. Failures are collected and reported at the end, so
+  // the exit code still says the command did not fully succeed.
+  let mut failures: Vec<String> = Vec::new();
+  for found in &targets {
+    if let Err(e) = remove_one(&repo, &workdir, &config, &skips, found, delete_branch) {
+      eprintln!("error: {}: {}", found.name, e);
+      failures.push(format!("{}: {}", found.name, e));
+    }
+  }
+  if failures.is_empty() {
+    Ok(())
+  } else {
+    Err(GwmError::Other(failures.join("; ")))
+  }
+}
+
+/// Remove one resolved worktree: pre_remove hooks, undo-journal entry,
+/// destruction, post_remove hooks. Extracted from [`cmd_remove`] when it grew
+/// a batch loop (#484) — the per-target sequence is unchanged.
+fn remove_one(
+  repo: &git2::Repository,
+  workdir: &Path,
+  config: &Config,
+  skips: &HookSkips,
+  found: &worktree::WorktreeInfo,
+  delete_branch: bool,
+) -> Result<()> {
+  let pre_ctx = HookContext::for_worktree(repo, workdir, &found.path, &found.path, found.branch.as_deref());
+  let report = lifecycle::run_phase(config, HookPhase::PreRemove, &pre_ctx, skips, false)?;
   print_lifecycle_report(&report);
 
   // Issue #29: capture the branch OID via libgit2 BEFORE the
@@ -3168,15 +3218,15 @@ fn cmd_remove(
     );
   }
 
-  worktree::remove(&repo, &found.id, delete_branch)?;
+  worktree::remove(repo, &found.id, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
     if let Some(b) = &found.branch {
       println!("  branch {} deleted", b);
     }
   }
-  let post_ctx = pre_ctx.with_cwd(&workdir);
-  let report = lifecycle::run_phase(&config, HookPhase::PostRemove, &post_ctx, &skips, false)?;
+  let post_ctx = pre_ctx.with_cwd(workdir);
+  let report = lifecycle::run_phase(config, HookPhase::PostRemove, &post_ctx, skips, false)?;
   print_lifecycle_report(&report);
   Ok(())
 }

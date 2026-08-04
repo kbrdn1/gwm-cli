@@ -3027,6 +3027,137 @@ fn remove_with_delete_branch_drops_branch() {
 }
 
 #[test]
+fn remove_takes_several_patterns_in_one_command() {
+  // #484: the TUI can now delete a batch, and the CLI is the non-interactive
+  // half of the same job. `xargs -n1 gwm remove` was the workaround.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("20", "bulk-one"), ("21", "bulk-two"), ("22", "bulk-three")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .args(["create", "feat", issue, slug])
+      .assert()
+      .success();
+  }
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "bulk-one", "bulk-three", "--delete-branch"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("bulk-one"))
+    .stdout(predicate::str::contains("bulk-three"));
+
+  assert!(!base.path().join("feat-20-bulk-one").exists());
+  assert!(!base.path().join("feat-22-bulk-three").exists());
+  assert!(
+    base.path().join("feat-21-bulk-two").exists(),
+    "an unnamed worktree must be left alone"
+  );
+  assert!(
+    repo.find_branch("feat/#21-bulk-two", git2::BranchType::Local).is_ok(),
+    "and so must its branch"
+  );
+}
+
+#[test]
+fn remove_resolves_every_pattern_before_touching_anything() {
+  // A typo in the middle of a batch must not leave half of it removed: the
+  // whole command fails with nothing touched. That is the guarantee the
+  // `xargs -n1` workaround could not offer.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "23", "survivor"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "survivor", "ghost"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
+
+  assert!(
+    base.path().join("feat-23-survivor").exists(),
+    "a batch with one unresolvable pattern must remove nothing"
+  );
+}
+
+#[test]
+fn remove_dry_run_prints_one_plan_per_pattern() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("24", "plan-one"), ("25", "plan-two")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .args(["create", "feat", issue, slug])
+      .assert()
+      .success();
+  }
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "plan-one", "plan-two", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-24-plan-one"))
+    .stdout(predicate::str::contains("feat-25-plan-two"));
+
+  assert!(
+    base.path().join("feat-24-plan-one").exists(),
+    "--dry-run touches nothing"
+  );
+  assert!(
+    base.path().join("feat-25-plan-two").exists(),
+    "--dry-run touches nothing"
+  );
+}
+
+#[test]
+fn remove_deduplicates_patterns_that_resolve_to_the_same_worktree() {
+  // `gwm remove foo foo` (or a name and its id) must not try to remove the
+  // same worktree twice — the second pass would fail on an already-gone row.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "26", "twice"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "twice", "twice"])
+    .assert()
+    .success();
+
+  assert!(!base.path().join("feat-26-twice").exists());
+}
+
+#[test]
 fn remove_unknown_pattern_fails() {
   // Fuzzy lookup must error loudly when nothing matches — silently
   // doing nothing would mask a user typo and leave them wondering why
