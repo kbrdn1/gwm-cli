@@ -305,20 +305,28 @@ outside gwm, so returning to one after two days means rebuilding it from
 `git log` and memory.
 
 A note attached to the worktree, editable from the TUI and flagged in the table.
-The design decision is storage, and it has no obvious answer: inside the worktree
-it dies with it and is unreadable from the main checkout, in the config dir it
-survives removal but becomes orphaned state that `gwm clean` then has to know
-about. Either way it should be plain text on disk, because a note is something
-one may want to `grep` or open without gwm running.
+Storage is settled: a plain markdown file at `.git/gwm/notes/<branch>.md` in the
+main checkout, which survives `gwm remove`, stays readable from the main checkout
+and is never committed. No sweeper is needed, because "the branch is gone" is a
+question git answers in one call, and `gwm doctor` reports what is left. Plain
+text, because a note is something one may want to `grep` or open without gwm
+running, which is also what rules git config out despite gwm already keeping
+three per-branch keys there.
 
 Comes after the PR/Issue view, which pays for the overlay machinery it would
 reuse.
 
 ### 6. Container execution ([#421](https://github.com/kbrdn1/gwm-cli/issues/421))
 
-A `container:` block on the existing `exec` / aliases surface. Low cost: it
-wraps `docker run`, and anything exposing a Docker-compatible socket works for
-free.
+A `container:` block on the existing `exec` / aliases surface, wrapping the
+command in `docker run`. Anything exposing a Docker-compatible socket works for
+free, so there is no runtime to integrate. The cost is not the wrapper, it is the
+mount: a linked worktree's `.git` is a file holding an absolute host path, so
+mounting the worktree alone produces a container in which git does not answer.
+The reference implementation has exactly that bug, in the middle of its own
+agent-per-worktree use case. gwm mirrors the host paths and mounts the main
+checkout's gitdir alongside, which turns this from a column to match into one to
+win.
 
 It was deferred for want of observed demand. It moves into the line because the
 comparison page now sits behind it rather than ahead: container execution is a
