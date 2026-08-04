@@ -12,13 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A config value no longer reaches the terminal with its Unicode bidi
-  overrides intact. The neutralisation added in 1.6.0 replaces control
-  characters, and `char::is_control` covers C0, DEL and C1: it does not cover
-  `U+202A` through `U+202E` or `U+2066` through `U+2069`. Those are `Cf`, not
-  `Cc`. They reorder how a terminal renders the text around them without ever
-  being a control byte, so a value carrying one can display something other
-  than what it is.
+- A config value no longer reaches the terminal with its Unicode bidi controls
+  intact. The neutralisation added in 1.6.0 replaces control characters, and
+  `char::is_control` covers C0, DEL and C1: it does not cover the twelve
+  characters carrying the `Bidi_Control` property, which are `Cf`, not `Cc`.
+  They reorder how a terminal renders the text around them without ever being
+  a control byte, so a value carrying one can display something other than
+  what it is.
 
   The site that matters is the pre-trust bootstrap summary, whose whole job is
   to let someone decide whether to authorise a shell command out of a repo
@@ -29,11 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   echo site already goes through, the way they inherited the control-character
   rule.
 
-  The implicit marks (`U+200E`, `U+200F`, `U+061C`) are deliberately left
-  alone. They carry no override of their own and occur in legitimate
-  multilingual text, so replacing them would corrupt values rather than
-  protect them. This is a gap in the 1.6.0 mitigation, not a regression:
-  1.5.0 and earlier neutralised nothing at all.
+  The set is `Bidi_Control` exactly rather than the overrides and isolates
+  alone, because the three implicit marks reorder too: `U+061C` is bidi class
+  `AL` and `U+200F` is `R`, so either one is a strong right-to-left character
+  inside left-to-right text and the weak and neutral rules of UAX #9 then
+  reorder the digits and punctuation around it. An argument or a URL can be
+  made to render in an order the bytes do not have. This is a gap in the 1.6.0
+  mitigation, not a regression: 1.5.0 and earlier neutralised nothing at all.
   ([#502](https://github.com/kbrdn1/gwm-cli/issues/502))
 
 - A race in the test harness, not reachable from the product.

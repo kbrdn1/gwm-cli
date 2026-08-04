@@ -1545,7 +1545,7 @@ pub fn sanitise_for_terminal(s: &str) -> String {
     .collect()
 }
 
-/// The Unicode bidirectional formatting characters (issue #502).
+/// The characters carrying the Unicode `Bidi_Control` property (issue #502).
 ///
 /// They are `Cf` (format), not `Cc` (control), so [`char::is_control`] does
 /// not match them — which is the whole reason they need naming here. They
@@ -1555,13 +1555,18 @@ pub fn sanitise_for_terminal(s: &str) -> String {
 /// the control-character replacement exists to provide, so they are
 /// neutralised the same way and at the same sinks.
 ///
-/// The set is the overrides and embeddings (`U+202A`-`U+202E`) plus the
-/// isolates and their terminator (`U+2066`-`U+2069`). The *implicit* marks
-/// (`U+200E`/`U+200F`/`U+061C`) are deliberately left alone: they carry no
-/// override of their own and appear in legitimate multilingual text, so
-/// replacing them would corrupt values rather than protect them.
+/// The set is `Bidi_Control` exactly, not a subset: the overrides, embeddings
+/// and isolates, **plus** the three implicit marks. The marks earn their place
+/// on their bidi class rather than on being formatting characters. `U+061C` is
+/// class `AL` and `U+200F` is `R`, so either one is a strong right-to-left
+/// character inside otherwise left-to-right text, and UAX #9's weak and
+/// neutral rules then reorder the digits and punctuation around it: an
+/// argument or a URL can render in an order the bytes do not have. `U+200E`
+/// is class `L` and does the same in a value whose paragraph direction is
+/// right-to-left. Aligning on the named property rather than on a hand-picked
+/// list is also what makes this reviewable.
 fn is_display_reordering(c: char) -> bool {
-  matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+  matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Neutralise control characters in output whose **shape is rows**: a `toml`
