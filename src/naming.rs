@@ -1565,7 +1565,12 @@ pub fn sanitise_for_terminal(s: &str) -> String {
 /// is class `L` and does the same in a value whose paragraph direction is
 /// right-to-left. Aligning on the named property rather than on a hand-picked
 /// list is also what makes this reviewable.
-fn is_display_reordering(c: char) -> bool {
+///
+/// Visible to the crate because `aliases::validate_aliases` needs the same set
+/// at the one boundary the sinks cannot reach: an alias expansion becomes argv
+/// before clap parses it, so it is refused there rather than cleaned here,
+/// exactly as the control characters are.
+pub(crate) fn is_display_reordering(c: char) -> bool {
   matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 

@@ -473,11 +473,18 @@ pub fn validate_aliases(map: &BTreeMap<String, String>, source_label: &str) -> R
     // has more than one downstream and clap's is the one we do not own. No
     // legitimate expansion needs a control character; the name and value are
     // quoted with `{:?}` so the report cannot replay what it is refusing.
-    if let Some(bad) = value.chars().find(|c| c.is_control()) {
+    // Issue #502: the `Bidi_Control` characters ride the same path for the same
+    // reason. They are `Cf`, so the test above does not see them, and measured,
+    // clap quotes `nope<U+061C>abc` back with the character intact, which makes
+    // the token it names render in an order it does not have.
+    if let Some(bad) = value
+      .chars()
+      .find(|c| c.is_control() || crate::naming::is_display_reordering(*c))
+    {
       return Err(GwmError::Config(format!(
-        "{}: alias '{}' = {:?} contains control character {:?}; \
-         an expansion becomes argv, and a control character there is a terminal \
-         escape rather than an argument",
+        "{}: alias '{}' = {:?} contains the character {:?}; \
+         an expansion becomes argv, and a control or display-reordering character \
+         there is a terminal escape rather than an argument",
         source_label, name, value, bad
       )));
     }

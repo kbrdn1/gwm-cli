@@ -532,6 +532,37 @@ fn an_alias_expansion_cannot_smuggle_a_control_byte_through_clap() {
 }
 
 #[test]
+fn an_alias_expansion_cannot_smuggle_a_bidi_control_through_clap() {
+  // The one path the sinks cannot cover, for the same reason the control-byte
+  // case above is refused rather than neutralised: the expansion becomes argv
+  // before clap parses it, and clap prints its own error and exits without
+  // passing through `main`'s sink. So the rule has to be the same on both
+  // legs of #473, or a repo can spoof the token clap echoes back.
+  //
+  // Every `Bidi_Control` character, one alias at a time, so a class clap
+  // happens to strip cannot hide one it does not.
+  let (dir, _repo) = init_repo();
+  for c in BIDI_CONTROLS {
+    fs::write(
+      dir.path().join(".gwm.toml"),
+      format!("[aliases]\nboom = \"nope{c}abc\"\n"),
+    )
+    .unwrap();
+
+    let out = gwm_in(dir.path()).arg("boom").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+      bidi_chars(&stdout).is_empty() && bidi_chars(&stderr).is_empty(),
+      "an alias expansion carrying U+{:04X} reached the terminal through clap: {:?} / {:?}",
+      *c as u32,
+      stdout,
+      stderr
+    );
+  }
+}
+
+#[test]
 fn a_config_value_cannot_forge_a_line_in_an_error() {
   // Errors are the one output path every command shares, and most of them
   // quote something out of `.gwm.toml`. A value carrying a `\n` would

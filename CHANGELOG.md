@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `trust list` and the rendered diagnostics carry the same exposure at lower
   stakes, and all of them inherit the fix: it lands in the two sinks every
   echo site already goes through, the way they inherited the control-character
-  rule.
+  rule. An `[aliases]` expansion is refused rather than neutralised, for the
+  reason it already was in 1.6.0: it becomes argv before clap parses it, and
+  clap prints its own error without passing through gwm's output path, so
+  `nope<ALM>abc` came back out of it with the character intact.
 
   The set is `Bidi_Control` exactly rather than the overrides and isolates
   alone, because the three implicit marks reorder too: `U+061C` is bidi class
