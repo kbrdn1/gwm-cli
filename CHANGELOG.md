@@ -58,6 +58,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code is worse than a slow first request. `composer install` and
   `direnv allow .` run on the same `when` predicates as the Laravel preset.
 
+- **Per-worktree notes**
+  ([#515](https://github.com/kbrdn1/gwm-cli/issues/515)). gwm knew the
+  branch, the linked issue, the diff against base and the agent session, but
+  not where you were: what you had just figured out, what is blocking, what
+  to check before opening the PR. `N` now opens the selected worktree's note
+  in `$EDITOR` (`editor_cmd`, then `$EDITOR`, then `vi`, the same handoff
+  `o` uses in `mode = "editor"`), and the worktrees table carries a binary
+  marker on the rows that have one. Notes are plain Markdown at
+  `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable and editable with
+  gwm shut down, never committed, readable from the main checkout, and they
+  survive `gwm remove`, which is the point of keeping them out of the
+  worktree. `gwm note show [slug]` prints one on stdout and exits 1 when
+  there is none, so it doubles as a presence test in a script, and the
+  `--format=json` list rows carry an additive `note` field alongside the
+  daemon payload. The note is keyed on the branch, which has three stated
+  consequences: a detached row cannot carry one and says so instead of
+  no-oping; a rename moves the file with the branch; and `gwm doctor` reports
+  a note whose branch is gone, rather than `gwm clean`, whose safety property
+  is that `--yes` only removes directories git already ignores. Presence
+  means "non-blank", not "the file exists", because `vi` over an empty buffer
+  writes one byte. One upgrade note, the same one `z` carried in #484: `N` is
+  now a shipped default, so a `.gwm.toml` binding a chord *starting* with `N`
+  (say `top = ["N x"]`) is a prefix conflict and is refused at load time.
+  Rebind that chord, or move `edit_note` elsewhere.
+
 ### Changed
 
 - **`cycle_sidebar_layout` moved from `Space` to `z`**
