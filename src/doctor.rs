@@ -376,7 +376,10 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
 /// launcher `lumen`. Keep this list narrow on purpose — exotic
 /// wrappers (`nice`, `time`, `nohup`) take positional args, which we
 /// would risk consuming and ending up with the wrong binary.
-const COMMAND_WRAPPERS: &[&str] = &["env", "command"];
+/// Words that stand in front of the real binary rather than being one.
+/// `exec composer install` runs composer, so stopping at `exec` would drop
+/// the step and let a missing composer go unreported.
+const COMMAND_WRAPPERS: &[&str] = &["env", "command", "exec"];
 
 /// Shell keywords and builtins that can legitimately open a `run` script.
 ///
@@ -392,13 +395,20 @@ const COMMAND_WRAPPERS: &[&str] = &["env", "command"];
 /// `true`) are deliberately absent: probing them costs nothing because they
 /// resolve, and leaving them out keeps this list to the words that would
 /// produce a false warning.
+///
+/// So is `source`, and for a sharper reason: it is a bashism, and where
+/// `/bin/sh` is dash, which is most Linux distributions, it is neither a
+/// keyword nor a builtin, so the step dies with "source: not found". Probing
+/// it produces exactly the warning worth having, whose fix is the portable
+/// `.` form. `exec` is absent too, for the opposite reason: it stands in
+/// front of the real binary, so it belongs in [`COMMAND_WRAPPERS`].
 const SHELL_KEYWORDS: &[&str] = &[
   // Reserved words.
   "!", "case", "do", "done", "elif", "else", "esac", "fi", "for", "if", "in", "then", "until", "while", "{", "}",
   // Special builtins, plus the regular ones that commonly open a script.
-  ".", ":", "alias", "bg", "break", "cd", "continue", "eval", "exec", "exit", "export", "fg", "getopts", "hash", "jobs",
-  "local", "read", "readonly", "return", "set", "shift", "source", "times", "trap", "type", "ulimit", "umask",
-  "unalias", "unset", "wait",
+  ".", ":", "alias", "bg", "break", "cd", "continue", "eval", "exit", "export", "fg", "getopts", "hash", "jobs",
+  "local", "read", "readonly", "return", "set", "shift", "times", "trap", "type", "ulimit", "umask", "unalias",
+  "unset", "wait",
 ];
 
 /// Extract the executable name from a shell command string. Tokenises
@@ -632,8 +642,13 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     }
     // A step that carries its own `PATH` resolves against that one, since
     // both runners hand `env` to `Command::env`, so probing it against the
-    // doctor's ambient `$PATH` answers a question nobody asked.
-    if env.contains_key("PATH") {
+    // doctor's ambient `$PATH` answers a question nobody asked. Matched
+    // case-insensitively because Windows environment names are, so
+    // `Path = "C:\\project\\bin"` really does replace the child's PATH there.
+    // Applied on every platform rather than behind `cfg(windows)`: the only
+    // cost on Unix is not probing a step that named its variable `Path`, and
+    // one behaviour is one thing to test.
+    if env.keys().any(|k| k.eq_ignore_ascii_case("PATH")) {
       continue;
     }
     let Some(bin) = extract_binary(run) else { continue };
