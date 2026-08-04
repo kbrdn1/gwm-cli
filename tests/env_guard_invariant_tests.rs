@@ -22,6 +22,18 @@
 //! So all three are derived: the binaries from their own `set_var` calls, the
 //! readers from a transitive walk of `src/`, and the ordering from where the
 //! guard sits relative to the call.
+//!
+//! # What it does not catch, on purpose
+//!
+//! A reader that takes the variable *name* as a parameter. `trust::env_truthy`
+//! calls `std::env::var(key)`, so nothing links it to any particular variable
+//! by reading the source. Seeding on non-literal `env::var` calls was tried
+//! and measured: it marks `env_truthy` a reader of everything, which through
+//! the transitive walk reaches `read_link` and `enter_open_menu`, and demands
+//! a lock from about a third of `forge_tests` and `tui_app_tests` including
+//! binaries whose own rewritten-variable set is empty. That trades a targeted
+//! guard for one whose failures carry no information, so the bound stays and
+//! is written here instead.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -214,30 +226,51 @@ fn ambient_readers(src: &[(String, String)], vars: &BTreeSet<String>) -> BTreeSe
   readers
 }
 
-/// Names of the `-> &'static std::sync::Mutex` helpers a test binary defines.
-/// Its guard is `<name>().lock()`, whatever the binary chose to call it.
-fn lock_helpers(source: &str) -> Vec<String> {
-  functions(source)
-    .into_iter()
-    .filter(|(_, body)| {
-      let head = body.lines().next().unwrap_or_default();
-      head.contains("Mutex")
-    })
-    .map(|(name, _)| name)
-    .collect()
+/// The two shapes a test binary uses to take its lock.
+///
+/// A `-> &'static Mutex<()>` helper hands back the mutex, so the acquisition
+/// is `helper().lock()`. A `-> MutexGuard` helper takes the lock itself and
+/// hands back the guard, so calling it *is* the acquisition. Both are in the
+/// tree (`env_lock` and `clean_env`), and reading only the first shape reports
+/// every `clean_env()` test in `gitlab_tests` and `forge_tests` as unguarded.
+struct Locks {
+  /// Needs `.lock()` chained onto the call.
+  mutexes: Vec<String>,
+  /// The call alone acquires, because the guard is the return value.
+  providers: Vec<String>,
+}
+
+fn lock_helpers(source: &str) -> Locks {
+  let mut mutexes = Vec::new();
+  let mut providers = Vec::new();
+  for (name, body) in functions(source) {
+    let head = body.lines().next().unwrap_or_default();
+    if head.contains("MutexGuard") {
+      providers.push(name);
+    } else if head.contains("Mutex") {
+      mutexes.push(name);
+    }
+  }
+  Locks { mutexes, providers }
 }
 
 /// Byte offset of the first acquisition of one of `helpers`, if any.
-fn guard_at(body: &str, helpers: &[String]) -> Option<usize> {
-  helpers
-    .iter()
-    .filter_map(|h| {
-      let at = call_at(body, h)?;
-      // The acquisition, not just the helper: `env_lock()` alone hands back a
-      // reference and locks nothing.
-      body[at..].find(".lock()").map(|_| at)
-    })
-    .min()
+///
+/// The `.lock()` has to be chained to the helper call, not merely present
+/// somewhere after it: `env_lock(); reader(); other.lock();` returns a
+/// reference, reads unprotected, and then locks something unrelated, which an
+/// "is there a `.lock()` later" test reads as a guarded body.
+fn guard_at(body: &str, locks: &Locks) -> Option<usize> {
+  let chained = locks.mutexes.iter().filter_map(|h| {
+    let at = call_at(body, h)?;
+    let after = &body[at + h.len()..];
+    let after = after.strip_prefix('(')?;
+    let after = after.trim_start().strip_prefix(')')?;
+    // Allow the line break rustfmt inserts on a long chain.
+    after.trim_start().starts_with(".lock()").then_some(at)
+  });
+  let provided = locks.providers.iter().filter_map(|p| call_at(body, p));
+  chained.chain(provided).min()
 }
 
 #[test]
@@ -257,22 +290,41 @@ fn every_test_that_can_observe_a_rewritten_env_var_locks_first() {
     if file.contains("env_guard_invariant") {
       continue; // its own `set_var` strings are the fixture below
     }
-    let vars = mutated_vars(&source);
-    if vars.is_empty() {
+    // Membership is "does this binary rewrite the environment at all", not
+    // "does it name a variable we could parse". `forge_tests::clean_env` loops
+    // over a list and calls `remove_var(v)`, so the literal scan finds nothing
+    // and the binary would drop out of the audit entirely while the count
+    // stayed plausible.
+    if !source.contains("set_var(") && !source.contains("remove_var(") {
       continue;
     }
     audited += 1;
 
+    // Empty when every key is indirect; the readers derived from it are then
+    // empty too, and what still holds for the binary is the rule that the
+    // rewrite itself must be locked.
+    let vars = mutated_vars(&source);
     let readers = ambient_readers(&src, &vars);
     let helpers = lock_helpers(&source);
     for (name, body) in functions(&source) {
-      let Some((reader, read_at)) = readers
+      // The rewrite itself has to be serialised, not only the reads: a test
+      // that only calls `set_var` (seeding the environment for a child
+      // process, say) still races every concurrent reader, and matching no
+      // reader name would otherwise excuse it.
+      let mutation = ["set_var(", "remove_var("]
+        .iter()
+        .filter_map(|m| call_at(&body, m.trim_end_matches('(')))
+        .min();
+      let reader_hit = readers
         .iter()
         .filter(|r| body.contains(r.as_str()))
         .filter_map(|r| call_at(&body, r).map(|at| (r, at)))
-        .min_by_key(|(_, at)| *at)
-      else {
-        continue;
+        .min_by_key(|(_, at)| *at);
+      let (reader, read_at) = match (reader_hit, mutation) {
+        (Some((_, at)), Some(m)) if m < at => ("set_var/remove_var", m),
+        (Some((r, at)), _) => (r.as_str(), at),
+        (None, Some(m)) => ("set_var/remove_var", m),
+        (None, None) => continue,
       };
       match guard_at(&body, &helpers) {
         Some(lock_at) if lock_at < read_at => {}
@@ -286,8 +338,13 @@ fn every_test_that_can_observe_a_rewritten_env_var_locks_first() {
     }
   }
 
+  // A sweep that silently stops finding binaries reports "no offenders" for
+  // the same reason an empty one does. Ten rewrite the environment today,
+  // eleven counting this file, which is skipped because its own fixtures
+  // contain the strings being searched for. The floor moves up when one is
+  // added, never down without saying why.
   assert!(
-    audited >= 8,
+    audited >= 10,
     "expected the sweep to find the env-rewriting binaries, found {audited}"
   );
   assert!(
@@ -328,12 +385,17 @@ fn the_guard_can_actually_fire() {
   );
   assert!(!readers.contains("unrelated"), "and nothing else is");
 
-  let helpers = vec!["env_lock".to_string()];
+  let helpers = Locks {
+    mutexes: vec!["env_lock".to_string()],
+    providers: vec!["clean_env".to_string()],
+  };
   let before = "fn t() {\n  let _g = env_lock().lock().unwrap();\n  record();\n}\n";
   let after = "fn t() {\n  record();\n  let _g = env_lock().lock().unwrap();\n}\n";
   let none = "fn t() {\n  record();\n}\n";
   let prose = "fn t() {\n  // record() would read the journal path\n}\n";
   let longer = "fn t() {\n  wrapped_record();\n}\n";
+  let unchained = "fn t() {\n  env_lock();\n  record();\n  other.lock();\n}\n";
+  let provided = "fn t() {\n  let _g = clean_env();\n  record();\n}\n";
 
   assert!(
     guard_at(before, &helpers) < call_at(before, "record"),
@@ -344,6 +406,14 @@ fn the_guard_can_actually_fire() {
     "locked afterwards serialises nothing and must be caught"
   );
   assert!(guard_at(none, &helpers).is_none(), "no guard at all is caught");
+  assert!(
+    guard_at(unchained, &helpers).is_none(),
+    "the helper without a chained .lock() returns a reference and protects nothing, whatever locks later"
+  );
+  assert!(
+    guard_at(provided, &helpers) < call_at(provided, "record"),
+    "a helper that returns the guard acquires on call"
+  );
   assert!(call_at(prose, "record").is_none(), "prose is not a call");
   assert!(
     call_at(longer, "record").is_none(),
