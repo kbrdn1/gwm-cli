@@ -603,6 +603,40 @@ The tag's `v` prefix is stripped to match the winget `PackageVersion`, and the m
 
 If the channel is unblocked and the manual flow proves routine, the job can come back — deleting the pin test is the first step of that change, and the removed job (pinned, digest-anchored komac; see the git history of `release.yml` at #448) is the starting point.
 
+### Documentation site (<https://gwm-docs.kbrdn.dev>)
+
+The published documentation follows `main`, not `dev`. Every push to `main` that touches `docs/` or `changelogs/` fires [`docs-sync.yml`](.github/workflows/docs-sync.yml), which sends a `repository_dispatch` to [`kbrdn1/kbrdn-docs`](https://github.com/kbrdn1/kbrdn-docs); that repo replays the conversion into its Starlight site, commits the drift and deploys.
+
+`main` is the right trigger precisely because it is only ever reached through a `dev` → `main` pull request: what lands there is what was delivered. `dev` would publish pages describing behaviour nobody can install yet, and a tag trigger would be worse still, since GitHub's `v*.*.*` glob matches `-rc.N` too and every release candidate's docs would go live as if they were stable. [`tests/release_workflow_tests.rs`](tests/release_workflow_tests.rs) pins both the branch and the watched paths.
+
+Nothing about the site lives in this repo: the conversion script, the Starlight theme and the Cloudflare Pages deploy all belong to `kbrdn-docs`. This side owns the Markdown sources and the bell.
+
+One asymmetry is worth knowing before you go looking for it: `docs/index.md` and `docs/fr/index.md` are **not** ported. The site has its own hand-written landing pages, which the sync deliberately preserves. Editing either file therefore fires the workflow, produces no drift and finishes green without changing anything online. Every other page under `docs/`, plus `changelogs/`, does travel.
+
+#### One-time bootstrap (maintainer)
+
+Same shape as the Homebrew tap, with a token scoped to the docs repo:
+
+1. Generate a fine-grained PAT at <https://github.com/settings/personal-access-tokens/new>:
+   - **Repository access**: select `kbrdn1/kbrdn-docs` only.
+   - **Permissions**: Contents → **Read and write**. Nothing else: that is the documented requirement for `POST /repos/{owner}/{repo}/dispatches`.
+   - **Expiration**: ≥ 1 year (set a calendar reminder to rotate).
+2. Add it as the `DOCS_SITE_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
+3. Flip `continue-on-error: true` to `false` on the `notify` job in [`docs-sync.yml`](.github/workflows/docs-sync.yml) after the first successful dispatch.
+
+Note that this is a write credential for a **private** repository, held in a public repository's secrets. It sits at the same trust level as `HOMEBREW_TAP_TOKEN` and `SCOOP_BUCKET_TOKEN`, which push to repositories of their own.
+
+The deploy itself needs three more settings, all on `kbrdn-docs` and none of them here: the `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets, the `DEPLOY_ENABLED` repository variable, and a Cloudflare Pages project named `gwm-docs`. Until they exist the sync still runs and commits, but the deploy job skips. The custom domain is attached to the Pages project itself; `gwm-docs.pages.dev` stays served alongside it and cannot be removed, which is why `site:` in `sites/gwm/astro.config.mjs` pins the custom one: that value is what ships in the sitemap and the canonical URLs.
+
+#### Re-running a missed sync
+
+The dispatch is a single API call with no state, so re-drive it from either end:
+
+```bash
+gh workflow run docs-sync.yml --ref main                       # from gwm-cli
+gh workflow run sync-gwm.yml --ref main -R kbrdn1/kbrdn-docs   # or straight at the site
+```
+
 ---
 
 By contributing, you agree your changes are licensed under the MIT License (see `LICENSE.md`).
