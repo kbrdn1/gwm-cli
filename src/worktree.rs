@@ -499,25 +499,35 @@ fn branch_created_age(repo: &Repository, branch: &str) -> Option<Duration> {
 /// may be gone by now, which would make `canonicalize` fail rather than
 /// disagree.
 pub fn remove_verified(repo: &Repository, name: &str, expected_path: &Path, delete_branch: bool) -> Result<()> {
-  let wt = repo
-    .find_worktree(name)
-    .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
-  if wt.path() != expected_path {
-    return Err(GwmError::Other(format!(
-      "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
-      name,
-      wt.path().display(),
-      expected_path.display()
-    )));
-  }
-  remove(repo, name, delete_branch)
+  remove_inner(repo, name, Some(expected_path), delete_branch)
 }
 
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
 pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> {
+  remove_inner(repo, name, None, delete_branch)
+}
+
+/// Shared body of [`remove`] and [`remove_verified`].
+///
+/// The check lives here, on the handle the prune will actually act on, rather
+/// than in a wrapper that resolves the name a second time: re-resolving would
+/// reopen the very window the check exists to close, however narrow (Codex
+/// review on PR #520). `expected_path = None` is the historical, unverified
+/// removal.
+fn remove_inner(repo: &Repository, name: &str, expected_path: Option<&Path>, delete_branch: bool) -> Result<()> {
   let wt = repo
     .find_worktree(name)
     .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  if let Some(expected) = expected_path {
+    if wt.path() != expected {
+      return Err(GwmError::Other(format!(
+        "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
+        name,
+        wt.path().display(),
+        expected.display()
+      )));
+    }
+  }
   let path = wt.path().to_path_buf();
 
   // Capture the branch (if any) so we can drop it after pruning.

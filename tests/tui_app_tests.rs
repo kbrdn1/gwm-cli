@@ -11792,3 +11792,31 @@ fn a_partial_batch_narrows_the_confirm_to_the_failures_never_to_the_cursor() {
     "and never the row the cursor landed on after the refresh"
   );
 }
+
+#[test]
+fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
+  // Codex review on PR #520 (P2): a workspace batch spans repos, and two of
+  // them can hold the same worktree id. The banner is where the user goes to
+  // fix things, so it names each failure by path.
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+  let outcome = DeleteBatchOutcome {
+    removed: vec![],
+    failed: vec![
+      DeleteFailure {
+        id: "feat-1-auth".into(),
+        path: "/repos/alpha/feat-1-auth".into(),
+        error: "locked".into(),
+      },
+      DeleteFailure {
+        id: "feat-1-auth".into(),
+        path: "/repos/beta/feat-1-auth".into(),
+        error: "dirty".into(),
+      },
+    ],
+  };
+  let banner = outcome.failure_banner().expect("two failures produce a banner");
+  assert!(
+    banner.contains("/repos/alpha/feat-1-auth") && banner.contains("/repos/beta/feat-1-auth"),
+    "both repos must be tellable apart: {banner}"
+  );
+}

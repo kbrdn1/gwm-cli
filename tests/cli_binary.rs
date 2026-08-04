@@ -3199,7 +3199,7 @@ run = "test ! -f .block"
     .assert()
     .failure()
     .stderr(predicate::str::contains("batch-blocked"))
-    .stderr(predicate::str::contains("1 of 2 removals failed"));
+    .stderr(predicate::str::contains("1 of 2 targets failed"));
 
   assert!(
     !base.path().join("feat-27-batch-ok").exists(),
@@ -3217,6 +3217,119 @@ run = "test ! -f .block"
     stderr.matches("refuse blocked").count(),
     1,
     "one line per failure, no duplicate: {stderr}"
+  );
+}
+
+#[test]
+fn a_batch_refuses_a_target_whose_path_moved_since_it_was_resolved() {
+  // #484 / Codex review on PR #520 (P1): a batch resolves every pattern up
+  // front, so a hook on an earlier target has a window to move a later one.
+  // The id still resolves; the path the plan was about does not. Removing by
+  // id alone would destroy whatever now holds it.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("30", "moved-first"), ("31", "moved-second")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+  let second = base.path().join("feat-31-moved-second");
+  let relocated = base.path().join("feat-31-relocated");
+  // `when:` predicates resolve against the hook's cwd, which is the worktree
+  // being removed — so a marker file scopes the hook to the first target.
+  std::fs::write(base.path().join("feat-30-moved-first").join(".trigger"), "").unwrap();
+
+  // Removing the FIRST target moves the second one out from under the plan.
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "move the other target"
+when = "file_exists:.trigger"
+run = "git -C {repo} worktree move {second} {relocated}"
+"#,
+    base = toml_basic_string(base.path()),
+    repo = toml_basic_string(dir.path()),
+    second = toml_basic_string(&second),
+    relocated = toml_basic_string(&relocated),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "moved-first", "moved-second"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("changed since it was confirmed"));
+
+  assert!(
+    !base.path().join("feat-30-moved-first").exists(),
+    "the target that still matched its plan is removed"
+  );
+  assert!(
+    relocated.exists(),
+    "the one that moved is left alone rather than removed at its new path"
+  );
+}
+
+#[test]
+fn a_failing_post_remove_hook_is_not_reported_as_a_failed_removal() {
+  // Codex review on PR #520 (P2): `remove_one` carries the post_remove hook,
+  // so an `on_fail = "abort"` hook returns an error on a worktree that IS
+  // gone. Calling that a failed removal tells a script the opposite of what
+  // happened on disk.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("32", "post-a"), ("33", "post-b")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.post_remove]]
+name = "always fails"
+run = "false"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "post-a", "post-b"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("2 of 2 targets failed"))
+    .stderr(predicate::str::contains("removals failed").not());
+
+  assert!(
+    !base.path().join("feat-32-post-a").exists() && !base.path().join("feat-33-post-b").exists(),
+    "both worktrees are gone — only the post hook failed"
   );
 }
 

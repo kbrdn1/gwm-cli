@@ -271,11 +271,16 @@ impl DeleteBatchOutcome {
     if self.removed.is_empty() && self.failed.len() == 1 {
       return Some(self.failed[0].error.clone());
     }
+    // The banner is where the user goes to fix things, so it names each
+    // failure by PATH: a workspace batch spans repos, and two of them can hold
+    // the same worktree id, which would make two rows indistinguishable
+    // (Codex review on PR #520). The status line keeps the shorter ids — it
+    // has one line to fit in, and the banner carries the detail.
     Some(
       self
         .failed
         .iter()
-        .map(|f| format!("{}: {}", f.id, f.error))
+        .map(|f| format!("{}: {}", f.path.display(), f.error))
         .collect::<Vec<_>>()
         .join(" · "),
     )

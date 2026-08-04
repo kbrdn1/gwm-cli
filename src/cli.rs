@@ -3168,8 +3168,13 @@ fn cmd_remove(
   if failed == 0 {
     Ok(())
   } else {
+    // "targets", not "removals": `remove_one` also carries the post_remove
+    // hook, which can fail on a worktree that IS gone (`on_fail = "abort"`).
+    // Reporting that as a failed removal would tell a script the opposite of
+    // what happened on disk (Codex review on PR #520). The per-target line
+    // above names what actually failed.
     Err(GwmError::Other(format!(
-      "{} of {} removals failed (see the errors above)",
+      "{} of {} targets failed (see the errors above)",
       failed,
       targets.len()
     )))
@@ -3228,7 +3233,12 @@ fn remove_one(
     );
   }
 
-  worktree::remove(repo, &found.id, delete_branch)?;
+  // `remove_verified`: a batch resolves every pattern up front (#484), so a
+  // hook on an earlier target, or another process, has a window to remove and
+  // recreate a later one under the same id at another path. The id is how the
+  // pattern resolved; the path is what the user was shown by `--dry-run` and
+  // what the plan is about (Codex review on PR #520).
+  worktree::remove_verified(repo, &found.id, &found.path, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
     if let Some(b) = &found.branch {
