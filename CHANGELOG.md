@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A branch name no longer reaches the TUI table with its bidi controls intact.
+  The sinks the CLI goes through are not on the TUI's path, and what protected
+  the TUI so far was incidental: measured on ratatui 0.30, every render path
+  drops the zero-width control bytes, but `List` and `Table` keep the
+  `Bidi_Control` characters. The worktrees table renders through `Table`, and
+  git's ref rules refuse the ASCII controls and `~^:?*[` but not the Unicode
+  format characters, so a fetched ref could carry one and its row could read
+  in an order the ref is not stored in.
+
+  The neutralisation goes in the width-clipping funnel every constrained cell
+  already passes through, rather than at each cell, so a column added later
+  inherits it. It runs before the width count, so what is measured is what is
+  drawn: a `Bidi_Control` character can measure zero columns where its `?`
+  measures one. The path column, which is not width-constrained, says so
+  itself. `tui::wt_tree::sanitize_name` now delegates to the shared predicate
+  instead of keeping a copy that had drifted: a filename out of `git status -z`
+  reorders a sidebar row exactly as a ref name reorders a table row.
+  ([#506](https://github.com/kbrdn1/gwm-cli/issues/506))
+
 - A config value no longer reaches the terminal with its Unicode bidi controls
   intact. The neutralisation added in 1.6.0 replaces control characters, and
   `char::is_control` covers C0, DEL and C1: it does not cover the twelve
