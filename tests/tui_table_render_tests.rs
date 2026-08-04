@@ -85,3 +85,44 @@ fn agent_column_appears_once_a_session_lands() {
   assert!(text.contains("AGENT"), "a landed session must surface the column");
   assert!(text.contains("claude"), "the top session's agent must show");
 }
+
+// --- Bidi controls in a ref name (issue #506) ------------------------------
+
+/// Every character carrying the Unicode `Bidi_Control` property. Not
+/// `char::is_control`, which by construction matches none of them: they are
+/// `Cf`, and that is the whole point.
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+  '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+/// A repo whose checked-out branch is `name`.
+fn repo_on_branch(name: &str) -> TempDir {
+  let dir = repo();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch(name, &head, false).unwrap();
+  repo.set_head(&format!("refs/heads/{name}")).unwrap();
+  dir
+}
+
+#[test]
+fn a_branch_name_cannot_carry_a_bidi_control_into_the_table() {
+  // Git's ref rules refuse the ASCII controls, space and `~^:?*[`, but not
+  // the Unicode format characters, so this name is a legal ref that can
+  // arrive with a fetch rather than being typed locally. The table renders
+  // through `Table`, which (measured on ratatui 0.30) drops zero-width
+  // control bytes but keeps these, so the row can read in an order the ref
+  // is not stored in.
+  for c in BIDI_CONTROLS {
+    let dir = repo_on_branch(&format!("feat/{c}danger"));
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    let text = draw_once(&mut app);
+    let leaked: Vec<char> = text.chars().filter(|x| BIDI_CONTROLS.contains(x)).collect();
+    assert!(
+      leaked.is_empty(),
+      "the table replayed U+{:04X} from the branch name",
+      *c as u32
+    );
+  }
+}
