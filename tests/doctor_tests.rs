@@ -339,6 +339,118 @@ fn when_predicates_detail_says_none_when_no_predicates_configured() {
 }
 
 // --------------------------------------------------------------------------
+// Checks #3 and #4 also see `[hooks.*]`, not just `[[bootstrap.command]]`
+// --------------------------------------------------------------------------
+
+/// Every lifecycle phase that carries commands. `[hooks.*]` steps have the
+/// same `run` / `when` shape as `[[bootstrap.command]]`, so a check that
+/// inspects one surface and not the other reports on half the config. The
+/// list is the whole of `LifecycleHooksConfig`; the loops below run each
+/// case against all six so a phase cannot be covered by accident.
+const HOOK_PHASES: &[&str] = &[
+  "pre_create",
+  "post_create",
+  "pre_bootstrap",
+  "post_bootstrap",
+  "pre_remove",
+  "post_remove",
+];
+
+/// Load a `.gwm.toml` written into a fresh repo, so the test exercises the
+/// real `[hooks.<phase>]` key names rather than field access.
+fn config_from_toml(dir: &std::path::Path, body: &str) -> Config {
+  std::fs::write(dir.join(".gwm.toml"), body).unwrap();
+  Config::load_layered(dir, None).expect("test config must load")
+}
+
+#[test]
+fn unsupported_when_predicate_on_a_hook_is_failed() {
+  // Pre-fix the `when` check walked `[[bootstrap.command]]` only, so a
+  // typo in a hook's predicate was reported as "no `when:` predicates
+  // configured": the check passed vacuously on a config it never read.
+  for phase in HOOK_PHASES {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.{phase}]]\nname = \"noop\"\nrun = \"true\"\nwhen = \"bogus_predicate:FOO\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report
+      .checks
+      .iter()
+      .find(|c| c.name.contains("when"))
+      .expect("expected a `when` predicate check");
+    assert_eq!(
+      c.status,
+      CheckStatus::Failed,
+      "phase {phase} went unchecked: {}",
+      c.detail
+    );
+    assert!(
+      c.detail.contains("bogus_predicate"),
+      "phase {phase} must name the offending atom, got: {}",
+      c.detail
+    );
+    assert!(
+      c.detail.contains(phase),
+      "phase {phase} must be named so the user knows where to look, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn supported_when_predicate_on_a_hook_counts_as_recognised() {
+  // The other half of the vacuous pass: a hook with a *valid* predicate was
+  // reported as "no `when:` predicates configured", which reads as "nothing
+  // to check here" on a config that has plenty.
+  for phase in HOOK_PHASES {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.{phase}]]\nname = \"noop\"\nrun = \"true\"\nwhen = \"file_exists:composer.json\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
+    assert_eq!(c.status, CheckStatus::Ok);
+    assert!(
+      c.detail.contains("1 predicate"),
+      "phase {phase} predicate went uncounted, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn missing_hook_binary_is_warning() {
+  // Same blind spot on the PATH check: a hook invoking a binary that is not
+  // installed produced a clean report, so `gwm doctor` said the config was
+  // fine right up to the moment the hook failed at `gwm create` time.
+  for phase in HOOK_PHASES {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.{phase}]]\nname = \"phantom\"\nrun = \"definitely-not-on-path-xyz123 --help\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report
+      .checks
+      .iter()
+      .find(|c| c.name.contains("PATH"))
+      .expect("expected a PATH check");
+    assert_eq!(c.status, CheckStatus::Warning, "phase {phase}: {}", c.detail);
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "phase {phase} must name the missing binary, got: {}",
+      c.detail
+    );
+  }
+}
+
+// --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
 
