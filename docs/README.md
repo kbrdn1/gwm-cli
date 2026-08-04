@@ -1,10 +1,10 @@
 ---
-title: docs/ — authoring conventions
+title: "docs/: authoring conventions"
 description: How the gwm documentation tree is organised for Nuxt Content (or any other SSG).
 navigation: false
 ---
 
-# `docs/` — authoring conventions
+# `docs/`: authoring conventions
 
 This tree is the source of truth for the gwm user docs and the future static documentation site. It is structured to drop straight into [Nuxt Content](https://content.nuxt.com/) (or any SSG that follows the same numeric-prefix routing convention).
 
@@ -41,9 +41,9 @@ description: <one-sentence teaser, used for SEO and search>
 
 Optional fields:
 
-- `navigation.title` — short label for the sidebar when the full title is too long.
-- `navigation.icon` — Iconify name (e.g. `lucide:terminal`) for SSGs that render section icons.
-- `navigation: false` — hide the page from the auto-generated sidebar (use for this README only).
+- `navigation.title`: short label for the sidebar when the full title is too long.
+- `navigation.icon`: Iconify name (e.g. `lucide:terminal`) for SSGs that render section icons.
+- `navigation: false`: hide the page from the auto-generated sidebar (use for this README only).
 
 ## links between docs pages
 
@@ -53,7 +53,7 @@ Use **repo-relative paths from this `docs/` root** so the same links resolve on 
 See [Configurable launchers](/tui/launchers) for the `[git_tui]` / `[review]` schema.
 ```
 
-(Nuxt Content rewrites bare `/segment` paths against the content root; on GitHub they render as broken-but-readable cross-references — acceptable until the site is live, at which point a relative-link audit can lift them all in one pass.)
+(Nuxt Content rewrites bare `/segment` paths against the content root; on GitHub they render as broken-but-readable cross-references, acceptable until the site is live, at which point a relative-link audit can lift them all in one pass.)
 
 ## images & assets
 
@@ -61,6 +61,6 @@ When pages need screenshots or diagrams, drop them under `docs/<section>/_assets
 
 ## see also
 
-- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — branch / commit / PR conventions
-- [`CHANGELOG.md`](../CHANGELOG.md) — release notes (root = `[Unreleased]`, per-version archives under `changelogs/`)
-- [`examples/gwm.toml.example`](../examples/gwm.toml.example) — annotated config reference
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md): branch / commit / PR conventions
+- [`CHANGELOG.md`](../CHANGELOG.md): release notes (root = `[Unreleased]`, per-version archives under `changelogs/`)
+- [`examples/gwm.toml.example`](../examples/gwm.toml.example): annotated config reference

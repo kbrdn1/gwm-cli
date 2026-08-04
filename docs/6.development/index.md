@@ -9,9 +9,9 @@ navigation:
 
 gwm is a small Rust crate (single binary). Build, test, and ship workflows are documented here.
 
-- **[Testing](/development/testing)** — the integration test files (~1900+ tests across 75 test files, run on the ubuntu / macos / windows matrix), the mandatory red → green → refactor TDD loop, how to run a subset, and the `// regression:` sentinel-test convention.
-- **[Contributing](/development/contributing)** — the Gitmoji + Conventional-Commit format, branch naming, the PR checklist, and the rules around the `CHANGELOG.md` / `changelogs/<version>.md` split.
-- **[Stability](/development/stability)** — the 1.0 SemVer compatibility contract: which surfaces are covered (CLI, exit codes, JSON schemas, daemon RPC, `.gwm.toml`), which are free to change (TUI, human strings, internal Rust API), the MSRV policy, and the deprecation process.
+- **[Testing](/development/testing)**: the integration test files (~1900+ tests across 75 test files, run on the ubuntu / macos / windows matrix), the mandatory red → green → refactor TDD loop, how to run a subset, and the `// regression:` sentinel-test convention.
+- **[Contributing](/development/contributing)**: the Gitmoji + Conventional-Commit format, branch naming, the PR checklist, and the rules around the `CHANGELOG.md` / `changelogs/<version>.md` split.
+- **[Stability](/development/stability)**: the 1.0 SemVer compatibility contract: which surfaces are covered (CLI, exit codes, JSON schemas, daemon RPC, `.gwm.toml`), which are free to change (TUI, human strings, internal Rust API), the MSRV policy, and the deprecation process.
 
 ## quick reference
 
@@ -23,7 +23,7 @@ cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
 ```
 
-A Nix dev shell is pinned in [`flake.nix`](https://github.com/kbrdn1/gwm-cli/blob/main/flake.nix) — toolchain, `rust-analyzer`, `clippy`, `rustfmt`, `cargo-watch`, `cargo-edit`, and the `libgit2` build deps — without touching the host system:
+A Nix dev shell is pinned in [`flake.nix`](https://github.com/kbrdn1/gwm-cli/blob/main/flake.nix), carrying the toolchain, `rust-analyzer`, `clippy`, `rustfmt`, `cargo-watch`, `cargo-edit` and the `libgit2` build deps, without touching the host system:
 
 ```bash
 nix develop
@@ -31,7 +31,7 @@ nix develop
 
 ## vs. bash script
 
-The full background — what changed from the original `tools/worktree-manager.sh` and why — lives in the contributing page under "[history](/development/contributing#history)".
+The full background, what changed from the original `tools/worktree-manager.sh` and why, lives in the contributing page under "[history](/development/contributing#history)".
 
 ## changelog
 
