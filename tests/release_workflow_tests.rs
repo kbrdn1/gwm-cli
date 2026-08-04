@@ -151,7 +151,11 @@ fn sibling_workflow_checkouts_do_not_persist_credentials() {
     // And by the whole name, not a suffix: `pre-release.yml` ends with
     // `release.yml`, so `ends_with` would drop a workflow that must be
     // audited. The `swept` floor below is what would catch that.
-    let is_release = Path::new(&path).file_name().and_then(|f| f.to_str()) == Some("release.yml");
+    // Fully qualified: `Path` is imported under `#[cfg(unix)]` in this file,
+    // next to the `Command` the shell-script tests need, and this test is not
+    // conditional. Reaching for the short name would have failed to compile on
+    // the very runner the line above exists for.
+    let is_release = std::path::Path::new(&path).file_name().and_then(|f| f.to_str()) == Some("release.yml");
     if is_release {
       continue;
     }
