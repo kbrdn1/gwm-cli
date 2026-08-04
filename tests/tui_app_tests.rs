@@ -11855,3 +11855,172 @@ fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
     "both repos must be tellable apart: {banner}"
   );
 }
+
+// --- rich PR / issue view wiring (issue #420) -----------------------------
+
+/// A PR with enough rich payload for the view to have something to render.
+fn rich_pr_fixture(number: u64) -> PrStatus {
+  PrStatus {
+    number,
+    title: "rich fixture".into(),
+    state: PrState::Open,
+    url: format!("https://example.test/pull/{number}"),
+    updated_at: "2026-08-04T13:00:00Z".into(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: "A description worth reading.".into(),
+      author: "kbrdn1".into(),
+      additions: 10,
+      deletions: 2,
+      base_ref: "dev".into(),
+      head_ref: "feat/#42-tui-search".into(),
+      reviews: vec![],
+      comments: vec![],
+    },
+  }
+}
+
+fn rich_issue_fixture(number: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number,
+    title: "rich issue fixture".into(),
+    state: gwm::github::IssueState::Open,
+    url: format!("https://example.test/issues/{number}"),
+    labels: vec!["feature".into()],
+    updated_at: "2026-08-01T10:00:00Z".into(),
+    detail: gwm::forge::IssueDetail {
+      body: "The issue body.".into(),
+      author: "sassman".into(),
+      comments: vec![],
+    },
+  }
+}
+
+#[test]
+fn rich_view_prefers_the_linked_pr() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "with both linked, the PR is the thing being worked on"
+  );
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.contains(&"kbrdn1"), "the metadata block rendered: {vals:?}");
+  assert!(
+    vals.iter().any(|v| v.contains("A description worth reading.")),
+    "the body rendered: {vals:?}"
+  );
+}
+
+#[test]
+fn rich_view_falls_back_to_the_issue() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.iter().any(|v| v.contains("The issue body.")), "{vals:?}");
+}
+
+#[test]
+fn rich_view_without_a_fetched_status_explains_instead_of_opening_blank() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::List, "an empty overlay is a bordered void");
+  assert!(
+    app.status.contains("fetch"),
+    "the status must name the way out: {}",
+    app.status
+  );
+}
+
+#[test]
+fn rich_view_enter_opens_the_selected_row_url() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  let url_row = app
+    .detail_overlay
+    .rows
+    .iter()
+    .position(|r| r.label == "url")
+    .expect("a url row");
+  app.detail_overlay.selected = url_row;
+
+  assert_eq!(app.rich_selected_url().as_deref(), Some("https://example.test/pull/61"));
+
+  // An inert row (the body) exposes nothing to open.
+  let body_row = app
+    .detail_overlay
+    .rows
+    .iter()
+    .position(|r| r.value.contains("A description worth reading."))
+    .expect("a body row");
+  app.detail_overlay.selected = body_row;
+  assert_eq!(app.rich_selected_url(), None);
+}
+
+#[test]
+fn a_link_change_closes_the_rich_view() {
+  // Same invariant the CI checks overlay carries (Codex review #455): the
+  // rows belong to the PR they were built for, and `Enter` would otherwise
+  // open the previous link's URL. `is_forge_linked` is what makes the
+  // guard cover every forge-backed consumer by construction.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+
+  assert_eq!(app.view, View::List, "the overlay must not outlive its link");
+}
+
+#[test]
+fn a_resize_rewraps_the_rich_view() {
+  // The builder wraps against a width the App carries; a resize that never
+  // reaches the App leaves rows wrapped for the old width and the renderer
+  // ellipsises them.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = "word ".repeat(120);
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  let wide = app.detail_overlay.rows.len();
+
+  app.set_term_width(60);
+  let narrow = app.detail_overlay.rows.len();
+
+  assert!(
+    narrow > wide,
+    "a narrower terminal must produce more wrapped rows ({narrow} vs {wide})"
+  );
+}
