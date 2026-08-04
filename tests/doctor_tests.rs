@@ -511,6 +511,45 @@ fn a_step_its_predicate_switches_on_is_still_probed() {
   }
 }
 
+#[test]
+fn doctor_declines_to_evaluate_a_predicate_it_cannot_bound() {
+  // `gwm doctor` reads a `.gwm.toml` that never went through the trust gate
+  // (#473), so evaluating one of its predicates means evaluating input from a
+  // repo nobody has vetted, on a command that also runs as an advisory CI job
+  // on every PR. `glob_exists:` walks the filesystem from wherever its pattern
+  // points, so `glob_exists:/**/nope` is a whole-disk walk; `file_exists:../..`
+  // reaches outside the repo. Neither gets evaluated.
+  //
+  // Declining is safe by construction: the step stays probed, which is what
+  // the check did before it evaluated anything, so it can never silence a
+  // warning. The three patterns below are bounded and match nothing, so an
+  // implementation that DID evaluate them would gate the step off and drop the
+  // binary from the report. That difference is what the assertion rides on,
+  // and it keeps the test instant instead of walking a real disk.
+  for when in [
+    "glob_exists:definitely-nope-xyz123-*",
+    "file_exists:../definitely-nope-xyz123",
+    // One unbounded atom taints the whole expression, however sound the rest.
+    "cmd_exists:sh && glob_exists:definitely-nope-xyz123-*",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!(
+        "[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{when}\"\n"
+      ),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{when}` must not be evaluated, so its step stays probed; got: {}",
+      c.detail
+    );
+  }
+}
+
 // --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
