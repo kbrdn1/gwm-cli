@@ -69,6 +69,12 @@ const PRESETS: &[Preset] = &[
     description: "Rust crate: target/ no-symlink + `cargo fetch`.",
     body: include_str!("../examples/presets/rust.toml"),
   },
+  Preset {
+    name: "symfony",
+    aliases: &[],
+    description: "Symfony: .env.local copy + AWS-RDS guard + vendor/ and var/ no-symlink + composer install.",
+    body: include_str!("../examples/presets/symfony.toml"),
+  },
 ];
 
 /// All built-in presets, in display order.

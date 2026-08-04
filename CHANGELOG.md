@@ -45,6 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed the first half of the batch and then reported the typo. Patterns
   naming the same worktree collapse to a single removal.
 
+- **`symfony` config preset**
+  ([#392](https://github.com/kbrdn1/gwm-cli/issues/392)). A seventh
+  `gwm init --preset`, next to `laravel` on the composer side but built on
+  Symfony's own dotenv convention, which is the mirror image of Laravel's:
+  `.env` is committed and holds the neutral defaults, `.env.local` is
+  gitignored and holds the secrets. So the preset copies `.env.local` and
+  `.env.test.local` rather than `.env`, and the `no-aws-rds` guard seeds from
+  the committed `.env` instead of an `.env.example`. `var/` joins `vendor/` in
+  the no-symlink invariants, because it holds the compiled service container
+  and the cached routes: sharing it between two worktrees running different
+  code is worse than a slow first request. `composer install` and
+  `direnv allow .` run on the same `when` predicates as the Laravel preset.
+
 ### Changed
 
 - **`cycle_sidebar_layout` moved from `Space` to `z`**
@@ -58,6 +71,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *starting* with `z` (say `top = ["z z"]`) is a prefix conflict and is
   refused at load time, the same way any chord/prefix pair has always been.
   Rebind that chord, or move `cycle_sidebar_layout` elsewhere.
+
+### Fixed
+
+- **`gwm doctor` now reads `[hooks.*]`, not just `[[bootstrap.command]]`.**
+  Two checks walked the bootstrap commands alone, so a config whose commands
+  all live in lifecycle hooks got a report about a file the doctor had barely
+  read: a typo in a hook's `when` predicate was announced as "no `when:`
+  predicates configured", and a hook invoking a binary that is not installed
+  produced a clean bill of health right up to the moment `gwm create` ran it
+  and failed. Both now walk the six phases as well, and the `when` failure
+  names the phase and step it came from (`bogus:1 (on hook post_create
+  \`install\`)`). Surfaced by the `symfony` preset, whose commands are all
+  hooks, but it applied to every hooks-based config since the phases landed.
+  `LifecycleHooksConfig::all_steps()` enumerates the phases through an
+  exhaustive destructuring, so adding a seventh phase without teaching the
+  consumers about it is now a compile error rather than a silent blind spot.
+  The PATH probe also honours each step's `when` predicate now, on bootstrap
+  commands as well, which it never did: the `node` preset ships `bun install`
+  under `cmd_exists:bun` and `npm ci` under `!cmd_exists:bun`, so probing both
+  regardless warned about whichever one the predicate had switched off, and a
+  Warning takes `gwm doctor` to exit code 1. The predicate is evaluated
+  against the main checkout, the same approximation the `.envrc` probe already
+  made; an unrecognised keyword still evaluates to `true`, matching the step
+  running anyway at bootstrap time. Only two predicate shapes are
+  evaluated, because a `.gwm.toml` never went through the trust gate:
+  `cmd_exists:` on a bare binary name, which is a `$PATH` lookup on the same
+  set the probe reports, and `file_exists:` on a single repo-root component
+  that is not itself a symlink, which is a `stat` on something the config's
+  own author committed. Everything else is a channel out of the repo for a
+  file nobody vetted, and one declined atom leaves the whole expression
+  unevaluated: `glob_exists:` picks its own root and walks it, a
+  multi-component `file_exists:` escapes through a committed symlink
+  (`outside/etc/passwd` with `outside -> /`) in a way no spelling check
+  catches, `env_set:` / `env_eq:` read the process environment and report the
+  answer through which binaries got probed, and a `cmd_exists:` argument with
+  a path separator is `file_exists:` under another name. Declining costs
+  nothing, the step simply stays probed, which is what the check did before it
+  evaluated anything.
+  A step whose binary cannot be resolved statically is left alone for the
+  same reason, from the other side: `lifecycle::run_step` expands `{path}` /
+  `{repo}` in `run` before spawning, so a hook reading `{path}/scripts/setup`
+  was probed as that literal string and always came back missing, and a step
+  that sets its own `PATH` in `env` resolves against that rather than against
+  the doctor's ambient one. Same for a script that opens on a shell word: a
+  `run` is handed whole to `sh -c`, so `cd sub && ./setup.sh` or
+  `if [ -f composer.json ]; then …` used to be probed as `cd` and `if`. That
+  one bit hooks harder than bootstrap commands, since a hook is a script far
+  more often.
+
 
 ### Docs
 

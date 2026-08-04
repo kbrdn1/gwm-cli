@@ -431,13 +431,36 @@ pub struct LifecycleHooksConfig {
 }
 
 impl LifecycleHooksConfig {
+  /// Every configured step, paired with the name of the phase it belongs to.
+  ///
+  /// The destructuring is exhaustive on purpose: adding a phase to this
+  /// struct without listing it here is a compile error. That is what keeps a
+  /// consumer walking the hooks (`gwm doctor`) from silently skipping a new
+  /// surface, which is exactly how the `when` and PATH checks came to read
+  /// `[[bootstrap.command]]` only.
+  pub fn all_steps(&self) -> impl Iterator<Item = (&'static str, &HookStep)> {
+    let Self {
+      pre_create,
+      post_create,
+      pre_bootstrap,
+      post_bootstrap,
+      pre_remove,
+      post_remove,
+    } = self;
+    [
+      ("pre_create", pre_create),
+      ("post_create", post_create),
+      ("pre_bootstrap", pre_bootstrap),
+      ("post_bootstrap", post_bootstrap),
+      ("pre_remove", pre_remove),
+      ("post_remove", post_remove),
+    ]
+    .into_iter()
+    .flat_map(|(phase, steps)| steps.iter().map(move |step| (phase, step)))
+  }
+
   pub fn has_any(&self) -> bool {
-    !self.pre_create.is_empty()
-      || !self.post_create.is_empty()
-      || !self.pre_bootstrap.is_empty()
-      || !self.post_bootstrap.is_empty()
-      || !self.pre_remove.is_empty()
-      || !self.post_remove.is_empty()
+    self.all_steps().next().is_some()
   }
 }
 
