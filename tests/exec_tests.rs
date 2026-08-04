@@ -503,6 +503,7 @@ fn mount_sources(out: &[String]) -> Vec<String> {
     .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn container_argv_mirrors_host_paths_and_runs_the_command_as_the_container_cmd() {
   let out = build_container_argv(
@@ -511,6 +512,7 @@ fn container_argv_mirrors_host_paths_and_runs_the_command_as_the_container_cmd()
     Path::new("/wt/feat-1"),
     Path::new("/main/.git"),
     &argv(&["cargo", "test"]),
+    false,
   );
   assert_eq!(
     out,
@@ -524,6 +526,16 @@ fn container_argv_mirrors_host_paths_and_runs_the_command_as_the_container_cmd()
       "/main/.git:/main/.git",
       "-w",
       "/wt/feat-1",
+      "-e",
+      "GIT_CONFIG_COUNT=2",
+      "-e",
+      "GIT_CONFIG_KEY_0=safe.directory",
+      "-e",
+      "GIT_CONFIG_VALUE_0=/wt/feat-1",
+      "-e",
+      "GIT_CONFIG_KEY_1=safe.directory",
+      "-e",
+      "GIT_CONFIG_VALUE_1=/main/.git",
       "rust:1.90",
       "cargo",
       "test",
@@ -532,6 +544,7 @@ fn container_argv_mirrors_host_paths_and_runs_the_command_as_the_container_cmd()
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn container_argv_mounts_the_main_checkout_gitdir_for_a_linked_worktree() {
   // THE test of this feature. A linked worktree's `.git` is a file holding
@@ -577,6 +590,7 @@ fn container_argv_mounts_the_main_checkout_gitdir_for_a_linked_worktree() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
   // The main checkout (reachable via an explicit slug — `find_fuzzy` does not
@@ -588,6 +602,7 @@ fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
     Path::new("/repo"),
     Path::new("/repo/.git"),
     &argv(&["true"]),
+    false,
   );
   assert_eq!(
     mount_sources(&out),
@@ -603,6 +618,7 @@ fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
     Path::new("/repo/"),
     Path::new("/repo/.git"),
     &argv(&["true"]),
+    false,
   );
   assert_eq!(
     mount_sources(&out),
@@ -611,6 +627,7 @@ fn container_argv_skips_the_gitdir_mount_when_it_lives_inside_the_worktree() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn container_argv_places_extra_args_after_gwms_flags_and_before_the_image() {
   let cfg = ContainerConfig {
@@ -624,6 +641,7 @@ fn container_argv_places_extra_args_after_gwms_flags_and_before_the_image() {
     Path::new("/wt/x"),
     Path::new("/main/.git"),
     &argv(&["npm", "test"]),
+    false,
   );
   let image_at = out.iter().position(|t| t == "node:22").expect("image present");
   let extra_at = out.iter().position(|t| t == "--network").expect("extra arg present");
@@ -640,6 +658,7 @@ fn container_argv_places_extra_args_after_gwms_flags_and_before_the_image() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn container_argv_never_quotes_or_joins_a_token() {
   // The invariant: gwm builds argv, never a shell string (the reference
@@ -652,6 +671,7 @@ fn container_argv_never_quotes_or_joins_a_token() {
     Path::new("/wt/x"),
     Path::new("/main/.git"),
     &["echo".to_string(), nasty.clone()],
+    false,
   );
   assert_eq!(out.last().unwrap(), &nasty, "the token is passed through verbatim");
   assert!(
@@ -660,6 +680,7 @@ fn container_argv_never_quotes_or_joins_a_token() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn container_plan_normalises_a_trailing_separator_on_the_common_dir() {
   // git2's `commondir()` returns `<main>/.git/`; the mount must read as a
@@ -765,5 +786,90 @@ fn a_container_block_with_an_empty_image_is_rejected() {
   assert!(
     err.to_string().contains("image"),
     "validator flags the empty image: {err}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn container_argv_declares_every_mounted_path_safe_for_git() {
+  // With a rootful Docker on Linux the container runs as uid 0 while the
+  // bind-mounted tree belongs to the host user, and git refuses a repository
+  // it reads as `dubious ownership` — which would undo the gitdir mount this
+  // feature exists for. The declaration rides `GIT_CONFIG_*` env (nothing
+  // written to disk) and names ONLY the paths gwm mounts, never the blanket
+  // `*`.
+  let out = build_container_argv(
+    "docker",
+    &container_cfg("rust:1.90"),
+    Path::new("/wt/feat-1"),
+    Path::new("/main/.git"),
+    &argv(&["git", "status"]),
+    false,
+  );
+  let env: Vec<&String> = out.windows(2).filter(|w| w[0] == "-e").map(|w| &w[1]).collect();
+  assert!(env.contains(&&"GIT_CONFIG_COUNT=2".to_string()), "{out:?}");
+  assert!(env.contains(&&"GIT_CONFIG_KEY_0=safe.directory".to_string()), "{out:?}");
+  assert!(env.contains(&&"GIT_CONFIG_VALUE_0=/wt/feat-1".to_string()), "{out:?}");
+  assert!(env.contains(&&"GIT_CONFIG_KEY_1=safe.directory".to_string()), "{out:?}");
+  assert!(env.contains(&&"GIT_CONFIG_VALUE_1=/main/.git".to_string()), "{out:?}");
+  assert!(
+    !out
+      .iter()
+      .any(|t| t.ends_with("safe.directory=*") || t == "GIT_CONFIG_VALUE_0=*"),
+    "the ownership check stays on for every path gwm did not mount: {out:?}"
+  );
+  // The declared set is exactly the mounted set: one mount ⇒ one entry.
+  let out = build_container_argv(
+    "docker",
+    &container_cfg("alpine"),
+    Path::new("/repo"),
+    Path::new("/repo/.git"),
+    &argv(&["true"]),
+    false,
+  );
+  assert!(
+    out.contains(&"GIT_CONFIG_COUNT=1".to_string()),
+    "the deduped mount declares one path, not two: {out:?}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn only_the_interactive_wrap_allocates_a_tty() {
+  // `gwm exec` is a fan-out over N worktrees, where a TTY per container means
+  // nothing; the TUI overlay spawns into a real pty, where its absence would
+  // cost a REPL its stdin and its terminal.
+  let plan = ContainerPlan::resolve(container_cfg("rust:1.90"), Path::new("/main/.git"), |_| true).unwrap();
+  let fanout = plan.wrap(Path::new("/wt/x"), &argv(&["cargo", "test"]));
+  let overlay = plan.wrap_interactive(Path::new("/wt/x"), &argv(&["cargo", "test"]));
+
+  assert!(
+    !fanout.contains(&"-t".to_string()) && !fanout.contains(&"-i".to_string()),
+    "the fan-out allocates no tty: {fanout:?}"
+  );
+  assert_eq!(
+    &overlay[..5],
+    &argv(&["docker", "run", "--rm", "-i", "-t"])[..],
+    "the overlay asks for stdin and a tty, right after `run`: {overlay:?}"
+  );
+  // Nothing else differs: same mounts, same command.
+  let strip: Vec<String> = overlay.iter().filter(|t| *t != "-i" && *t != "-t").cloned().collect();
+  assert_eq!(strip, fanout, "the tty flags are the only difference");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_container_profile_is_refused_on_windows() {
+  // The wrapper mirrors host paths, and `C:\…` is neither mountable nor
+  // resolvable inside a Linux container — and the worktree's `.git` file
+  // would still name a Windows path, so git could not answer even with a
+  // translated mount. Refused with a message that says so, rather than
+  // handed to `docker run` to fail obscurely.
+  let err = ContainerPlan::resolve(container_cfg("rust:1.90"), Path::new("C:\\main\\.git"), |_| true)
+    .expect_err("a container profile must be refused on Windows");
+  let msg = err.to_string();
+  assert!(
+    msg.contains("Windows") && msg.contains("container"),
+    "the error names the platform and the feature: {msg}"
   );
 }

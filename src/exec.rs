@@ -177,6 +177,20 @@ impl ContainerPlan {
   /// `PATH` lookup, injected so tests never depend on the runner having a
   /// container runtime installed.
   pub fn resolve(config: ContainerConfig, common_dir: &Path, available: impl Fn(&str) -> bool) -> Result<Self> {
+    // Refused on Windows rather than half-honoured. The whole design mirrors
+    // host paths, and a Windows path is not one a Linux container can mount
+    // or `cd` into; worse, the `.git` file of a linked worktree would still
+    // name a drive-letter path, so even a translated mount would leave git
+    // unable to answer — the one thing this feature exists to guarantee.
+    if cfg!(windows) {
+      return Err(GwmError::Config(
+        "exec: `[container]` is not supported on Windows — the wrapper mirrors host paths, \
+         and a `C:\\…` path is neither mountable nor resolvable inside a Linux container \
+         (the worktree's `.git` file would still name a Windows path). Run the profile on \
+         the host, or drive the container from a Linux/macOS checkout."
+          .into(),
+      ));
+    }
     let runtime = resolve_container_runtime(config.runtime.as_deref(), available)?;
     Ok(Self {
       runtime,
@@ -188,9 +202,20 @@ impl ContainerPlan {
     })
   }
 
-  /// Wrap `argv` for `worktree`. See [`build_container_argv`].
+  /// Wrap `argv` for `worktree`, non-interactively. See
+  /// [`build_container_argv`]. This is the fan-out form: `gwm exec` runs
+  /// across N worktrees, where a TTY per container means nothing.
   pub fn wrap(&self, worktree: &Path, argv: &[String]) -> Vec<String> {
-    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv)
+    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv, false)
+  }
+
+  /// Wrap `argv` for `worktree` **with `-i -t`**, for a caller that already
+  /// owns a terminal: the TUI exec overlay spawns into a real pty
+  /// (`portable_pty::openpty`), so without them a REPL, a debugger or any
+  /// prompting command would read EOF and see no terminal — capabilities the
+  /// same command has when it runs on the host in that overlay.
+  pub fn wrap_interactive(&self, worktree: &Path, argv: &[String]) -> Vec<String> {
+    build_container_argv(&self.runtime, &self.config, worktree, &self.common_dir, argv, true)
   }
 }
 
@@ -205,10 +230,12 @@ impl ContainerPlan {
 /// The shape:
 ///
 /// ```text
-/// <runtime> run --rm -v <wt>:<wt> -v <common>:<common> -w <wt> <extra…> <image> <argv…>
+/// <runtime> run --rm [-i -t] -v <wt>:<wt> -v <common>:<common> -w <wt> \
+///   -e GIT_CONFIG_COUNT=<n> -e GIT_CONFIG_KEY_i=safe.directory -e GIT_CONFIG_VALUE_i=<path> \
+///   <extra…> <image> <argv…>
 /// ```
 ///
-/// Two decisions are baked in:
+/// Three decisions are baked in:
 ///
 /// - **Host paths are mirrored.** `/workspace` buys nothing once the gitdir
 ///   mount has to reproduce an absolute host path anyway, and mirroring keeps
@@ -219,28 +246,54 @@ impl ContainerPlan {
 ///   It is skipped when it already lives inside the worktree (the main
 ///   checkout, reachable via an explicit slug), where the first mount covers
 ///   it.
+/// - **Every mounted path is declared `safe.directory`.** With a rootful
+///   Docker on Linux the process runs as uid 0 while the bind-mounted tree
+///   belongs to the host user, and git refuses a repository it sees as
+///   `dubious ownership` — which would undo the mount above. The declaration
+///   travels as `GIT_CONFIG_*` environment, so nothing is written to any
+///   config file, and it names **only the paths gwm mounts itself** rather
+///   than the blanket `*` (the ownership check stays on for everything else).
+///   It is the same fix CI providers apply to their own checkouts.
 ///
 /// `argv` becomes the container's **command**, so an image's `ENTRYPOINT` (if
 /// any) receives it as arguments; `extra_args = ["--entrypoint", ""]` opts
 /// out. `extra_args` lands after gwm's own flags, so a repeated flag wins.
+///
+/// `interactive` adds `-i -t`; see [`ContainerPlan::wrap_interactive`].
 pub fn build_container_argv(
   runtime: &str,
   cfg: &ContainerConfig,
   worktree: &Path,
   common_dir: &Path,
   argv: &[String],
+  interactive: bool,
 ) -> Vec<String> {
   let wt = mount_path(worktree);
   let mut out = vec![runtime.to_string(), "run".into(), "--rm".into()];
-  out.push("-v".into());
-  out.push(format!("{wt}:{wt}"));
+  if interactive {
+    out.push("-i".into());
+    out.push("-t".into());
+  }
+  // The paths gwm mounts itself, in mount order — also the exact set it
+  // declares safe below.
+  let mut mounted = vec![wt.clone()];
   if !common_dir.starts_with(worktree) {
-    let common = mount_path(common_dir);
+    mounted.push(mount_path(common_dir));
+  }
+  for path in &mounted {
     out.push("-v".into());
-    out.push(format!("{common}:{common}"));
+    out.push(format!("{path}:{path}"));
   }
   out.push("-w".into());
   out.push(wt);
+  out.push("-e".into());
+  out.push(format!("GIT_CONFIG_COUNT={}", mounted.len()));
+  for (i, path) in mounted.iter().enumerate() {
+    out.push("-e".into());
+    out.push(format!("GIT_CONFIG_KEY_{i}=safe.directory"));
+    out.push("-e".into());
+    out.push(format!("GIT_CONFIG_VALUE_{i}={path}"));
+  }
   out.extend(cfg.extra_args.iter().cloned());
   out.push(cfg.image.clone());
   out.extend(argv.iter().cloned());

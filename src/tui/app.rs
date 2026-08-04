@@ -2987,7 +2987,11 @@ impl App {
             match crate::exec::ContainerPlan::resolve(container, &self.exec_picker_common_dir, |bin| {
               which::which(bin).is_ok()
             }) {
-              Ok(plan) => argv = plan.wrap(&cwd, &argv),
+              // `wrap_interactive`: this overlay spawns into a real pty, so
+              // the container gets `-i -t` and a REPL / debugger / prompting
+              // command keeps working, exactly as it does when the same
+              // profile runs on the host here.
+              Ok(plan) => argv = plan.wrap_interactive(&cwd, &argv),
               Err(e) => {
                 self.status = format!("exec profile {profile:?}: {e}");
                 return None;

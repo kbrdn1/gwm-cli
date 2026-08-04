@@ -29,9 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the per-worktree header names the run
   (`━━ feat-1 (/path) [docker rust:1.90]`). Any Docker-compatible CLI works
   (OrbStack, Colima, Rancher Desktop, Docker Desktop, native Docker), so there
-  is no runtime to integrate. No `interactive` / TTY knob: `gwm exec` is a
-  fan-out over N worktrees, and that belongs to the surfaces that can honour
-  it.
+  is no runtime to integrate. Every mounted path is declared `safe.directory`
+  through `GIT_CONFIG_*` environment (never the blanket `*`), because a
+  rootful Docker on Linux runs as uid 0 against a tree owned by the host user
+  and git would otherwise refuse it as `dubious ownership`, undoing the mount.
+  `gwm exec` allocates no TTY, since a terminal per container means nothing
+  across a fan-out; the TUI exec overlay, which spawns into a real pty, runs
+  the container with `-i -t` so a REPL or a debugger keeps working there.
+  Refused on Windows with a message saying why: host paths cannot be mirrored
+  into a Linux container, and a linked worktree's `.git` file would still name
+  a drive-letter path.
 
 - **Multi-row selection in the TUI, and a batch delete on top of it**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the

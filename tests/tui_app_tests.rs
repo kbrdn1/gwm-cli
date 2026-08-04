@@ -9606,6 +9606,7 @@ fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
   assert_eq!(cwd, expected_cwd, "cwd is the selected worktree's path");
 }
 
+#[cfg(unix)] // `[container]` is refused on Windows (host paths cannot be mirrored there).
 #[test]
 fn exec_picker_wraps_a_container_profile_the_same_way_the_cli_does() {
   // Issue #421: the same profile must not mean "in a container" on the CLI
@@ -9619,6 +9620,12 @@ fn exec_picker_wraps_a_container_profile_the_same_way_the_cli_does() {
   let (argv, _) = app.exec_picker_resolve().expect("a container profile resolves");
   assert_eq!(argv[0], "docker", "argv[0] is the runtime the PTY overlay spawns");
   assert_eq!(argv[1], "run");
+  // This overlay owns a real pty, so the container gets stdin and a terminal
+  // (the fan-out on the CLI deliberately does not).
+  assert!(
+    argv.contains(&"-i".to_string()) && argv.contains(&"-t".to_string()),
+    "the overlay allocates stdin + tty: {argv:?}"
+  );
   // The selected worktree here is the main checkout, whose gitdir lives
   // inside it: one mount, its own path (the CLI dedupe, exercised through
   // the TUI path).

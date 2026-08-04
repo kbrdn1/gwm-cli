@@ -382,10 +382,12 @@ Built narrower than the reference's nine fields: `image`, `runtime`,
 `extra_args`. The dropped ones are not missing, they are covered: `-w`, `-e`
 and `-v` are `docker run` flags, and `extra_args` lands after gwm's own so a
 repeat overrides them. Two decisions the issue asked to be resolved rather than
-discovered: `interactive` is not shipped at all, because `gwm exec` is a fan-out
-over N worktrees and a TTY per container means nothing there (it belongs to the
-multiplexer windows and the PTY overlay), and the command is the container's
-CMD, so an image's ENTRYPOINT receives it as arguments. The block rides a
+discovered: there is no `interactive` knob, because `gwm exec` is a fan-out over
+N worktrees and a TTY per container means nothing there, while the TUI exec
+overlay owns a real pty and therefore runs its container with `-i -t`; and the
+command is the container's CMD, so an image's ENTRYPOINT receives it as
+arguments. Refused on Windows, where mirroring a host path into a Linux
+container cannot work and the `.git` file would name a drive letter anyway. The block rides a
 profile only: the inline `gwm exec -- <cmd>` is the frozen surface (#319) and a
 config file must not change what an unchanged command line does. `[aliases]`
 needed nothing, contrary to what the issue title suggests. A gwm alias is argv

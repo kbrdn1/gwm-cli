@@ -443,8 +443,14 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #   <runtime> run --rm -v <wt>:<wt> -v <main>/.git:<main>/.git -w <wt> … <image> <cmd…>
 # That second mount is the point. A linked worktree's `.git` is a FILE holding
 # an absolute host path, so mounting the worktree alone yields a container in
-# which no git command answers. There is no `interactive` knob: `gwm exec` is a
-# fan-out over N worktrees, where a TTY per container means nothing.
+# which no git command answers. Every mounted path is declared `safe.directory`
+# via GIT_CONFIG_* env, so a rootful Docker on Linux (uid 0 vs a tree owned by
+# the host user) does not refuse the repo as `dubious ownership`.
+#
+# There is no `interactive` knob: `gwm exec` is a fan-out over N worktrees,
+# where a TTY per container means nothing. The TUI exec overlay owns a real
+# pty, so IT runs the container with `-i -t`. Not supported on Windows: host
+# paths cannot be mirrored into a Linux container.
 #
 # [exec.profiles.ci]
 # command = ["cargo", "test", "--all-features"]
