@@ -47,17 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Warning takes `gwm doctor` to exit code 1. The predicate is evaluated
   against the main checkout, the same approximation the `.envrc` probe already
   made; an unrecognised keyword still evaluates to `true`, matching the step
-  running anyway at bootstrap time. Only predicates the doctor can bound are
-  evaluated, since a `.gwm.toml` never went through the trust gate: a `$PATH`
-  lookup, an environment read, or a `stat` on a repo-relative path. A
-  `glob_exists:` pattern picks its own root, so `glob_exists:/**/nope` would
-  walk the whole disk on a check meant to be instant, and one such atom leaves
-  the entire expression unevaluated. Declining costs nothing, the step simply
-  stays probed, which is what the check did before it evaluated anything. A
-  `file_exists:` path is checked as resolved, not just lexically: a repo can
-  commit a symlink, so `outside/etc/passwd` with `outside -> /` passes every
-  spelling test and still walks out of the repo the moment `Path::exists`
-  follows it.
+  running anyway at bootstrap time. Only two predicate shapes are
+  evaluated, because a `.gwm.toml` never went through the trust gate:
+  `cmd_exists:` on a bare binary name, which is a `$PATH` lookup on the same
+  set the probe reports, and `file_exists:` on a single repo-root component
+  that is not itself a symlink, which is a `stat` on something the config's
+  own author committed. Everything else is a channel out of the repo for a
+  file nobody vetted, and one declined atom leaves the whole expression
+  unevaluated: `glob_exists:` picks its own root and walks it, a
+  multi-component `file_exists:` escapes through a committed symlink
+  (`outside/etc/passwd` with `outside -> /`) in a way no spelling check
+  catches, `env_set:` / `env_eq:` read the process environment and report the
+  answer through which binaries got probed, and a `cmd_exists:` argument with
+  a path separator is `file_exists:` under another name. Declining costs
+  nothing, the step simply stays probed, which is what the check did before it
+  evaluated anything.
   A step whose binary cannot be resolved statically is left alone for the
   same reason, from the other side: `lifecycle::run_step` expands `{path}` /
   `{repo}` in `run` before spawning, so a hook reading `{path}/scripts/setup`

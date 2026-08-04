@@ -486,9 +486,9 @@ fn a_step_its_predicate_switches_off_is_not_probed() {
 #[test]
 fn a_step_its_predicate_switches_on_is_still_probed() {
   // The other polarity, so the fix above cannot be "stop probing anything
-  // that carries a `when`". `.gwm.toml` is written by `config_from_toml`, so
-  // `file_exists:.gwm.toml` is true by construction.
-  let on = "file_exists:.gwm.toml";
+  // that carries a `when`". `sh` is on every POSIX system, and `cmd_exists:`
+  // is the one keyword the doctor evaluates.
+  let on = "cmd_exists:sh";
   let mut bodies: Vec<String> = vec![format!(
     "[[bootstrap.command]]\nname = \"on\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{on}\"\n"
   )];
@@ -522,14 +522,27 @@ fn doctor_declines_to_evaluate_a_predicate_it_cannot_bound() {
   //
   // Declining is safe by construction: the step stays probed, which is what
   // the check did before it evaluated anything, so it can never silence a
-  // warning. The three patterns below are bounded and match nothing, so an
-  // implementation that DID evaluate them would gate the step off and drop the
-  // binary from the report. That difference is what the assertion rides on,
-  // and it keeps the test instant instead of walking a real disk.
+  // warning. Every pattern below is bounded and false, so an implementation
+  // that DID evaluate it would gate the step off and drop the binary from the
+  // report. That difference is what the assertion rides on, and it keeps the
+  // test instant instead of walking a real disk to prove a walk is possible.
+  //
+  // The list is the whole allowance in reverse: `cmd_exists:` on a bare name
+  // is the only keyword evaluated, and every entry here is a way of reaching
+  // past `$PATH` that a review pass on this PR found one at a time. The
+  // lexical defences that preceded this rule are why the list is the shape it
+  // is: `file_exists:sub/x` looks repo-relative and still leaves the repo when
+  // `sub` is a committed symlink, and `cmd_exists:/abs/tool` is `file_exists:`
+  // wearing a different keyword.
   for when in [
     "glob_exists:definitely-nope-xyz123-*",
     "file_exists:../definitely-nope-xyz123",
-    // One unbounded atom taints the whole expression, however sound the rest.
+    "file_exists:sub/definitely-nope-xyz123",
+    "env_set:DEFINITELY_UNSET_XYZ123",
+    "env_eq:DEFINITELY_UNSET_XYZ123=guess",
+    "cmd_exists:/definitely/nope/xyz123",
+    "cmd_exists:./definitely-nope-xyz123",
+    // One declined atom taints the whole expression, however sound the rest.
     "cmd_exists:sh && glob_exists:definitely-nope-xyz123-*",
   ] {
     let (dir, repo) = init_repo();
@@ -568,6 +581,9 @@ fn a_step_whose_binary_cannot_be_resolved_statically_is_not_probed() {
   for body in [
     "[[hooks.post_create]]\nname = \"templated\"\nrun = \"{path}/definitely-not-on-path-xyz123\"\n",
     "[[hooks.post_create]]\nname = \"own-path\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nenv = { PATH = \"/opt/project/bin\" }\n",
+    // `which` would resolve this against the doctor's working directory,
+    // while the step runs from the worktree root.
+    "[[hooks.post_create]]\nname = \"relative\"\nrun = \"./scripts/definitely-not-on-path-xyz123\"\n",
   ] {
     let (dir, repo) = init_repo();
     let config = config_from_toml(dir.path(), body);
@@ -1668,36 +1684,6 @@ fn branch_pattern_check_reads_the_on_disk_config_not_the_lenient_fallback() {
   assert_eq!(check.status, CheckStatus::Warning);
 }
 
-#[cfg(unix)]
-#[test]
-fn a_file_exists_path_that_leaves_the_repo_through_a_symlink_is_not_evaluated() {
-  // The lexical check is not enough on its own: a repo can commit a symlink,
-  // so `outside/nope` is relative, carries no `..`, and still walks out of the
-  // repo the moment `Path::exists` follows it. That hands an unvetted
-  // `.gwm.toml` a presence oracle on the host running `gwm doctor`, which in
-  // CI is a runner, and can trip an automount on the way.
-  //
-  // The symlink target below holds no such file, so evaluating the predicate
-  // would return false and gate the step off. It stays probed instead, which
-  // is what proves the predicate was never evaluated.
-  let (dir, repo) = init_repo();
-  let outside = tempfile::TempDir::new().unwrap();
-  std::os::unix::fs::symlink(outside.path(), dir.path().join("outside")).unwrap();
-
-  let config = config_from_toml(
-    dir.path(),
-    "[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123\"\nwhen = \"file_exists:outside/definitely-nope-xyz123\"\n",
-  );
-
-  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
-  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
-  assert!(
-    c.detail.contains("definitely-not-on-path-xyz123"),
-    "a path that resolves outside the repo must not be evaluated, got: {}",
-    c.detail
-  );
-}
-
 #[test]
 fn an_env_option_that_takes_an_operand_does_not_become_the_binary() {
   // `env -u NODE_OPTIONS npm ci` runs npm. Skipping `-u` but not its operand
@@ -1727,4 +1713,68 @@ fn an_env_option_that_takes_an_operand_does_not_become_the_binary() {
       c.detail
     );
   }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_exists_component_that_is_a_symlink_is_not_evaluated() {
+  // A single component passes the shape rule, but `exists()` follows a
+  // symlink, so a repo that commits `package.json -> /home/runner/.ssh/id_rsa`
+  // would learn from the report whether that file is on the host. Committing
+  // the link is exactly what an unvetted repo can do, so the component is
+  // checked with `symlink_metadata`, which does not follow, before the
+  // predicate is trusted.
+  //
+  // The link below dangles, so evaluating `file_exists:` would return false
+  // and gate the step off. It stays probed, which is what proves the
+  // predicate was declined.
+  let (dir, repo) = init_repo();
+  std::os::unix::fs::symlink("/definitely-nope-xyz123", dir.path().join("marker")).unwrap();
+
+  let config = config_from_toml(
+    dir.path(),
+    "[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123\"\nwhen = \"file_exists:marker\"\n",
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-xyz123"),
+    "a symlinked component must not be evaluated, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn the_node_preset_pair_still_gates_on_the_package_manager() {
+  // The case the whole allowance exists for, asserted against the shipped
+  // preset rather than a hand-written config. With `package.json` present and
+  // a package manager that is not installed, the hook under
+  // `cmd_exists:<pm>` must go quiet while its `!cmd_exists:<pm>` twin stays
+  // probed. Uses a fake manager name so the assertion does not depend on
+  // whether the runner has bun.
+  let (dir, repo) = init_repo();
+  std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+  let config = config_from_toml(
+    dir.path(),
+    concat!(
+      "[[hooks.post_create]]\nname = \"pm\"\nrun = \"definitely-not-on-path-xyz123 install\"\n",
+      "when = \"file_exists:package.json && cmd_exists:definitely-no-pm-xyz123\"\n",
+      "[[hooks.post_create]]\nname = \"fallback\"\nrun = \"also-not-on-path-xyz123 ci\"\n",
+      "when = \"file_exists:package.json && !cmd_exists:definitely-no-pm-xyz123\"\n",
+    ),
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    !c.detail.contains("definitely-not-on-path-xyz123"),
+    "the hook its predicate switched off must not be probed, got: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.contains("also-not-on-path-xyz123"),
+    "the hook that will actually run must still be probed, got: {}",
+    c.detail
+  );
 }

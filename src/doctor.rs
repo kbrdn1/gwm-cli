@@ -533,52 +533,50 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
 /// Whether `gwm doctor` is willing to evaluate a `when` expression it read
 /// out of a `.gwm.toml`.
 ///
-/// That file has not been through the trust gate (issue #473), so a predicate
-/// coming from it is input from a repo nobody has vetted, evaluated by a
-/// command anyone runs, including the advisory CI job on every PR.
-/// `cmd_exists:` is a `$PATH` lookup, `env_set:` / `env_eq:` read the process
-/// environment, and `file_exists:` on a repo-relative path is a single `stat`:
-/// all bounded, all cheap. `glob_exists:` walks the filesystem from wherever
-/// its pattern points, so `glob_exists:/**/nope` is a whole-disk walk on a
-/// check that is supposed to be instant, and it is never evaluated here.
+/// Two shapes qualify, and the rule behind both is that evaluating them can
+/// tell an unvetted repo nothing it does not already know.
 ///
-/// A single atom we will not evaluate taints the whole expression, since the
-/// boolean result would depend on it either way. Declining costs nothing: the
-/// step stays probed, which is exactly what this check did before it evaluated
-/// any predicate at all, so refusing to evaluate can never silence a warning.
+/// `cmd_exists:` on a bare binary name is a `$PATH` lookup, and `$PATH` is
+/// the very set this probe reports on, so it answers the probe's own question
+/// with the probe's own data. `file_exists:` on a single path component that
+/// is not itself a symlink is a `stat` on one entry of the repo root, and the
+/// repo root is what the `.gwm.toml` author committed.
+///
+/// Everything else is declined, because this evaluation runs on a file that
+/// never went through the trust gate (issue #473), including in the advisory
+/// CI job on every pull request. Each excluded shape is a channel out of the
+/// repo and each was a separate finding on this PR: `glob_exists:` picks its
+/// own root and walks it; a `file_exists:` path with more than one component
+/// escapes through a committed symlink (`outside/etc/passwd` with
+/// `outside -> /`), which no lexical check catches, and so does a single
+/// component that is a symlink itself, because `exists()` follows it;
+/// `env_set:` / `env_eq:` read the process environment and report the answer
+/// through which binaries got probed; and a `cmd_exists:` argument carrying a
+/// path separator is `file_exists:` wearing a different keyword.
+///
+/// A single declined atom taints the whole expression, since the boolean
+/// would depend on it either way. Declining costs nothing: the step stays
+/// probed, which is exactly what this check did before it evaluated any
+/// predicate at all, so it can never silence a warning. What the allowance
+/// buys is the `node` preset, whose install hooks are
+/// `file_exists:package.json && cmd_exists:bun` and the same with
+/// `!cmd_exists:bun`, and that pair was the entire reason to evaluate
+/// anything here.
 fn predicate_is_safe_to_evaluate(expr: &str, repo_workdir: &Path) -> bool {
   crate::bootstrap::when_atoms(expr).iter().all(|atom| {
-    if let Some(path) = atom.strip_prefix("file_exists:") {
-      return path_stays_in_repo(path.trim(), repo_workdir);
+    if let Some(rel) = atom.strip_prefix("file_exists:") {
+      let rel = rel.trim();
+      // One component, so the OS resolves nothing on the way in, and not a
+      // symlink, so it resolves nothing at the end either. Together that is
+      // what keeps `exists()` inside the repo.
+      return !rel.is_empty() && !rel.contains(['/', '\\']) && rel != ".." && !repo_workdir.join(rel).is_symlink();
     }
-    atom.starts_with("cmd_exists:") || atom.starts_with("env_set:") || atom.starts_with("env_eq:")
+    let Some(name) = atom.strip_prefix("cmd_exists:") else {
+      return false;
+    };
+    let name = name.trim();
+    !name.is_empty() && !name.contains(['/', '\\'])
   })
-}
-
-/// A path that cannot reach outside the repo.
-///
-/// Lexically first: non-empty, relative, no `..`, and no Windows drive prefix
-/// (`C:foo` is not absolute per `is_absolute`, yet it makes `join` drop the
-/// base). That alone is not enough, because a repo can commit a symlink, so
-/// `outside/etc/passwd` with `outside -> /` passes every lexical test and
-/// still leaves the repo the moment `Path::exists` follows it. That would
-/// hand an unvetted `.gwm.toml` a presence oracle on whatever machine runs
-/// `gwm doctor`, a CI runner included, and can trip an automount on the way.
-/// So the resolved path is checked too, through the same `ensure_within` the
-/// bootstrap copies use (issue #94).
-fn path_stays_in_repo(value: &str, repo_workdir: &Path) -> bool {
-  if value.is_empty() {
-    return false;
-  }
-  let p = Path::new(value);
-  if p.is_absolute()
-    || p
-      .components()
-      .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
-  {
-    return false;
-  }
-  crate::bootstrap::ensure_within(repo_workdir, &repo_workdir.join(p)).is_ok()
 }
 
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
@@ -690,6 +688,13 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     }
     // A script that opens on a shell word names no binary to probe.
     if SHELL_KEYWORDS.contains(&bin.as_str()) {
+      continue;
+    }
+    // A path rather than a name: `which` would resolve `./scripts/setup`
+    // against the doctor's own working directory, while the step runs from
+    // the worktree root. Same rule as the placeholder above, one more way the
+    // string we hold is not the file that will be executed.
+    if bin.contains(['/', '\\']) {
       continue;
     }
     needed.insert(bin);
