@@ -133,7 +133,30 @@ fn exec_in_dir_runs_a_relative_script_from_the_worktree() {
   std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
   std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
   // `./run.sh` only resolves if it is anchored to the worktree dir.
-  let status = exec_in_dir(dir.path(), "./run.sh", &[]);
+  //
+  // Retried on `ETXTBSY`, and that is not flake-hiding (issue #500). `execve`
+  // refuses a file that is open for writing by ANY process, and the window is
+  // between another thread's `fork` and its own `execve`: a child forked by
+  // one of the other spawning tests in this binary carries a copy of every fd
+  // the harness had open at fork time, including the write handle this test
+  // just used for `run.sh`. The errno therefore says nothing about
+  // `exec_in_dir` — it is inherent to writing an executable and running it
+  // from a multi-threaded harness. Matching `(os error N)` rather than the
+  // message: `strerror` prose is localised, the suffix is not.
+  //
+  // Every other spawn error still fails on the first attempt, because the
+  // assertion below is unchanged.
+  let mut status = exec_in_dir(dir.path(), "./run.sh", &[]);
+  for _ in 0..10 {
+    match &status {
+      ExecStatus::SpawnError(e) if e.contains("(os error 26)") => {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        status = exec_in_dir(dir.path(), "./run.sh", &[]);
+      }
+      _ => break,
+    }
+  }
+
   assert_eq!(
     status,
     ExecStatus::Ok,
