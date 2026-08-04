@@ -178,8 +178,11 @@ capability gaps came out of it. Two have shipped: the agent session pane
 follow-ups, and multi-forge support
 ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)) in v1.5.0, which landed
 deliberately ahead of the rich PR/Issue view so that view is born multi-forge
-instead of being rewritten later. See the table above for both. The remaining
-two are ordered by what they unlock rather than by size.
+instead of being rewritten later. See the table above for both.
+
+**The lot below is queued for a future v1.7.0 cut.** It is not ordered by size.
+Each step sits where it is cheapest to land, which usually means ahead of the
+thing that would otherwise have to be reopened to accommodate it.
 
 ### 1. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) ✅ → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) ✅ → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) ✅ → [#479](https://github.com/kbrdn1/gwm-cli/issues/479) ✅ → [#418](https://github.com/kbrdn1/gwm-cli/issues/418) ✅), plus [#480](https://github.com/kbrdn1/gwm-cli/issues/480) ✅ / [#481](https://github.com/kbrdn1/gwm-cli/issues/481) ✅ / [#482](https://github.com/kbrdn1/gwm-cli/issues/482) ✅ / [#475](https://github.com/kbrdn1/gwm-cli/issues/475) ✅
 
@@ -254,20 +257,45 @@ is naming work; they are recorded here because they were found here:
 - [x] [#473](https://github.com/kbrdn1/gwm-cli/issues/473) : a `.gwm.toml` is data from a repo nobody has vetted, and the commands that read it back skip the trust gate on purpose, so echoing a value verbatim handed that file a terminal escape channel out of a read-only command. Neutralised at each **sink** rather than each producer, which is what covers checks and rows nobody has written yet. The worst site was not in `gwm config` at all but in the TOFU prompt, whose bootstrap summary could be made to erase the row naming the shell it asks permission to run; and `toml`'s parse error quotes the offending source line, so `gwm list` inside the repo was enough
 - [x] [#487](https://github.com/kbrdn1/gwm-cli/issues/487) : `worktree::add` creates the branch before the directory, because `WorktreeAddOptions::reference` takes a reference that already exists, so *any* late failure left it orphaned. #474 and #475 each closed one input set; a full disk is not an input set, so the ordering is what actually bounds the class. Three conditions now gate the rollback, and each came from a different way of getting it wrong: this call created the branch, it still points where the call put it, and no checkout has it as HEAD. The last one is the review's: deleting the *reference* rather than the branch spares a `branch.<name>` config section the command never wrote, but it also drops `git_branch_delete`'s refusal on a branch a linked worktree stands on, and that residue is a worktree bound to nothing, which no check reports
 
-### 2. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
+### 2. Bulk selection ([#484](https://github.com/kbrdn1/gwm-cli/issues/484))
+
+`Space` marks the active row and the verbs act on the marked set rather than on
+a single row. The request came in for bulk cleanup, which is the obvious first
+consumer, but demand is not why it goes first.
+
+It changes what "the current row" means, and the two features behind it both
+open on the current row: opening on it directly is the advantage the rich
+PR/Issue view claims over `snacks.gh`, and a note is attached to whichever
+worktree is selected. Landing a multi-row selection model after them means
+reopening both. Landing it before means they are written against the final
+model once.
+
+### 3. Symfony preset ([#392](https://github.com/kbrdn1/gwm-cli/issues/392))
+
+A seventh `gwm init --preset`, modelled on the Laravel one, offered by the
+requester as a contribution.
+
+Placed here because it is the only item in the lot that is not sequenced against
+the others: it touches `src/presets/` and `examples/presets/`, disjoint from the
+TUI files the rest of the line lives in, so it can run in parallel with any of
+them without a merge conflict.
+
+### 4. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
 Read a pull request or issue in full without leaving the TUI: description,
 individual checks, reviews, conversation, and inline review comments. Modelled
 on `snacks.nvim`'s `snacks.gh`, whose key lesson is that inline diff comments are
 reachable only through GraphQL, not through `gh --json`.
 
-Comes first of the two queued features, and inherits both the detail overlay the
-agent pane (#408) already paid for and the `Forge` trait (#419), so it is born
-reading GitLab too. Where gwm can beat the reference: `snacks.gh` has no notion
-of a worktree, so the user picks from a flat list; gwm already knows the
+The first of the two big TUI features, and it inherits both the detail overlay
+the agent pane (#408) already paid for and the `Forge` trait (#419), so it is
+born reading GitLab too. Where gwm can beat the reference: `snacks.gh` has no
+notion of a worktree, so the user picks from a flat list; gwm already knows the
 worktree → branch → PR → issue chain and can open on the current row directly.
+That last point is why bulk selection (#484) goes ahead of it: "the current row"
+has to mean its final thing before two features are written against it.
 
-### 3. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515))
+### 5. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515))
 
 gwm holds everything about a worktree except the part only its author can write:
 where they were. It knows the branch, the linked issue, the diff against base and
@@ -286,9 +314,37 @@ one may want to `grep` or open without gwm running.
 Comes after the PR/Issue view, which pays for the overlay machinery it would
 reuse.
 
+### 6. Container execution ([#421](https://github.com/kbrdn1/gwm-cli/issues/421))
+
+A `container:` block on the existing `exec` / aliases surface. Low cost: it
+wraps `docker run`, and anything exposing a Docker-compatible socket works for
+free.
+
+It was deferred for want of observed demand. It moves into the line because the
+comparison page now sits behind it rather than ahead: container execution is a
+column in that table, and writing the table first would mean publishing a column
+gwm loses by default.
+
+### 7. Comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422))
+
+gwm against gwq and lazyworktree. Content rather than product work, but it is
+what decides whether any of the above is seen. gwq is the incumbent by star
+count and has been dormant since May.
+
+Last, and the position is the point: a comparison is worth writing once the
+features it compares are the ones shipping. That now includes container
+execution (#421), which is why it moved behind that rather than behind the
+notes.
+
+**The issue needs rewriting before it is picked up.** It was filed against an
+older read of the field: there was no container column in it, and the
+lazyworktree half has not been re-read since. Both have to be redone against
+what the two projects are now, otherwise the page ships a comparison of what
+they were.
+
 ### Deferred
 
-- [#421](https://github.com/kbrdn1/gwm-cli/issues/421) — **container execution**: a `container:` block on the existing `exec` / aliases surface. Low cost (it wraps `docker run`, and anything exposing a Docker-compatible socket works for free), but no observed demand yet, so it waits until after the discovery push.
+- [#414](https://github.com/kbrdn1/gwm-cli/issues/414) — **process-level agent liveness on macOS / Linux**: detection reads transcript mtime, which is *activity*, not liveness. It lags a session that is thinking or waiting on a long tool call, and a crashed one looks recent for a while. The targeted Unix refinement shipped in v1.3.0 ([#441](https://github.com/kbrdn1/gwm-cli/issues/441)): a Claude Code session whose recorded PID is gone drops to idle immediately. What remains is the general case, deferred by the issue's own title.
 
 ### Maintenance
 
@@ -300,8 +356,8 @@ reuse.
 Not feature work, but tracked here because it gates whether any of the above is
 seen:
 
-- [#422](https://github.com/kbrdn1/gwm-cli/issues/422) : comparison page covering gwm, gwq and lazyworktree (gwq is the incumbent by star count and has been dormant since May). Queued **after** the PR/Issue view (#420) and per-worktree notes (#515): a comparison is worth writing once the features it compares are the ones shipping
-- [#516](https://github.com/kbrdn1/gwm-cli/issues/516) : retire the em dash habit across `docs/`, 1500 occurrences over 76 of its 79 files. Now that the tree is published, that is the punctuation the site carries. Worth doing page by page while they are touched for other reasons, not as one unreviewable diff
+- The comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422)) is the remaining visibility item, and it now sits in the numbered line above as its last step rather than here
+- [#516](https://github.com/kbrdn1/gwm-cli/issues/516) ✅ — the em dash is retired across `docs/`: 1586 occurrences in 78 of the 79 pages, English and French, replaced by whatever connector the dash was standing in for (a colon where it introduced a list or an explanation, a full stop where it joined two independent clauses, a comma or parentheses around an aside). Fenced code blocks are untouched, so 60 survive there. 45 headings changed shape and none was the target of an internal link, checked by resolving the tree's 194 internal anchors against the heading slugs of both the before and after trees. Merged in [#518](https://github.com/kbrdn1/gwm-cli/pull/518)
 - [#423](https://github.com/kbrdn1/gwm-cli/issues/423) ✅ — the documentation is published at **<https://gwm.kbrdn.dev>** and keeps itself there. A merge into `main` touching `docs/`, `changelogs/` or `Cargo.toml` posts a `repository_dispatch` to `kbrdn1/kbrdn-docs`, which reruns the conversion, commits whatever drifted and redeploys. The in-repo tree stays the source of truth: the site is generated from it, never edited on the other side
 
 ## Ambitious
