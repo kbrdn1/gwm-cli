@@ -34,6 +34,13 @@
 //! binaries whose own rewritten-variable set is empty. That trades a targeted
 //! guard for one whose failures carry no information, so the bound stays and
 //! is written here instead.
+//!
+//! The guard's *scope* is also unchecked: the comparison is positional, so a
+//! lock acquired inside an inner block, or dropped before the read, would
+//! satisfy it. Following scope means tracking blocks, which is the next step
+//! towards a parser; measured against the tree, no audited binary takes its
+//! lock in an inner block and the only `drop(` in one drops a repo handle. So
+//! the ordering check is what is claimed here, and no more.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -135,16 +142,56 @@ fn call_at(body: &str, name: &str) -> Option<usize> {
 }
 
 /// Environment variables `source` rewrites with `set_var` / `remove_var`.
+///
+/// Literal keys are read off the call. When a key is *not* a literal, nothing
+/// in the file says which variable it is:
+/// `forge_tests::clean_env` loops over an array and calls `remove_var(v)`, so
+/// reading only literal calls returns nothing and the binary's readers are
+/// never derived, which is the whole audit silently skipped.
+///
+/// The fallback for that case is to take every environment-shaped literal in
+/// the file, `SCREAMING_SNAKE` and at least three characters. It over-collects
+/// (a `"GITLAB_CI"` used for something else joins the set) and that is the
+/// safe direction: a variable that is not really rewritten can only make the
+/// sweep ask for more locking.
 fn mutated_vars(source: &str) -> BTreeSet<String> {
   let mut out = BTreeSet::new();
+  let mut indirect = false;
   for line in code_lines(source) {
-    for call in ["set_var(\"", "remove_var(\""] {
+    for call in ["set_var(", "remove_var("] {
       let mut rest = line;
       while let Some(at) = rest.find(call) {
         rest = &rest[at + call.len()..];
-        if let Some(end) = rest.find('"') {
-          out.insert(rest[..end].to_string());
+        match rest.strip_prefix('"') {
+          Some(after) => {
+            if let Some(end) = after.find('"') {
+              out.insert(after[..end].to_string());
+            }
+          }
+          None => indirect = true,
         }
+      }
+    }
+  }
+  if indirect {
+    out.extend(env_shaped_literals(source));
+  }
+  out
+}
+
+/// Every `"SCREAMING_SNAKE"` string literal in `source`.
+fn env_shaped_literals(source: &str) -> BTreeSet<String> {
+  let mut out = BTreeSet::new();
+  for line in code_lines(source) {
+    for (i, piece) in line.split('"').enumerate() {
+      let inside_quotes = i % 2 == 1;
+      let shaped = piece.len() >= 3
+        && piece
+          .chars()
+          .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && piece.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+      if inside_quotes && shaped {
+        out.insert(piece.to_string());
       }
     }
   }
