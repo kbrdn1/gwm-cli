@@ -190,6 +190,7 @@ fn json_worktree_serialize_deserialize_round_trips() {
     issue: Some(309),
     pr: Some(310),
     agents: None,
+    note: None,
   };
   let line = serde_json::to_string(&wt).unwrap();
   let back: JsonWorktree = serde_json::from_str(&line).unwrap();
@@ -257,6 +258,7 @@ fn attach_agents_reuses_detection_within_the_ttl() {
     issue: None,
     pr: None,
     agents: None,
+    note: None,
   };
 
   let reals = vec![std::path::PathBuf::from("/work/cached")];
@@ -311,4 +313,73 @@ fn json_worktree_path_stays_the_plain_lossy_absolute_path() {
     a.path, b.path,
     "lossy public paths may collide — the internal key disambiguates"
   );
+}
+
+// --- `note` on the list row (issue #515) -----------------------------------
+
+/// A minimal one-commit repo on `main`, local to this binary (which has no
+/// `mod common`).
+fn seeded_repo() -> (tempfile::TempDir, git2::Repository) {
+  let dir = tempfile::TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  repo.set_head("refs/heads/main").ok();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+  let reopened = git2::Repository::open(dir.path()).unwrap();
+  (dir, reopened)
+}
+
+#[test]
+fn the_shared_list_assembly_carries_the_note() {
+  // `worktrees` runs the agent detection pass, which reads `$GWM_AGENTS_HOME`
+  // (#507): hold the binary's lock across the read even though nothing here
+  // rewrites it, so a concurrent test that does cannot be observed mid-write.
+  let _guard = env_lock().lock().unwrap();
+  // `json_api::worktrees` is what the daemon's `list` RPC serves, so this is
+  // the surface that keeps the daemon byte-identical to `gwm list
+  // --format=json`.
+  let (_dir, repo) = seeded_repo();
+  let path = gwm::notes::prepare(&repo, "main").unwrap().unwrap();
+  std::fs::write(path, "- [ ] check the ETXTBSY retry\n").unwrap();
+
+  let rows = json_api::worktrees(&repo).unwrap();
+  let main = rows.iter().find(|r| r.is_main).unwrap();
+
+  assert_eq!(main.note.as_deref(), Some("- [ ] check the ETXTBSY retry\n"));
+}
+
+#[test]
+fn a_note_less_row_omits_the_field_entirely() {
+  // `worktrees` runs the agent detection pass, which reads `$GWM_AGENTS_HOME`
+  // (#507): hold the binary's lock across the read even though nothing here
+  // rewrites it, so a concurrent test that does cannot be observed mid-write.
+  let _guard = env_lock().lock().unwrap();
+  let (_dir, repo) = seeded_repo();
+  let rows = json_api::worktrees(&repo).unwrap();
+  let main = rows.iter().find(|r| r.is_main).unwrap();
+
+  assert_eq!(main.note, None);
+  let serialized = serde_json::to_value(main).unwrap();
+  assert!(
+    !serialized.as_object().unwrap().contains_key("note"),
+    "additive field: omitted, never null, so a pre-#515 payload is byte-identical"
+  );
+}
+
+#[test]
+fn a_blank_note_does_not_reach_the_json_surface() {
+  // `worktrees` runs the agent detection pass, which reads `$GWM_AGENTS_HOME`
+  // (#507): hold the binary's lock across the read even though nothing here
+  // rewrites it, so a concurrent test that does cannot be observed mid-write.
+  let _guard = env_lock().lock().unwrap();
+  // The presence predicate is shared with the table marker and `gwm note
+  // show`: one file, one answer, everywhere.
+  let (_dir, repo) = seeded_repo();
+  let path = gwm::notes::prepare(&repo, "main").unwrap().unwrap();
+  std::fs::write(path, "   \n\n").unwrap();
+
+  let rows = json_api::worktrees(&repo).unwrap();
+  assert_eq!(rows.iter().find(|r| r.is_main).unwrap().note, None);
 }

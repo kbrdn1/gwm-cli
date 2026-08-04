@@ -73,6 +73,7 @@ Stable: `name`, `id`, `path`, `branch`, `head`, `is_main`, `is_locked`,
 |-------|------|------|
 | `repo` | **experimental** | present only in `--workspace` mode; rides the young workspace feature (#36). In `properties` but never `required`. |
 | `agents` | **experimental** | agent-session summary (#408): `{top, sessions[]}` of `{kind, freshness, last_activity, id}`. Additive, so it is omitted entirely (never `null`) when no session matched. In `properties` but never `required`; its shape may still change in a minor while the feature settles. |
+| `note` | **experimental** | the worktree's note (#515), verbatim Markdown from `<main>/.git/gwm/notes/<branch>.md`. Additive, so it is omitted entirely (never `null`) when the branch carries no note. In `properties` but never `required`. |
 
 `doctor.schema.json` (`checks[]`, `severity`, `exit_code`) and
 `path.schema.json` (`name`, `path`, `branch`) are entirely **stable**.

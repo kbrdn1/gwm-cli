@@ -96,6 +96,10 @@
         "agents": {
           "description": "EXPERIMENTAL (issue #408) \u2014 agent sessions matched to this worktree from on-disk artefacts (Claude Code, Codex, opencode, Mistral Vibe). Additive field: omitted entirely when no session matched, never null. Being experimental-tier, its shape may still change in a minor release; see README.md for the tier rules.",
           "$ref": "#/$defs/agents"
+        },
+        "note": {
+          "type": "string",
+          "description": "EXPERIMENTAL (issue #515) \u2014 the worktree's note, verbatim Markdown, as stored in <main>/.git/gwm/notes/<branch>.md. Additive field: omitted entirely when the branch carries no note (absent, blank, or a detached row), never null. Also readable one-off with `gwm note show`."
         }
       }
     },

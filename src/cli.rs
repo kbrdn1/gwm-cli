@@ -336,6 +336,11 @@ pub enum Command {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
   },
+  /// Read the note attached to a worktree (issue #515).
+  Note {
+    #[command(subcommand)]
+    action: NoteAction,
+  },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
@@ -763,6 +768,24 @@ pub enum Command {
   },
 }
 
+/// Subcommands of `gwm note` (issue #515).
+///
+/// Read-only on purpose: the note is written in `$EDITOR`, from the TUI's
+/// `N` or by opening the file directly — it is plain Markdown on disk, which
+/// is the whole point of storing it as a file rather than a git-config key.
+#[derive(Debug, Subcommand)]
+pub enum NoteAction {
+  /// Print a worktree's note on stdout, verbatim.
+  ///
+  /// Without a slug the note of the worktree the CWD sits in is printed.
+  /// Exits 1 when there is no note, so `gwm note show >/dev/null` is a
+  /// usable "does this worktree carry a note" test in a script.
+  Show {
+    /// Worktree name or fuzzy pattern; defaults to the current worktree.
+    slug: Option<String>,
+  },
+}
+
 /// Subcommands of `gwm theme` (issue #33).
 #[derive(Debug, Subcommand)]
 pub enum ThemeAction {
@@ -1099,6 +1122,9 @@ pub fn run(cli: Cli) -> Result<()> {
       skip_hooks,
     } => cmd_remove(patterns, delete_branch, dry_run, force, skip_hooks, mode),
     Command::Path { pattern, format } => cmd_path(pattern, format),
+    Command::Note {
+      action: NoteAction::Show { slug },
+    } => cmd_note_show(slug),
     Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
     Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
     Command::Prune { dry_run } => cmd_prune(dry_run),
@@ -1903,6 +1929,9 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
       // costs (Codex review round U) — only the human table does.
       if format == AgentsFormat::Json {
         json_api::attach_agents(&mut rows, &reals, &pins);
+        // #515: this payload is documented as mirroring `gwm list
+        // --format=json`, so it carries the same experimental `note` field.
+        json_api::attach_notes(&repo, &mut rows);
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
       }
@@ -2157,6 +2186,9 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     let pins = json_api::agent_pins_for_rows(&repo, &trees);
     let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
     json_api::attach_agents(&mut dto, &reals, &pins);
+    // #515: same shared pass as the daemon's `list`, so the two stay
+    // byte-identical.
+    json_api::attach_notes(&repo, &mut dto);
     if detect_pr {
       // When detection RAN for a row its result is authoritative — apply
       // it even when `None` (clears a stale persisted PR). When it did NOT
@@ -2390,6 +2422,17 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     // with each row's own repo pins overlaid (round I).
     let reals: Vec<PathBuf> = rows.iter().map(|r| r.info.path.clone()).collect();
     json_api::attach_agents(&mut worktree_rows, &reals, &agent_pins);
+    // #515: a note lives in its OWN repo's `.git`, so a workspace spanning
+    // several repos reads each row through its owning handle — the same
+    // per-row open the pins above need, for the same reason.
+    for (row, out) in rows.iter().zip(worktree_rows.iter_mut()) {
+      let Some(branch) = github::pinnable_branch(row.info.branch.as_deref()) else {
+        continue;
+      };
+      out.note = Repository::open(&row.repo_path)
+        .ok()
+        .and_then(|repo| crate::notes::read(&repo, branch));
+    }
     let dto: Vec<WorkspaceJsonWorktree> = rows
       .iter()
       .zip(worktree_rows)
@@ -3263,6 +3306,43 @@ fn cmd_path(pattern: String, format: OutputFormat) -> Result<()> {
     }
   }
   Ok(())
+}
+
+/// `gwm note show [<slug>]` (issue #515).
+///
+/// Without a slug the CWD's own worktree is the target, resolved by opening
+/// the repo *there* rather than through `worktree::discover_repo`, which
+/// deliberately walks back to the main checkout — its HEAD is the main
+/// checkout's branch, not the branch the user is standing on.
+///
+/// Prints the note verbatim (no trailing newline added: the file is the
+/// payload) and exits 1 when there is none, so the command doubles as a
+/// scriptable presence test.
+fn cmd_note_show(slug: Option<String>) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let branch = match slug {
+    Some(pattern) => worktree::find_fuzzy(&repo, &pattern)?.branch,
+    None => Repository::discover(std::env::current_dir()?)
+      .ok()
+      .and_then(|here| here.head().ok()?.shorthand().ok().map(str::to_string)),
+  };
+  // A detached row cannot carry a note — the rule `pinnable_branch` settled
+  // for the agent pin, restated here so the CLI says why instead of
+  // printing nothing.
+  let Some(branch) = github::pinnable_branch(branch.as_deref()) else {
+    eprintln!("no branch checked out (detached HEAD) — a note is keyed on the branch");
+    std::process::exit(1);
+  };
+  match crate::notes::read(&repo, branch) {
+    Some(note) => {
+      print!("{note}");
+      Ok(())
+    }
+    None => {
+      eprintln!("no note on {}", crate::naming::sanitise_for_terminal(branch));
+      std::process::exit(1);
+    }
+  }
 }
 
 fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode: TrustMode) -> Result<()> {
