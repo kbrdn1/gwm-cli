@@ -49,7 +49,12 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
     PaletteEntry {
       action: Action::DeleteConfirm,
       name: "delete",
-      description: "delete the selected worktree (with confirm)",
+      description: "delete the selected worktree(s) (with confirm)",
+    },
+    PaletteEntry {
+      action: Action::ToggleSelect,
+      name: "select",
+      description: "mark / unmark the highlighted worktree for a bulk delete",
     },
     PaletteEntry {
       action: Action::Bootstrap,

@@ -31,7 +31,7 @@ pub use app::{
   read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
   OpenTarget, RepoMeta, View, WorkspaceState,
 };
-pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+pub use state::async_task::{CreateWorktreeResult, DeleteBatchOutcome, DeleteTarget, TaskKind, TaskMsg, TaskRunner};
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
@@ -70,17 +70,18 @@ pub use ui::{
   branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style,
   ci_indicator, clean_dir_icon, command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints,
   config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line,
-  delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, format_status,
-  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
-  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
-  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
-  modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, overlay_modal_width, palette_name_style,
-  pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line, recent_commits_lines,
-  recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line, status_pane_title, table_marker,
-  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON,
-  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  delete_batch_title, delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress,
+  footer_line, format_status, freshness_color, github_status_lines, header_line, help_body_section_color,
+  help_entry_line, help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style,
+  issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width,
+  link_target_keys, link_target_line, list_pane_counter, modal_hint_for_context, modal_hint_for_context_with_fields,
+  modal_hint_line, overlay_modal_width, palette_name_style, pane_counter, panel_border_color, picker_window,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
+  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -976,6 +977,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     }
     Action::Create if !app.picker_mode => app.enter_create(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
+    // #484: `Space` marks the cursor row. Picker-gated — `gwm switch` picks
+    // exactly one path, so a mark set has nothing to act on there.
+    Action::ToggleSelect if !app.picker_mode => app.toggle_select(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
     // Issue #258: `gwm sync` of the selected worktree, off-thread.
     Action::Sync if !app.picker_mode => app.request_sync(),

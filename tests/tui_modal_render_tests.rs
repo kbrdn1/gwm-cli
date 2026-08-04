@@ -229,11 +229,12 @@ fn confirm_modal_renders_title_target_and_buttons() {
   let (_dir, mut app) = make_app();
   // Inject a deletable worktree and select it so the modal renders its
   // destructive-summary body (the "nothing selected" branch has no
-  // buttons). `view` is set directly: this test pins the *render*, not
-  // the `enter_confirm_delete` guard (covered in tui_app_tests.rs).
+  // buttons). Opened through `enter_confirm_delete` because the overlay
+  // renders the batch snapshot it takes (#484), not the cursor row; the
+  // guard itself is covered in tui_app_tests.rs.
   app.worktrees.push(deletable_worktree("feat-235-net"));
   app.list_state.select(Some(app.worktrees.len() - 1));
-  app.view = View::Confirm;
+  app.enter_confirm_delete();
   let buf = render(&mut app);
   assert_present(&buf, "Delete Worktree", "confirm title");
   // Pin the destructive-summary BODY via labels unique to it: the detail
@@ -251,6 +252,28 @@ fn confirm_modal_renders_title_target_and_buttons() {
 }
 
 #[test]
+fn confirm_modal_renders_the_batch_size_instead_of_the_rows() {
+  // #484: a batch reports how many worktrees it will delete and how many of
+  // them carry a branch. It deliberately does NOT list them — the rows are
+  // already on screen behind the modal, and sassman asked for the count.
+  let (_dir, mut app) = make_app();
+  app.worktrees.push(deletable_worktree("feat-484-one"));
+  app.worktrees.push(deletable_worktree("feat-484-two"));
+  app.list_state.select(Some(app.worktrees.len() - 2));
+  app.toggle_select();
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.toggle_select();
+  app.enter_confirm_delete();
+
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Delete 2 Worktrees", "batch confirm title");
+  assert_present(&buf, "2 selected", "batch size");
+  assert_present(&buf, "2 of 2 carry a branch", "branch summary");
+  assert_present(&buf, "Delete Branch", "the batch-wide branch toggle");
+}
+
+#[test]
 fn confirm_modal_delete_branch_row_uses_the_live_toggle_chord() {
   // Codex review on PR #292 (P2): ToggleDeleteBranch moved to `D` in #290, but
   // the delete modal's "Delete Branch" row hardcoded `p`. It must show the live
@@ -258,7 +281,7 @@ fn confirm_modal_delete_branch_row_uses_the_live_toggle_chord() {
   let (_dir, mut app) = make_app();
   app.worktrees.push(deletable_worktree("feat-290-togglekey"));
   app.list_state.select(Some(app.worktrees.len() - 1));
-  app.view = View::Confirm;
+  app.enter_confirm_delete();
   let buf = render(&mut app);
   let row = row_strings(&buf)
     .into_iter()
@@ -280,7 +303,7 @@ fn confirm_modal_renders_delete_loader_while_delete_is_in_flight() {
   let (_dir, mut app) = make_app();
   app.worktrees.push(deletable_worktree("feat-257-loader"));
   app.list_state.select(Some(app.worktrees.len() - 1));
-  app.view = View::Confirm;
+  app.enter_confirm_delete();
   app.tasks.request(TaskKind::DeleteWorktree).unwrap();
 
   let buf = render(&mut app);
@@ -294,7 +317,7 @@ fn confirm_modal_renders_delete_failure_after_async_delete_fails() {
   let (_dir, mut app) = make_app();
   app.worktrees.push(deletable_worktree("feat-257-loader"));
   app.list_state.select(Some(app.worktrees.len() - 1));
-  app.view = View::Confirm;
+  app.enter_confirm_delete();
   app.delete_failure = Some("permission denied".into());
 
   let buf = render(&mut app);
