@@ -7558,3 +7558,60 @@ fn list_json_omits_note_when_there_is_none() {
     "additive field: omitted, never null, so a pre-#515 consumer sees the old payload — got {rows}"
   );
 }
+
+#[test]
+fn note_show_without_a_slug_reads_the_worktree_the_cwd_sits_in() {
+  // The trap this closes: `worktree::discover_repo` deliberately walks back
+  // to the MAIN checkout from inside a linked worktree, so its HEAD is the
+  // main checkout's branch, not the branch the user is standing on. Reading
+  // the branch off that handle would print `main`'s note (or none) from
+  // inside every worktree. The command opens the repo at the CWD instead.
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  let branch = git2::Repository::open(&wt)
+    .unwrap()
+    .head()
+    .unwrap()
+    .shorthand()
+    .unwrap()
+    .to_string();
+  write_note_file(dir.path(), &branch, "read me from inside the worktree\n");
+  // A different note on the main checkout's own branch, so resolving through
+  // the main repo would produce a wrong answer rather than an empty one.
+  write_note_file(dir.path(), "main", "the main checkout's note\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["note", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::eq("read me from inside the worktree\n"));
+}
+
+#[test]
+fn agents_json_carries_the_note_like_the_list_does() {
+  // `gwm agents --format=json` is documented as mirroring `gwm list
+  // --format=json`, and it assembles its rows itself, so the additive field
+  // needs its own guard or the two drift.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "mirrored onto the agents payload\n");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["agents", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert_eq!(
+    rows[0]["note"].as_str(),
+    Some("mirrored onto the agents payload\n"),
+    "payload was: {rows}"
+  );
+}
