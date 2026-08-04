@@ -207,6 +207,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "list the linked PR's CI checks (Enter opens in browser)",
     },
     PaletteEntry {
+      action: Action::RichView,
+      name: "rich-view",
+      description: "open the linked PR/issue: description, checks, reviews, comments",
+    },
+    PaletteEntry {
       action: Action::WtScrollDown,
       name: "wt-scroll-down",
       description: "scroll the Working Tree pane down (status focus)",
