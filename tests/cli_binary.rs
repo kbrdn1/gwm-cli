@@ -3220,6 +3220,13 @@ run = "test ! -f .block"
   );
 }
 
+/// A path safe to embed in a shell command inside a lifecycle hook: the shell
+/// the hook runs through strips a Windows path's backslashes, and git accepts
+/// forward slashes everywhere. A no-op on Unix.
+fn shell_path(p: &std::path::Path) -> std::path::PathBuf {
+  std::path::PathBuf::from(p.to_string_lossy().replace('\\', "/"))
+}
+
 #[test]
 fn a_batch_refuses_a_target_whose_path_moved_since_it_was_resolved() {
   // #484 / Codex review on PR #520 (P1): a batch resolves every pattern up
@@ -3258,9 +3265,12 @@ when = "file_exists:.trigger"
 run = "git -C {repo} worktree move {second} {relocated}"
 "#,
     base = toml_basic_string(base.path()),
-    repo = toml_basic_string(dir.path()),
-    second = toml_basic_string(&second),
-    relocated = toml_basic_string(&relocated),
+    // Forward slashes inside the `run =` command: the hook goes through a
+    // shell, which eats a Windows path's backslashes before git ever sees it
+    // (`C:UsersRUNNER~1…`). git accepts `/` on every platform.
+    repo = toml_basic_string(&shell_path(dir.path())),
+    second = toml_basic_string(&shell_path(&second)),
+    relocated = toml_basic_string(&shell_path(&relocated)),
   );
   std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
 
