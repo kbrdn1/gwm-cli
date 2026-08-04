@@ -3102,7 +3102,7 @@ impl App {
     let (kind, title, rows, target, number) = match self.pr_fetch_state() {
       GitHubFetchState::Loaded(pr) => (
         crate::tui::state::detail_overlay::DetailKind::RichPr,
-        format!("{} #{} — {}", self.pr_noun_titlecase(), pr.number, pr.title),
+        format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
         crate::tui::state::rich_view::rich_pr_rows(pr, width),
         LinkTarget::Pr,
         pr.number,
@@ -3110,7 +3110,7 @@ impl App {
       _ => match self.issue_fetch_state() {
         GitHubFetchState::Loaded(issue) => (
           crate::tui::state::detail_overlay::DetailKind::RichIssue,
-          format!("Issue #{} — {}", issue.number, issue.title),
+          format!("Issue #{} · {}", issue.number, issue.title),
           crate::tui::state::rich_view::rich_issue_rows(issue, width),
           LinkTarget::Issue,
           issue.number,

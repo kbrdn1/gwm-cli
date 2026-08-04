@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reviews`, `additions` / `deletions` and the branch refs in the same single
   request, so the view costs no extra round trip. Bodies are wrapped against
   the modal width and re-wrapped on resize, and every cap says how much it
-  dropped (`... 312 more lines`) rather than stopping silently. Remote text is
+  dropped (`… 312 more lines`) rather than stopping silently. Remote text is
   neutralised on the way in, so a bidi override in a comment cannot reorder
   what the terminal paints. `Enter` opens the selected row's URL, `f`
   re-fetches, and the whole verb set is rebindable under

@@ -98,6 +98,24 @@ fn value_for(rows: &[gwm::tui::state::detail_overlay::DetailRow], label: &str) -
 }
 
 #[test]
+fn every_emitted_label_fits_the_reserved_column() {
+  // `LABEL_W` is an ASSUMPTION here and a DERIVED value in the renderer,
+  // which sizes its label column from the widest label it is handed. A
+  // longer label added later would push every row past the modal's inner
+  // width — and `row_width` below, which measures against the constant,
+  // would keep passing. This is the assertion that makes the width checks
+  // mean something.
+  let rows = [rich_pr_rows(&sample_pr(), W), rich_issue_rows(&sample_issue(), W)].concat();
+  for r in &rows {
+    assert!(
+      r.label.chars().count() <= LABEL_W,
+      "label {:?} is wider than the {LABEL_W}-column budget the wrap assumes",
+      r.label
+    );
+  }
+}
+
+#[test]
 fn pr_rows_carry_the_metadata_block() {
   let rows = rich_pr_rows(&sample_pr(), W);
 
