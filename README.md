@@ -1,9 +1,11 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/_assets/promo.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/_assets/promo-light.png">
-    <img alt="gwm — git worktree manager, a CLI + TUI in Rust. One binary, every worktree, setup already done." src="docs/_assets/promo.png" width="100%">
-  </picture>
+  <a href="https://gwm.kbrdn.dev/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/_assets/promo.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/_assets/promo-light.png">
+      <img alt="gwm — git worktree manager, a CLI + TUI in Rust. One binary, every worktree, setup already done." src="docs/_assets/promo.png" width="100%">
+    </picture>
+  </a>
 </p>
 
 # <picture><source media="(prefers-color-scheme: dark)" srcset="docs/_assets/logo.svg"><source media="(prefers-color-scheme: light)" srcset="docs/_assets/logo-light.svg"><img alt="" src="docs/_assets/logo.svg" width="26" height="26" align="top"></picture> gwm — git worktree manager
@@ -12,6 +14,7 @@
 [![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 [![rust](https://img.shields.io/badge/rust-1.95%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![docs](https://img.shields.io/badge/docs-gwm.kbrdn.dev-d4825d)](https://gwm.kbrdn.dev/)
 
 **One binary to manage every git worktree in every repo, with the setup already done.**
 
@@ -94,7 +97,9 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 
 ## documentation
 
-The full tree lives under [`docs/`](docs/): 39 pages in English, with 36 of them translated in French under [`docs/fr/`](docs/fr/). Numeric prefixes drive the sidebar order and every page carries frontmatter, so the tree renders as-is into a static site ([#423](https://github.com/kbrdn1/gwm-cli/issues/423) tracks publishing it). The in-repo tree is the source of truth.
+Published at **<https://gwm.kbrdn.dev>**, and it keeps itself there: a delivery landing on `main` that touches `docs/` fires a resync and a redeploy on its own ([#423](https://github.com/kbrdn1/gwm-cli/issues/423)).
+
+The full tree lives under [`docs/`](docs/): 39 pages in English, with 36 of them translated in French under [`docs/fr/`](docs/fr/). Numeric prefixes drive the sidebar order and every page carries frontmatter, so the tree renders as-is into the static site. The in-repo tree is the source of truth: the site is generated from it, never edited on the other side.
 
 | Section                                                         | Read this when …                                                              |
 |:----------------------------------------------------------------|:------------------------------------------------------------------------------|
