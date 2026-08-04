@@ -566,17 +566,30 @@ fn predicate_is_safe_to_evaluate(expr: &str, repo_workdir: &Path) -> bool {
   crate::bootstrap::when_atoms(expr).iter().all(|atom| {
     if let Some(rel) = atom.strip_prefix("file_exists:") {
       let rel = rel.trim();
-      // One component, so the OS resolves nothing on the way in, and not a
-      // symlink, so it resolves nothing at the end either. Together that is
-      // what keeps `exists()` inside the repo.
-      return !rel.is_empty() && !rel.contains(['/', '\\']) && rel != ".." && !repo_workdir.join(rel).is_symlink();
+      // One plain component, so the OS resolves nothing on the way in, and
+      // not a symlink, so it resolves nothing at the end either. Together
+      // that is what keeps `exists()` inside the repo.
+      return is_plain_name(rel) && !repo_workdir.join(rel).is_symlink();
     }
-    let Some(name) = atom.strip_prefix("cmd_exists:") else {
-      return false;
-    };
-    let name = name.trim();
-    !name.is_empty() && !name.contains(['/', '\\'])
+    match atom.strip_prefix("cmd_exists:") {
+      Some(name) => is_plain_name(name.trim()),
+      None => false,
+    }
   })
+}
+
+/// One ordinary path component and nothing else: no separator, no `.` or
+/// `..`, and no Windows drive prefix.
+///
+/// Spelled through `Components` rather than as a scan for `/` and `\`,
+/// because `C:secret` contains neither and is still drive-relative on
+/// Windows, where `join` drops the base it was given and `which` resolves it
+/// against another directory entirely. On Windows that string parses as
+/// `Prefix` + `Normal`, so counting components catches it; on Unix it is an
+/// ordinary filename and stays allowed, which is correct there.
+fn is_plain_name(value: &str) -> bool {
+  let mut components = Path::new(value).components();
+  matches!(components.next(), Some(std::path::Component::Normal(_))) && components.next().is_none()
 }
 
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {

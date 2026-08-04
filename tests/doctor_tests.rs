@@ -542,6 +542,8 @@ fn doctor_declines_to_evaluate_a_predicate_it_cannot_bound() {
     "env_eq:DEFINITELY_UNSET_XYZ123=guess",
     "cmd_exists:/definitely/nope/xyz123",
     "cmd_exists:./definitely-nope-xyz123",
+    "file_exists:.",
+    "file_exists:..",
     // One declined atom taints the whole expression, however sound the rest.
     "cmd_exists:sh && glob_exists:definitely-nope-xyz123-*",
   ] {
@@ -1777,4 +1779,36 @@ fn the_node_preset_pair_still_gates_on_the_package_manager() {
     "the hook that will actually run must still be probed, got: {}",
     c.detail
   );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_drive_relative_operand_is_not_evaluated() {
+  // `C:secret` carries no separator, so a scan for `/` and `\\` waves it
+  // through, and on Windows it is still drive-relative: `join` drops the base
+  // it was given and `which` resolves it against another directory entirely.
+  // That is the same escape as `../`, spelled in a way only one of the three
+  // runners can see, which is why the shape check goes through `Components`
+  // rather than a character scan.
+  //
+  // Unix-side this string is an ordinary filename and evaluating it is
+  // correct, so the case is scoped to the platform where it is not.
+  for when in [
+    "file_exists:C:definitely-nope-xyz123",
+    "cmd_exists:C:definitely-nope-xyz123",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123\"\nwhen = \"{when}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{when}` is drive-relative here, so it must not be evaluated; got: {}",
+      c.detail
+    );
+  }
 }
