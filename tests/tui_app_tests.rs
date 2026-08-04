@@ -6873,6 +6873,7 @@ fn toml_basic_string(path: &std::path::Path) -> String {
 
 #[test]
 fn tui_gate_passes_when_no_gwm_toml_present() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // The CLI gate is a no-op when `.gwm.toml` doesn't exist — same
   // contract on the TUI side. Construction with `init_repo`'s empty
   // workdir already covers this.
@@ -6885,6 +6886,7 @@ fn tui_gate_passes_when_no_gwm_toml_present() {
 
 #[test]
 fn tui_gate_passes_on_empty_bootstrap_surface() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // A `.gwm.toml` with only `[worktree]` (no executable surface)
   // carries no RCE risk. Prompting in that case would just train
   // the user to mash `y` — same UX bug the CLI gate avoids.
@@ -6959,6 +6961,7 @@ run  = "true"
 
 #[test]
 fn tui_gate_clears_under_allow_mode() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // `--allow-bootstrap` (resolved to `TrustMode::Allow` at the
   // entrypoint) bypasses the gate. Threading it through
   // `with_trust_mode` is the whole reason for this PR follow-up —
@@ -6978,6 +6981,7 @@ run  = "true"
 
 #[test]
 fn tui_gate_refuses_under_deny_mode_even_with_safe_config() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // `--deny-bootstrap` is the forensic mode: refuse even if there's
   // nothing scary. The empty-surface short-circuit comes BEFORE the
   // Deny check inside `evaluate`, so a truly empty surface still
@@ -7091,6 +7095,7 @@ fn fill_create_form(app: &mut App, issue: &str, desc: &str) {
 
 #[test]
 fn submit_create_starts_async_create_and_keeps_create_modal_open() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   use gwm::tui::state::async_task::TaskKind;
 
   let base_dir = tempfile::TempDir::new().unwrap();
@@ -7278,6 +7283,7 @@ run  = "echo trapped"
 
 #[test]
 fn bootstrap_selected_with_no_selection_reports_and_does_not_load() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   // The early guard runs before the trust gate and the spawn: with nothing
   // selected there is no worktree to bootstrap, so no generation is claimed.
   let (_dir, mut app) = make_app();
@@ -11397,6 +11403,7 @@ fn enter_submits_from_the_last_field_whatever_the_pattern_calls_it() {
 /// repo still failed with `invalid issue number ''`.
 #[test]
 fn submitting_the_create_form_does_not_demand_a_segment_the_patterns_discard() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
   let (_d, mut app) = app_with_patterns("{type}/{desc}", "{type}-{desc}", "{repo_parent}/wt");
   app.enter_create();
   for c in "thing".chars() {
