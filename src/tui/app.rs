@@ -4966,8 +4966,9 @@ impl App {
   fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
     let trust_mode = self.trust_mode;
+    let global_path = self.global_path.clone();
     std::thread::spawn(move || {
-      let outcome = run_delete_batch(targets, delete_branch, trust_mode);
+      let outcome = run_delete_batch(targets, delete_branch, global_path, trust_mode);
       let _ = tx.send(TaskMsg::DeleteWorktree(generation, outcome));
     });
   }
@@ -6053,9 +6054,14 @@ struct RepoBatch {
 }
 
 impl RepoBatch {
-  fn open(workdir: &Path, trust_mode: crate::trust::TrustMode) -> Result<Self> {
+  /// `global_path` is the App's, not a fresh `global_config_path()`: the two
+  /// agree at runtime, and re-resolving here would make the hooks a delete
+  /// runs differ from the ones the config panel shows — and would read the
+  /// runner's real `~/.config/gwm/config.toml` from tests that injected
+  /// `None` precisely to avoid it (#194).
+  fn open(workdir: &Path, global_path: Option<&Path>, trust_mode: crate::trust::TrustMode) -> Result<Self> {
     let repo = worktree::discover_repo(Some(workdir))?;
-    let config = Config::load_for_repo(workdir)?;
+    let config = Config::load_layered(workdir, global_path)?;
     let worktrees = worktree::list(&repo)?;
     // Gate on the phases this operation actually runs, not on the whole
     // `[hooks]` table: a repo whose only hook is `post_create` executes no
@@ -6090,6 +6096,7 @@ impl RepoBatch {
 fn run_delete_batch(
   targets: Vec<DeleteTarget>,
   delete_branch: bool,
+  global_path: Option<PathBuf>,
   trust_mode: crate::trust::TrustMode,
 ) -> DeleteBatchOutcome {
   let mut outcome = DeleteBatchOutcome::default();
@@ -6100,7 +6107,7 @@ fn run_delete_batch(
   for target in targets {
     let batch = match repos.entry(target.workdir.clone()) {
       Entry::Occupied(e) => e.into_mut(),
-      Entry::Vacant(e) => match RepoBatch::open(&target.workdir, trust_mode) {
+      Entry::Vacant(e) => match RepoBatch::open(&target.workdir, global_path.as_deref(), trust_mode) {
         Ok(b) => e.insert(b),
         Err(err) => {
           outcome.failed.push(DeleteFailure {
