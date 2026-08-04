@@ -143,8 +143,9 @@ pub enum Command {
   /// Write a .gwm.toml to the current repo, optionally from a stack preset.
   Init {
     /// Seed an opinionated .gwm.toml for a known stack (e.g. `laravel`,
-    /// `node`/`nuxt`, `rust`, `go`, `python-uv`). Omit for the generic
-    /// documented template. Run `gwm init --list-presets` to see them all.
+    /// `symfony`, `node`/`nuxt`, `rust`, `go`, `python-uv`). Omit for the
+    /// generic documented template. Run `gwm init --list-presets` to see
+    /// them all.
     #[arg(long, value_name = "NAME")]
     preset: Option<String>,
     /// List the built-in presets with one-line descriptions and exit
