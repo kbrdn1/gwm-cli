@@ -1512,7 +1512,8 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   ))
 }
 
-/// Neutralise control characters before echoing a config-supplied value on
+/// Neutralise control characters, and the display-reordering characters
+/// [`is_display_reordering`] names, before echoing a config-supplied value on
 /// a **single row**.
 ///
 /// Config values come from a repo's `.gwm.toml`, and the commands that quote
@@ -1533,7 +1534,34 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
 /// Public because every site that echoes a config-supplied string has to use
 /// it, `main` included; a second copy would be a second thing to forget.
 pub fn sanitise_for_terminal(s: &str) -> String {
-  s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+  s.chars()
+    .map(|c| {
+      if c.is_control() || is_display_reordering(c) {
+        '?'
+      } else {
+        c
+      }
+    })
+    .collect()
+}
+
+/// The Unicode bidirectional formatting characters (issue #502).
+///
+/// They are `Cf` (format), not `Cc` (control), so [`char::is_control`] does
+/// not match them — which is the whole reason they need naming here. They
+/// reorder how a terminal *renders* the text around them, so a value carrying
+/// one can display a benign-looking command while the bytes that execute
+/// differ. That defeats the same "what you read is what is there" guarantee
+/// the control-character replacement exists to provide, so they are
+/// neutralised the same way and at the same sinks.
+///
+/// The set is the overrides and embeddings (`U+202A`-`U+202E`) plus the
+/// isolates and their terminator (`U+2066`-`U+2069`). The *implicit* marks
+/// (`U+200E`/`U+200F`/`U+061C`) are deliberately left alone: they carry no
+/// override of their own and appear in legitimate multilingual text, so
+/// replacing them would corrupt values rather than protect them.
+fn is_display_reordering(c: char) -> bool {
+  matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Neutralise control characters in output whose **shape is rows**: a `toml`
@@ -1542,9 +1570,10 @@ pub fn sanitise_for_terminal(s: &str) -> String {
 ///
 /// Keeps `\n` and `\t`, which carry the layout, and replaces everything else
 /// including `\r` (which returns the cursor to column zero and lets a value
-/// overwrite the line it was printed on). Sanitising these is not "breaking
-/// raw": an escape sequence inside the body defeats the very inspection the
-/// `show` view exists to provide.
+/// overwrite the line it was printed on) and the display-reordering characters
+/// [`is_display_reordering`] names. Sanitising these is not "breaking raw": an
+/// escape sequence inside the body defeats the very inspection the `show` view
+/// exists to provide.
 /// Neutralise a **diagnostic** headed for stderr: block-sanitise it, then
 /// indent every line after the first (issue #473).
 ///
@@ -1585,7 +1614,7 @@ pub fn sanitise_block_for_terminal(s: &str) -> String {
   normalised
     .chars()
     .map(|c| {
-      if c.is_control() && c != '\n' && c != '\t' {
+      if (c.is_control() && c != '\n' && c != '\t') || is_display_reordering(c) {
         '?'
       } else {
         c

