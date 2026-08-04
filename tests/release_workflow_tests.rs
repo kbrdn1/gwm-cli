@@ -138,12 +138,21 @@ fn workflow_paths() -> Vec<String> {
 /// (it owns the audited token split above), everything else is swept.
 #[test]
 fn sibling_workflow_checkouts_do_not_persist_credentials() {
-  let release = ".github/workflows/release.yml";
   let mut swept = 0;
   let mut audited = 0;
 
   for path in workflow_paths() {
-    if path == release {
+    // By file name, not by path: `read_dir` joins with the platform separator,
+    // so a full-path comparison against `.github/workflows/release.yml` misses
+    // on Windows, and the one workflow that is *supposed* to carry a token
+    // gets swept with the rest. Caught by `test (windows-latest)`, green on
+    // the other two runners.
+    //
+    // And by the whole name, not a suffix: `pre-release.yml` ends with
+    // `release.yml`, so `ends_with` would drop a workflow that must be
+    // audited. The `swept` floor below is what would catch that.
+    let is_release = Path::new(&path).file_name().and_then(|f| f.to_str()) == Some("release.yml");
+    if is_release {
       continue;
     }
     swept += 1;
