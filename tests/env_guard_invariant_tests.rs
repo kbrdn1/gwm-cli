@@ -100,7 +100,16 @@ fn functions(source: &str) -> Vec<(String, String)> {
   for (i, start) in bytes.iter().enumerate() {
     let end = bytes.get(i + 1).copied().unwrap_or(source.len());
     let chunk = &source[*start..end];
-    let name = chunk[3..].split('(').next().unwrap_or_default().trim().to_string();
+    // Cut at `<` as well as `(`, or a generic function is dropped entirely:
+    // `run_gh<I, S>` reads `$GWM_GH` through `gh_program()`, and rejecting the
+    // name for its type parameters kept every wrapper of it out of the reader
+    // set.
+    let name = chunk[3..]
+      .split(['(', '<'])
+      .next()
+      .unwrap_or_default()
+      .trim()
+      .to_string();
     if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
       out.push((name, chunk.to_string()));
     }
