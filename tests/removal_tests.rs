@@ -483,3 +483,66 @@ fn a_failing_post_remove_hook_is_not_reported_as_a_failed_removal() {
     }
   }
 }
+
+#[test]
+fn gwm_undo_restores_what_the_tui_deleted() {
+  // The acceptance criterion for #521 is a round trip, not a well-shaped
+  // journal entry: `gwm undo` filters on `repo_root` verbatim, so an entry
+  // whose path was canonicalised differently than undo resolves it satisfies
+  // every field assertion and is still invisible. Only the binary can say.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let (dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let doomed = wt_root.path().join("wt-521-roundtrip");
+  worktree::add(&repo, "wt-521-roundtrip", &doomed, "feat/#521-roundtrip", false).unwrap();
+
+  let sandbox = TempDir::new().unwrap();
+  let journal_path = sandbox.path().join("history.toml");
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  // SAFETY: `env_lock` above serialises every env mutation in this binary.
+  // Both variables are restored at the end of the test, under the same guard.
+  unsafe {
+    std::env::set_var("GWM_HISTORY_FILE", &journal_path);
+    std::env::set_var("GWM_TRUST_LEDGER", sandbox.path().join("trust.toml"));
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  select_row(&mut app, "wt-521-roundtrip");
+  app.enter_confirm_delete();
+  app.confirm_delete().unwrap();
+  wait_for_delete(&mut app);
+  assert!(!doomed.exists(), "the worktree is gone (status: {})", app.status);
+
+  // `gwm undo` from the main checkout, reading the same journal.
+  let undo = std::process::Command::new(env!("CARGO_BIN_EXE_gwm"))
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &journal_path)
+    .arg("undo")
+    .output()
+    .unwrap();
+  assert!(
+    undo.status.success(),
+    "gwm undo failed: {}{}",
+    String::from_utf8_lossy(&undo.stdout),
+    String::from_utf8_lossy(&undo.stderr)
+  );
+  assert!(
+    doomed.exists(),
+    "undo must put the worktree back where the TUI removed it: {}",
+    String::from_utf8_lossy(&undo.stdout)
+  );
+
+  // SAFETY: still under the `env_lock` guard taken at the top of this test.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+  }
+}
