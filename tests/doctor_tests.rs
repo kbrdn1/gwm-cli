@@ -582,6 +582,46 @@ fn a_step_whose_binary_cannot_be_resolved_statically_is_not_probed() {
   }
 }
 
+#[test]
+fn a_shell_keyword_is_not_probed_as_a_binary() {
+  // `run` is a shell script handed whole to `sh -c`, not an argv, so its
+  // first token is a shell word at least as often as it is a program. `cd`,
+  // `export`, `set` and `if` have no binary on disk to find, so probing them
+  // warns about a hook that works and takes the exit code to 1. This got
+  // sharper when the probe started walking hooks: a hook is a script far more
+  // often than a bootstrap command is.
+  for run in [
+    "cd sub && ./setup.sh",
+    "export APP_ENV=dev; ./setup.sh",
+    "set -e; ./setup.sh",
+    "if [ -f composer.json ]; then ./setup.sh; fi",
+    "while [ ! -f ready ]; do ./wait.sh; done",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"scripted\"\nrun = \"{run}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    let missing: Vec<String> = c
+      .detail
+      .split("not on PATH:")
+      .nth(1)
+      .unwrap_or("")
+      .split([',', '\n'])
+      .map(|s| s.trim().to_string())
+      .collect();
+    let keyword = run.split_whitespace().next().unwrap();
+    assert!(
+      !missing.iter().any(|m| m == keyword),
+      "`{keyword}` is a shell keyword, not a binary to probe; got: {}",
+      c.detail
+    );
+  }
+}
+
 // --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
