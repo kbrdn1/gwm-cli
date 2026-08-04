@@ -340,12 +340,19 @@ fn docs_sync_fires_on_pushes_to_main_only() {
 }
 
 /// The paths filter is the one half of the contract this repo cannot see: the
-/// conversion script lives in `kbrdn1/kbrdn-docs` and reads exactly two roots
-/// of this repo. A root dropped here does not break anything loudly — it just
-/// stops waking the sync, and the site quietly serves stale pages.
+/// conversion script lives in `kbrdn1/kbrdn-docs` and reads a fixed set of
+/// roots out of this repo. A root dropped here does not break anything loudly
+/// — it just stops waking the sync, and the site quietly serves stale pages.
 ///
-/// So the list is pinned literally. If the site starts reading a third root,
+/// So the list is pinned literally. If the site starts reading another root,
 /// this test is where that gets recorded.
+///
+/// `Cargo.toml` is in the set and is the reason this test exists rather than
+/// being obvious: it is not documentation, but `sync-gwm-docs.mjs` reads the
+/// `[package]` version out of it for the release badge in the site header.
+/// A release moves `changelogs/` in the same push, so the omission only shows
+/// when a version bump travels alone, and the failure is a stale badge rather
+/// than an error.
 #[test]
 fn docs_sync_watches_every_root_the_site_reads() {
   let on = docs_sync_triggers();
@@ -356,7 +363,7 @@ fn docs_sync_watches_every_root_the_site_reads() {
     .filter_map(|p| p.as_str())
     .collect();
 
-  for root in ["docs/**", "changelogs/**"] {
+  for root in ["docs/**", "changelogs/**", "Cargo.toml"] {
     assert!(
       paths.contains(&root),
       "docs-sync.yml must watch `{root}`: the site's sync script reads it, so a change there \

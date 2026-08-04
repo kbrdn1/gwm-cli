@@ -26,6 +26,12 @@ on:
     paths:
       - 'docs/**'
       - 'changelogs/**'
+      # Not documentation, but the site reads it: the sync script pulls the
+      # `[package]` version out of it for the release badge in the header.
+      # A release usually moves `changelogs/` in the same push, so this only
+      # matters when a version bump travels alone, which is exactly the case
+      # nobody would think to check.
+      - 'Cargo.toml'
   workflow_dispatch:
 
 # The dispatch authenticates with a PAT scoped to the docs repository; the
