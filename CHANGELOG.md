@@ -10,6 +10,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-row selection in the TUI, and a batch delete on top of it**
+  ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the
+  highlighted worktree, `d` then deletes every marked row in one batch; with
+  nothing marked it stays the single-row delete it has always been. Only `d`
+  reads the mark set, so the worktrees footer carries the count
+  (` 3 of 12 · 2 marked `) rather than letting a live selection go invisible
+  under `b` / `s` / `p`. Marks are keyed by on-disk path, which is what makes
+  them survive the fuzzy reranking and stay unambiguous in workspace mode,
+  where two repos can hold the same worktree id. Opening the filter and the
+  manual `f` refresh clear them; the background auto-refresh only prunes rows
+  that no longer exist, otherwise a 60s timer would eat a selection still
+  being built. The confirm overlay snapshots its targets when it opens, so a
+  refresh landing during the safety countdown cannot retarget the deletion,
+  and for a batch it reports the size and how many targets carry a branch
+  instead of listing rows, with `D` arming the branch deletion batch-wide. A
+  batch never stops at the first error: every target is attempted through its
+  own repo handle and only after re-checking that its id still resolves to the
+  path the overlay named (a worktree removed and recreated from another shell
+  during the countdown gets the same id back, and removing by id alone would
+  have deleted it), the confirm stays open narrowed to what failed (narrowed,
+  never recomputed: `worktree::remove` prunes the admin entry before deleting
+  the directory, so a removal that fails on the filesystem drops its own row,
+  and recomputing would have fallen back to the cursor row), and the status
+  line names the failures.
+- **`gwm remove` takes several patterns**
+  ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `gwm remove a b c`
+  removes the batch in one command and `--dry-run` prints one plan per
+  pattern. Every pattern is resolved before anything is touched, so an unknown
+  or ambiguous one fails the whole command with nothing removed, which is what
+  `gwm list --format json | ... | xargs -n1 gwm remove` could not do: it
+  removed the first half of the batch and then reported the typo. Patterns
+  naming the same worktree collapse to a single removal.
+
+### Changed
+
+- **`cycle_sidebar_layout` moved from `Space` to `z`**
+  ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)), to make room for the
+  row mark. Space-to-mark is the convention in lazygit, k9s and fzf, so the
+  default was picked on merit rather than on which verb was there first. Both
+  pre-#484 defaults are one `[tui.keys]` line away
+  (`cycle_sidebar_layout = ["Space"]`, `toggle_select = ["z"]`), and
+  `gwm tui keys` prints the resolved set with a per-row source. One upgrade
+  note: `z` is now a shipped default, so a `.gwm.toml` that binds a chord
+  *starting* with `z` (say `top = ["z z"]`) is a prefix conflict and is
+  refused at load time, the same way any chord/prefix pair has always been.
+  Rebind that chord, or move `cycle_sidebar_layout` elsewhere.
+
 ### Docs
 
 - **Retired the em dash across the whole `docs/` tree**

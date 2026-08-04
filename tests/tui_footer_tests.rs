@@ -344,7 +344,7 @@ fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
   assert_eq!(
     labels,
     vec![
-      "new", "del", "boot", // lifecycle
+      "new", "del", "mark", "boot", // lifecycle
       "open", "git", "exec", "agents", "review", "yank", // act on the selected worktree
       "filter", "status", "logs", "settings", // find / navigate
       "help", "quit", // global

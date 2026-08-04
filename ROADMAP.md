@@ -257,18 +257,45 @@ is naming work; they are recorded here because they were found here:
 - [x] [#473](https://github.com/kbrdn1/gwm-cli/issues/473) : a `.gwm.toml` is data from a repo nobody has vetted, and the commands that read it back skip the trust gate on purpose, so echoing a value verbatim handed that file a terminal escape channel out of a read-only command. Neutralised at each **sink** rather than each producer, which is what covers checks and rows nobody has written yet. The worst site was not in `gwm config` at all but in the TOFU prompt, whose bootstrap summary could be made to erase the row naming the shell it asks permission to run; and `toml`'s parse error quotes the offending source line, so `gwm list` inside the repo was enough
 - [x] [#487](https://github.com/kbrdn1/gwm-cli/issues/487) : `worktree::add` creates the branch before the directory, because `WorktreeAddOptions::reference` takes a reference that already exists, so *any* late failure left it orphaned. #474 and #475 each closed one input set; a full disk is not an input set, so the ordering is what actually bounds the class. Three conditions now gate the rollback, and each came from a different way of getting it wrong: this call created the branch, it still points where the call put it, and no checkout has it as HEAD. The last one is the review's: deleting the *reference* rather than the branch spares a `branch.<name>` config section the command never wrote, but it also drops `git_branch_delete`'s refusal on a branch a linked worktree stands on, and that residue is a worktree bound to nothing, which no check reports
 
-### 2. Bulk selection ([#484](https://github.com/kbrdn1/gwm-cli/issues/484))
+### 2. Bulk selection ([#484](https://github.com/kbrdn1/gwm-cli/issues/484) ✅)
 
-`Space` marks the active row and the verbs act on the marked set rather than on
-a single row. The request came in for bulk cleanup, which is the obvious first
-consumer, but demand is not why it goes first.
+`Space` marks the active row and `d` acts on the marked set rather than on a
+single row. The request came in for bulk cleanup, which is the obvious first
+consumer, but demand is not why it went first.
 
 It changes what "the current row" means, and the two features behind it both
 open on the current row: opening on it directly is the advantage the rich
 PR/Issue view claims over `snacks.gh`, and a note is attached to whichever
-worktree is selected. Landing a multi-row selection model after them means
-reopening both. Landing it before means they are written against the final
+worktree is selected. Landing a multi-row selection model after them would have
+meant reopening both. Landing it before means they are written against the final
 model once.
+
+- [x] [#484](https://github.com/kbrdn1/gwm-cli/issues/484) ([PR #520](https://github.com/kbrdn1/gwm-cli/pull/520)) : `Space` marks a row, `d` deletes the marked set behind one confirm that reports a count instead of listing rows, with `D` arming the branch deletion for the whole batch. `gwm remove a b c` is the non-interactive half, and it resolves every pattern before touching anything, so a typo removes nothing at all, which is what the `gwm list --format json | ... | xargs -n1 gwm remove` workaround could not offer
+
+Scope was negotiated with the reporter rather than assumed, and the answer was
+narrower than the issue title: only `d` reads the mark set. Every other verb
+keeps acting on the cursor row, which would be a footgun if it were silent, so
+the pane footer carries the mark count for as long as the set is non-empty.
+Marks are keyed by path, since the fuzzy filter reranks indices on every
+keystroke and a worktree id is unique only inside one repo, which a workspace
+merges several of. The filter and the manual `f` clear them; the background
+auto-refresh only prunes rows that no longer exist, because a sixty second timer
+eating a selection still being built would make the feature unusable.
+`cycle_sidebar_layout` moved off `Space` onto `z`, which is a default worth
+naming twice: a `.gwm.toml` binding a chord that starts with `z` is now a prefix
+conflict and is refused at load time.
+
+Two defects came out of reviewing it, both in the part that was new rather than
+in the part that was moved:
+
+- the confirm overlay recomputed its batch after a partial failure. `worktree::remove` prunes the admin entry before it deletes the directory (#98, so a partial failure cannot leave a phantom worktree), which means a removal that fails on the filesystem still drops its own row, the refresh then prunes its mark, and the recomputation fell back to the cursor row. A second confirm deleted a worktree that had never been marked. A batch can now only ever narrow
+- a worktree id is the `.git/worktrees/<id>` entry name, and git hands it back to whoever recreates a worktree with that basename. The overlay snapshots its targets and fires after a countdown, and the CLI resolves the whole batch before running any hook, so both had a window in which the id pointed elsewhere. Both go through a checked removal now, and the check sits on the handle the prune acts on rather than in a wrapper that resolves the name a second time
+
+[#521](https://github.com/kbrdn1/gwm-cli/issues/521) came out of the same review
+and was deliberately left out of the PR: the TUI delete writes no undo journal
+entry and runs no `pre_remove` / `post_remove` hooks, unlike the CLI. That is
+older than this feature, but a batch makes it bite harder, since ten worktrees
+can now leave in one keystroke with nothing for `gwm undo` to pop.
 
 ### 3. Symfony preset ([#392](https://github.com/kbrdn1/gwm-cli/issues/392))
 

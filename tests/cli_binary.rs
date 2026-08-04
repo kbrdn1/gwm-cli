@@ -3027,6 +3027,323 @@ fn remove_with_delete_branch_drops_branch() {
 }
 
 #[test]
+fn remove_takes_several_patterns_in_one_command() {
+  // #484: the TUI can now delete a batch, and the CLI is the non-interactive
+  // half of the same job. `xargs -n1 gwm remove` was the workaround.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("20", "bulk-one"), ("21", "bulk-two"), ("22", "bulk-three")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .args(["create", "feat", issue, slug])
+      .assert()
+      .success();
+  }
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "bulk-one", "bulk-three", "--delete-branch"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("bulk-one"))
+    .stdout(predicate::str::contains("bulk-three"));
+
+  assert!(!base.path().join("feat-20-bulk-one").exists());
+  assert!(!base.path().join("feat-22-bulk-three").exists());
+  assert!(
+    base.path().join("feat-21-bulk-two").exists(),
+    "an unnamed worktree must be left alone"
+  );
+  assert!(
+    repo.find_branch("feat/#21-bulk-two", git2::BranchType::Local).is_ok(),
+    "and so must its branch"
+  );
+}
+
+#[test]
+fn remove_resolves_every_pattern_before_touching_anything() {
+  // A typo in the middle of a batch must not leave half of it removed: the
+  // whole command fails with nothing touched. That is the guarantee the
+  // `xargs -n1` workaround could not offer.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "23", "survivor"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "survivor", "ghost"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
+
+  assert!(
+    base.path().join("feat-23-survivor").exists(),
+    "a batch with one unresolvable pattern must remove nothing"
+  );
+}
+
+#[test]
+fn remove_dry_run_prints_one_plan_per_pattern() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("24", "plan-one"), ("25", "plan-two")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .args(["create", "feat", issue, slug])
+      .assert()
+      .success();
+  }
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "plan-one", "plan-two", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-24-plan-one"))
+    .stdout(predicate::str::contains("feat-25-plan-two"));
+
+  assert!(
+    base.path().join("feat-24-plan-one").exists(),
+    "--dry-run touches nothing"
+  );
+  assert!(
+    base.path().join("feat-25-plan-two").exists(),
+    "--dry-run touches nothing"
+  );
+}
+
+#[test]
+fn remove_deduplicates_patterns_that_resolve_to_the_same_worktree() {
+  // `gwm remove foo foo` (or a name and its id) must not try to remove the
+  // same worktree twice — the second pass would fail on an already-gone row.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "26", "twice"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "twice", "twice"])
+    .assert()
+    .success();
+
+  assert!(!base.path().join("feat-26-twice").exists());
+}
+
+#[test]
+fn a_batch_removal_continues_past_a_failing_target() {
+  // #484: one hook-blocked row must not strand the rest of the cleanup. The
+  // pre_remove hook runs in the worktree being removed, so `.block` fails
+  // exactly one target of the two.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("27", "batch-ok"), ("28", "batch-blocked")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+  std::fs::write(base.path().join("feat-28-batch-blocked").join(".block"), "").unwrap();
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "refuse blocked"
+run = "test ! -f .block"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "batch-ok", "batch-blocked"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("batch-blocked"))
+    .stderr(predicate::str::contains("1 of 2 targets failed"));
+
+  assert!(
+    !base.path().join("feat-27-batch-ok").exists(),
+    "the target that could be removed must be gone"
+  );
+  assert!(
+    base.path().join("feat-28-batch-blocked").exists(),
+    "the blocked one must survive"
+  );
+
+  // The blocked target is reported once, not twice: the per-row line names it,
+  // the returned error is the tally.
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert_eq!(
+    stderr.matches("refuse blocked").count(),
+    1,
+    "one line per failure, no duplicate: {stderr}"
+  );
+}
+
+/// A path safe to embed in a shell command inside a lifecycle hook: the shell
+/// the hook runs through strips a Windows path's backslashes, and git accepts
+/// forward slashes everywhere. A no-op on Unix.
+fn shell_path(p: &std::path::Path) -> std::path::PathBuf {
+  std::path::PathBuf::from(p.to_string_lossy().replace('\\', "/"))
+}
+
+#[test]
+fn a_batch_refuses_a_target_whose_path_moved_since_it_was_resolved() {
+  // #484 / Codex review on PR #520 (P1): a batch resolves every pattern up
+  // front, so a hook on an earlier target has a window to move a later one.
+  // The id still resolves; the path the plan was about does not. Removing by
+  // id alone would destroy whatever now holds it.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("30", "moved-first"), ("31", "moved-second")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+  let second = base.path().join("feat-31-moved-second");
+  let relocated = base.path().join("feat-31-relocated");
+  // `when:` predicates resolve against the hook's cwd, which is the worktree
+  // being removed — so a marker file scopes the hook to the first target.
+  std::fs::write(base.path().join("feat-30-moved-first").join(".trigger"), "").unwrap();
+
+  // Removing the FIRST target moves the second one out from under the plan.
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "move the other target"
+when = "file_exists:.trigger"
+run = "git -C {repo} worktree move {second} {relocated}"
+"#,
+    base = toml_basic_string(base.path()),
+    // Forward slashes inside the `run =` command: the hook goes through a
+    // shell, which eats a Windows path's backslashes before git ever sees it
+    // (`C:UsersRUNNER~1…`). git accepts `/` on every platform.
+    repo = toml_basic_string(&shell_path(dir.path())),
+    second = toml_basic_string(&shell_path(&second)),
+    relocated = toml_basic_string(&shell_path(&relocated)),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "moved-first", "moved-second"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("changed since it was confirmed"));
+
+  assert!(
+    !base.path().join("feat-30-moved-first").exists(),
+    "the target that still matched its plan is removed"
+  );
+  assert!(
+    relocated.exists(),
+    "the one that moved is left alone rather than removed at its new path"
+  );
+}
+
+#[test]
+fn a_failing_post_remove_hook_is_not_reported_as_a_failed_removal() {
+  // Codex review on PR #520 (P2): `remove_one` carries the post_remove hook,
+  // so an `on_fail = "abort"` hook returns an error on a worktree that IS
+  // gone. Calling that a failed removal tells a script the opposite of what
+  // happened on disk.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("32", "post-a"), ("33", "post-b")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.post_remove]]
+name = "always fails"
+run = "false"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "post-a", "post-b"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("2 of 2 targets failed"))
+    .stderr(predicate::str::contains("removals failed").not());
+
+  assert!(
+    !base.path().join("feat-32-post-a").exists() && !base.path().join("feat-33-post-b").exists(),
+    "both worktrees are gone — only the post hook failed"
+  );
+}
+
+#[test]
 fn remove_unknown_pattern_fails() {
   // Fuzzy lookup must error loudly when nothing matches — silently
   // doing nothing would mask a user typo and leave them wondering why

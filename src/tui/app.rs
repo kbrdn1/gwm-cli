@@ -1,7 +1,10 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
-use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::async_task::{
+  CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
+  TaskRunner,
+};
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
@@ -285,6 +288,27 @@ pub struct App {
   pub workspace_active_stale: bool,
   pub worktrees: Vec<WorktreeInfo>,
   pub list_state: TableState,
+  /// Rows marked for a bulk action (issue #484), keyed by on-disk path.
+  ///
+  /// Two different things are called a selection in this file: `list_state`
+  /// holds the *cursor* row (one index into the filtered view), while this
+  /// set holds the rows the user marked with `Space`. `d` acts on this set
+  /// when it is non-empty and on the cursor row otherwise; every other verb
+  /// stays on the cursor row, which the list footer makes visible by
+  /// carrying the mark count.
+  ///
+  /// Keyed by path rather than by index or id: the fuzzy filter reranks
+  /// indices on every keystroke, and worktree ids are only unique within one
+  /// repo (workspace mode merges several). `BTreeSet` so a batch, its
+  /// confirm copy and its status line are all in a deterministic order.
+  /// Private — the mutation surface is [`App::toggle_select`] /
+  /// [`App::clear_marks`], both of which keep the status line in sync.
+  marked: BTreeSet<PathBuf>,
+  /// The batch the open confirm overlay is about (issue #484). Snapshotted by
+  /// [`App::enter_confirm_delete`] and read by [`App::confirm_delete`], so an
+  /// auto-refresh landing during the safety countdown cannot retarget the
+  /// deletion.
+  pending_delete: Vec<DeleteTarget>,
   pub view: View,
   pub status: String,
   pub delete_branch_on_remove: bool,
@@ -643,6 +667,8 @@ impl App {
       view: View::List,
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
+      marked: BTreeSet::new(),
+      pending_delete: Vec::new(),
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
       create_failure: None,
@@ -1261,6 +1287,10 @@ impl App {
 
     self.worktrees = worktrees;
     self.filter.invalidate();
+    // #484: a mark whose row is gone must not survive as a phantom target.
+    // Pruning (not clearing) is deliberate — this tail also runs for the
+    // background auto-refresh, which must not eat a selection mid-build.
+    self.prune_marks();
     self.clamp_selection_to_filter();
     let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
@@ -1306,6 +1336,10 @@ impl App {
   /// while loading is a no-op) and seeds the loader label + spinner. The
   /// result is applied by [`Self::drain_task_results`].
   pub fn request_refresh(&mut self) {
+    // #484: the explicit `f` drops the marks. The periodic
+    // `maybe_auto_refresh` deliberately does not — it only prunes rows that
+    // vanished, otherwise a timer would eat a selection mid-build.
+    self.clear_marks();
     if self.is_workspace() {
       // Workspace mode re-lists every repo off-thread on its own slot (issue
       // #343): the single-repo worker can't be reused (it would clobber the
@@ -1849,26 +1883,41 @@ impl App {
           // refresh / sync arms use).
           refresh_applied = true;
         }
-        TaskMsg::DeleteWorktree(generation, name, label, result) => {
+        TaskMsg::DeleteWorktree(generation, outcome) => {
           if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
             // Late result — a newer run (or an invalidate) superseded it.
             continue;
           }
-          match result {
-            Ok(()) => {
-              self.delete_failure = None;
+          // Re-list first in both arms: the removed rows have to leave the
+          // table (and their marks with them, via `prune_marks`) even on a
+          // partial batch, so what stays marked is exactly what failed and a
+          // retry is one keystroke (#484).
+          let refresh_result = self.refresh();
+          let status = outcome.status_line();
+          self.delete_failure = outcome.failure_banner();
+          match &self.delete_failure {
+            None => {
               self.view = View::List;
               self.confirm.reset();
-              let refresh_result = self.refresh();
+              self.pending_delete.clear();
               self.status = match refresh_result {
-                Ok(()) => format!("removed {} ({})", name, label),
-                Err(e) => format!("removed {} ({}); refresh failed: {}", name, label, e),
+                Ok(()) => status,
+                Err(e) => format!("{}; refresh failed: {}", status, e),
               };
             }
-            Err(e) => {
-              self.delete_failure = Some(e.clone());
+            Some(_) => {
+              // Stay on the overlay so the failure is read, narrowed to the
+              // targets that actually failed. NARROWED, never recomputed:
+              // `worktree::remove` prunes the admin entry before deleting the
+              // directory (#98), so a removal that fails on the filesystem
+              // still drops its row from the list, the refresh above prunes
+              // its mark, and a recomputed batch would fall back to the
+              // CURSOR row. A second confirm would then delete a worktree the
+              // user never marked (Codex review on PR #520).
+              let failed: std::collections::BTreeSet<&Path> = outcome.failed.iter().map(|f| f.path.as_path()).collect();
+              self.pending_delete.retain(|t| failed.contains(t.path.as_path()));
               self.view = View::Confirm;
-              self.status = format!("delete failed: {}", e);
+              self.status = status;
             }
           }
           applied = true;
@@ -4763,17 +4812,122 @@ impl App {
     });
   }
 
-  // ---- Delete flow ---------------------------------------------------------
+  // ---- Row marks (issue #484) ---------------------------------------------
 
-  pub fn enter_confirm_delete(&mut self) {
+  /// Toggle the mark on the cursor row (`Space`). The main worktree is
+  /// refused here rather than at delete time: `d` can never remove it, so a
+  /// mark on it could only build a batch with a target that fails.
+  pub fn toggle_select(&mut self) {
     let Some(sel) = self.selected() else {
       self.status = "nothing selected".into();
       return;
     };
     if sel.is_main {
-      self.status = "cannot remove the main worktree".into();
+      self.status = "cannot select the main worktree".into();
       return;
     }
+    let path = sel.path.clone();
+    if !self.marked.remove(&path) {
+      self.marked.insert(path);
+    }
+    let delete_key = self
+      .keymap
+      .primary_chord(Action::DeleteConfirm)
+      .map(|c| format!(" · {} deletes them", c))
+      .unwrap_or_default();
+    self.status = match self.marked.len() {
+      0 => "selection cleared".into(),
+      1 => format!("1 worktree selected{}", delete_key),
+      n => format!("{} worktrees selected{}", n, delete_key),
+    };
+  }
+
+  /// Drop every mark. Called when the filter opens and on the manual
+  /// refresh (`f`), per the contract agreed on #484.
+  pub fn clear_marks(&mut self) {
+    self.marked.clear();
+  }
+
+  /// How many rows are marked. Drives the list footer so a live selection is
+  /// never invisible while a cursor-row verb (`b` / `s` / `p`) runs.
+  pub fn marked_count(&self) -> usize {
+    self.marked.len()
+  }
+
+  /// Whether `path`'s row carries a mark. Read per row by the table renderer.
+  pub fn is_marked(&self, path: &Path) -> bool {
+    self.marked.contains(path)
+  }
+
+  /// Drop marks whose row is gone from the list. Called from the shared
+  /// refresh tail so a row removed by ANY refresh (including the background
+  /// one, which must not clear a selection the user is still building) can
+  /// never survive as a phantom target.
+  fn prune_marks(&mut self) {
+    if self.marked.is_empty() {
+      return;
+    }
+    let live: BTreeSet<&PathBuf> = self.worktrees.iter().map(|w| &w.path).collect();
+    self.marked.retain(|p| live.contains(p));
+  }
+
+  /// The owning repo's workdir for raw row `raw_index`. In workspace mode
+  /// (#36) it comes from the `row_repo` map so a row is acted on through its
+  /// own repo; in single-repo mode every row belongs to the active one.
+  fn row_workdir(&self, raw_index: usize) -> Option<PathBuf> {
+    match &self.workspace {
+      Some(ws) => ws.repos.get(*ws.row_repo.get(raw_index)?).map(|r| r.workdir.clone()),
+      None => Some(self.workdir.clone()),
+    }
+  }
+
+  /// What a `d` would delete: the marked rows in list order when the mark set
+  /// is non-empty, else the cursor row. Marks pointing at a row that no
+  /// longer exists resolve to nothing, so a stale mark drops out instead of
+  /// targeting whatever took its place.
+  pub fn delete_targets(&self) -> Vec<DeleteTarget> {
+    let rows: Vec<usize> = if self.marked.is_empty() {
+      self.selected_raw_index().into_iter().collect()
+    } else {
+      (0..self.worktrees.len())
+        .filter(|i| self.worktrees.get(*i).is_some_and(|w| self.marked.contains(&w.path)))
+        .collect()
+    };
+    rows
+      .into_iter()
+      .filter_map(|i| {
+        let w = self.worktrees.get(i)?;
+        if w.is_main {
+          return None;
+        }
+        Some(DeleteTarget {
+          workdir: self.row_workdir(i)?,
+          // `worktree::remove` resolves by the internal git id, which can
+          // diverge from the display name after a rename (#290).
+          id: w.id.clone(),
+          path: w.path.clone(),
+        })
+      })
+      .collect()
+  }
+
+  /// The batch the open confirm overlay is about. Empty outside the overlay.
+  pub fn pending_delete(&self) -> &[DeleteTarget] {
+    &self.pending_delete
+  }
+
+  // ---- Delete flow ---------------------------------------------------------
+
+  pub fn enter_confirm_delete(&mut self) {
+    let targets = self.delete_targets();
+    if targets.is_empty() {
+      self.status = match self.selected() {
+        Some(w) if w.is_main => "cannot remove the main worktree".into(),
+        _ => "nothing selected".into(),
+      };
+      return;
+    }
+    self.pending_delete = targets;
     self.view = View::Confirm;
     self.confirm.reset();
     self.delete_failure = None;
@@ -4783,12 +4937,13 @@ impl App {
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
-    // `worktree::remove` resolves by the internal git id, which can diverge
-    // from the display name after a rename (#290), so pass `id` here.
-    let (id, label) = match self.selected() {
-      Some(s) => (s.id.clone(), s.path.display().to_string()),
-      None => return Ok(()),
-    };
+    // Fire the snapshot taken when the overlay opened, not a fresh
+    // resolution: an auto-refresh can land during the safety countdown and
+    // reorder the list under the cursor (#484).
+    let targets = self.pending_delete.clone();
+    if targets.is_empty() {
+      return Ok(());
+    }
     if self.is_delete_worktree_loading() {
       return Ok(());
     }
@@ -4808,18 +4963,35 @@ impl App {
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::DeleteWorktree.loading_label().into();
-    self.spawn_delete_worktree(generation, id, label, delete_branch);
+    self.spawn_delete_worktrees(generation, targets, delete_branch);
     Ok(())
   }
 
-  fn spawn_delete_worktree(&self, generation: u64, id: String, label: String, delete_branch: bool) {
+  /// Run the batch sequentially on one worker thread. Never stops at the
+  /// first error (#484): a locked or already-pruned row must not strand the
+  /// rest of a cleanup the user explicitly asked for. Each target is opened
+  /// through its own repo, so a workspace batch spanning several repos is
+  /// removed from the right one.
+  fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
-    let workdir = self.workdir.clone();
     std::thread::spawn(move || {
-      let result = worktree::discover_repo(Some(&workdir))
-        .and_then(|repo| worktree::remove(&repo, &id, delete_branch))
-        .map_err(|e| e.to_string());
-      let _ = tx.send(TaskMsg::DeleteWorktree(generation, id, label, result));
+      let mut outcome = DeleteBatchOutcome::default();
+      for target in targets {
+        // `remove_verified`, not `remove`: the confirm named a PATH, and the
+        // id it resolved to can point elsewhere by the time the countdown
+        // fires (removed and recreated from another shell reuses the id).
+        let result = worktree::discover_repo(Some(&target.workdir))
+          .and_then(|repo| worktree::remove_verified(&repo, &target.id, &target.path, delete_branch));
+        match result {
+          Ok(()) => outcome.removed.push((target.id, target.path)),
+          Err(e) => outcome.failed.push(DeleteFailure {
+            id: target.id,
+            path: target.path,
+            error: e.to_string(),
+          }),
+        }
+      }
+      let _ = tx.send(TaskMsg::DeleteWorktree(generation, outcome));
     });
   }
 
@@ -4892,6 +5064,7 @@ impl App {
     }
     self.confirm.dismiss();
     self.delete_failure = None;
+    self.pending_delete.clear();
     self.view = View::List;
   }
 
@@ -4925,6 +5098,9 @@ impl App {
   /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
     self.filter.open();
+    // #484: narrowing the list is a fresh start — the marks the user built
+    // against the previous match set do not carry over.
+    self.clear_marks();
     self.sidebar.focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();

@@ -200,10 +200,17 @@ fn default_keymap_binds_sidebar_layout_and_position() {
     ChordResolution::Matched(Action::ToggleSidebar)
   ));
 
-  let cycle = KeyStroke::parse_chord("Space").unwrap();
+  // #484: `Space` marks a row for a bulk delete, the layout cycle moved to `z`.
+  let cycle = KeyStroke::parse_chord("z").unwrap();
   assert!(matches!(
     km.lookup(&cycle),
     ChordResolution::Matched(Action::CycleSidebarLayout)
+  ));
+
+  let mark = KeyStroke::parse_chord("Space").unwrap();
+  assert!(matches!(
+    km.lookup(&mark),
+    ChordResolution::Matched(Action::ToggleSelect)
   ));
 
   let toggle_pos = KeyStroke::parse_chord("v").unwrap();
