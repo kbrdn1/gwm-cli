@@ -305,11 +305,16 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
 /// keyword lands in `bootstrap.rs::evaluate_when`.
 const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_set:", "env_eq:", "glob_exists:"];
 
-/// Check #3: every `[[bootstrap.command]].when` predicate uses one of the
-/// supported keywords. Unknown predicates default to `true` in
-/// `bootstrap::evaluate_when`, so the command runs anyway and the user's
-/// intended gating condition is silently ignored — that's still a footgun
-/// worth flagging, just not "command never runs".
+/// Check #3: every `when` predicate uses one of the supported keywords.
+/// Unknown predicates default to `true` in `bootstrap::evaluate_when`, so
+/// the command runs anyway and the user's intended gating condition is
+/// silently ignored — that's still a footgun worth flagging, just not
+/// "command never runs".
+///
+/// Both surfaces that carry a predicate are walked: `[[bootstrap.command]]`
+/// and the six `[hooks.*]` phases. Reading the first only made this check
+/// pass vacuously on a config built out of hooks, reporting "no `when:`
+/// predicates configured" about a file with plenty of them.
 ///
 /// Walks every atom in the expression (via `bootstrap::when_atoms`) so
 /// negated atoms (`!env_set:CI`) and compound expressions
@@ -317,21 +322,32 @@ const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_s
 /// being green-lit by their first keyword.
 fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let name = "`when` predicates supported";
-  let bs = &ctx.config.bootstrap;
+
+  let commands = ctx
+    .config
+    .bootstrap
+    .command
+    .iter()
+    .map(|cmd| (format!("command `{}`", cmd.name), cmd.when.as_ref()));
+  let hooks = ctx
+    .config
+    .hooks
+    .all_steps()
+    .map(|(phase, step)| (format!("hook {} `{}`", phase, step.name), step.when.as_ref()));
 
   let mut unknown: Vec<String> = Vec::new();
   let mut recognised: usize = 0;
-  for cmd in &bs.command {
-    let Some(w) = &cmd.when else { continue };
+  for (label, when) in commands.chain(hooks) {
+    let Some(w) = when else { continue };
     // Walk every atom in the expression (via `bootstrap::when_atoms`) so
     // negated atoms (`!env_set:CI`) and compound expressions (`file_exists:a
     // && bogus:1`) are validated as a whole rather than green-lit by their
-    // first keyword. A command is `recognised` only when all its atoms
+    // first keyword. A step is `recognised` only when all its atoms
     // pass — a single unknown atom kicks it into `unknown`.
     let mut had_unknown = false;
     for atom in crate::bootstrap::when_atoms(w) {
       if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| atom.starts_with(p)) {
-        unknown.push(format!("{} (on command `{}`)", atom, cmd.name));
+        unknown.push(format!("{} (on {})", atom, label));
         had_unknown = true;
       }
     }
@@ -360,7 +376,40 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
 /// launcher `lumen`. Keep this list narrow on purpose — exotic
 /// wrappers (`nice`, `time`, `nohup`) take positional args, which we
 /// would risk consuming and ending up with the wrong binary.
-const COMMAND_WRAPPERS: &[&str] = &["env", "command"];
+/// Words that stand in front of the real binary rather than being one.
+/// `exec composer install` runs composer, so stopping at `exec` would drop
+/// the step and let a missing composer go unreported.
+const COMMAND_WRAPPERS: &[&str] = &["env", "command", "exec"];
+
+/// Shell keywords and builtins that can legitimately open a `run` script.
+///
+/// A step's `run` is handed whole to `sh -c`, so it is a script, not an argv,
+/// and its first token is a shell word at least as often as it is a program
+/// name: `cd sub && ./setup.sh`, `set -e; …`, `if [ -f composer.json ]; then …`.
+/// A few of these do ship an external binary on some systems (`cd` has a
+/// `/usr/bin/cd` on macOS), but the shell resolves the builtin first, so
+/// probing `$PATH` for any of them answers a question the shell never asks
+/// and warns about a step that works.
+///
+/// Names with a real external binary everywhere (`echo`, `test`, `printf`,
+/// `true`) are deliberately absent: probing them costs nothing because they
+/// resolve, and leaving them out keeps this list to the words that would
+/// produce a false warning.
+///
+/// So is `source`, and for a sharper reason: it is a bashism, and where
+/// `/bin/sh` is dash, which is most Linux distributions, it is neither a
+/// keyword nor a builtin, so the step dies with "source: not found". Probing
+/// it produces exactly the warning worth having, whose fix is the portable
+/// `.` form. `exec` is absent too, for the opposite reason: it stands in
+/// front of the real binary, so it belongs in [`COMMAND_WRAPPERS`].
+const SHELL_KEYWORDS: &[&str] = &[
+  // Reserved words.
+  "!", "case", "do", "done", "elif", "else", "esac", "fi", "for", "if", "in", "then", "until", "while", "{", "}",
+  // Special builtins, plus the regular ones that commonly open a script.
+  ".", ":", "alias", "bg", "break", "cd", "continue", "eval", "exit", "export", "fg", "getopts", "hash", "jobs",
+  "local", "read", "readonly", "return", "set", "shift", "times", "trap", "type", "ulimit", "umask", "unalias",
+  "unset", "wait",
+];
 
 /// Extract the executable name from a shell command string. Tokenises
 /// via `shell_words` so quoted args (`"my tool" --flag`) and escaped
@@ -386,7 +435,21 @@ fn extract_binary(run: &str) -> Option<String> {
   if iter.peek().is_some_and(|t| COMMAND_WRAPPERS.contains(&t.as_str())) {
     iter.next(); // consume the wrapper itself
     while let Some(t) = iter.peek() {
-      if t.starts_with('-') || (!t.starts_with('=') && t.contains('=')) {
+      if t.starts_with('-') {
+        // Some of `env`'s options take a separate operand, and skipping the
+        // flag without it leaves the operand looking like the executable:
+        // `env -u NODE_OPTIONS npm ci` used to resolve to `NODE_OPTIONS`. The
+        // attached forms (`--unset=NAME`) carry their own operand, so only
+        // the detached spellings consume the next token.
+        let takes_operand = matches!(
+          t.as_str(),
+          "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+        );
+        iter.next();
+        if takes_operand {
+          iter.next();
+        }
+      } else if !t.starts_with('=') && t.contains('=') {
         iter.next();
       } else {
         break;
@@ -467,6 +530,68 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
 
 /// Missing binaries are surfaced as Warning, not Failed — the user may not
 /// rely on that step at all, but the visibility matters.
+/// Whether `gwm doctor` is willing to evaluate a `when` expression it read
+/// out of a `.gwm.toml`.
+///
+/// Two shapes qualify, and the rule behind both is that evaluating them can
+/// tell an unvetted repo nothing it does not already know.
+///
+/// `cmd_exists:` on a bare binary name is a `$PATH` lookup, and `$PATH` is
+/// the very set this probe reports on, so it answers the probe's own question
+/// with the probe's own data. `file_exists:` on a single path component that
+/// is not itself a symlink is a `stat` on one entry of the repo root, and the
+/// repo root is what the `.gwm.toml` author committed.
+///
+/// Everything else is declined, because this evaluation runs on a file that
+/// never went through the trust gate (issue #473), including in the advisory
+/// CI job on every pull request. Each excluded shape is a channel out of the
+/// repo and each was a separate finding on this PR: `glob_exists:` picks its
+/// own root and walks it; a `file_exists:` path with more than one component
+/// escapes through a committed symlink (`outside/etc/passwd` with
+/// `outside -> /`), which no lexical check catches, and so does a single
+/// component that is a symlink itself, because `exists()` follows it;
+/// `env_set:` / `env_eq:` read the process environment and report the answer
+/// through which binaries got probed; and a `cmd_exists:` argument carrying a
+/// path separator is `file_exists:` wearing a different keyword.
+///
+/// A single declined atom taints the whole expression, since the boolean
+/// would depend on it either way. Declining costs nothing: the step stays
+/// probed, which is exactly what this check did before it evaluated any
+/// predicate at all, so it can never silence a warning. What the allowance
+/// buys is the `node` preset, whose install hooks are
+/// `file_exists:package.json && cmd_exists:bun` and the same with
+/// `!cmd_exists:bun`, and that pair was the entire reason to evaluate
+/// anything here.
+fn predicate_is_safe_to_evaluate(expr: &str, repo_workdir: &Path) -> bool {
+  crate::bootstrap::when_atoms(expr).iter().all(|atom| {
+    if let Some(rel) = atom.strip_prefix("file_exists:") {
+      let rel = rel.trim();
+      // One plain component, so the OS resolves nothing on the way in, and
+      // not a symlink, so it resolves nothing at the end either. Together
+      // that is what keeps `exists()` inside the repo.
+      return is_plain_name(rel) && !repo_workdir.join(rel).is_symlink();
+    }
+    match atom.strip_prefix("cmd_exists:") {
+      Some(name) => is_plain_name(name.trim()),
+      None => false,
+    }
+  })
+}
+
+/// One ordinary path component and nothing else: no separator, no `.` or
+/// `..`, and no Windows drive prefix.
+///
+/// Spelled through `Components` rather than as a scan for `/` and `\`,
+/// because `C:secret` contains neither and is still drive-relative on
+/// Windows, where `join` drops the base it was given and `which` resolves it
+/// against another directory entirely. On Windows that string parses as
+/// `Prefix` + `Normal`, so counting components catches it; on Unix it is an
+/// ordinary filename and stays allowed, which is correct there.
+fn is_plain_name(value: &str) -> bool {
+  let mut components = Path::new(value).components();
+  matches!(components.next(), Some(std::path::Component::Normal(_))) && components.next().is_none()
+}
+
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   let name = "external binaries on PATH";
   let mut needed: BTreeSet<String> = BTreeSet::new();
@@ -518,11 +643,74 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     }
   }
 
-  // Whatever the user's own bootstrap commands invoke.
-  for cmd in &ctx.config.bootstrap.command {
-    if let Some(bin) = extract_binary(&cmd.run) {
-      needed.insert(bin);
+  // Whatever the user's own bootstrap commands and lifecycle hooks invoke.
+  // Both surfaces, not just the first: a `[hooks.post_create]` step naming a
+  // binary that is not installed used to produce a clean report right up to
+  // the moment `gwm create` ran it and failed.
+  //
+  // A step its `when` switches off is not probed, because it is not going to
+  // run. The `node` preset is the case that makes this load-bearing: it ships
+  // `bun install` under `cmd_exists:bun` and `npm ci` under `!cmd_exists:bun`,
+  // so probing both regardless warns about whichever one the predicate has
+  // just switched off, and a Warning takes the exit code to 1. The predicate
+  // is evaluated against the main checkout rather than the future worktree,
+  // the same approximation the `.envrc` probe above already makes: the
+  // worktree gets the same tracked files. An unknown keyword evaluates to
+  // `true` in `evaluate_when`, so it stays probed, which matches the step
+  // still running at bootstrap time.
+  let steps = ctx
+    .config
+    .bootstrap
+    .command
+    .iter()
+    .map(|cmd| (&cmd.run, cmd.when.as_deref(), &cmd.env))
+    .chain(
+      ctx
+        .config
+        .hooks
+        .all_steps()
+        .map(|(_, step)| (&step.run, step.when.as_deref(), &step.env)),
+    );
+  for (run, when, env) in steps {
+    let gated_off = when.is_some_and(|w| {
+      predicate_is_safe_to_evaluate(w, ctx.repo_workdir) && !crate::bootstrap::evaluate_when(w, ctx.repo_workdir)
+    });
+    if gated_off {
+      continue;
     }
+    // A step that carries its own `PATH` resolves against that one, since
+    // both runners hand `env` to `Command::env`, so probing it against the
+    // doctor's ambient `$PATH` answers a question nobody asked. Matched
+    // case-insensitively because Windows environment names are, so
+    // `Path = "C:\\project\\bin"` really does replace the child's PATH there.
+    // Applied on every platform rather than behind `cfg(windows)`: the only
+    // cost on Unix is not probing a step that named its variable `Path`, and
+    // one behaviour is one thing to test.
+    if env.keys().any(|k| k.eq_ignore_ascii_case("PATH")) {
+      continue;
+    }
+    let Some(bin) = extract_binary(run) else { continue };
+    // `lifecycle::run_step` expands `{path}` / `{repo}` in `run` before
+    // spawning, so a hook reading `{path}/scripts/setup` would be probed as
+    // that literal string and always come back missing. Deliberately applied
+    // to `[[bootstrap.command]]` too, which does *not* expand its `run`: a
+    // first token carrying a `{…}` is not a binary name this check can
+    // resolve either way, and staying quiet beats a warning we know is wrong.
+    if bin.contains('{') {
+      continue;
+    }
+    // A script that opens on a shell word names no binary to probe.
+    if SHELL_KEYWORDS.contains(&bin.as_str()) {
+      continue;
+    }
+    // A path rather than a name: `which` would resolve `./scripts/setup`
+    // against the doctor's own working directory, while the step runs from
+    // the worktree root. Same rule as the placeholder above, one more way the
+    // string we hold is not the file that will be executed.
+    if bin.contains(['/', '\\']) {
+      continue;
+    }
+    needed.insert(bin);
   }
 
   let mut missing: Vec<String> = Vec::new();

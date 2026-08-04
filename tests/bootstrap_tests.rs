@@ -2,6 +2,7 @@ use gwm::bootstrap::{self, BootstrapCtx, StepResult, StepStatus};
 #[cfg(unix)]
 use gwm::config::NoSymlink;
 use gwm::config::{CommandStep, Config, CopyStep, FallbackContent, Guard};
+use gwm::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -951,4 +952,206 @@ fn step_status_sigil_is_canonical_across_renderers() {
   assert_eq!(StepStatus::Skipped.sigil(), "·");
   assert_eq!(StepStatus::Warning.sigil(), "!");
   assert_eq!(StepStatus::Failed.sigil(), "✗");
+}
+
+// --------------------------------------------------------------------------
+// The `symfony` preset, run end to end (issue #392)
+// --------------------------------------------------------------------------
+
+/// Load a preset body as the config of a temporary main repo, so the test
+/// exercises the file the binary actually ships rather than a hand-built
+/// `Config` that only resembles it.
+fn preset_ctx(name: &str) -> (TempDir, TempDir, Config) {
+  let (main, wt, _) = dirs();
+  let body = gwm::presets::lookup(name).expect("preset must exist").body;
+  std::fs::write(main.path().join(".gwm.toml"), body).unwrap();
+  let cfg = Config::load_layered(main.path(), None).expect("preset must load");
+  (main, wt, cfg)
+}
+
+/// A hook context pointing at the pair of temp dirs, built by hand rather
+/// than through `HookContext::for_create` so the test needs no git repo.
+fn hook_ctx(main: &std::path::Path, wt: &std::path::Path) -> HookContext {
+  HookContext {
+    main_repo: main.to_path_buf(),
+    cwd: wt.to_path_buf(),
+    path: wt.to_path_buf(),
+    branch: "feat/#392-symfony-preset".into(),
+    branch_type: "feat".into(),
+    issue: "392".into(),
+    desc: "symfony-preset".into(),
+    user: "tester".into(),
+    owner: "kbrdn1".into(),
+    repo: "gwm-cli".into(),
+  }
+}
+
+#[test]
+fn symfony_preset_seeds_env_local_from_the_committed_env_when_the_guard_trips() {
+  // The load-bearing difference with the laravel preset. Symfony commits
+  // `.env` and gitignores `.env.local`, the reverse of Laravel, so the guard
+  // seeds from `.env` and there is no `.env.example` to fall back on. Copying
+  // the laravel preset verbatim would have produced a guard that fails on its
+  // first trip with "no example_file available", and nothing outside this test
+  // executes that path.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  std::fs::write(main.path().join(".env"), "DATABASE_URL=postgres://localhost/app\n").unwrap();
+  std::fs::write(
+    main.path().join(".env.local"),
+    "DATABASE_URL=postgres://prod.cluster-abc.eu-west-1.rds.amazonaws.com/app\n",
+  )
+  .unwrap();
+
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  let report = bootstrap::run(&ctx).unwrap();
+
+  let seeded = std::fs::read_to_string(wt.path().join(".env.local")).expect(".env.local must be written");
+  assert!(
+    seeded.contains("localhost"),
+    "the guard must seed from the committed .env, got: {seeded}"
+  );
+  assert!(
+    !seeded.contains("rds.amazonaws.com"),
+    "the RDS host must never reach the worktree, got: {seeded}"
+  );
+  assert!(
+    report.steps.iter().any(|s| s.status == StepStatus::Warning),
+    "a tripped guard must surface as a warning, not pass silently"
+  );
+}
+
+#[test]
+fn symfony_preset_copies_a_clean_env_local_verbatim() {
+  // The nominal path: no RDS host, so the guard lets the real file through
+  // rather than replacing it with the committed defaults.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  std::fs::write(main.path().join(".env"), "APP_ENV=dev\n").unwrap();
+  std::fs::write(main.path().join(".env.local"), "APP_SECRET=local-only\n").unwrap();
+  std::fs::write(main.path().join(".env.test.local"), "APP_ENV=test\n").unwrap();
+
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  bootstrap::run(&ctx).unwrap();
+
+  assert_eq!(
+    std::fs::read_to_string(wt.path().join(".env.local")).unwrap(),
+    "APP_SECRET=local-only\n"
+  );
+  assert_eq!(
+    std::fs::read_to_string(wt.path().join(".env.test.local")).unwrap(),
+    "APP_ENV=test\n"
+  );
+}
+
+#[test]
+fn symfony_preset_survives_a_repo_without_any_env_file() {
+  // Every copy is `required = false`, so a Symfony repo that keeps its
+  // secrets somewhere else bootstraps clean instead of failing.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  let report = bootstrap::run(&ctx).unwrap();
+  assert!(
+    !report.steps.iter().any(|s| s.status == StepStatus::Failed),
+    "missing optional env files must not fail the bootstrap: {:?}",
+    report.steps
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn symfony_preset_refuses_inherited_vendor_and_var_symlinks() {
+  // `var/` is the one the laravel preset does not have: it holds the compiled
+  // service container and the cached routes, so a worktree that inherits a
+  // symlink to the main checkout's runs the other branch's container.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  for dir in ["vendor", "var"] {
+    std::fs::create_dir(main.path().join(dir)).unwrap();
+    std::os::unix::fs::symlink(main.path().join(dir), wt.path().join(dir)).unwrap();
+  }
+
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  bootstrap::run(&ctx).unwrap();
+
+  for dir in ["vendor", "var"] {
+    assert!(
+      !wt.path().join(dir).is_symlink(),
+      "{dir}/ symlink must be removed so the worktree keeps its own"
+    );
+  }
+}
+
+#[test]
+fn symfony_preset_hooks_no_op_on_a_repo_that_is_not_symfony() {
+  // `bootstrap::run` never touches `[hooks.*]`, so the tests above prove the
+  // copies, the guard and the no-symlink invariants and nothing else. The two
+  // command hooks the preset ships go through `lifecycle::run_phase`, and this
+  // is the case that matters for anyone who writes the preset into the wrong
+  // repo: no `composer.json`, no `.envrc`, so both predicates are false and
+  // neither command is spawned.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  let ctx = hook_ctx(main.path(), wt.path());
+
+  let report = lifecycle::run_phase(&cfg, HookPhase::PostCreate, &ctx, &HookSkips::default(), false).unwrap();
+
+  assert_eq!(report.steps.len(), 2, "both hooks must be reported: {:?}", report.steps);
+  for step in &report.steps {
+    assert_eq!(
+      step.status,
+      StepStatus::Skipped,
+      "no composer.json and no .envrc, so nothing should run: {:?}",
+      step
+    );
+    assert!(
+      step.detail.contains("when condition"),
+      "the skip must name the predicate that switched the hook off, got: {}",
+      step.detail
+    );
+  }
+}
+
+#[test]
+fn symfony_preset_composer_hook_warns_instead_of_aborting() {
+  // `on_fail = "warn"` is the other half of the hook contract: a composer that
+  // is missing, or a project that does not build, must not take the worktree
+  // down with it. The `composer.json` here is deliberately unparseable so the
+  // command fails on its own file without reaching the network, and the
+  // assertion holds whether or not the runner has composer installed.
+  let (main, wt, cfg) = preset_ctx("symfony");
+  std::fs::write(wt.path().join("composer.json"), "definitely not json").unwrap();
+  let ctx = hook_ctx(main.path(), wt.path());
+
+  let report = lifecycle::run_phase(&cfg, HookPhase::PostCreate, &ctx, &HookSkips::default(), false).unwrap();
+
+  let composer = report
+    .steps
+    .iter()
+    .find(|s| s.label.contains("composer"))
+    .expect("the composer hook must be selected once composer.json exists");
+  assert_ne!(
+    composer.status,
+    StepStatus::Skipped,
+    "composer.json exists, so the predicate must select the hook: {:?}",
+    composer
+  );
+  assert_ne!(
+    composer.status,
+    StepStatus::Failed,
+    "on_fail = warn must keep a failing install out of the abort path: {:?}",
+    composer
+  );
 }
