@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A config value no longer reaches the terminal with its Unicode bidi
+  overrides intact. The neutralisation added in 1.6.0 replaces control
+  characters, and `char::is_control` covers C0, DEL and C1: it does not cover
+  `U+202A` through `U+202E` or `U+2066` through `U+2069`. Those are `Cf`, not
+  `Cc`. They reorder how a terminal renders the text around them without ever
+  being a control byte, so a value carrying one can display something other
+  than what it is.
+
+  The site that matters is the pre-trust bootstrap summary, whose whole job is
+  to let someone decide whether to authorise a shell command out of a repo
+  they have not vetted. A summary that can be made to misrepresent the command
+  it asks about is worse than no summary. `gwm config get`, `types`,
+  `trust list` and the rendered diagnostics carry the same exposure at lower
+  stakes, and all of them inherit the fix: it lands in the two sinks every
+  echo site already goes through, the way they inherited the control-character
+  rule.
+
+  The implicit marks (`U+200E`, `U+200F`, `U+061C`) are deliberately left
+  alone. They carry no override of their own and occur in legitimate
+  multilingual text, so replacing them would corrupt values rather than
+  protect them. This is a gap in the 1.6.0 mitigation, not a regression:
+  1.5.0 and earlier neutralised nothing at all.
+  ([#502](https://github.com/kbrdn1/gwm-cli/issues/502))
+
+- A race in the test harness, not reachable from the product.
+  `exec_in_dir_runs_a_relative_script_from_the_worktree` writes an executable
+  and immediately runs it, and `execve` refuses a file that is open for
+  writing by any process: a child forked by another test thread carries a copy
+  of that write handle until it execs, so the spawn intermittently returned
+  `ETXTBSY` on Linux. It is retried on that errno alone, with the reason
+  written at the retry, and every other spawn error still fails on the first
+  attempt.
+  ([#500](https://github.com/kbrdn1/gwm-cli/issues/500))
+
+- The same shape in `config_tests`, where the guard around `$HOME` documented
+  a boundary narrower than the real one, and five tests skipped it on the
+  strength of that doc.
+  `expand_placeholders` resolves the home directory before it looks at a
+  single token, so every call is a concurrent reader whatever the template
+  says, while one test rewrites the variable with `set_var`. The guard is now
+  taken by every test in that binary that can observe `$HOME`, and its doc
+  states the hazard rather than a proxy for it.
+  ([#503](https://github.com/kbrdn1/gwm-cli/issues/503))
+
 ## Past releases
 
 In reverse chronological order:
