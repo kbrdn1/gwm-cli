@@ -499,12 +499,87 @@ fn branch_created_age(repo: &Repository, branch: &str) -> Option<Duration> {
 /// may be gone by now, which would make `canonicalize` fail rather than
 /// disagree.
 pub fn remove_verified(repo: &Repository, name: &str, expected_path: &Path, delete_branch: bool) -> Result<()> {
-  remove_inner(repo, name, Some(expected_path), delete_branch)
+  remove_inner(repo, name, Some(expected_path), delete_branch, |_| {})
+}
+
+/// [`remove_verified`], recording the removal at its point of no return
+/// (issue #531).
+///
+/// `record` fires once the worktree is gone and before the branch delete —
+/// the last instant at which nothing irreversible has happened, and the first
+/// at which the removal is committed. That placement is the whole point:
+///
+/// - **Nothing earlier**, because everything that can still refuse runs
+///   before it. An undo-journal entry written ahead of the path check
+///   described a removal that never happened, and `gwm undo` cannot get past
+///   one — it saves the journal only after the resurrection succeeds, and the
+///   resurrection fails on a worktree that is still on disk, so the stale
+///   entry comes back on every retry until someone edits `history.toml` by
+///   hand (Codex review on PR #526, issue #531).
+/// - **Nothing later**, because the branch delete is the only step that
+///   destroys something git cannot rebuild from the reflog alone (issue #29),
+///   so the recovery anchor has to exist before it.
+///
+/// The [`HeadBranch`] handed to `record` is the same observation the deletion
+/// below acts on, read once. Reading it twice let a concurrent checkout have
+/// the journal name one branch while another was deleted.
+pub fn remove_verified_recording(
+  repo: &Repository,
+  name: &str,
+  expected_path: &Path,
+  delete_branch: bool,
+  record: impl FnOnce(&HeadBranch),
+) -> Result<()> {
+  remove_inner(repo, name, Some(expected_path), delete_branch, record)
 }
 
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
 pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> {
-  remove_inner(repo, name, None, delete_branch)
+  remove_inner(repo, name, None, delete_branch, |_| {})
+}
+
+/// What a worktree's HEAD says, as three answers that must not collapse into
+/// one another (issue #531).
+///
+/// A removal deletes a branch only in the [`Attached`](HeadBranch::Attached)
+/// case, so whoever records the removal has to be able to tell "there is no
+/// branch" from "I could not look".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadBranch {
+  /// HEAD is on a branch: the one a removal deletes and a journal records.
+  Attached(String),
+  /// Detached HEAD. There is no branch to delete, and none to restore
+  /// either — `gwm undo` refuses such an entry rather than inventing one.
+  Detached,
+  /// The worktree could not be opened, or its HEAD not read (unborn, already
+  /// gone). Nothing was observed, so nothing is deleted; a caller with an
+  /// older listing may still prefer its own name for the record.
+  Unreadable,
+}
+
+impl HeadBranch {
+  /// The branch name, when one was actually observed.
+  pub fn name(&self) -> Option<&str> {
+    match self {
+      Self::Attached(b) => Some(b),
+      Self::Detached | Self::Unreadable => None,
+    }
+  }
+}
+
+/// Read the branch checked out in the worktree at `path`, once.
+pub fn head_branch(path: &Path) -> HeadBranch {
+  match Repository::open(path) {
+    Ok(wt) => match wt.head() {
+      Ok(head) if head.is_branch() => match head.shorthand() {
+        Ok(b) => HeadBranch::Attached(b.to_string()),
+        Err(_) => HeadBranch::Unreadable,
+      },
+      Ok(_) => HeadBranch::Detached,
+      Err(_) => HeadBranch::Unreadable,
+    },
+    Err(_) => HeadBranch::Unreadable,
+  }
 }
 
 /// The refusal a path mismatch produces, shared so the two check sites word
@@ -550,7 +625,13 @@ pub fn verify_path(repo: &Repository, name: &str, expected_path: &Path) -> Resul
 /// would have the first handle validated and the second one destroyed (Codex
 /// review on PR #520, then again on #526). `expected_path = None` is the
 /// historical, unverified removal.
-fn remove_inner(repo: &Repository, name: &str, expected_path: Option<&Path>, delete_branch: bool) -> Result<()> {
+fn remove_inner(
+  repo: &Repository,
+  name: &str,
+  expected_path: Option<&Path>,
+  delete_branch: bool,
+  record: impl FnOnce(&HeadBranch),
+) -> Result<()> {
   let wt = repo
     .find_worktree(name)
     .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
@@ -561,11 +642,11 @@ fn remove_inner(repo: &Repository, name: &str, expected_path: Option<&Path>, del
   }
   let path = wt.path().to_path_buf();
 
-  // Capture the branch (if any) so we can drop it after pruning.
-  let branch_name = match Repository::open(&path) {
-    Ok(sub) => sub.head().ok().and_then(|r| r.shorthand().ok().map(|s| s.to_string())),
-    Err(_) => None,
-  };
+  // The one observation of HEAD: it names what `record` writes down and what
+  // the branch delete below removes. Read twice, a concurrent checkout landed
+  // between them and the record named a branch the removal never touched
+  // (issue #531).
+  let head = head_branch(&path);
 
   // Prune admin files (.git/worktrees/<name>) FIRST so a subsequent
   // filesystem failure cannot leave a "phantom worktree" (issue #98):
@@ -581,9 +662,15 @@ fn remove_inner(repo: &Repository, name: &str, expected_path: Option<&Path>, del
     std::fs::remove_dir_all(&path)?;
   }
 
+  // The point of no return, and the only place a record belongs: every
+  // refusal is behind us, and the branch delete — the one step that destroys
+  // something the caller cannot rebuild from what is left on disk — is still
+  // ahead. See [`remove_verified_recording`].
+  record(&head);
+
   if delete_branch {
-    if let Some(b) = branch_name {
-      if let Ok(mut branch) = repo.find_branch(&b, git2::BranchType::Local) {
+    if let Some(b) = head.name() {
+      if let Ok(mut branch) = repo.find_branch(b, git2::BranchType::Local) {
         let _ = branch.delete();
       }
     }

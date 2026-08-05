@@ -2070,3 +2070,109 @@ fn remove_verified_refuses_an_id_that_now_points_elsewhere() {
   worktree::remove_verified(&repo, &live.id, &live.path, false).unwrap();
   assert!(!second.exists(), "a target that still matches is removed");
 }
+
+/// Issue #531: the removal records itself at the point of no return, so a
+/// refusal leaves nothing behind.
+///
+/// The check that can still refuse sits on the handle the prune acts on, and
+/// it runs before the callback. An entry written earlier would describe a
+/// removal that never happened, and `gwm undo` cannot get past one: it saves
+/// the journal only after the resurrection succeeds (`cli.rs`), and the
+/// resurrection fails on a worktree that is still on disk, so the stale entry
+/// comes back every single time until someone edits `history.toml` by hand.
+#[test]
+fn a_refused_removal_records_nothing() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-531-a");
+  worktree::add(&repo, "feat-531-a", &target, "feat/#531-a", false).unwrap();
+
+  let mut recorded = false;
+  let err = worktree::remove_verified_recording(
+    &repo,
+    "feat-531-a",
+    &wt_root.path().join("somewhere-else"),
+    false,
+    |_| recorded = true,
+  )
+  .expect_err("a path that no longer matches must refuse");
+
+  assert!(!recorded, "a refused removal must not record anything");
+  assert!(format!("{err}").contains("changed since it was confirmed"));
+  assert!(target.exists(), "the worktree must survive its own refusal");
+}
+
+/// One observation of HEAD, handed to whoever records the removal and used by
+/// the deletion itself — the journal cannot name a branch other than the one
+/// that goes.
+#[test]
+fn the_recorded_branch_is_the_one_the_removal_deletes() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-531-b");
+  worktree::add(&repo, "feat-531-b", &target, "feat/#531-b", false).unwrap();
+  let expected = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-531-b")
+    .expect("the new worktree is listed")
+    .path;
+
+  let mut seen = None;
+  let mut oid_at_record = None;
+  worktree::remove_verified_recording(&repo, "feat-531-b", &expected, true, |head| {
+    seen = Some(head.clone());
+    // What the undo journal does at this instant. The callback fires after
+    // the prune and after the directory is gone, so the ref has to still
+    // resolve here or `gwm undo` loses the tip it would resurrect, and it is
+    // the last instant at which it can: the branch delete is next.
+    oid_at_record = head
+      .name()
+      .and_then(|b| repo.find_branch(b, git2::BranchType::Local).ok())
+      .and_then(|br| br.into_reference().target());
+  })
+  .unwrap();
+
+  assert_eq!(seen, Some(worktree::HeadBranch::Attached("feat/#531-b".into())));
+  assert!(
+    oid_at_record.is_some(),
+    "the branch tip must still resolve when the removal reports itself"
+  );
+  assert!(
+    repo.find_branch("feat/#531-b", git2::BranchType::Local).is_err(),
+    "the branch the callback was handed is the one that got deleted"
+  );
+}
+
+/// A detached HEAD is its own answer, not "could not read it": the removal
+/// deletes no branch, so the record must not name one either — `gwm undo`
+/// refuses a detached-HEAD entry outright rather than restoring the wrong
+/// branch.
+#[test]
+fn a_detached_head_is_recorded_as_such_and_deletes_no_branch() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-531-c");
+  worktree::add(&repo, "feat-531-c", &target, "feat/#531-c", false).unwrap();
+  let expected = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-531-c")
+    .expect("the new worktree is listed")
+    .path;
+
+  let head = Repository::open(&target).unwrap().head().unwrap().target().unwrap();
+  Repository::open(&target).unwrap().set_head_detached(head).unwrap();
+
+  let mut seen = None;
+  worktree::remove_verified_recording(&repo, "feat-531-c", &expected, true, |h| seen = Some(h.clone())).unwrap();
+
+  assert_eq!(seen, Some(worktree::HeadBranch::Detached));
+  assert!(
+    repo.find_branch("feat/#531-c", git2::BranchType::Local).is_ok(),
+    "a detached removal deletes no branch, whatever --delete-branch says"
+  );
+}

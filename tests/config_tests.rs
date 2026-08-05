@@ -2797,3 +2797,62 @@ fn a_repo_path_without_a_parent_resolves_only_the_path_token() {
   let out = expand_placeholders("{repo_path}|{repo_parent}", "r", None, None, None, Some(root)).unwrap();
   assert_eq!(out, "/|{repo_parent}");
 }
+
+/// Issue #531: the layered load must be able to work from bytes the caller
+/// already read, so a delete can hash, merge and gate one single snapshot of
+/// `.gwm.toml` instead of opening it once per question.
+#[test]
+fn the_layered_config_merges_the_repo_bytes_it_was_handed() {
+  let handed = br#"
+[worktree]
+branch_pattern = "handed/{desc}"
+"#;
+  let cfg = Config::load_layered_from_bytes(Some(handed), None).unwrap();
+  assert_eq!(cfg.worktree.branch_pattern, "handed/{desc}");
+}
+
+/// `None` repo bytes is "this repo has no `.gwm.toml`" — the global layer
+/// alone, exactly what an absent file produces through the path-based form.
+#[test]
+fn no_repo_bytes_leaves_the_global_layer_alone() {
+  let dir = TempDir::new().unwrap();
+  let global = dir.path().join("config.toml");
+  std::fs::write(&global, "[worktree]\nbranch_pattern = \"global/{desc}\"\n").unwrap();
+
+  let cfg = Config::load_layered_from_bytes(None, Some(&global)).unwrap();
+  assert_eq!(cfg.worktree.branch_pattern, "global/{desc}");
+}
+
+/// The handed bytes are still a repo layer, so they win over the global one
+/// key by key — same merge rule as the path-based form (#190).
+#[test]
+fn handed_repo_bytes_override_the_global_layer() {
+  let dir = TempDir::new().unwrap();
+  let global = dir.path().join("config.toml");
+  std::fs::write(
+    &global,
+    "[worktree]\nbranch_pattern = \"global/{desc}\"\nbase = \"develop\"\n",
+  )
+  .unwrap();
+
+  let cfg =
+    Config::load_layered_from_bytes(Some(b"[worktree]\nbranch_pattern = \"repo/{desc}\"\n"), Some(&global)).unwrap();
+  assert_eq!(cfg.worktree.branch_pattern, "repo/{desc}");
+  assert_eq!(
+    cfg.worktree.base, "develop",
+    "an untouched sibling key survives the merge"
+  );
+}
+
+/// The validators run on the handed bytes as they do on the file, so the
+/// snapshot form cannot become a way to smuggle a config the path-based form
+/// rejects.
+#[test]
+fn handed_repo_bytes_go_through_the_same_validators() {
+  let out = Config::load_layered_from_bytes(Some(b"[exec.profiles.bad]\ncommand = []\n"), None);
+  let err = out.expect_err("an empty exec profile command must be rejected");
+  assert!(
+    format!("{err}").contains("empty `command`"),
+    "the semantic validator has to run on handed bytes too, got: {err}"
+  );
+}

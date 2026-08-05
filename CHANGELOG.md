@@ -134,12 +134,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all `post_create` runs nothing on a delete and is never asked. Hook output
   lands on the Command Logs transcript (`3`) as it does everywhere else.
 - **A refused removal is no longer recorded as undoable**
-  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521)). `gwm remove` wrote
-  its journal entry before the destructive call, so a target that then got
-  refused (its path moved since it was resolved, git declining the removal)
-  still showed up in `gwm history` as something `gwm undo` would replay. The
-  branch OID is still captured beforehand, which is what the entry needs; only
-  the write moved after the removal succeeds.
+  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521),
+  [#531](https://github.com/kbrdn1/gwm-cli/issues/531)). `gwm remove` wrote its
+  journal entry before the destructive call, so a target that then got refused
+  (its path moved since it was resolved, git declining the removal) still
+  showed up in `gwm history` as something `gwm undo` would replay. That is not
+  a cosmetic leftover: `gwm undo` saves the journal only once the resurrection
+  succeeds, and the resurrection fails on a worktree that is still on disk, so
+  the stale entry came back on every retry and no later removal in that repo
+  could be undone until `history.toml` was edited by hand. The removal now
+  records itself at its point of no return, with the worktree gone and the
+  branch not yet, which is both after everything that can still refuse and
+  before the one step that destroys something unrecoverable: a refusal writes
+  nothing, and a partial failure still leaves the branch OID `gwm undo` needs.
+- **The delete reads `.gwm.toml` once**
+  ([#531](https://github.com/kbrdn1/gwm-cli/issues/531)). A TUI delete asked
+  the same file four separate times: for the config whose hooks run, for the
+  repo layer that says whether it runs any, for the bytes the trust ledger
+  rules on, and again to parse the branch for `{type}` / `{issue}` / `{desc}`.
+  A `.gwm.toml` rewritten between two of those could be approved as one thing
+  and executed as another. All four now answer from one snapshot. Same for the
+  branch a removal deletes and the branch it records: one read of HEAD, so a
+  checkout landing mid-removal can no longer have `gwm undo` restore a ref that
+  was never deleted while the deleted one stays lost.
 - **`cycle_sidebar_layout` moved from `Space` to `z`**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)), to make room for the
   row mark. Space-to-mark is the convention in lazygit, k9s and fzf, so the

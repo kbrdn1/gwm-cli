@@ -6433,15 +6433,20 @@ impl RepoBatch {
   /// `None` precisely to avoid it (#194).
   fn open(workdir: &Path, global_path: Option<&Path>, trust_mode: crate::trust::TrustMode) -> Result<Self> {
     let repo = worktree::discover_repo(Some(workdir))?;
-    let config = Config::load_layered(workdir, global_path)?;
-    // Read back to back with the one above, before the `worktree::list` below,
-    // which walks every worktree's git status and is the expensive part. The
-    // two reads still are not atomic — `trust::evaluate` opens the file a
-    // third time to hash it — but a `.gwm.toml` rewritten between them can no
-    // longer land in a window measured in hundreds of milliseconds (Codex
-    // review on PR #526). Closing it fully means handing `evaluate` bytes
-    // already read, which is a change to the trust surface, not to this one.
-    let repo_only = Config::load_layered(workdir, None)?;
+    // One read of `.gwm.toml`, three answers (issue #531): the config whose
+    // hooks run, the repo layer that says whether this operation runs any,
+    // and the bytes the ledger rules on. Three separate opens meant a file
+    // rewritten in between could be approved as one thing and executed as
+    // another; they are now the same snapshot by construction, so no window
+    // is left to narrow.
+    let cfg_path = workdir.join(crate::config::CONFIG_FILE);
+    let repo_bytes = match std::fs::read(&cfg_path) {
+      Ok(b) => Some(b),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+      Err(e) => return Err(e.into()),
+    };
+    let config = Config::load_layered_from_bytes(repo_bytes.as_deref(), global_path)?;
+    let repo_only = Config::load_layered_from_bytes(repo_bytes.as_deref(), None)?;
     let worktrees = worktree::list(&repo)?;
     // Gate on the phases this operation actually runs, asked of the file the
     // trust decision is about. Two narrowings, both load-bearing:
@@ -6458,7 +6463,13 @@ impl RepoBatch {
       lifecycle::has_steps(&repo_only, HookPhase::PreRemove) || lifecycle::has_steps(&repo_only, HookPhase::PostRemove);
     let trust_refusal = if runs_hooks {
       let origin = crate::trust::origin_key_for_repo(&repo, workdir);
-      crate::trust::evaluate_silent(workdir, &origin, trust_mode, crate::trust::APPROVE_VIA_TRUST_ADD)?
+      crate::trust::evaluate_silent_bytes(
+        &cfg_path,
+        repo_bytes.as_deref(),
+        &origin,
+        trust_mode,
+        crate::trust::APPROVE_VIA_TRUST_ADD,
+      )?
     } else {
       None
     };
