@@ -559,6 +559,18 @@ pub struct App {
   /// config (Codex #333 review).
   exec_picker_cfg: ExecConfig,
 
+  /// The active repo's `commondir` (`<main>/.git`), captured alongside
+  /// [`Self::exec_picker_cfg`] for the same reason: in workspace mode the
+  /// active repo can swap while the overlay is open. Only read when the
+  /// picked profile carries a `[container]` block (issue #421), which mounts
+  /// it so git answers inside the container.
+  exec_picker_common_dir: PathBuf,
+
+  /// Monotonic counter behind the container name of an overlay run (issue
+  /// #421). The pid alone would collide across two overlays opened on the
+  /// same worktree within one session.
+  exec_container_seq: u64,
+
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
   /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
@@ -750,6 +762,8 @@ impl App {
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
       exec_picker_cfg: ExecConfig::default(),
+      exec_picker_common_dir: PathBuf::new(),
+      exec_container_seq: 0,
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
@@ -2951,6 +2965,7 @@ impl App {
     // *this* worktree against *this* config — not whatever is live later
     // (Codex #333 review).
     self.exec_picker_cfg = self.config.exec.clone();
+    self.exec_picker_common_dir = self.repo.commondir().to_path_buf();
     self.exec_picker.open(names, cwd);
     self.view = View::ExecPicker;
   }
@@ -2975,13 +2990,17 @@ impl App {
     }
   }
 
-  /// Resolve the highlighted exec profile to an `(argv, cwd)` pair for the
-  /// run loop to spawn in a PTY overlay (issue #325). `None` (with a
+  /// Resolve the highlighted exec profile to an `(argv, cwd, teardown)` triple
+  /// for the run loop to spawn in a PTY overlay (issue #325). `None` (with a
   /// status-bar message) when nothing is selected or the profile fails to
   /// resolve — e.g. an empty `command` array. The argv is the frozen
   /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
   /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
-  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
+  ///
+  /// `teardown` is `Some` only for a containerised profile (issue #421):
+  /// killing the pty leader kills the `docker` client, never the container it
+  /// asked the daemon for, so the overlay removes it by name on close.
+  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf, Option<Vec<String>>)> {
     let profile = self.exec_picker.selected_profile()?.to_string();
     // Resolve against the worktree captured when the picker opened, NOT the
     // live selection (which an auto-refresh may have drifted) — #333 review.
@@ -2990,6 +3009,7 @@ impl App {
       return None;
     };
     // Resolve against the `[exec]` config captured at open, not the live one.
+    let mut teardown: Option<Vec<String>> = None;
     match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
       Ok(mut argv) => {
         // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
@@ -3000,7 +3020,47 @@ impl App {
         if let Some(first) = argv.first_mut() {
           *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
         }
-        Some((argv, cwd))
+        // A profile carrying `[container]` runs in a container here too
+        // (issue #421) — the same profile must not mean "on the host" in the
+        // TUI and "in a container" on the CLI. The wrap comes AFTER the
+        // relative-program anchoring: host paths are mirrored inside the
+        // container, so the anchored absolute path is valid on both sides.
+        match crate::exec::resolve_exec_container(Some(&profile), &self.exec_picker_cfg) {
+          Ok(Some(container)) => {
+            match crate::exec::ContainerPlan::resolve(container, &self.exec_picker_common_dir, |bin| {
+              which::which(bin).is_ok()
+            }) {
+              // `wrap_interactive`: this overlay spawns into a real pty, so
+              // the container gets `-i -t` and a REPL / debugger / prompting
+              // command keeps working, exactly as it does when the same
+              // profile runs on the host here.
+              Ok(plan) => {
+                self.exec_container_seq += 1;
+                let name = crate::exec::container_run_name(&cwd, std::process::id(), self.exec_container_seq);
+                match plan.wrap_interactive(&cwd, &argv, &name) {
+                  Ok(wrapped) => {
+                    argv = wrapped;
+                    teardown = Some(plan.container_teardown_argv(&name));
+                  }
+                  Err(e) => {
+                    self.status = format!("exec profile {profile:?}: {e}");
+                    return None;
+                  }
+                }
+              }
+              Err(e) => {
+                self.status = format!("exec profile {profile:?}: {e}");
+                return None;
+              }
+            }
+          }
+          Ok(None) => {}
+          Err(e) => {
+            self.status = format!("exec profile {profile:?}: {e}");
+            return None;
+          }
+        }
+        Some((argv, cwd, teardown))
       }
       Err(e) => {
         self.status = format!("exec profile {profile:?}: {e}");

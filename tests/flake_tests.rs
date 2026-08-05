@@ -128,15 +128,15 @@ fn flake_exposes_runnable_app() {
 #[test]
 fn flake_exposes_dev_shell_with_rust_toolchain() {
   let s = read_flake();
-  // The binding and the builder are asserted on one line but not as one
-  // literal: `7202e74` put an `assert msrvOk;` between them, which is exactly
-  // the kind of edit this test should survive. Requiring both on the same
-  // line still rules out a `devShells.default` bound to something else
-  // elsewhere in the file.
+  // Read the binding, not one exact spelling of it: the flake may guard the
+  // shell before building it (`= assert msrvOk; pkgs.mkShell { … }`, added
+  // when the dev shell started verifying the MSRV floor). What the test owns
+  // is that the default devShell IS a `pkgs.mkShell`, not what stands between
+  // the `=` and it.
+  let binding = s.lines().find(|l| l.contains("devShells.default")).unwrap_or_default();
   assert!(
-    s.lines()
-      .any(|line| line.contains("devShells.default =") && line.contains("pkgs.mkShell")),
-    "flake must expose `devShells.<system>.default = pkgs.mkShell {{ ... }}`"
+    binding.contains("pkgs.mkShell"),
+    "flake must expose `devShells.<system>.default = … pkgs.mkShell {{ ... }}`, got: {binding:?}"
   );
   assert!(
     s.contains("rust-analyzer"),

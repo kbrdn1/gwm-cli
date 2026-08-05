@@ -147,6 +147,55 @@ pub struct ExecProfile {
   /// when this profile runs; the `--jobs` flag still wins over it.
   #[serde(default)]
   pub jobs: Option<u32>,
+  /// `[exec.profiles.<name>.container]` — run this profile's command inside
+  /// a container instead of on the host (issue #421). Absent ⇒ host, the
+  /// unchanged behaviour.
+  #[serde(default)]
+  pub container: Option<ContainerConfig>,
+}
+
+/// `[exec.profiles.<name>.container]` — wrap this profile's command in
+/// `docker run` / `podman run` (issue #421).
+///
+/// Attached to a **profile**, never to the inline `gwm exec -- <cmd>`: the
+/// user names the profile, so containerising is something they opted into.
+/// The inline surface stays byte-identical, which is what [`ExecConfig`]
+/// pledges.
+///
+/// The wrapper mirrors host paths (`-v <worktree>:<worktree>`) and mounts the
+/// main checkout's gitdir alongside, because a linked worktree's `.git` is a
+/// file holding an **absolute host path** — mount the worktree alone and no
+/// git command answers inside the container. See
+/// [`crate::exec::build_container_argv`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerConfig {
+  /// Image to run, e.g. `"rust:1.90"`. Required and non-empty — an empty
+  /// `image` is a config error, like an empty profile `command`.
+  pub image: String,
+  /// Container CLI to shell out to. Absent ⇒ auto-detected, `docker` first
+  /// then `podman` (gwm states its own order rather than inheriting one).
+  /// Any Docker-compatible CLI works (`nerdctl`, …) since gwm only builds an
+  /// argv for it.
+  #[serde(default)]
+  pub runtime: Option<String>,
+  /// Extra arguments spliced in **before the image**, forwarded to
+  /// `<runtime> run` verbatim: `["-e", "CI=1"]`, `["-v", "cache:/root/.cargo"]`,
+  /// `["--network", "none"]`. They come after gwm's own flags, so a repeated
+  /// flag (e.g. `-w`) overrides gwm's.
+  #[serde(default)]
+  pub extra_args: Vec<String>,
+  /// Suffix gwm's own bind mounts with `:z` (issue #421). Needed on an
+  /// SELinux-enforcing host (Fedora, RHEL, CentOS), where an unlabelled bind
+  /// mount leaves the container process with `EACCES` on the worktree and the
+  /// gitdir. Opt-in rather than detected, because relabelling **writes to the
+  /// host**: it applies a shared SELinux label recursively to the worktree and
+  /// to the main checkout's `.git`.
+  ///
+  /// `extra_args` cannot express this — it cannot reach the mounts gwm builds
+  /// itself — which is why it is a field.
+  #[serde(default)]
+  pub selinux_relabel: bool,
 }
 
 /// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).
@@ -1544,7 +1593,7 @@ impl Config {
   pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
     let cfg: ExecConfig = load_config_section(Some(repo_root), "exec")?;
     for (name, p) in &cfg.profiles {
-      crate::exec::validate_exec_profile_command(name, &p.command)?;
+      crate::exec::validate_exec_profile(name, p)?;
     }
     Ok(cfg)
   }
@@ -1627,7 +1676,7 @@ impl Config {
   /// resolvers share the same validators, so the two paths can't drift.
   pub(crate) fn validate_profiles(&self) -> Result<()> {
     for (name, p) in &self.exec.profiles {
-      crate::exec::validate_exec_profile_command(name, &p.command)?;
+      crate::exec::validate_exec_profile(name, p)?;
     }
     for (name, p) in &self.clean.profiles {
       crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
