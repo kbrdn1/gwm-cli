@@ -347,7 +347,7 @@ comments anchored to a diff hunk, is [#528](https://github.com/kbrdn1/gwm-cli/is
 those are reachable through GraphQL alone, so they are a second transport rather
 than a wider field list, and they were always the last of the three.
 
-### 5. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515) ✅)
+### 5. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515))
 
 gwm holds everything about a worktree except the part only its author can write:
 where they were. It knows the branch, the linked issue, the diff against base and
@@ -365,7 +365,7 @@ text, because a note is something one may want to `grep` or open without gwm
 running, which is also what rules git config out despite gwm already keeping
 three per-branch keys there.
 
-- [x] [#515](https://github.com/kbrdn1/gwm-cli/issues/515) ([PR #530](https://github.com/kbrdn1/gwm-cli/pull/530)) : `N` opens the selected worktree's note in `$EDITOR`, a binary marker flags the rows that carry one, `gwm note show [slug]` reads it back and the `--format=json` rows carry it in an additive `note` field. A rename moves the file, and `gwm doctor` reports a note whose branch is gone
+- [ ] [#515](https://github.com/kbrdn1/gwm-cli/issues/515) ([PR #530](https://github.com/kbrdn1/gwm-cli/pull/530)) : `N` opens the selected worktree's note in `$EDITOR`, a binary marker flags the rows that carry one, `gwm note show [slug]` reads it back and the `--format=json` rows carry it in an additive `note` field. A rename moves the file, and `gwm doctor` reports a note whose branch is gone
 
 It was meant to come after the PR/Issue view, which pays for the overlay
 machinery it would reuse. It does not reuse it: the note opens in `$EDITOR`
