@@ -72,11 +72,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree. `gwm note show [slug]` prints one on stdout and exits 1 when
   there is none, so it doubles as a presence test in a script, and the
   `--format=json` list rows carry an additive `note` field alongside the
-  daemon payload. The note is keyed on the branch, which has three stated
+  daemon payload. The note is keyed on the branch, which has four stated
   consequences: a detached row cannot carry one and says so instead of
-  no-oping; a rename moves the file with the branch; and `gwm doctor` reports
-  a note whose branch is gone, rather than `gwm clean`, whose safety property
-  is that `--yes` only removes directories git already ignores. Presence
+  no-oping; a rename moves the file with the branch; a branch name a
+  filesystem will not take backs no note anywhere, on every platform, so a
+  note cannot exist on macOS and vanish on the same repo cloned to Windows;
+  and `gwm doctor` reports a note whose branch is gone, rather than
+  `gwm clean`, whose safety property is that `--yes` only removes directories
+  git already ignores. Two branches differing only in case — which
+  `git pack-refs` lets coexist — share one file where the filesystem folds
+  case, so `N` refuses the pair by name rather than opening one branch's
+  editor on the other's prose. Presence
   means "non-blank", not "the file exists", because `vi` over an empty buffer
   writes one byte. One upgrade note, the same one `z` carried in #484: `N` is
   now a shipped default, so a `.gwm.toml` binding a chord *starting* with `N`
@@ -107,7 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   These are shell lines by convention (git, cargo and systemctl all word-split
   them), and gwm already reads `[review]` tools and hook `run =` lines that
   way, so they are word-split now, with a quoted program path staying one
-  token and an unbalanced quote falling back to the raw string. Found while
+  token and an unbalanced quote falling back to the raw string. Splitting is
+  POSIX and filenames are not, so a value that already names a file is handed
+  over whole and never split: `EDITOR=C:\Tools\nvim.exe` keeps launching
+  rather than becoming `C:Toolsnvim.exe` once the splitter eats the
+  backslashes. Found while
   reviewing the note editor (#515), which reuses the same handoff and would
   have shipped with the same hole. The path also reaches the child as an
   `OsStr` rather than a lossy string, so a repo path carrying non-UTF-8 bytes
