@@ -12249,3 +12249,127 @@ fn a_refreshed_title_follows_a_renamed_pr() {
     app.detail_overlay.title
   );
 }
+
+// --- inline review comments wiring (issue #528) ---------------------------
+
+fn one_thread() -> gwm::forge::ReviewThreads {
+  gwm::forge::ReviewThreads::Threads {
+    threads: vec![gwm::forge::ReviewThread {
+      path: "src/tui/app.rs".into(),
+      line: Some(11),
+      start_line: Some(7),
+      is_resolved: false,
+      is_outdated: false,
+      diff_hunk: "@@ -4,10 +4,11 @@\n-old\n+new".into(),
+      total_comments: 1,
+      comments: vec![gwm::forge::ForgeComment {
+        author: "coderabbitai".into(),
+        body: "This drops the guard.".into(),
+        created_at: "2026-08-04T13:40:21Z".into(),
+        url: Some("https://example.test/pull/61#discussion_r1".into()),
+      }],
+    }],
+    total: 1,
+  }
+}
+
+fn overlay_text(app: &gwm::tui::App) -> String {
+  app
+    .detail_overlay
+    .rows
+    .iter()
+    .map(|r| r.value.clone())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+#[test]
+fn landed_threads_reach_an_already_open_rich_view() {
+  // Same invariant as the PR itself: while the view is open it renders
+  // the freshest version of what it is showing. A second transport that
+  // resolves *after* the view opened is the common case here, not an
+  // edge one — the view is what triggers the request.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(
+    !overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "precondition: the threads have not landed yet"
+  );
+
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "the landing never reached the open view:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_thread_result_for_another_pr_is_not_shown() {
+  // The cache is keyed by number for the reason #138 already paid for.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  app.apply_pr_threads_fetch_result(62, Ok(one_thread()));
+
+  assert!(
+    !overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "PR 62's threads rendered under PR 61"
+  );
+}
+
+#[test]
+fn a_failed_thread_fetch_is_shown_not_swallowed() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  app.apply_pr_threads_fetch_result(61, Err("gh: HTTP 403".into()));
+
+  assert!(
+    overlay_text(&app).contains("gh: HTTP 403"),
+    "in:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_link_refresh_drops_cached_threads_with_everything_else() {
+  // Threads live in their own cache, so the invalidation that clears the
+  // PR must clear them too — otherwise a refreshed PR renders next to the
+  // previous run's inline comments.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "precondition"
+  );
+
+  app.refresh_link();
+
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Idle),
+    "stale threads survived the invalidation"
+  );
+}
+
+#[test]
+fn the_issue_view_never_grows_a_threads_section() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  app.enter_rich_view();
+
+  assert!(!overlay_text(&app).to_lowercase().contains("inline comments"));
+}

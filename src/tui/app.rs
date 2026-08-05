@@ -1862,6 +1862,14 @@ impl App {
           applied = true;
           github_applied = true;
         }
+        TaskMsg::GithubPrThreads(generation, number, result) => {
+          if !self.tasks.complete(TaskKind::GithubPrThreads(number), generation) {
+            continue;
+          }
+          self.land_pr_threads(number, result);
+          applied = true;
+          github_applied = true;
+        }
         TaskMsg::Sync(generation, name, result) => {
           if !self.tasks.complete(TaskKind::Sync, generation) {
             // Late result — a newer sync (or an invalidate) superseded it.
@@ -3135,6 +3143,10 @@ impl App {
     if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
       let source = RichSource::Pr(pr.clone());
       let title = format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title);
+      let number = pr.number;
+      // Before the rows are built, so the section opens as "loading"
+      // instead of appearing out of nowhere one landing later.
+      self.spawn_github_pr_threads(number);
       self.open_rich_overlay(source, title, width);
       return;
     }
@@ -3158,7 +3170,7 @@ impl App {
     let (kind, rows, target, number) = match &source {
       RichSource::Pr(pr) => (
         crate::tui::state::detail_overlay::DetailKind::RichPr,
-        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -3227,7 +3239,9 @@ impl App {
     }
     let width = self.rich_view_width();
     let rows = match &self.rich_overlay_source {
-      Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(pr, width),
+      Some(RichSource::Pr(pr)) => {
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width)
+      }
       Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
       None => return,
     };
@@ -3251,6 +3265,13 @@ impl App {
       return;
     }
     self.refresh_github_status();
+    // The invalidation above dropped the cached threads as well, so the
+    // section would otherwise stay empty until the view was reopened.
+    if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::RichPr {
+      if let Some(n) = self.github.link.pr {
+        self.spawn_github_pr_threads(n);
+      }
+    }
   }
 
   /// Contextual KEY routing (issue #436) — same mechanism that turns
@@ -5878,6 +5899,26 @@ impl App {
     true
   }
 
+  /// Inline-review-thread counterpart to [`Self::spawn_github_pr`] (issue
+  /// #528). Not part of the bulk prefetch: this is a second request per
+  /// PR, and the only surface that reads it is the rich view, so it is
+  /// spawned when that view opens rather than alongside every PR fetch.
+  fn spawn_github_pr_threads(&mut self, n: u64) -> bool {
+    let key = FetchKey::PrThreads(n);
+    // Checked here rather than in `spawn_github_fetch`, which bails out
+    // silently: marking `Loading` for a request that is never made leaves
+    // the section spinning forever.
+    if self.github.forge.is_none() || self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubPrThreads(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, String::new(), generation);
+    true
+  }
+
   /// Spawn one background `gh` shell-out for `key` tagged with `generation`
   /// and wire its result back over the shared task channel (issue #255,
   /// migrated from #217's dedicated channel). Deliberately a thin shell: it
@@ -5899,6 +5940,9 @@ impl App {
       let msg = match key {
         FetchKey::Issue(n) => TaskMsg::GithubIssue(generation, n, forge.fetch_issue(n).map_err(|e| e.to_string())),
         FetchKey::Pr(n) => TaskMsg::GithubPr(generation, n, forge.fetch_pr(n).map_err(|e| e.to_string())),
+        FetchKey::PrThreads(n) => {
+          TaskMsg::GithubPrThreads(generation, n, forge.fetch_pr_threads(n).map_err(|e| e.to_string()))
+        }
       };
       let _ = tx.send(msg);
     });
@@ -5968,6 +6012,44 @@ impl App {
       self.sync_rich_overlay(RichSource::Pr(status.clone()));
     }
     self.github.apply_pr_result(r);
+  }
+
+  /// Test seam for the inline-review-thread fetch (issue #528), the
+  /// counterpart of [`Self::apply_pr_fetch_result`]. Routes through the
+  /// same [`Self::land_pr_threads`] the drain uses, so the two cannot
+  /// desync.
+  pub fn apply_pr_threads_fetch_result(
+    &mut self,
+    number: u64,
+    r: std::result::Result<crate::forge::ReviewThreads, String>,
+  ) {
+    self.land_pr_threads(number, r);
+  }
+
+  /// The cached inline-review-thread state for `number` (issue #528).
+  pub fn pr_threads_fetch_state(&self, number: u64) -> &GitHubFetchState<crate::forge::ReviewThreads> {
+    self.github.pr_threads_state(number)
+  }
+
+  /// Stamp a landed thread fetch and, when the rich view is showing that
+  /// very PR, re-run its invariant so the section stops saying "loading".
+  ///
+  /// Called from **both** landing paths — the drain and the test seam —
+  /// for the reason the CI counterpart spells out below: a landing wired
+  /// only into the seam leaves the running TUI without the refresh. The
+  /// threads are a second transport, so this is the third path where that
+  /// pairing has to hold.
+  fn land_pr_threads(&mut self, number: u64, r: std::result::Result<crate::forge::ReviewThreads, String>) {
+    self.github.complete_pr_threads(number, r);
+    // Re-render through the one invariant rather than touching the rows
+    // here: the view renders the side the LINK prefers, and these threads
+    // belong to it only when the linked PR is the one that landed.
+    if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+      if pr.number == number {
+        let pr = pr.clone();
+        self.sync_rich_overlay(RichSource::Pr(pr));
+      }
+    }
   }
 
   /// Rebuild the open CI checks overlay from a landed PR fetch (validation
@@ -6066,7 +6148,7 @@ impl App {
     let width = self.rich_view_width();
     let (rows, target, number) = match &source {
       RichSource::Pr(pr) => (
-        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
         LinkTarget::Pr,
         pr.number,
       ),
