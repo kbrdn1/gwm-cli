@@ -7615,3 +7615,24 @@ fn agents_json_carries_the_note_like_the_list_does() {
     "payload was: {rows}"
   );
 }
+
+#[test]
+fn note_show_resolves_the_main_checkout_by_name() {
+  // `worktree::find_fuzzy` filters the main worktree out, so naming it from
+  // inside a linked worktree answered "not found" for a note every other
+  // surface handles: the TUI's `N`, the no-slug path and the JSON row all
+  // carry the main row's note (Codex review, PR #530, pass 3).
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  write_note_file(dir.path(), "main", "the main checkout's note\n");
+  let main_name = dir.path().file_name().unwrap().to_string_lossy().to_string();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["note", "show", &main_name])
+    .assert()
+    .success()
+    .stdout(predicate::eq("the main checkout's note\n"));
+}

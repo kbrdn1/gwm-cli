@@ -2214,3 +2214,50 @@ fn rename_worktree_refuses_when_a_note_already_sits_at_the_destination() {
     Some("prose from a previous life of this name\n")
   );
 }
+
+#[test]
+fn rename_worktree_refuses_a_target_name_that_cannot_back_the_note() {
+  // The mirror of the occupied-destination preflight. gwm's own name
+  // validation accepts a segment ending in `.md` (it only enforces git's
+  // rules plus the Windows ones), while the note store keeps that suffix off
+  // directory names. Without this check the rename reported success and the
+  // note stayed behind under the old branch, gone from the marker and from
+  // `gwm note show` (Codex review, PR #530, pass 3).
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  write_note(&repo, "feat/#1-old", "must not be orphaned by a rename\n");
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "docs.md/fix").unwrap_err();
+
+  assert!(
+    err.to_string().contains("cannot back a note file"),
+    "the error must say why, got: {err}"
+  );
+  assert!(old_path.exists(), "nothing may move before the refusal");
+  assert!(repo.find_branch("feat/#1-old", git2::BranchType::Local).is_ok());
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-old").as_deref(),
+    Some("must not be orphaned by a rename\n")
+  );
+}
+
+#[test]
+fn a_branch_without_a_note_renames_freely_to_such_a_name() {
+  // The refusal is scoped to what it protects: with no note to carry there
+  // is nothing to orphan, so the rename must not be blocked by a rule about
+  // notes.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-plain");
+  worktree::add(&repo, "feat-1-plain", &old_path, "feat/#1-plain", false).unwrap();
+
+  let new_path = wt_root.path().join("docs-md-fix");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#1-plain", &new_path, "docs.md/fix").unwrap();
+
+  assert!(repo.find_branch("docs.md/fix", git2::BranchType::Local).is_ok());
+}

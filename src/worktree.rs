@@ -648,15 +648,29 @@ pub fn rename_worktree(
   //     nothing is half-done and the message names the file to deal with:
   //     `gwm doctor` already reports it as an orphan. A blank leftover does
   //     not block, since overwriting it loses nothing.
+  //
+  //     The mirror case, same preflight: the note being CARRIED cannot land
+  //     under a name that backs no file. gwm's own name validation accepts
+  //     some of those (a segment ending in `.md`, which the note store keeps
+  //     off directory names), so the rename would report success while the
+  //     note stayed behind under the old branch, gone from the marker and
+  //     from `gwm note show`. Only a branch that actually carries a note is
+  //     refused: with nothing to move there is nothing to lose.
   if new_branch != old_branch {
-    if let Some(note) = Repository::open(workdir)
-      .ok()
-      .and_then(|repo| crate::notes::occupied_by(&repo, new_branch))
-    {
-      return Err(GwmError::CommandFailed(format!(
-        "a note already exists for `{new_branch}`: {} — move or delete it first (it is an orphan `gwm doctor` reports)",
-        note.display()
-      )));
+    if let Ok(repo) = Repository::open(workdir) {
+      if crate::notes::read(&repo, old_branch).is_some() && crate::notes::relative_path(new_branch).is_none() {
+        return Err(GwmError::CommandFailed(format!(
+          "`{old_branch}` carries a note and `{new_branch}` cannot back a note file — \
+           rename to a name a filesystem accepts, or move the note out of {} first",
+          crate::notes::notes_dir(&repo).display()
+        )));
+      }
+      if let Some(note) = crate::notes::occupied_by(&repo, new_branch) {
+        return Err(GwmError::CommandFailed(format!(
+          "a note already exists for `{new_branch}`: {} — move or delete it first (it is an orphan `gwm doctor` reports)",
+          note.display()
+        )));
+      }
     }
   }
 

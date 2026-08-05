@@ -3321,7 +3321,13 @@ fn cmd_path(pattern: String, format: OutputFormat) -> Result<()> {
 fn cmd_note_show(slug: Option<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let branch = match slug {
-    Some(pattern) => worktree::find_fuzzy(&repo, &pattern)?.branch,
+    // `resolve_agents_worktree`, not `find_fuzzy`: the latter filters out the
+    // main worktree, which every other note surface handles (the TUI's `N`,
+    // the no-slug path, the JSON row). Naming the main checkout from inside a
+    // linked worktree would have answered "not found" for a note that plainly
+    // exists (Codex review, PR #530). It also brings `.` along, resolving the
+    // worktree the CWD sits in, the same token `gwm agents` takes.
+    Some(pattern) => resolve_agents_worktree(&worktree::list(&repo)?, &pattern)?.branch,
     None => Repository::discover(std::env::current_dir()?)
       .ok()
       .and_then(|here| here.head().ok()?.shorthand().ok().map(str::to_string)),
