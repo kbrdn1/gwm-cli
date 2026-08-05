@@ -25,6 +25,15 @@
 //!   rule the agent pin settled ([`crate::github::pinnable_branch`]).
 //! - **A rename has to move the file**, which
 //!   [`crate::worktree::rename_worktree`] does.
+//! - **Recreating a branch of the same name adopts its note, on purpose.**
+//!   Surviving `gwm remove` is the property that decided this storage over
+//!   the in-worktree one, and the note is usually worth most between the
+//!   removal and the merge. Recreating `feat/#515-notes` is resuming that
+//!   work, restoring it with `gwm undo`, or reviewing the same PR again;
+//!   in all three the old note is the thing you wanted back. Guarding
+//!   `worktree::add` against it would trade the storage's stated advantage
+//!   for a case the user can settle with one `rm` that `gwm doctor` has
+//!   been naming since the branch went away.
 //! - **A branch name is not always a legal filename.** git accepts `<`,
 //!   `>`, `"`, `|` and a component ending in `.`; Windows accepts none of
 //!   them (and silently normalises the trailing dot away, which would make
@@ -108,7 +117,11 @@ pub fn relative_path(branch: &str) -> Option<PathBuf> {
   // #530). Keeping the suffix off directory names makes the sets disjoint by
   // construction rather than by ordering luck. The LAST component is free:
   // branch `foo.md` is the file `foo.md.md`, which collides with nothing.
-  if parents.iter().any(|c| c.ends_with(NOTE_EXT)) {
+  // Case-folded, because the comparison has to hold where the filesystem
+  // folds too: on macOS's default volume and on Windows, `foo.MD` and
+  // `foo.md` are one path, so a case-sensitive check would keep the sets
+  // disjoint on Linux only.
+  if parents.iter().any(|c| c.to_ascii_lowercase().ends_with(NOTE_EXT)) {
     return None;
   }
   let mut out = PathBuf::new();
@@ -216,7 +229,8 @@ fn collect_files(dir: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
   }
 }
 
-/// The note a move onto `branch` would destroy, if any.
+/// The prose sitting under `branch`, if any: what a move onto it would
+/// destroy, and equally what a move away from it would carry.
 ///
 /// Deliberately **not** [`read`]. That one answers *does this worktree carry
 /// a note* and collapses absent, unreadable and blank into `None`, which is

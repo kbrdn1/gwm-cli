@@ -2261,3 +2261,30 @@ fn a_branch_without_a_note_renames_freely_to_such_a_name() {
 
   assert!(repo.find_branch("docs.md/fix", git2::BranchType::Local).is_ok());
 }
+
+#[test]
+fn an_unreadable_source_note_is_still_a_note_worth_refusing_a_rename_for() {
+  // The preflight asked `notes::read`, which answers a display question and
+  // collapses "unreadable" into "absent". A note carrying invalid UTF-8 then
+  // slipped past a rename onto a name that backs no file, and was left under
+  // the old branch where the doctor's scan cannot see it either. Both sides
+  // of the preflight read through one byte-preserving predicate now (Codex
+  // review, PR #530, pass 4).
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  let note = gwm::notes::prepare(&repo, "feat/#1-old").unwrap().unwrap();
+  std::fs::write(&note, [0xff, 0xfe, b'h', b'i']).unwrap();
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "docs.md/fix").unwrap_err();
+
+  assert!(err.to_string().contains("cannot back a note file"), "got: {err}");
+  assert_eq!(
+    std::fs::read(&note).unwrap(),
+    vec![0xff, 0xfe, b'h', b'i'],
+    "the bytes stay where they are, reachable under the old name"
+  );
+}

@@ -658,7 +658,12 @@ pub fn rename_worktree(
   //     refused: with nothing to move there is nothing to lose.
   if new_branch != old_branch {
     if let Ok(repo) = Repository::open(workdir) {
-      if crate::notes::read(&repo, old_branch).is_some() && crate::notes::relative_path(new_branch).is_none() {
+      // `occupied_by` on BOTH sides, not `read` on one and `occupied_by` on
+      // the other: "there is prose here" is one question, and asking it two
+      // ways let an unreadable source note slip through this refusal and get
+      // stranded under the old branch, where the doctor's scan cannot see it
+      // either (Codex review, PR #530, pass 4).
+      if crate::notes::occupied_by(&repo, old_branch).is_some() && crate::notes::relative_path(new_branch).is_none() {
         return Err(GwmError::CommandFailed(format!(
           "`{old_branch}` carries a note and `{new_branch}` cannot back a note file — \
            rename to a name a filesystem accepts, or move the note out of {} first",

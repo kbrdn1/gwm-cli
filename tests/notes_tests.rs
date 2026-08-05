@@ -355,3 +355,15 @@ fn a_destination_that_is_provably_blank_is_still_free() {
   assert_eq!(notes::occupied_by(&repo, "feat/#515-blank"), None);
   assert_eq!(notes::occupied_by(&repo, "feat/#515-absent"), None);
 }
+
+#[test]
+fn the_note_extension_is_matched_without_regard_to_case() {
+  // macOS's default filesystem and Windows both fold case, so `foo.MD/bar`
+  // wants the directory `foo.MD` and `foo` wants the file `foo.md`, which are
+  // the same path there. The rule that keeps the suffix off directory names
+  // has to fold case too, or it holds on Linux and not where most of the
+  // users are (Codex review, PR #530, pass 4).
+  for branch in ["foo.MD/bar", "foo.Md/bar", "a/b.mD/c"] {
+    assert_eq!(notes::relative_path(branch), None, "{branch:?} must carry no note");
+  }
+}
