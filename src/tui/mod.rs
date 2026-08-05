@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 pub use app::{
   read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
-  OpenTarget, RepoMeta, View, WorkspaceState,
+  NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -45,6 +45,7 @@ pub use state::exec_picker::ExecPicker;
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
+pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
 
@@ -642,6 +643,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // detach, and routing it through a rebindable context would silently
       // steal a keystroke from the child program. See the `modal_keymap`
       // module note ("What stays hard-coded").
+      // #515: the note editor. Every printable, `Enter`, `Backspace` and
+      // `Delete` are text — `App::handle_note_key` routes them before the
+      // modal resolution, which is what keeps `d` from reaching the global
+      // delete verb while someone writes "done".
+      View::Note => {
+        if let NoteKey::LaunchEditor(command, path) = app.handle_note_key(key) {
+          run_subshell(terminal, &command, &[path.as_os_str()], None, &mut app, "note")?;
+          app.reload_note_after_editor();
+        }
+      }
       View::Pty => {
         // #325: once a one-shot exec command has finished, the overlay is
         // just showing its final output — there is no live child to receive
@@ -1041,12 +1052,11 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // same suspend-and-restore loop `o` uses in `mode = "editor"`. The
     // marker is re-read for that one row on the way back — the editor may
     // have created the note, or emptied it.
-    Action::EditNote if !app.picker_mode => {
-      if let Some((command, path)) = app.prepare_note_edit() {
-        run_subshell(terminal, &command, &[path.as_os_str()], None, app, "note")?;
-        app.sync_selected_note_marker();
-      }
-    }
+    // #515: `N` opens the note in the TUI. It used to suspend the whole
+    // terminal to spawn `$EDITOR`, which is a heavier gesture than the
+    // three lines a note usually is; `Ctrl+e` inside the modal still gets
+    // there in one keystroke.
+    Action::EditNote if !app.picker_mode => app.open_note_editor(),
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #420: `I` opens the rich PR / issue view on the linked side.
     Action::RichView if !app.picker_mode => app.enter_rich_view(),

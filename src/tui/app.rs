@@ -123,6 +123,27 @@ pub enum View {
   /// PR/Issue view reuses it. State lives on [`App::detail_overlay`]; keys
   /// resolve through [`crate::tui::modal_keymap::KeyContext::Detail`].
   DetailOverlay,
+  /// The in-TUI note editor (issue #515). A centred modal holding the
+  /// selected worktree's note in an editable buffer; `Esc` writes and
+  /// closes, `Ctrl+e` hands the same file to `$EDITOR`. State lives on
+  /// [`App::note_editor`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::Note`].
+  Note,
+}
+
+/// What the run loop must do after [`App::handle_note_key`] processes a key
+/// in the note editor (issue #515). Mirrors [`CreateKey`] / [`ExecPickerKey`]
+/// — the testable handler owns the buffer, the cursor and the write, and the
+/// loop owns the one side effect it cannot do: suspending the terminal to
+/// run `$EDITOR`.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum NoteKey {
+  /// The key edited the buffer, moved the cursor, or closed the editor.
+  Handled,
+  /// `Ctrl+e` — the buffer has been flushed to the returned path and the
+  /// loop should run the command on it, then call
+  /// [`App::reload_note_after_editor`].
+  LaunchEditor(String, std::path::PathBuf),
 }
 
 /// What the run loop must do after [`App::handle_exec_picker_key`]
@@ -552,6 +573,11 @@ pub struct App {
   /// ([`PtyKind::Exec`]) in the selected worktree's directory.
   pub exec_picker: ExecPicker,
 
+  /// The open note editor (issue #515), or `None` when no note is being
+  /// edited. An `Option` rather than an always-present empty buffer: the
+  /// editor owns a branch and a path it can only have while open.
+  pub note_editor: Option<crate::tui::state::note_editor::NoteEditor>,
+
   /// The `[exec]` config captured when the exec picker opened (issue #325).
   /// In workspace mode `sync_active_repo` can swap `self.config` to another
   /// repo while the overlay is open, so `Enter` resolves the argv against
@@ -761,6 +787,7 @@ impl App {
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
+      note_editor: None,
       exec_picker_cfg: ExecConfig::default(),
       exec_picker_common_dir: PathBuf::new(),
       exec_container_seq: 0,
@@ -2554,6 +2581,7 @@ impl App {
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
+      View::Note => HintContext::Note,
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
@@ -4127,19 +4155,33 @@ impl App {
     }
   }
 
-  /// The `$EDITOR` command and the note file to hand it for the selected
-  /// row (issue #515), with the note's parent directory already created.
+  /// Open the selected row's note in the in-TUI editor (issue #515).
   ///
-  /// `None` when the row cannot carry a note, and the reason is on the
-  /// status bar rather than nothing happening: a detached row has no
-  /// branch to key on (the rule [`crate::github::pinnable_branch`] settled
-  /// for the agent pin), and a branch name git accepts but no filesystem
-  /// can back is refused rather than silently written somewhere else.
+  /// `N` used to hand the file straight to `$EDITOR`. It does not any more:
+  /// a note is usually three lines written between two thoughts, and
+  /// suspending the whole TUI to spawn `vi` for that is a heavier gesture
+  /// than the note. `$EDITOR` is still one keystroke away inside the modal.
   ///
-  /// The editor handoff itself is the `o`-with-`mode = "editor"` one — same
-  /// `editor_cmd` → `$EDITOR` → `vi` precedence, same suspend-and-restore
-  /// loop — so pressing `N` cannot feel different from pressing `o`.
-  pub fn prepare_note_edit(&mut self) -> Option<(String, PathBuf)> {
+  /// A row that cannot carry a note leaves the view alone and says why on
+  /// the status bar, rather than opening an editor over nothing —
+  /// [`Self::note_target`] owns those three refusals.
+  pub fn open_note_editor(&mut self) {
+    let Some((branch, path)) = self.note_target() else {
+      return;
+    };
+    let text = crate::notes::read(&self.repo, &branch).unwrap_or_default();
+    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    self.view = View::Note;
+  }
+
+  /// The branch and note path for the selected row, or `None` with the
+  /// reason on the status bar.
+  ///
+  /// A detached row has no branch to key on (the rule
+  /// [`crate::github::pinnable_branch`] settled for the agent pin), and a
+  /// branch name git accepts but no filesystem can back is refused rather
+  /// than silently written somewhere else.
+  fn note_target(&mut self) -> Option<(String, PathBuf)> {
     let Some(selected) = self.selected() else {
       self.status = "nothing selected".into();
       return None;
@@ -4149,7 +4191,7 @@ impl App {
       return None;
     };
     match crate::notes::prepare(&self.repo, &branch) {
-      Ok(Some(path)) => Some((resolve_editor_command(&self.config.tui.open), path)),
+      Ok(Some(path)) => Some((branch, path)),
       Ok(None) => {
         self.status = format!("`{branch}` cannot back a note file — the name is not a portable filename");
         None
@@ -4161,6 +4203,117 @@ impl App {
         None
       }
     }
+  }
+
+  /// Write the open buffer to disk.
+  ///
+  /// A blank buffer **removes** the file rather than writing one byte: that
+  /// is the only way to discard a note (there is no "quit without saving"),
+  /// and a blank file left behind would read as absent everywhere while
+  /// still being what `gwm doctor` reports once the branch is gone.
+  ///
+  /// A clean buffer writes nothing at all, so opening a note to read it
+  /// does not touch its mtime.
+  fn flush_note(&mut self) {
+    let Some(editor) = self.note_editor.as_mut() else {
+      return;
+    };
+    if !editor.dirty {
+      return;
+    }
+    let text = editor.text();
+    let path = editor.path.clone();
+    let outcome = if text.is_empty() {
+      match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+      }
+    } else {
+      std::fs::write(&path, &text)
+    };
+    match outcome {
+      Ok(()) => editor.dirty = false,
+      Err(e) => self.status = format!("could not write the note: {e}"),
+    }
+  }
+
+  /// Route one key while the note editor is open (issue #515).
+  ///
+  /// **Typing routes before everything else**, which is the contract every
+  /// always-typing context in this TUI holds (Codex review #456, and
+  /// [`crate::tui::modal_keymap::KeyContext::reserved_typing_stroke`] is
+  /// where it is declared). Get it wrong here and writing "done" in a note
+  /// fires the global `d` — the delete confirm, on the very worktree the
+  /// note is about.
+  pub fn handle_note_key(&mut self, key: KeyEvent) -> NoteKey {
+    use crate::tui::modal_keymap::{KeyContext, ModalAction};
+    use crossterm::event::KeyCode as KC;
+
+    let stroke = crate::tui::keymap::KeyStroke::from_event(&key);
+    if KeyContext::Note.reserved_typing_stroke(&stroke) {
+      if let Some(editor) = self.note_editor.as_mut() {
+        match key.code {
+          KC::Char(c) => editor.insert_char(c),
+          KC::Enter => editor.newline(),
+          KC::Backspace => editor.backspace(),
+          KC::Delete => editor.delete(),
+          _ => {}
+        }
+      }
+      return NoteKey::Handled;
+    }
+
+    match self.resolve_modal(KeyContext::Note, key) {
+      Some(ModalAction::NoteClose) => {
+        self.flush_note();
+        self.note_editor = None;
+        self.view = View::List;
+        self.sync_selected_note_marker();
+        return NoteKey::Handled;
+      }
+      // `$EDITOR` opens the *file*, so the buffer is flushed first —
+      // otherwise it shows the note as it was before the keys just typed,
+      // and saving there would overwrite them.
+      Some(ModalAction::NoteOpenEditor) => {
+        self.flush_note();
+        if let Some(editor) = self.note_editor.as_ref() {
+          let path = editor.path.clone();
+          return NoteKey::LaunchEditor(resolve_editor_command(&self.config.tui.open), path);
+        }
+        return NoteKey::Handled;
+      }
+      _ => {}
+    }
+
+    // Movement. Hard-coded rather than bindable for the same reason the
+    // module note gives for `Esc` / `Enter`: an arrow key means one thing
+    // in a text buffer and rebinding it would only take it away.
+    let height = self.note_editor.as_ref().map_or(10, |e| e.viewport);
+    if let Some(editor) = self.note_editor.as_mut() {
+      match key.code {
+        KC::Left => editor.left(),
+        KC::Right => editor.right(),
+        KC::Up => editor.up(),
+        KC::Down => editor.down(),
+        KC::Home => editor.home(),
+        KC::End => editor.end(),
+        KC::PageUp => editor.page_up(height),
+        KC::PageDown => editor.page_down(height),
+        _ => {}
+      }
+    }
+    NoteKey::Handled
+  }
+
+  /// Re-read the note after `$EDITOR` exited (issue #515), so the modal
+  /// shows what was written outside rather than the stale buffer.
+  pub fn reload_note_after_editor(&mut self) {
+    let Some(editor) = self.note_editor.as_ref() else {
+      return;
+    };
+    let (branch, path) = (editor.branch.clone(), editor.path.clone());
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
   }
 
   /// Re-read the selected row's note presence once the editor has exited

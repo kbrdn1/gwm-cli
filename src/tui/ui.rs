@@ -172,6 +172,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
     View::Pty => draw_pty_overlay(f, app),
+    View::Note => draw_note_editor(f, app),
     // #325: exec profile picker renders as a small centred modal.
     View::ExecPicker => draw_exec_picker(f, app),
     // #325: clean reclaim report renders as a centred modal.
@@ -2180,6 +2181,9 @@ pub enum HintContext {
   /// PR's or issue's description, reviews and conversation — j/k select,
   /// Enter opens the row's URL, f re-fetches, Esc closes.
   RichView,
+  /// The in-TUI note editor (issue #515): every printable is text, so the
+  /// only verbs advertised are the two ways out.
+  Note,
 }
 
 impl HintContext {
@@ -2205,6 +2209,7 @@ impl HintContext {
       HintContext::Detail => "agents",
       HintContext::CiChecks => "checks",
       HintContext::RichView => "pr/issue",
+      HintContext::Note => "note",
     }
   }
 
@@ -2360,6 +2365,13 @@ impl HintContext {
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
       ],
+      // #515: no verbs beyond the exits — j/k are letters here, and the
+      // arrows are hard-coded for the same reason `Esc` is elsewhere.
+      HintContext::Note => &[
+        Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "save & close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2482,6 +2494,7 @@ impl HintContext {
       HintContext::Detail => KeyContext::Detail,
       HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::RichView => KeyContext::RichView,
+      HintContext::Note => KeyContext::Note,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -3106,7 +3119,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
     rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
     rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
-    rows.push(entry(Action::EditNote, "open the selected worktree's note in $EDITOR"));
+    rows.push(entry(Action::EditNote, "edit the selected worktree's note"));
     rows.push(entry(
       Action::ExitToWorktree,
       "quit TUI and print selected path to stdout",
@@ -3290,6 +3303,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Note Editor".to_string()),
+      HelpRow::Blank,
+      fixed("Left/Right/Up/Down", "move the cursor"),
+      fixed("Home/End", "start / end of line"),
+      fixed("PgUp/PgDn", "page through the note"),
+      modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
+      modal_entry(ModalAction::NoteClose, "save and close (empty the note to delete it)"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -4809,6 +4830,59 @@ fn draw_report(f: &mut Frame, app: &App) {
     )),
     layout[4],
   );
+}
+
+// ── Note editor (issue #515) ───────────────────────────────────────────────
+
+/// Render the in-TUI note editor: the branch in the title, the buffer in an
+/// 80% x 80% centred box, and the cursor placed on the terminal so the
+/// caret blinks where the next character lands.
+///
+/// The scroll is clamped **here**, with the height the layout actually gave,
+/// which is why [`crate::tui::state::note_editor::NoteEditor`] does not try
+/// to know its own viewport ahead of a resize. That same call teaches the
+/// editor what a page key should move by.
+fn draw_note_editor(f: &mut Frame, app: &mut App) {
+  let area = centered(80, 80, f.area());
+  f.render_widget(Clear, area);
+
+  let title = match app.note_editor.as_ref() {
+    Some(editor) => format!(" note · {} ", crate::naming::sanitise_for_terminal(&editor.branch)),
+    None => " note ".to_string(),
+  };
+  let block = overlay_block(app.theme.accent)
+    .title(title)
+    .title_alignment(ratatui::layout::Alignment::Center);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+
+  let Some(editor) = app.note_editor.as_mut() else {
+    return;
+  };
+  editor.clamp_scroll(inner.height as usize);
+
+  let visible: Vec<Line> = editor
+    .lines
+    .iter()
+    .skip(editor.scroll)
+    .take(inner.height as usize)
+    // Not wrapped: a wrapped line makes the screen row the cursor sits on
+    // stop matching its buffer line, and the caret would land somewhere
+    // else entirely. Long lines scroll out of view instead — `Ctrl+e` is
+    // the answer for prose that needs the width.
+    .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(app.theme.name))))
+    .collect();
+  f.render_widget(Paragraph::new(visible), inner);
+
+  // The caret. Columns are `char`s in the buffer and cells on screen, which
+  // is the same approximation the cursor itself makes (see the state module
+  // note): a wide CJK glyph puts the caret one cell left of the glyph it is
+  // about to push.
+  let row = editor.cursor_line.saturating_sub(editor.scroll) as u16;
+  if row < inner.height {
+    let col = (editor.cursor_col as u16).min(inner.width.saturating_sub(1));
+    f.set_cursor_position((inner.x + col, inner.y + row));
+  }
 }
 
 // ── PTY overlay (issue #35) ────────────────────────────────────────────────

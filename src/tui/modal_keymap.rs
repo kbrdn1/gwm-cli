@@ -115,6 +115,10 @@ pub enum KeyContext {
   /// Rich PR / issue view (issue #420) — the same shell opened on the
   /// linked PR's or issue's description, reviews and conversation.
   RichView,
+  /// The in-TUI note editor (issue #515). An always-typing context: every
+  /// printable, `Enter` and `Backspace` are text, so the only bindable
+  /// verbs are the two ways out.
+  Note,
 }
 
 impl KeyContext {
@@ -139,6 +143,13 @@ impl KeyContext {
     }
     match (self, stroke.code) {
       (KeyContext::CommandPalette | KeyContext::LinkInputNumber | KeyContext::ConfigEdit, KC::Backspace) => true,
+      // Note (#515) reserves more than any other context, because it is the
+      // only multi-line one: `Enter` splits a line and `Delete` removes
+      // forwards, so both are text rather than verbs. Binding `close` to
+      // any of these would leave the editor with a key that types instead
+      // of closing — and `d` reaching the global keymap would open the
+      // delete confirm on the worktree the user is writing about.
+      (KeyContext::Note, KC::Backspace | KC::Enter | KC::Delete | KC::Char(_)) => true,
       // A shifted letter is an uppercase (kitty-style) — not palette
       // input, so it stays bindable.
       (KeyContext::CommandPalette, KC::Char(c)) if stroke.modifiers.contains(KM::SHIFT) => c.is_ascii_digit(),
@@ -170,6 +181,7 @@ impl KeyContext {
       KeyContext::Clean => "clean",
       KeyContext::CiChecks => "ci_checks",
       KeyContext::RichView => "rich_view",
+      KeyContext::Note => "note",
     }
   }
 
@@ -199,6 +211,7 @@ impl KeyContext {
       Clean,
       CiChecks,
       RichView,
+      Note,
     ]
   }
 }
@@ -367,6 +380,18 @@ define_modal_actions! {
     RichViewPrev    => "select_prev" [ "k", "Up" ],
     RichViewOpen    => "open"        [ "Enter" ],
     RichViewRefresh => "refresh"     [ "f" ],
+  }
+  // #515: two verbs, because everything else is text. `Esc` writes and
+  // closes — there is no discard, the buffer is emptied instead (see
+  // `state::note_editor`). `Ctrl+e` hands the same file to `$EDITOR`,
+  // which is what `N` itself used to do.
+  //
+  // `Ctrl+e` is now spoken for. If line motions ever land here, the
+  // readline `Ctrl+a` / `Ctrl+e` pair cannot have it — pick another key
+  // rather than shadowing the way out to a real editor.
+  Note {
+    NoteClose      => "close"       [ "Esc" ],
+    NoteOpenEditor => "open_editor" [ "Ctrl+e" ],
   }
 }
 

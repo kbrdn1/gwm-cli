@@ -5,7 +5,7 @@ use gwm::naming::BRANCH_TYPES;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
-  ConfirmKeyAction, CountdownTickOutcome, Field, View,
+  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -11986,15 +11986,18 @@ fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
 // ---- per-worktree notes (#515) -------------------------------------------
 
 #[test]
-fn preparing_a_note_edit_returns_the_editor_and_the_file() {
-  // The handoff is the `o`-with-`mode = "editor"` one, so `N` cannot feel
-  // different from `o`: same `editor_cmd` -> `$EDITOR` -> `vi` precedence.
+fn opening_the_note_editor_resolves_the_file_in_the_main_git_dir() {
   let (dir, mut app) = make_app();
   app.list_state.select(Some(0));
 
-  let (command, path) = app.prepare_note_edit().expect("the main row carries a branch");
+  app.open_note_editor();
 
-  assert!(!command.is_empty(), "an editor command must always resolve");
+  let path = app
+    .note_editor
+    .as_ref()
+    .expect("the main row carries a branch")
+    .path
+    .clone();
   // `paths_equal` canonicalises: on macOS the tempdir is `/var/...` and the
   // resolved note is `/private/var/...`, the same inode spelled two ways.
   assert!(
@@ -12017,7 +12020,7 @@ fn preparing_a_note_edit_returns_the_editor_and_the_file() {
 }
 
 #[test]
-fn preparing_a_note_edit_on_a_detached_row_says_why() {
+fn opening_a_note_on_a_detached_row_says_why() {
   // No branch, no filename. The rule `pinnable_branch` settled for the agent
   // pin, restated so the key press explains itself instead of no-oping.
   let (_dir, mut app) = make_app();
@@ -12026,7 +12029,14 @@ fn preparing_a_note_edit_on_a_detached_row_says_why() {
   app.worktrees = vec![row];
   app.list_state.select(Some(0));
 
-  assert!(app.prepare_note_edit().is_none());
+  app.open_note_editor();
+
+  assert!(app.note_editor.is_none());
+  assert_eq!(
+    app.view,
+    View::List,
+    "no modal opened over a row that cannot carry a note"
+  );
   assert!(
     app.status.contains("detached"),
     "the status bar must carry the reason, got: {}",
@@ -12035,12 +12045,15 @@ fn preparing_a_note_edit_on_a_detached_row_says_why() {
 }
 
 #[test]
-fn preparing_a_note_edit_with_nothing_selected_says_so() {
+fn opening_a_note_with_nothing_selected_says_so() {
   let (_dir, mut app) = make_app();
   app.worktrees.clear();
   app.list_state.select(None);
 
-  assert!(app.prepare_note_edit().is_none());
+  app.open_note_editor();
+
+  assert!(app.note_editor.is_none());
+  assert_eq!(app.view, View::List);
   assert_eq!(app.status, "nothing selected");
 }
 
@@ -12054,7 +12067,10 @@ fn a_branch_name_no_filesystem_can_back_refuses_the_note_out_loud() {
   app.worktrees = vec![row];
   app.list_state.select(Some(0));
 
-  assert!(app.prepare_note_edit().is_none());
+  app.open_note_editor();
+
+  assert!(app.note_editor.is_none());
+  assert_eq!(app.view, View::List);
   assert!(
     app.status.contains("portable"),
     "the status bar must say the name is the problem, got: {}",
@@ -12069,7 +12085,8 @@ fn the_marker_follows_what_the_editor_left_behind() {
   // row's git config to repaint a single glyph.
   let (_dir, mut app) = make_app();
   app.list_state.select(Some(0));
-  let (_, path) = app.prepare_note_edit().unwrap();
+  app.open_note_editor();
+  let path = app.note_editor.as_ref().unwrap().path.clone();
   assert!(!app.worktrees[0].has_note, "no note yet");
 
   std::fs::write(&path, "what I had just figured out\n").unwrap();
@@ -12516,5 +12533,182 @@ fn a_refreshed_title_follows_a_renamed_pr() {
     app.detail_overlay.title.contains("renamed upstream"),
     "stale heading over fresh content: {}",
     app.detail_overlay.title
+  );
+}
+
+// ---- the in-TUI note editor (#515) ---------------------------------------
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Open the note editor on the main row, which always carries a branch.
+fn app_with_note_open() -> (tempfile::TempDir, App) {
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  assert_eq!(app.view, View::Note, "the editor must be the active view");
+  (dir, app)
+}
+
+#[test]
+fn typing_in_the_note_editor_never_reaches_the_global_keymap() {
+  // The bug this exists to stop: `d` is the global delete verb. A modal
+  // that captures every printable must consume it, or writing the word
+  // "done" in a note opens the delete confirm on the worktree the note is
+  // about — and the second `d` is inside a running countdown.
+  let (_dir, mut app) = app_with_note_open();
+
+  for c in "done".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  assert_eq!(app.view, View::Note, "no global verb fired");
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["done"],
+    "every keystroke landed in the buffer"
+  );
+}
+
+#[test]
+fn every_global_single_key_default_is_swallowed_by_the_note_editor() {
+  // Enumerated rather than sampled: `d` is the one that destroys data, but
+  // any global default reaching through would be a keystroke the user
+  // cannot type. Derived from the keymap so a verb added later is covered
+  // without editing this test.
+  let (_dir, mut app) = app_with_note_open();
+  let singles: Vec<char> = app
+    .keymap
+    .list()
+    .into_iter()
+    .flat_map(|binding| binding.chords)
+    .filter(|chord| chord.len() == 1)
+    .filter_map(|chord| match chord[0].code {
+      KeyCode::Char(c) if chord[0].modifiers.is_empty() => Some(c),
+      _ => None,
+    })
+    .collect();
+  assert!(singles.len() > 5, "the keymap should have plenty of single-key verbs");
+
+  for c in &singles {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(*c), KeyModifiers::NONE));
+    assert_eq!(app.view, View::Note, "`{c}` escaped the note editor");
+  }
+  let typed: String = singles.iter().collect();
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec![typed]);
+}
+
+#[test]
+fn esc_writes_the_note_and_closes() {
+  // Esc saves: the reflex on leaving a note is to keep it, and there is no
+  // "quit without saving" to lose prose to.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "kept".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert_eq!(app.view, View::List, "the editor closed");
+  assert!(app.note_editor.is_none(), "and dropped its buffer");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+}
+
+#[test]
+fn clearing_the_buffer_removes_the_note_instead_of_writing_a_blank_file() {
+  // The only way to discard, so it has to actually delete: a one-byte file
+  // reads as "no note" everywhere but would still sit on disk and be found
+  // by `gwm doctor` once the branch is gone.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let branch = app.selected().unwrap().branch.clone().unwrap();
+  let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
+    .unwrap()
+    .unwrap();
+  std::fs::write(&path, "old prose\n").unwrap();
+
+  app.open_note_editor();
+  for _ in 0..20 {
+    app.handle_note_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  }
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert!(!path.exists(), "an emptied note is removed, not blanked");
+}
+
+#[test]
+fn closing_an_untouched_note_does_not_rewrite_the_file() {
+  // Opening a note to read it must not touch its mtime, which is what
+  // `dirty` is for.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let branch = app.selected().unwrap().branch.clone().unwrap();
+  let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
+    .unwrap()
+    .unwrap();
+  std::fs::write(&path, "untouched\n").unwrap();
+  let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+  app.open_note_editor();
+  app.handle_note_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "untouched\n");
+}
+
+#[test]
+fn ctrl_e_writes_the_buffer_before_handing_the_file_to_the_editor() {
+  // `$EDITOR` opens the file, not the buffer. Launching without flushing
+  // would show the user their note as it was before the keys they just
+  // typed, and their save would then overwrite those keys.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "typed here".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  let outcome = app.handle_note_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+  let NoteKey::LaunchEditor(command, path) = outcome else {
+    panic!("Ctrl+e must hand the run loop an editor command, got {outcome:?}");
+  };
+  assert!(!command.is_empty(), "an editor command always resolves");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "typed here\n");
+  assert_eq!(app.view, View::Note, "the editor overlay stays open behind $EDITOR");
+}
+
+#[test]
+fn returning_from_the_external_editor_reloads_what_it_wrote() {
+  let (_dir, mut app) = app_with_note_open();
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+  let NoteKey::LaunchEditor(_, path) = app.handle_note_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+  else {
+    panic!("expected a launch");
+  };
+  std::fs::write(&path, "rewritten outside\n").unwrap();
+
+  app.reload_note_after_editor();
+
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["rewritten outside", ""],
+    "the buffer shows what $EDITOR left, not what was typed before it"
+  );
+}
+
+#[test]
+fn a_detached_row_says_so_rather_than_opening_an_editor_on_nothing() {
+  let (_dir, mut app) = make_app();
+  app.worktrees[0].branch = None;
+  app.list_state.select(Some(0));
+
+  app.open_note_editor();
+
+  assert_eq!(app.view, View::List, "no editor opened");
+  assert!(app.note_editor.is_none());
+  assert!(
+    app.status.contains("detached"),
+    "the refusal is on the status bar: {}",
+    app.status
   );
 }

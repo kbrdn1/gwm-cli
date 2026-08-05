@@ -89,7 +89,7 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
     PaletteEntry {
       action: Action::EditNote,
       name: "edit-note",
-      description: "open the selected worktree's note in $EDITOR",
+      description: "edit the selected worktree's note",
     },
     PaletteEntry {
       action: Action::ExitToWorktree,

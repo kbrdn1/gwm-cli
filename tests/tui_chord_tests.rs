@@ -549,6 +549,7 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       KeyContext::Clean => "Clean Reclaim",
       KeyContext::CiChecks => "CI Checks",
       KeyContext::RichView => "PR / Issue View",
+      KeyContext::Note => "Note Editor",
     }
   };
 
