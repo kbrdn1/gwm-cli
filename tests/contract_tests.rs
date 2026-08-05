@@ -665,6 +665,7 @@ fn populated_status() -> Value {
     url: "https://example/317".into(),
     labels: vec!["enhancement".into()],
     updated_at: "2026-06-17T00:00:00Z".into(),
+    detail: Default::default(),
   });
   let pr = Some(PrStatus {
     number: 322,
@@ -676,6 +677,7 @@ fn populated_status() -> Value {
     checks_total: 4,
     ci: CiState::Running,
     checks: vec![],
+    detail: Default::default(),
   });
   build_status_json(
     "feat/#317-freeze-machine-contracts",

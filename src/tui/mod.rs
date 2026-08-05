@@ -280,6 +280,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       app.maybe_refresh_agent_sessions();
     }
 
+    // #420: the rich view's wrap budget is the terminal width. `Resize`
+    // covers the changes, this covers the FIRST frame — an overlay opened
+    // before any resize event would otherwise wrap against the 80-column
+    // default whatever the real terminal is. A no-op once they agree.
+    app.set_term_width(terminal.size().unwrap_or_default().width);
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before
@@ -347,6 +353,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           pty.resize(inner_cols, inner_rows);
         }
       }
+      // #420: the rich view wraps against the width the App carries, so a
+      // resize that never reached it would leave the rows wrapped for the
+      // previous terminal and the renderer would ellipsise the overflow.
+      app.set_term_width(cols);
       terminal.clear()?;
       continue;
     }
@@ -730,6 +740,27 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           _ => {}
         }
       }
+      // #420: the rich view shares the shell with the agent pane but not
+      // its verbs, so it resolves in its own context.
+      View::DetailOverlay
+        if matches!(
+          app.detail_overlay.kind,
+          crate::tui::state::detail_overlay::DetailKind::RichIssue
+            | crate::tui::state::detail_overlay::DetailKind::RichPr
+        ) =>
+      {
+        match app.resolve_modal(KeyContext::RichView, key) {
+          Some(ModalAction::RichViewClose) => app.close_detail_overlay(),
+          Some(ModalAction::RichViewNext) => app.detail_overlay.select_next(),
+          Some(ModalAction::RichViewPrev) => app.detail_overlay.select_prev(),
+          Some(ModalAction::RichViewOpen) => match app.rich_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            None => app.status = "this row has nothing to open".into(),
+          },
+          Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
+          _ => {}
+        }
+      }
       View::DetailOverlay => match app.resolve_modal(KeyContext::Detail, key) {
         Some(ModalAction::DetailClose) => app.close_detail_overlay(),
         Some(ModalAction::DetailSelectNext) => app.detail_overlay.select_next(),
@@ -1003,6 +1034,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
       }
     }
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
+    // #420: `I` opens the rich PR / issue view on the linked side.
+    Action::RichView if !app.picker_mode => app.enter_rich_view(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.

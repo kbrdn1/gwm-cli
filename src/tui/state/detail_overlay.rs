@@ -23,12 +23,37 @@ pub enum DetailMode {
 
 /// Which consumer the open overlay belongs to (issue #436). The shell is
 /// content-agnostic; the dispatch routes the keys (and the Enter action)
-/// by this discriminant — agents attach/detach, CI checks open-in-browser.
+/// by this discriminant — agents attach/detach, CI checks open-in-browser,
+/// the rich view (#420) opens whatever URL its selected row carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailKind {
   #[default]
   Agents,
   CiChecks,
+  /// Rich issue view (issue #420).
+  RichIssue,
+  /// Rich pull / merge request view (issue #420).
+  RichPr,
+}
+
+impl DetailKind {
+  /// `true` for the consumers whose rows come from a **forge link**, and
+  /// which therefore must not outlive it: a workspace selection gone stale
+  /// or a re-link means the rows describe a PR/issue that is no longer the
+  /// selected one, and every verb — `Enter` opening a URL above all —
+  /// would act on the wrong thing.
+  ///
+  /// Written as an exhaustive `match` with no `_` arm on purpose (issue
+  /// #420): a fourth consumer added later does not compile until someone
+  /// answers the question for it, which is the only way this guard stays
+  /// complete. The equality tests it replaces had to be remembered at each
+  /// new site instead.
+  pub fn is_forge_linked(self) -> bool {
+    match self {
+      Self::CiChecks | Self::RichIssue | Self::RichPr => true,
+      Self::Agents => false,
+    }
+  }
 }
 
 /// Semantic style role of a detail row — mapped to theme colours at render

@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rich PR / issue view in the TUI**
+  ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)). `I` opens the linked
+  PR (or the linked issue when there is no PR) on its description, author,
+  branch pair, diff size, CI rollup, submitted reviews and conversation,
+  without leaving the TUI. `gwm` already asked `gh` for the rollup and threw
+  the per-check detail away; it now asks for `body`, `author`, `comments`,
+  `reviews`, `additions` / `deletions` and the branch refs in the same single
+  request, so the view costs no extra round trip. Bodies are wrapped against
+  the modal width and re-wrapped on resize, and every cap says how much it
+  dropped (`… 312 more lines`) rather than stopping silently. Remote text is
+  neutralised on the way in, so a bidi override in a comment cannot reorder
+  what the terminal paints. `Enter` opens the selected row's URL, `f`
+  re-fetches, and the whole verb set is rebindable under
+  `[tui.keys.modal.rich_view]`. On GitLab the view renders the summary tier
+  plus the description, author and branch pair; approvals, notes and the diff
+  size need separate API calls and are not fetched. Inline review comments
+  (the ones anchored to a diff hunk) are GitHub GraphQL only and are not part
+  of this change.
+
 - **Multi-row selection in the TUI, and a batch delete on top of it**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the
   highlighted worktree, `d` then deletes every marked row in one batch; with
@@ -93,6 +112,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The TUI delete runs the remove hooks and records the undo journal**
+  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521)). `d` called
+  `worktree::remove` directly, so `[hooks.pre_remove]` / `[hooks.post_remove]`
+  never ran and nothing reached `gwm undo`: an interactive delete was
+  unrecoverable, and a hook written to guard a removal only held for whoever
+  used the CLI. Both paths now go through one sequence, so `gwm undo` puts
+  back what `d` removed, exactly as it does for `gwm remove`. `undo` stays
+  per-worktree: a batch of ten appends ten entries and pops one at a time.
+  Two consequences worth knowing before you upgrade. A `pre_remove` that
+  refuses now refuses in the TUI too, for that one target, with the batch
+  carrying on and the confirm overlay staying open on what failed. And
+  because running a hook means executing code out of `.gwm.toml`, a delete in
+  a repo whose config has remove hooks is gated on the TOFU trust ledger
+  (#95): unapproved, it refuses rather than silently skipping the guard hook.
+  The gate asks about the two remove phases only, so a config whose hooks are
+  all `post_create` runs nothing on a delete and is never asked. Hook output
+  lands on the Command Logs transcript (`3`) as it does everywhere else.
+- **A refused removal is no longer recorded as undoable**
+  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521)). `gwm remove` wrote
+  its journal entry before the destructive call, so a target that then got
+  refused (its path moved since it was resolved, git declining the removal)
+  still showed up in `gwm history` as something `gwm undo` would replay. The
+  branch OID is still captured beforehand, which is what the entry needs; only
+  the write moved after the removal succeeds.
 - **`cycle_sidebar_layout` moved from `Space` to `z`**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)), to make room for the
   row mark. Space-to-mark is the convention in lazygit, k9s and fzf, so the

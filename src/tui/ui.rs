@@ -2176,6 +2176,10 @@ pub enum HintContext {
   /// PR's per-check rollup — j/k select, Enter opens the details URL,
   /// f filters, Esc closes.
   CiChecks,
+  /// Rich PR / issue view (issue #420): the same shell on the linked
+  /// PR's or issue's description, reviews and conversation — j/k select,
+  /// Enter opens the row's URL, f re-fetches, Esc closes.
+  RichView,
 }
 
 impl HintContext {
@@ -2200,6 +2204,7 @@ impl HintContext {
       HintContext::Rename | HintContext::RenameFreeform => "rename",
       HintContext::Detail => "agents",
       HintContext::CiChecks => "checks",
+      HintContext::RichView => "pr/issue",
     }
   }
 
@@ -2348,6 +2353,13 @@ impl HintContext {
         Hint::Modal(ModalAction::CiChecksRefresh, "refresh"),
         Hint::Modal(ModalAction::CiChecksClose, "close"),
       ],
+      // #420: no filter verb — a rich view is prose, not a row set.
+      HintContext::RichView => &[
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::RichViewOpen, "open"),
+        Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
+        Hint::Modal(ModalAction::RichViewClose, "close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2469,6 +2481,7 @@ impl HintContext {
       HintContext::Help => KeyContext::Help,
       HintContext::Detail => KeyContext::Detail,
       HintContext::CiChecks => KeyContext::CiChecks,
+      HintContext::RichView => KeyContext::RichView,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -3078,6 +3091,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       Action::CiChecks,
       "list the linked PR's CI checks (also `c` with status focus)",
     ));
+    rows.push(entry(
+      Action::RichView,
+      "open the linked PR/issue: description, checks, reviews, comments",
+    ));
   }
   rows.push(entry(
     Action::Filter,
@@ -3265,6 +3282,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("enter", "filter: open the highlighted check's URL"),
       fixed("Esc", "filter: back to the list"),
       modal_entry(ModalAction::CiChecksClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("PR / Issue View".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::RichViewNext, "next row"),
+      modal_entry(ModalAction::RichViewPrev, "previous row"),
+      modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
+      modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
+      modal_entry(ModalAction::RichViewClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -5383,10 +5408,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   }
   // #436 validation feedback: the CI checks consumer advertises ITS verbs,
   // not the agents' attach / detach — the hint context follows the kind.
-  let hint_ctx = if ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
-    HintContext::CiChecks
-  } else {
-    HintContext::Detail
+  let hint_ctx = match ov.kind {
+    crate::tui::state::detail_overlay::DetailKind::CiChecks => HintContext::CiChecks,
+    crate::tui::state::detail_overlay::DetailKind::RichIssue
+    | crate::tui::state::detail_overlay::DetailKind::RichPr => HintContext::RichView,
+    crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
   };
   push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
   let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;

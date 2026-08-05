@@ -48,6 +48,7 @@ pub mod naming;
 pub mod notes;
 pub mod pr_templates;
 pub mod presets;
+pub mod removal;
 pub mod review;
 pub mod statusline;
 pub mod sync;
