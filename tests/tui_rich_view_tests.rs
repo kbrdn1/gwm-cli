@@ -373,3 +373,32 @@ fn a_wrapped_continuation_keeps_the_line_indent() {
 fn row_width_of(v: &str) -> usize {
   LABEL_W + 2 + v.chars().count()
 }
+
+#[test]
+fn indented_comment_and_review_bodies_stay_inside_the_budget() {
+  // The width checks above only ever measured PR *description* rows, where
+  // the body indent is empty. Comment and review bodies are pushed with a
+  // two-space indent, and `wrap_line`'s "already fits" early return
+  // measures against the budget it was handed, not against the indent the
+  // caller prepends afterwards. So that whole class of row was unmeasured.
+  let mut pr = sample_pr();
+  // Lines walking across the boundary from both sides.
+  let body = (50..70).map(|n| "y".repeat(n)).collect::<Vec<_>>().join("\n");
+  pr.detail.comments[0].body = body.clone();
+  pr.detail.reviews[1].body = body;
+
+  let rows = rich_pr_rows(&pr, W);
+
+  for r in &rows {
+    assert!(
+      row_width(r) <= W,
+      "row {:?} is {} cols, budget {W}",
+      r.value,
+      row_width(r)
+    );
+  }
+  assert!(
+    rows.iter().any(|r| r.value.starts_with("  y")),
+    "precondition: the indented bodies rendered"
+  );
+}
