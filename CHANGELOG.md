@@ -119,9 +119,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch, the linked issue, the diff against base and the agent session, but
   not where you were: what you had just figured out, what is blocking, what
   to check before opening the PR. `N` now opens the selected worktree's note
-  in `$EDITOR` (`editor_cmd`, then `$EDITOR`, then `vi`, the same handoff
-  `o` uses in `mode = "editor"`), and the worktrees table carries a binary
-  marker on the rows that have one. Notes are plain Markdown at
+  in an editable modal, and the worktrees table carries a binary marker on
+  the rows that have one. The modal rather than `$EDITOR`, because a note is
+  usually three lines written in the ten seconds between two thoughts and
+  suspending the whole TUI to spawn an editor is a heavier gesture than
+  that; `Ctrl+e` inside it still hands the same file over (`editor_cmd`,
+  then `$EDITOR`, then `vi`, the handoff `o` uses in `mode = "editor"`) and
+  reloads what that editor wrote. `Esc` writes and closes, with no "quit
+  without saving" to lose prose to: emptying the buffer is how a note is
+  deleted, and it removes the file rather than leaving a blank one. Text,
+  `Enter`, `Backspace`, `Delete`, the arrows, `Home` / `End` and
+  `PageUp` / `PageDown` are all input and none of them are rebindable —
+  only `close` and `open_editor` live under `[tui.keys.modal.note]`, and
+  binding either to a printable is refused at load time. Notes are plain Markdown at
   `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable and editable with
   gwm shut down, never committed, readable from the main checkout, and they
   survive `gwm remove`, which is the point of keeping them out of the
