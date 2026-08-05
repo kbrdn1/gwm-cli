@@ -27,5 +27,6 @@ pub mod filter;
 pub mod github_fetch;
 pub mod link_prompt;
 pub mod pty_overlay;
+pub mod rich_view;
 pub mod sidebar;
 pub mod spinner;

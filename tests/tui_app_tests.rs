@@ -2669,6 +2669,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     url: "https://example.test".into(),
     labels: vec!["feature".into()],
     updated_at: "2026-05-19T00:00:00Z".into(),
+    detail: Default::default(),
   };
   let pr = PrStatus {
     number: 61,
@@ -2680,6 +2681,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     checks_total: 3,
     ci: CiState::Running,
     checks: vec![],
+    detail: Default::default(),
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -2708,6 +2710,7 @@ fn loaded_issue_status_persists_title_for_no_fetch_startup() {
     url: "https://example.test/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2752,6 +2755,7 @@ fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
         completed_at: None,
       },
     ],
+    detail: Default::default(),
   }));
 
   app.enter_ci_checks();
@@ -2784,6 +2788,7 @@ fn pr_summary_line_advertises_the_ci_checks_key_after_the_indicator() {
     ci,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -2840,6 +2845,7 @@ fn pr_line_ci_hint_follows_the_focus_context() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   let text_of = |app: &App| -> String {
@@ -3029,6 +3035,7 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   // Codex review on PR #455: the contextual routing lives on the KEY path
@@ -3096,6 +3103,7 @@ fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(
     61,
@@ -3182,6 +3190,7 @@ fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(vec![PrCheck {
     name: "a".into(),
@@ -3232,6 +3241,7 @@ fn app_with_open_ci_overlay_on_pr_61() -> (tempfile::TempDir, git2::Repository, 
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
@@ -3368,6 +3378,7 @@ fn ci_filter_cursor_clamps_when_a_refresh_shrinks_the_matches() {
     checks_total: checks.len() as u32,
     ci: CiState::Passing,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(vec![
     mk_check("check-a"),
@@ -3421,6 +3432,7 @@ fn ci_overlay_ticks_running_check_durations() {
       started_at,
       completed_at: None,
     }],
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Running, Some(started.clone()))));
   app.enter_ci_checks();
@@ -3475,6 +3487,7 @@ fn ci_overlay_ticks_survive_a_pr_cache_invalidation() {
       started_at: Some(started),
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.enter_ci_checks();
 
@@ -3520,6 +3533,7 @@ fn pr_line_ci_hint_is_hidden_in_picker_mode() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   let text: String = gwm::tui::github_status_lines(&app, 120)
     .iter()
@@ -3575,6 +3589,7 @@ fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   // Agents overlay opened (captures the target), then interrupted without
@@ -3632,6 +3647,7 @@ fn pr_line_ci_hint_disappears_when_the_binding_is_removed() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.focus_worktrees();
   app.keymap.apply_override(Action::CiChecks, Vec::new()).unwrap();
@@ -3685,6 +3701,7 @@ fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -3708,6 +3725,7 @@ fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -3867,6 +3885,7 @@ fn sample_issue_titled(n: u64, title: &str) -> gwm::github::IssueStatus {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }
 }
 
@@ -4269,6 +4288,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -4862,6 +4882,7 @@ fn refresh_github_status_message_celebrates_full_success() {
     url: "https://example.test".into(),
     labels: vec![],
     updated_at: "".into(),
+    detail: Default::default(),
   };
   app.apply_issue_fetch_result(Ok(issue));
   app.report_github_refresh_status();
@@ -5194,6 +5215,7 @@ fn table_marker_issue_pastille_uses_loaded_closed_issue_state() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   let theme = Theme::default();
@@ -5235,6 +5257,7 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let theme = Theme::default();
@@ -5878,6 +5901,7 @@ fn issue_summary_line_truncates_loaded_state_to_budget() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     828,
@@ -5910,6 +5934,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     ci: CiState::Passing,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     70,
@@ -5938,6 +5963,7 @@ fn issue_summary_line_keeps_short_title_intact() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     1,
@@ -6021,6 +6047,7 @@ fn issue_summary_line_loaded_icon_uses_issue_state_color() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = issue_summary_line(
@@ -6066,6 +6093,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6111,6 +6139,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -6142,6 +6171,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     ci: gwm::github::CiState::Failing,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -6177,6 +6207,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     ci: gwm::github::CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6224,6 +6255,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6287,6 +6319,7 @@ fn issue_summary_line_state_badge_is_a_reverse_video_chip() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     7,
@@ -8302,6 +8335,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
       DeleteBatchOutcome {
         removed: vec![("alpha".into(), "/tmp/alpha".into())],
         failed: vec![],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -8336,6 +8370,7 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
           path: "/tmp/alpha".into(),
           error: "permission denied".into(),
         }],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -8368,6 +8403,7 @@ fn drain_drops_a_superseded_delete_worktree_result() {
       DeleteBatchOutcome {
         removed: vec![("alpha".into(), "/tmp/alpha".into())],
         failed: vec![],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -10872,6 +10908,7 @@ fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
     url: "https://web.acme.internal:8443/team/proj/-/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   app.enter_open_menu();
@@ -10901,6 +10938,7 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
     url: "https://github.com/acme/widgets/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   repo.remote_delete("origin").unwrap();
@@ -11779,6 +11817,7 @@ fn the_batch_status_names_the_failures() {
   let single = DeleteBatchOutcome {
     removed: vec![("alpha".into(), "/tmp/alpha".into())],
     failed: vec![],
+    warnings: vec![],
   };
   assert_eq!(single.status_line(), "removed alpha (/tmp/alpha)");
 
@@ -11792,6 +11831,7 @@ fn the_batch_status_names_the_failures() {
       path: "/tmp/gamma".into(),
       error: "locked".into(),
     }],
+    warnings: vec![],
   };
   assert_eq!(batch.status_line(), "removed 2 of 3 worktrees; failed: gamma (locked)");
 
@@ -11801,8 +11841,50 @@ fn the_batch_status_names_the_failures() {
       ("beta".into(), "/tmp/beta".into()),
     ],
     failed: vec![],
+    warnings: vec![],
   };
   assert_eq!(all_ok.status_line(), "removed 2 worktrees");
+}
+
+#[test]
+fn a_warning_rides_the_status_line_without_becoming_a_failure() {
+  // Issue #521: a `post_remove` hook that aborts, or an undo-journal entry
+  // that could not be written, happens around a removal that DID happen.
+  // Counting it as a failure would report the opposite of what is on disk,
+  // and `failure_banner` is what keeps the confirm overlay open, so a
+  // warning must not reach it.
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+
+  let with_warning = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![],
+    warnings: vec!["hook post_remove 'cleanup' failed: exited with 1".into()],
+  };
+  assert_eq!(
+    with_warning.status_line(),
+    "removed alpha (/tmp/alpha); hook post_remove 'cleanup' failed: exited with 1"
+  );
+  assert_eq!(
+    with_warning.failure_banner(),
+    None,
+    "a warning must not hold the confirm overlay open"
+  );
+
+  // A real failure still owns the banner, and warnings ride along.
+  let both = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![DeleteFailure {
+      id: "beta".into(),
+      path: "/tmp/beta".into(),
+      error: "locked".into(),
+    }],
+    warnings: vec!["journal unwritable".into()],
+  };
+  assert_eq!(
+    both.status_line(),
+    "removed 1 of 2 worktrees; failed: beta (locked); journal unwritable"
+  );
+  assert_eq!(both.failure_banner(), Some("/tmp/beta: locked".into()));
 }
 
 #[test]
@@ -11849,6 +11931,7 @@ fn a_partial_batch_narrows_the_confirm_to_the_failures_never_to_the_cursor() {
           path: doomed.clone(),
           error: "directory not empty".into(),
         }],
+        warnings: vec![],
       },
     ))
     .unwrap();
@@ -11888,10 +11971,356 @@ fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
         error: "dirty".into(),
       },
     ],
+    warnings: vec![],
   };
   let banner = outcome.failure_banner().expect("two failures produce a banner");
   assert!(
     banner.contains("/repos/alpha/feat-1-auth") && banner.contains("/repos/beta/feat-1-auth"),
     "both repos must be tellable apart: {banner}"
+  );
+}
+
+// --- rich PR / issue view wiring (issue #420) -----------------------------
+
+/// A PR with enough rich payload for the view to have something to render.
+fn rich_pr_fixture(number: u64) -> PrStatus {
+  PrStatus {
+    number,
+    title: "rich fixture".into(),
+    state: PrState::Open,
+    url: format!("https://example.test/pull/{number}"),
+    updated_at: "2026-08-04T13:00:00Z".into(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: "A description worth reading.".into(),
+      author: "kbrdn1".into(),
+      additions: 10,
+      deletions: 2,
+      base_ref: "dev".into(),
+      head_ref: "feat/#42-tui-search".into(),
+      reviews: vec![],
+      comments: vec![],
+    },
+  }
+}
+
+fn rich_issue_fixture(number: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number,
+    title: "rich issue fixture".into(),
+    state: gwm::github::IssueState::Open,
+    url: format!("https://example.test/issues/{number}"),
+    labels: vec!["feature".into()],
+    updated_at: "2026-08-01T10:00:00Z".into(),
+    detail: gwm::forge::IssueDetail {
+      body: "The issue body.".into(),
+      author: "sassman".into(),
+      comments: vec![],
+    },
+  }
+}
+
+#[test]
+fn rich_view_prefers_the_linked_pr() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "with both linked, the PR is the thing being worked on"
+  );
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.contains(&"kbrdn1"), "the metadata block rendered: {vals:?}");
+  assert!(
+    vals.iter().any(|v| v.contains("A description worth reading.")),
+    "the body rendered: {vals:?}"
+  );
+}
+
+#[test]
+fn rich_view_falls_back_to_the_issue() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.iter().any(|v| v.contains("The issue body.")), "{vals:?}");
+}
+
+#[test]
+fn rich_view_without_a_fetched_status_explains_instead_of_opening_blank() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::List, "an empty overlay is a bordered void");
+  assert!(
+    app.status.contains("fetch"),
+    "the status must name the way out: {}",
+    app.status
+  );
+}
+
+#[test]
+fn rich_view_enter_opens_the_selected_row_url() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  let url_row = app
+    .detail_overlay
+    .rows
+    .iter()
+    .position(|r| r.label == "url")
+    .expect("a url row");
+  app.detail_overlay.selected = url_row;
+
+  assert_eq!(app.rich_selected_url().as_deref(), Some("https://example.test/pull/61"));
+
+  // An inert row (the body) exposes nothing to open.
+  let body_row = app
+    .detail_overlay
+    .rows
+    .iter()
+    .position(|r| r.value.contains("A description worth reading."))
+    .expect("a body row");
+  app.detail_overlay.selected = body_row;
+  assert_eq!(app.rich_selected_url(), None);
+}
+
+#[test]
+fn a_link_change_closes_the_rich_view() {
+  // Same invariant the CI checks overlay carries (Codex review #455): the
+  // rows belong to the PR they were built for, and `Enter` would otherwise
+  // open the previous link's URL. `is_forge_linked` is what makes the
+  // guard cover every forge-backed consumer by construction.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+
+  assert_eq!(app.view, View::List, "the overlay must not outlive its link");
+}
+
+#[test]
+fn a_resize_rewraps_the_rich_view() {
+  // The builder wraps against a width the App carries; a resize that never
+  // reaches the App leaves rows wrapped for the old width and the renderer
+  // ellipsises them.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = "word ".repeat(120);
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  let wide = app.detail_overlay.rows.len();
+
+  app.set_term_width(60);
+  let narrow = app.detail_overlay.rows.len();
+
+  assert!(
+    narrow > wide,
+    "a narrower terminal must produce more wrapped rows ({narrow} vs {wide})"
+  );
+}
+
+#[test]
+fn an_issue_standing_in_for_a_slower_pr_is_replaced_when_it_lands() {
+  // The original concern (Codex review #529, first pass) replayed by hand
+  // after the guard that answered it was REMOVED. It refused to open while
+  // the PR was `Loading`, which guarded a symptom of the missing
+  // promotion; once `sync_rich_overlay` existed the guard only produced
+  // its own edge case, since `Idle` ("nobody asked yet") is
+  // indistinguishable from `Loading` for a user staring at the wrong side.
+  //
+  // What actually had to hold is this: the user never gets STUCK on the
+  // issue. Showing it meanwhile beats showing nothing.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.mark_pr_loading_for_test(61);
+
+  app.enter_rich_view();
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "what is available opens rather than nothing"
+  );
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "and the PR claims the view the moment it lands"
+  );
+}
+
+#[test]
+fn an_origin_move_between_instances_closes_the_rich_view() {
+  // Codex review #529: the overlay identity was keyed on the bare SLUG, so
+  // an origin moving from github.com/acme/widgets to gitlab.com/acme/widgets
+  // compared equal, the overlay survived, and `Enter` still opened the old
+  // host's URL. Same failure `open_menu_drops_a_cached_url_from_the_previous_origin`
+  // pins for the fetch caches (Codex review #458); the identity now carries
+  // the full `<kind> <web origin>/<slug>`.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay, "precondition");
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "the overlay outlived the instance its rows describe"
+  );
+}
+
+#[test]
+fn rich_view_falls_back_to_the_issue_when_the_pr_fetch_failed() {
+  // The other half of the same rule: a PR whose fetch ERRORED is never
+  // going to land, so refusing to show the issue would leave the user with
+  // nothing. Only an in-flight PR holds the view back.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Err("gh: not found".into()));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+}
+
+#[test]
+fn a_resize_still_rewraps_after_the_cache_was_flushed() {
+  // Codex review #529: the rebuild read the fetch CACHE, so a resize while
+  // a refresh was in flight found no `Loaded` and gave up. If that refresh
+  // then failed, nothing ever rebuilt and the view stayed wrapped for the
+  // old terminal for good. The overlay owns its source instead, the same
+  // fix `ci_overlay_checks` already carries for the duration tick (#455).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = "word ".repeat(120);
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  let wide = app.detail_overlay.rows.len();
+
+  // The `F` refresh flushes the cache before re-requesting.
+  app.refresh_link();
+  assert_eq!(app.view, View::DetailOverlay, "same link, the overlay stays up");
+
+  app.set_term_width(60);
+
+  assert!(
+    app.detail_overlay.rows.len() > wide,
+    "the overlay must re-wrap from its own source, not from a flushed cache"
+  );
+}
+
+#[test]
+fn a_landing_pr_promotes_the_rich_view_off_the_issue() {
+  // Codex review #529, second pass. The invariant, written once instead of
+  // patched a third time: while the rich view is open it renders the side
+  // the LINK prefers, in its freshest version, title included. So a PR
+  // landing takes over an issue view that was only standing in for it.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Err("gh: transient".into()));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue, "precondition");
+
+  // `f` succeeds this time.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "the PR must claim the view it is entitled to"
+  );
+  assert!(
+    app.detail_overlay.title.contains("#61"),
+    "the title must follow the content: {}",
+    app.detail_overlay.title
+  );
+}
+
+#[test]
+fn a_landing_issue_does_not_displace_the_pr_view() {
+  // The other direction of the same invariant: the link prefers the PR, so
+  // an issue landing refreshes the view only when the issue IS the view.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "precondition");
+
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn a_refreshed_title_follows_a_renamed_pr() {
+  // Same invariant, third consequence: `f` used to replace the source and
+  // the rows while keeping the title computed at open, so a PR renamed
+  // upstream showed fresh content under a stale heading.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(app.detail_overlay.title.contains("rich fixture"), "precondition");
+
+  let mut renamed = rich_pr_fixture(61);
+  renamed.title = "renamed upstream".into();
+  app.apply_pr_fetch_result(Ok(renamed));
+
+  assert!(
+    app.detail_overlay.title.contains("renamed upstream"),
+    "stale heading over fresh content: {}",
+    app.detail_overlay.title
   );
 }

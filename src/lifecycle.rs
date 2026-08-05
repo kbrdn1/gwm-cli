@@ -151,6 +151,33 @@ pub struct HookAbort {
   pub detail: String,
 }
 
+/// A phase that aborted: the steps that ran before the failure, and the
+/// failure itself. [`run_phase_quiet`] hands both back so a caller that
+/// cannot print — a TUI worker thread — still gets the partial report.
+#[derive(Debug)]
+pub struct PhaseFailure {
+  pub report: BootstrapReport,
+  pub error: GwmError,
+}
+
+impl From<PhaseFailure> for GwmError {
+  fn from(f: PhaseFailure) -> Self {
+    f.error
+  }
+}
+
+/// True when `phase` has at least one step to run under `config`. Callers
+/// that gate on hooks (the trust prompt) ask about the phase they are about
+/// to run rather than about the whole `[hooks]` table: a repo whose only
+/// hook is `post_create` executes nothing on a removal, so making it answer
+/// a trust question there would refuse an operation that runs no code.
+pub fn has_steps(config: &Config, phase: HookPhase) -> bool {
+  !steps_for(config, phase).is_empty()
+}
+
+/// [`run_phase`] without the abort-time `print_report`. The only caller that
+/// wants the silent form is the TUI, which owns the alternate screen — every
+/// CLI path goes through [`run_phase`] and keeps the printing behaviour.
 pub fn run_phase(
   config: &Config,
   phase: HookPhase,
@@ -158,6 +185,19 @@ pub fn run_phase(
   skips: &HookSkips,
   include_legacy_post_create: bool,
 ) -> Result<BootstrapReport> {
+  run_phase_quiet(config, phase, ctx, skips, include_legacy_post_create).map_err(|f| {
+    print_report(&f.report);
+    f.error
+  })
+}
+
+pub fn run_phase_quiet(
+  config: &Config,
+  phase: HookPhase,
+  ctx: &HookContext,
+  skips: &HookSkips,
+  include_legacy_post_create: bool,
+) -> std::result::Result<BootstrapReport, PhaseFailure> {
   let mut report = BootstrapReport { steps: Vec::new() };
   if skips.contains(phase) {
     report.steps.push(StepResult::skipped(
@@ -190,13 +230,10 @@ pub fn run_phase(
       Err(detail) => match step.on_fail {
         HookOnFail::Abort => {
           report.steps.push(StepResult::failed(label, detail.clone()));
-          print_report(&report);
-          return Err(GwmError::CommandFailed(format!(
-            "hook {} '{}' failed: {}",
-            phase.as_str(),
-            step.name,
-            detail
-          )));
+          return Err(PhaseFailure {
+            report,
+            error: GwmError::CommandFailed(format!("hook {} '{}' failed: {}", phase.as_str(), step.name, detail)),
+          });
         }
         HookOnFail::Warn => report.steps.push(StepResult::warning(label, detail)),
         HookOnFail::Ignore => report

@@ -21,6 +21,7 @@ use crate::multiplexer::{
 use crate::naming::{BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
+use crate::removal;
 use crate::review;
 use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
@@ -3237,9 +3238,17 @@ fn cmd_remove(
   }
 }
 
-/// Remove one resolved worktree: pre_remove hooks, undo-journal entry,
-/// destruction, post_remove hooks. Extracted from [`cmd_remove`] when it grew
-/// a batch loop (#484) — the per-target sequence is unchanged.
+/// Remove one resolved worktree and print what happened.
+///
+/// The sequence itself — pre_remove hooks, undo-journal entry, destruction,
+/// post_remove hooks — lives in [`crate::removal`] since #521, so the TUI `d`
+/// runs the same one. What is left here is the rendering: the reports, the
+/// `✓ removed` line, and the journal warning on stderr.
+///
+/// `found.path` is the expected path because on this side `found` IS the
+/// resolve-time snapshot — every pattern is resolved before the first hook
+/// runs (#484), so a hook on an earlier target has a window to recreate a
+/// later one under the same id somewhere else.
 fn remove_one(
   repo: &git2::Repository,
   workdir: &Path,
@@ -3248,63 +3257,39 @@ fn remove_one(
   found: &worktree::WorktreeInfo,
   delete_branch: bool,
 ) -> Result<()> {
-  let pre_ctx = HookContext::for_worktree(repo, workdir, &found.path, &found.path, found.branch.as_deref());
-  let report = lifecycle::run_phase(config, HookPhase::PreRemove, &pre_ctx, skips, false)?;
-  print_lifecycle_report(&report);
-
-  // Issue #29: capture the branch OID via libgit2 BEFORE the
-  // destructive call so we can resurrect the branch on `gwm undo`.
-  // We swallow any journal IO failure with a stderr warning rather
-  // than blocking a destruction the user explicitly asked for —
-  // losing recoverability is unfortunate, but failing the remove
-  // because we can't write to `~/.local/share/gwm/history.toml` would
-  // be far more surprising. (Disk full, read-only FS, sandboxed
-  // CI runner without home dir, …)
-  let branch_oid = found.branch.as_deref().and_then(|b| {
-    repo
-      .find_branch(b, git2::BranchType::Local)
-      .ok()
-      .and_then(|br| br.into_reference().target())
-      .map(|o| o.to_string())
-  });
-  let repo_root = repo
-    .workdir()
-    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-    .unwrap_or_default();
-  let entry = OpEntry {
-    ts: chrono::Utc::now(),
-    kind: crate::history::OpKind::Remove,
-    worktree: found.name.clone(),
-    branch: found.branch.clone(),
-    branch_oid,
-    path: found.path.clone(),
-    deleted_branch: delete_branch,
-    repo_root,
-    undone: false,
-  };
-  if let Err(e) = history::record(entry) {
-    eprintln!(
-      "warning: failed to record undo journal entry: {} (continuing with the remove anyway)",
-      e
-    );
-  }
-
-  // `remove_verified`: a batch resolves every pattern up front (#484), so a
-  // hook on an earlier target, or another process, has a window to remove and
-  // recreate a later one under the same id at another path. The id is how the
-  // pattern resolved; the path is what the user was shown by `--dry-run` and
-  // what the plan is about (Codex review on PR #520).
-  worktree::remove_verified(repo, &found.id, &found.path, delete_branch)?;
-  println!("✓ removed {} ({})", found.name, found.path.display());
-  if delete_branch {
-    if let Some(b) = &found.branch {
-      println!("  branch {} deleted", b);
+  let expected = found.path.clone();
+  match removal::remove_with_lifecycle(repo, workdir, config, skips, found, &expected, delete_branch) {
+    Ok(outcome) => {
+      print_removal_outcome(&outcome, found, delete_branch);
+      Ok(())
+    }
+    Err(failure) => {
+      print_removal_outcome(&failure.outcome, found, delete_branch);
+      Err(failure.error)
     }
   }
-  let post_ctx = pre_ctx.with_cwd(workdir);
-  let report = lifecycle::run_phase(config, HookPhase::PostRemove, &post_ctx, skips, false)?;
-  print_lifecycle_report(&report);
-  Ok(())
+}
+
+/// Render a removal in the order it happened, so a failure shows the steps
+/// that ran before it rather than only the error that stopped it.
+fn print_removal_outcome(outcome: &removal::RemovalOutcome, found: &worktree::WorktreeInfo, delete_branch: bool) {
+  print_lifecycle_report(&outcome.pre);
+  if outcome.removed {
+    println!("✓ removed {} ({})", found.name, found.path.display());
+    if delete_branch {
+      if let Some(b) = &found.branch {
+        println!("  branch {} deleted", b);
+      }
+    }
+  }
+  // A journal write that failed is a warning, never a failed removal: the
+  // worktree is gone either way, and refusing to report that because
+  // `~/.local/share/gwm/history.toml` is unwritable (disk full, read-only FS,
+  // a CI runner with no home dir) would be far more surprising.
+  if let Some(warning) = &outcome.journal_warning {
+    eprintln!("warning: {}", warning);
+  }
+  print_lifecycle_report(&outcome.post);
 }
 
 fn cmd_path(pattern: String, format: OutputFormat) -> Result<()> {

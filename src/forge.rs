@@ -84,6 +84,96 @@ pub struct IssueStatus {
   pub url: String,
   pub labels: Vec<String>,
   pub updated_at: String,
+  /// Everything the rich view reads and the summary line does not
+  /// (issue #420). Grouped in its own struct so a backend that cannot
+  /// serve it fills one `Default::default()` instead of six fields, and
+  /// so "summary tier" vs "detail tier" is visible in the type.
+  pub detail: IssueDetail,
+}
+
+/// The rich slice of an issue (issue #420): the description, its author,
+/// and the conversation. Empty when the forge backend only serves the
+/// summary tier — never `Option`, because "no comments" and "comments not
+/// fetched" render identically and a second state would only be a way to
+/// get the two confused.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueDetail {
+  /// The issue description, raw markdown as the forge stores it.
+  pub body: String,
+  /// Author login (`kbrdn1`), not the display name — it is what every
+  /// other gwm surface shows and what a `gh`/`glab` filter takes.
+  pub author: String,
+  /// Conversation comments, in the order the forge returned them.
+  pub comments: Vec<ForgeComment>,
+}
+
+/// One conversation comment on an issue or PR (issue #420). Inline review
+/// comments (the ones anchored to a diff hunk) are **not** this type: on
+/// GitHub they are only reachable through GraphQL and are deliberately out
+/// of scope here — see the follow-up issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeComment {
+  /// Author login.
+  pub author: String,
+  /// Raw markdown body.
+  pub body: String,
+  /// RFC 3339 creation timestamp.
+  pub created_at: String,
+  /// Permalink to the comment, when the forge reports one.
+  pub url: Option<String>,
+}
+
+/// The verdict a review carries (issue #420).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+  Approved,
+  ChangesRequested,
+  Commented,
+  Dismissed,
+  Pending,
+  /// A state this build does not know. Same rule as
+  /// [`CheckOutcome::Unknown`]: named honestly rather than folded into
+  /// `Commented`, so a state added upstream can never be rendered as a
+  /// verdict gwm did not actually read.
+  Unknown,
+}
+
+impl ReviewState {
+  /// Classify a GitHub `PullRequestReviewState` value. Case-insensitive
+  /// because the REST and GraphQL surfaces disagree on casing.
+  pub fn classify(s: &str) -> Self {
+    match s.trim().to_ascii_uppercase().as_str() {
+      "APPROVED" => Self::Approved,
+      "CHANGES_REQUESTED" => Self::ChangesRequested,
+      "COMMENTED" => Self::Commented,
+      "DISMISSED" => Self::Dismissed,
+      "PENDING" => Self::Pending,
+      _ => Self::Unknown,
+    }
+  }
+
+  /// Short label for the rich view.
+  pub fn label(&self) -> &'static str {
+    match self {
+      Self::Approved => "approved",
+      Self::ChangesRequested => "changes requested",
+      Self::Commented => "commented",
+      Self::Dismissed => "dismissed",
+      Self::Pending => "pending",
+      Self::Unknown => "unknown",
+    }
+  }
+}
+
+/// One submitted review on a PR (issue #420).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeReview {
+  pub author: String,
+  pub state: ReviewState,
+  /// Raw markdown body — empty for a bare approval, which is common.
+  pub body: String,
+  /// RFC 3339 submission timestamp.
+  pub submitted_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +247,26 @@ pub struct PrStatus {
   pub ci: CiState,
   /// The classified per-check list, same order as the forge returned it.
   pub checks: Vec<PrCheck>,
+  /// The rich slice — see [`IssueDetail`] for why it is grouped.
+  pub detail: PrDetail,
+}
+
+/// The rich slice of a pull request / merge request (issue #420): the
+/// description, its author, the diff size, the branch pair, the submitted
+/// reviews and the conversation. Same "empty, never `Option`" contract as
+/// [`IssueDetail`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrDetail {
+  pub body: String,
+  pub author: String,
+  pub additions: u32,
+  pub deletions: u32,
+  /// The branch the PR merges into (`dev`).
+  pub base_ref: String,
+  /// The branch the PR comes from (`feat/#420-rich-pr-issue-view`).
+  pub head_ref: String,
+  pub reviews: Vec<ForgeReview>,
+  pub comments: Vec<ForgeComment>,
 }
 
 /// The slice of PR metadata `gwm review` needs to materialise a worktree:
