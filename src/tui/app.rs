@@ -3267,7 +3267,15 @@ impl App {
     self.refresh_github_status();
     // The invalidation above dropped the cached threads as well, so the
     // section would otherwise stay empty until the view was reopened.
-    if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::RichPr {
+    //
+    // Gated on the VIEW too, not just the overlay kind: the refresh can
+    // close the overlay (`close_forge_overlay_if_link_disagrees`, when the
+    // re-probe moved the PR), and `close_detail_overlay` leaves `kind`
+    // holding its last value. A kind-only guard would then fire a GraphQL
+    // request for a view that is no longer on screen.
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::RichPr
+    {
       if let Some(n) = self.github.link.pr {
         self.spawn_github_pr_threads(n);
       }
