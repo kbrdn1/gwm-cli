@@ -1170,13 +1170,13 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// aggregate code (non-zero if any worktree failed).
 fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let (argv, job_count) = exec_plan(&repo, profile.as_deref(), jobs, &command)?;
+  let plan = exec_plan(&repo, profile.as_deref(), jobs, &command)?;
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {
     println!("no worktrees to run in");
     return Ok(());
   }
-  let outcomes = exec_run(&targets, &argv, job_count, None)?;
+  let outcomes = exec_run(&targets, &plan, None)?;
   print_exec_rollup_and_exit(&outcomes)
 }
 
@@ -1203,13 +1203,12 @@ fn cmd_exec_workspace(
   // doesn't touch contributes nothing, so its `[exec]` / `--profile` must not
   // be resolved — an unrelated repo lacking the profile or with a bad `[exec]`
   // can't break a run scoped elsewhere (#326 review).
-  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, Vec<String>, usize)> = Vec::new();
+  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, ExecPlan)> = Vec::new();
   for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
     if targets.is_empty() {
       continue;
     }
-    let (argv, job_count) = exec_plan(repo, profile.as_deref(), jobs, &command)?;
-    plans.push((name, targets, argv, job_count));
+    plans.push((name, targets, exec_plan(repo, profile.as_deref(), jobs, &command)?));
   }
 
   if plans.is_empty() {
@@ -1225,11 +1224,21 @@ fn cmd_exec_workspace(
     return Ok(());
   }
 
+  // Build every repo's argv before ANY repo runs. `exec_run` already does this
+  // within a repo; upfront resolution is a workspace-wide contract (#326), so
+  // a worktree of the last repo that cannot be expressed as a container mount
+  // must not surface after the first repo has already run its command.
+  for (_, targets, plan) in &plans {
+    for w in targets.iter() {
+      plan.argv_for(&w.path)?;
+    }
+  }
+
   // Run sequentially per repo, aggregating the repo-tagged outcomes.
   let mut all = Vec::new();
-  for (name, targets, argv, job_count) in &plans {
+  for (name, targets, plan) in &plans {
     println!("\n══ {}", name);
-    all.extend(exec_run(targets, argv, *job_count, Some(name))?);
+    all.extend(exec_run(targets, plan, Some(name))?);
   }
   print_exec_rollup_and_exit(&all)
 }
@@ -1296,16 +1305,12 @@ fn open_workspace_repos(root: &Path) -> Result<Vec<(String, Repository)>> {
     .collect()
 }
 
-/// Resolve the argv to run and the parallelism for `gwm exec` against `repo`
-/// (config load + profile/inline resolution + jobs precedence). No side
-/// effects — shared by the single-repo and workspace paths so every repo can
-/// be resolved upfront. See the precedence/config-loading notes inline.
-fn exec_plan(
-  repo: &Repository,
-  profile: Option<&str>,
-  jobs: Option<u32>,
-  command: &[String],
-) -> Result<(Vec<String>, usize)> {
+/// Resolve the argv to run, the parallelism, and the container wrapper (if
+/// the named profile carries one) for `gwm exec` against `repo`: config load,
+/// profile/inline resolution, jobs precedence. No side effects — shared by
+/// the single-repo and workspace paths so every repo can be resolved upfront.
+/// See the precedence/config-loading notes inline.
+fn exec_plan(repo: &Repository, profile: Option<&str>, jobs: Option<u32>, command: &[String]) -> Result<ExecPlan> {
   // Read `[exec]` only as strictly as the invocation needs (issue #324):
   //   - `--profile` → full `load_exec_config` (resolve + validate every
   //     profile); needs a workdir to locate `.gwm.toml`.
@@ -1325,37 +1330,83 @@ fn exec_plan(
   };
   let argv = exec::resolve_exec_command(profile, command, &exec_cfg)?;
   let job_count = exec::resolve_jobs(jobs, profile, &exec_cfg);
-  Ok((argv, job_count))
+  // `[container]` rides the profile only (issue #421), so this is `None` for
+  // the inline `gwm exec -- <cmd>` whatever the config says. `commondir()` is
+  // `<main>/.git` for every worktree of the repo — the mount that keeps git
+  // answering inside the container.
+  let container = match exec::resolve_exec_container(profile, &exec_cfg)? {
+    Some(cfg) => Some(exec::ContainerPlan::resolve(cfg, repo.commondir(), |bin| {
+      which::which(bin).is_ok()
+    })?),
+    None => None,
+  };
+  Ok(ExecPlan {
+    argv,
+    job_count,
+    container,
+  })
 }
 
-/// Run `argv` across one repo's `targets`: sequential (live inherited stdio)
+/// One repo's resolved `gwm exec` plan: what to run, how wide, and whether it
+/// runs inside a container. Resolved upfront (before any command runs) so a
+/// config error surfaces before the first side effect.
+struct ExecPlan {
+  argv: Vec<String>,
+  job_count: usize,
+  container: Option<exec::ContainerPlan>,
+}
+
+impl ExecPlan {
+  /// The argv to run in `worktree` — the plain command, or the containerised
+  /// wrap (which mounts that worktree's own path, hence per-worktree). Errors
+  /// when that worktree cannot be expressed as a mount (a `:` in its path).
+  fn argv_for(&self, worktree: &Path) -> Result<Vec<String>> {
+    match &self.container {
+      Some(plan) => plan.wrap(worktree, &self.argv),
+      None => Ok(self.argv.clone()),
+    }
+  }
+
+  /// Suffix appended to the per-worktree header so a containerised run says
+  /// so: `━━ feat-1 (/path) [docker rust:1.90]`.
+  fn header_suffix(&self) -> String {
+    match &self.container {
+      Some(plan) => format!(" [{} {}]", plan.runtime, plan.config.image),
+      None => String::new(),
+    }
+  }
+}
+
+/// Run `plan` across one repo's `targets`: sequential (live inherited stdio)
 /// when `job_count <= 1`, else bounded-parallel with per-worktree captured
 /// blocks. `tag` (the workspace repo name) prefixes each outcome's display
 /// name with `<repo>/` for the aggregated rollup; the per-worktree header
 /// stays plain (it sits under the `══ <repo>` header). Returns the outcomes.
-fn exec_run(
-  targets: &[worktree::WorktreeInfo],
-  argv: &[String],
-  job_count: usize,
-  tag: Option<&str>,
-) -> Result<Vec<exec::ExecOutcome>> {
-  // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv, but
-  // split defensively rather than indexing — a panic would be user-facing.
-  let (program, args) = argv
-    .split_first()
-    .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
-  let args = args.to_vec();
+fn exec_run(targets: &[worktree::WorktreeInfo], plan: &ExecPlan, tag: Option<&str>) -> Result<Vec<exec::ExecOutcome>> {
   let display = |name: &str| match tag {
     Some(t) => format!("{t}/{name}"),
     None => name.to_string(),
   };
+  let suffix = plan.header_suffix();
+
+  // Build EVERY worktree's argv before running anything. Resolution is
+  // upfront by contract (#326): a worktree whose path cannot be expressed as
+  // a container mount must fail the whole fan-out, not after the first
+  // worktree already ran.
+  let argvs: Vec<Vec<String>> = targets.iter().map(|w| plan.argv_for(&w.path)).collect::<Result<_>>()?;
 
   let mut outcomes = Vec::with_capacity(targets.len());
-  if job_count <= 1 {
+  if plan.job_count <= 1 {
     // Sequential: inherit the parent's stdio so output streams live, in order.
-    for w in targets {
-      println!("\n━━ {} ({})", w.name, w.path.display());
-      let status = exec::exec_in_dir(&w.path, program, &args);
+    for (w, argv) in targets.iter().zip(&argvs) {
+      println!("\n━━ {} ({}){}", w.name, w.path.display(), suffix);
+      // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv,
+      // but split defensively rather than indexing — a panic would be
+      // user-facing.
+      let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
+      let status = exec::exec_in_dir(&w.path, program, args);
       outcomes.push(exec::ExecOutcome {
         name: display(&w.name),
         status,
@@ -1368,14 +1419,18 @@ fn exec_run(
     // (not via `String::from_utf8_lossy`) so binary / non-UTF-8 output is
     // re-emitted byte-for-byte, matching the sequential path's inherited stdio.
     use std::io::Write;
-    let items: Vec<(String, std::path::PathBuf)> = targets.iter().map(|w| (w.name.clone(), w.path.clone())).collect();
-    let results = exec::run_in_dirs_parallel(job_count, &items, program, &args);
+    let items: Vec<(String, std::path::PathBuf, Vec<String>)> = targets
+      .iter()
+      .zip(argvs)
+      .map(|(w, argv)| (w.name.clone(), w.path.clone(), argv))
+      .collect();
+    let results = exec::run_in_dirs_parallel(plan.job_count, &items);
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    for ((name, path), (outcome, output)) in items.iter().zip(results) {
+    for ((name, path, _), (outcome, output)) in items.iter().zip(results) {
       // Ignore write errors: a closed stdout (e.g. `| head`) shouldn't panic
       // the whole fan-out, and the rollup/exit code still report the result.
-      let _ = writeln!(lock, "\n━━ {} ({})", name, path.display());
+      let _ = writeln!(lock, "\n━━ {} ({}){}", name, path.display(), suffix);
       let _ = lock.write_all(&output);
       outcomes.push(exec::ExecOutcome {
         name: display(name),

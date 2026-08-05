@@ -48,6 +48,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus the description, author and branch pair; approvals, notes and the diff
   size need separate API calls and are not fetched.
 
+- **Container execution on `gwm exec` profiles**
+  ([#421](https://github.com/kbrdn1/gwm-cli/issues/421)). A
+  `[exec.profiles.<name>.container]` block wraps that profile's command in
+  `docker run` / `podman run`: `image` is required, `runtime` is auto-detected
+  (docker first, then podman) and `extra_args` is spliced in before the image.
+  The block rides a **profile only**: an inline `gwm exec -- <cmd>` still runs
+  on the host, whatever the config says, so the frozen 1.0 surface keeps doing
+  what it did. The mount is the point rather than the wrapper: a linked
+  worktree's `.git` is a *file* holding an absolute host path, so gwm mirrors
+  host paths and mounts the main checkout's gitdir alongside
+  (`-v <worktree>:<worktree> -v <main>/.git:<main>/.git -w <worktree>`), which
+  is what makes `git status`, a commit or a hook answer inside the container;
+  mounting the worktree alone produces one where none of them do. gwm builds
+  an argv and never a shell string, no token is quoted or joined at any point,
+  and the per-worktree header names the run
+  (`━━ feat-1 (/path) [docker rust:1.90]`). Any Docker-compatible CLI works
+  (OrbStack, Colima, Rancher Desktop, Docker Desktop, native Docker), so there
+  is no runtime to integrate. Every mounted path is declared `safe.directory`
+  through `GIT_CONFIG_*` environment (never the blanket `*`), because a
+  rootful Docker on Linux runs as uid 0 against a tree owned by the host user
+  and git would otherwise refuse it as `dubious ownership`, undoing the mount.
+  `gwm exec` allocates no TTY, since a terminal per container means nothing
+  across a fan-out; the TUI exec overlay, which spawns into a real pty, runs
+  the container with `-i -t` so a REPL or a debugger keeps working there.
+  The TUI overlay also names its container (`gwm-<worktree>-<pid>-<n>`) and
+  removes it on close from the worktree, because killing a `docker run` client
+  leaves the container running and a long command would keep writing to the
+  worktree after the overlay closed; `--name` in `extra_args` is refused,
+  since a runtime honours the last one and the teardown would then remove
+  something else.
+  `selinux_relabel = true` suffixes gwm's own mounts with `:z` for an
+  SELinux-enforcing host, which `extra_args` cannot reach; it stays off by
+  default because relabelling writes to the host recursively. Refused on
+  Windows with a message saying why (host paths cannot be mirrored into a
+  Linux container, and a linked worktree's `.git` file would still name a
+  drive-letter path), and refused for a worktree path containing a `:`, which
+  is the field separator of `-v source:destination`.
+
 - **Multi-row selection in the TUI, and a batch delete on top of it**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the
   highlighted worktree, `d` then deletes every marked row in one batch; with

@@ -12,14 +12,36 @@
       # silently drifted for eight releases (#393) because the comment claiming
       # it was "bumped in lockstep at release time" was enforced by nothing.
       #
-      # Only the version is derived. `Cargo.toml` names the crate `gwm-cli`
-      # (the bare `gwm` name was taken on crates.io) while the binary, and so
-      # the package, is `gwm` — see `pname` below.
-      version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+      # `Cargo.toml` names the crate `gwm-cli` (the bare `gwm` name was taken
+      # on crates.io) while the binary, and so the package, is `gwm` — see
+      # `pname` below.
+      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      version = cargoToml.package.version;
+
+      # The same lesson, one field over. This flake asks nixpkgs for a bare
+      # `rustc`, so the compiler it serves is whatever its pin happens to
+      # carry, and that pin moves independently of this repo's floor. It drifted
+      # exactly that way: the shell served rustc 1.89 against a declared 1.95,
+      # so `nix develop` could not build the project it exists to serve, and
+      # nothing noticed because no CI job evaluates this file.
+      msrv = cargoToml.package.rust-version;
     in
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+
+        # Pinning the toolchain *to* the MSRV was the other option and it is
+        # worse: it would hand every contributor the oldest compiler the crate
+        # still supports, older than the rustup most of them already run. The
+        # floor is a lower bound, not a target. So keep whatever rustc nixpkgs
+        # carries and refuse to build the shell when it falls under, which turns
+        # a confusing `cargo` refusal deep in a build into a message naming the
+        # fix.
+        msrvOk =
+          assert pkgs.lib.assertMsg
+            (builtins.compareVersions pkgs.rustc.version msrv >= 0)
+            "flake: nixpkgs ships rustc ${pkgs.rustc.version}, below this repo's declared MSRV ${msrv} (Cargo.toml `rust-version`). Run `nix flake update nixpkgs`.";
+          true;
 
         gwm = pkgs.rustPlatform.buildRustPackage {
           pname = "gwm";
@@ -69,7 +91,7 @@
           default = self.apps.${system}.gwm;
         };
 
-        devShells.default = pkgs.mkShell {
+        devShells.default = assert msrvOk; pkgs.mkShell {
           name = "gwm-dev";
 
           # Tools contributors need: the Rust toolchain itself, the

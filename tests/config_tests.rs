@@ -2495,6 +2495,128 @@ command = []
 }
 
 #[test]
+fn exec_profile_parses_a_container_block() {
+  // Issue #421. The block rides a profile, so the inline `gwm exec -- <cmd>`
+  // surface is untouched; `image` is the only required field.
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "rust:1.90"
+  runtime = "podman"
+  extra_args = ["-e", "CI=1"]
+"#,
+  )
+  .expect("container block parses");
+  let c = cfg.exec.profiles["test"]
+    .container
+    .as_ref()
+    .expect("container block present");
+  assert_eq!(c.image, "rust:1.90");
+  assert_eq!(c.runtime.as_deref(), Some("podman"));
+  assert_eq!(c.extra_args, vec!["-e", "CI=1"]);
+  assert!(
+    !c.selinux_relabel,
+    "relabelling is off unless asked: it writes to the host"
+  );
+  assert!(
+    cfg.exec.profiles["test"].container.is_some() && cfg.exec.jobs.is_none(),
+    "the block is nested under the profile, not a new top-level section"
+  );
+}
+
+#[test]
+fn exec_profile_container_defaults_to_absent() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+"#,
+  )
+  .expect("profile without a container parses");
+  assert!(
+    cfg.exec.profiles["test"].container.is_none(),
+    "no `[container]` ⇒ the command runs on the host"
+  );
+}
+
+#[test]
+fn exec_container_parses_the_selinux_relabel_flag() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "fedora:41"
+  selinux_relabel = true
+"#,
+  )
+  .expect("selinux_relabel parses");
+  assert!(cfg.exec.profiles["test"].container.as_ref().unwrap().selinux_relabel);
+}
+
+#[test]
+fn exec_container_rejects_unknown_fields() {
+  // The reference implementation's schema is wider (mounts, env, interactive,
+  // working_dir); gwm's is deliberately not, so a copy-pasted key must be
+  // refused rather than silently ignored.
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "rust:1.90"
+  interactive = true
+"#,
+  )
+  .expect_err("unknown field must error");
+  assert!(
+    err.to_string().contains("interactive") || err.to_string().contains("unknown"),
+    "{err}"
+  );
+}
+
+#[test]
+fn exec_container_without_an_image_is_a_load_error() {
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  runtime = "docker"
+"#,
+  )
+  .expect_err("missing image must error");
+  assert!(
+    err.to_string().contains("image"),
+    "error names the missing field: {err}"
+  );
+}
+
+#[test]
+fn exec_container_with_an_empty_image_fails_validation() {
+  // `image = ""` parses but is semantically invalid — caught at config-load
+  // time so `gwm config validate` / `gwm doctor` reject what
+  // `gwm exec --profile` would.
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = ""
+"#,
+  )
+  .expect_err("empty image must fail validation");
+  assert!(err.to_string().contains("empty `image`"), "{err}");
+}
+
+#[test]
 fn clean_profile_with_an_escaping_dir_fails_validation() {
   // `dirs = [".."]` parses but escapes the worktree — caught at config-load
   // time, not only later in `gwm clean`.
