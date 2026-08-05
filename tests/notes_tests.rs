@@ -367,3 +367,29 @@ fn the_note_extension_is_matched_without_regard_to_case() {
     assert_eq!(notes::relative_path(branch), None, "{branch:?} must carry no note");
   }
 }
+
+#[test]
+fn a_case_only_rename_is_not_its_own_occupied_destination() {
+  // `git branch -m feat/foo feat/Foo` is a valid rename. On a case-folding
+  // volume (macOS's default, Windows) the destination path opens the SOURCE
+  // file, so the "never overwrite" guard read it as occupied prose and
+  // refused a rename that worked before the guard existed. A guard that
+  // breaks the case it was not written for is a regression, not hardening
+  // (Codex review, PR #530, pass 5).
+  //
+  // What this exercises depends on the runner, and that is the point: on a
+  // case-sensitive volume the two paths are two files and the move is
+  // ordinary; on a folding one they are one file and only the same-file
+  // check lets it through. The assertion holds either way.
+  let (_dir, repo) = init_repo();
+  write_note(&repo, "feat/foo", "same work, better capitalisation\n");
+
+  assert!(
+    notes::rename(&repo, "feat/foo", "feat/Foo").unwrap(),
+    "a case-only rename must move the note rather than read as occupied"
+  );
+  assert_eq!(
+    notes::read(&repo, "feat/Foo").as_deref(),
+    Some("same work, better capitalisation\n")
+  );
+}

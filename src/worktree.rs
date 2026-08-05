@@ -670,9 +670,18 @@ pub fn rename_worktree(
           crate::notes::notes_dir(&repo).display()
         )));
       }
-      if let Some(note) = crate::notes::occupied_by(&repo, new_branch) {
+      // `move_conflict`, not `occupied_by`: a case-only rename resolves to
+      // the source file on a case-folding volume, and refusing that would
+      // break a rename that has always worked.
+      //
+      // The message names the file and stops there. An earlier version sent
+      // the user to `gwm doctor`, which is true for a readable note and
+      // false for exactly the ones this branch also catches: the doctor's
+      // scan reads content, so a note carrying invalid UTF-8 is absent from
+      // its report (Codex review, PR #530, pass 5).
+      if let Some(note) = crate::notes::move_conflict(&repo, old_branch, new_branch) {
         return Err(GwmError::CommandFailed(format!(
-          "a note already exists for `{new_branch}`: {} — move or delete it first (it is an orphan `gwm doctor` reports)",
+          "a note already exists for `{new_branch}`: {} — move or delete it first",
           note.display()
         )));
       }

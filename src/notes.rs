@@ -255,9 +255,33 @@ pub fn occupied_by(repo: &git2::Repository, branch: &str) -> Option<PathBuf> {
   }
 }
 
+/// The prose a move from `old_branch` to `new_branch` would destroy.
+///
+/// [`occupied_by`] answers "is there prose here"; this answers "would this
+/// particular move lose any", which is not the same question when the two
+/// names resolve to one file. `git branch -m feat/foo feat/Foo` is a valid
+/// rename, and on a case-folding volume (macOS's default, Windows) the
+/// destination path opens the SOURCE note: reading that as occupied refused
+/// a rename that worked before the guard existed (Codex review, PR #530,
+/// pass 5). The single place that distinction is made, so the preflight and
+/// the move itself cannot disagree about it.
+pub fn move_conflict(repo: &git2::Repository, old_branch: &str, new_branch: &str) -> Option<PathBuf> {
+  let destination = occupied_by(repo, new_branch)?;
+  let source = path_for(repo, old_branch)?;
+  (!is_same_file(&source, &destination)).then_some(destination)
+}
+
+/// Whether two paths name one file. Compared through `canonicalize` rather
+/// than as strings, since a case-folding volume is exactly the case where
+/// two different strings are one file; falls back to string equality when
+/// either side cannot be resolved.
+fn is_same_file(a: &Path, b: &Path) -> bool {
+  a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
 /// Follow a branch rename (#479). Returns `true` when a note was actually
 /// moved, `false` when there was nothing to move, either name cannot back a
-/// file, or the destination already carries a note.
+/// file, or the move would destroy prose already at the destination.
 ///
 /// Never overwrites (Codex review, PR #530). `git branch -m old new` fails
 /// when `new` already exists, so a note found there is necessarily an orphan
@@ -268,7 +292,7 @@ pub fn rename(repo: &git2::Repository, old_branch: &str, new_branch: &str) -> Re
   let (Some(from), Some(to)) = (path_for(repo, old_branch), path_for(repo, new_branch)) else {
     return Ok(false);
   };
-  if from == to || !from.is_file() || occupied_by(repo, new_branch).is_some() {
+  if from == to || !from.is_file() || move_conflict(repo, old_branch, new_branch).is_some() {
     return Ok(false);
   }
   if let Some(parent) = to.parent() {
