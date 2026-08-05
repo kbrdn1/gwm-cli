@@ -40,13 +40,15 @@
 //!   two branches share one note). [`relative_path`] returns `None` for
 //!   those rather than writing a file whose name means something else on
 //!   another platform.
-//! - **Two branches differing only in case share one note** where the
-//!   filesystem folds case, which is macOS's default volume and every
-//!   Windows one. `git pack-refs` is what lets `feat/foo` and `feat/Foo`
-//!   both go live there. [`prepare`] refuses the pair, so no editor is ever
-//!   pointed at the other branch's prose; [`read`] stays permissive and will
-//!   show one branch the other's note, because refusing to *display* a file
-//!   that is plainly there helps nobody.
+//! - **Two branch names a volume folds together share one note.** That is
+//!   ASCII case, Unicode case and the NFC/NFD forms on macOS's default
+//!   volume and every case-insensitive Windows one; `git pack-refs` is what
+//!   lets `feat/foo` and `feat/Foo` both go live there. [`prepare`] refuses
+//!   the pair, so no editor is ever pointed at the other branch's prose —
+//!   by name before either has a note, and by asking the filesystem once one
+//!   does. [`read`] stays permissive and will show one branch the other's
+//!   note, because refusing to *display* a file that is plainly there helps
+//!   nobody.
 //!
 //! ## Presence is "non-blank", not "exists"
 //!
@@ -195,9 +197,16 @@ fn read_at(path: &Path) -> Option<String> {
 ///
 /// Checked on every platform rather than behind a `cfg`, for the reason
 /// [`component_is_portable`] gives: the answer must not depend on which
-/// machine wrote the note. `eq_ignore_ascii_case` is the conservative half of
-/// the comparison — a filesystem folding beyond ASCII would alias a pair this
-/// misses, and [`crate::doctor`] is what surfaces the leftover.
+/// machine wrote the note.
+///
+/// `eq_ignore_ascii_case` is half the comparison, and deliberately the half
+/// that needs no knowledge of the volume: it catches the pair **before either
+/// has a note**, which is the only moment nothing on disk can be asked.
+/// Everything it cannot compare — Unicode case, NFC meeting NFD — is
+/// [`aliased_note`]'s half, which asks the filesystem rather than guessing
+/// its folding rules. `gwm doctor` does *not* cover the gap: its check fires
+/// on a note whose branch is gone, and both branches of an aliased pair are
+/// alive.
 fn case_fold_rival(repo: &git2::Repository, branch: &str) -> Option<String> {
   repo
     .branches(Some(git2::BranchType::Local))
@@ -207,14 +216,36 @@ fn case_fold_rival(repo: &git2::Repository, branch: &str) -> Option<String> {
     .find(|other| other != branch && other.eq_ignore_ascii_case(branch))
 }
 
+/// The note already on disk that `path` opens under a different name.
+///
+/// No comparison of two strings can answer this: whether `feat/É.md` and
+/// `feat/é.md` are one file is a property of the *volume*, and APFS and NTFS
+/// fold Unicode case and the NFC/NFD forms as readily as ASCII. So the
+/// question goes to the filesystem — one `read_dir` of the parent, and
+/// [`is_same_file`] on any entry whose name is not byte-equal. On a
+/// case-sensitive volume `canonicalize` fails on the absent target and
+/// nothing matches, which is the right answer there.
+///
+/// `None` when the directory cannot be read: an unprovable alias is not one
+/// to refuse on.
+fn aliased_note(path: &Path) -> Option<PathBuf> {
+  let parent = path.parent()?;
+  let name = path.file_name()?;
+  std::fs::read_dir(parent)
+    .ok()?
+    .filter_map(|entry| entry.ok())
+    .map(|entry| entry.path())
+    .find(|other| other.file_name() != Some(name) && is_same_file(other, path))
+}
+
 /// Create the directory `branch`'s note lives in and return the file path,
 /// ready to hand to `$EDITOR`. The file itself is not created — an editor
 /// exited without saving leaves no note behind.
 ///
 /// `Ok(None)` is "this branch name cannot back a portable file"; the error is
 /// "it can, but writing there would take someone else's prose" — the one
-/// place the case-fold aliasing is refused rather than documented, because it
-/// is the only path that hands a user an editor pointed at the file.
+/// place the aliasing is refused rather than documented, because it is the
+/// only path that hands a user an editor pointed at the file.
 pub fn prepare(repo: &git2::Repository, branch: &str) -> Result<Option<PathBuf>> {
   let Some(path) = path_for(repo, branch) else {
     return Ok(None);
@@ -228,6 +259,17 @@ pub fn prepare(repo: &git2::Repository, branch: &str) -> Result<Option<PathBuf>>
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent)
       .map_err(|e| crate::error::GwmError::CommandFailed(format!("could not create the notes directory: {e}")))?;
+  }
+  if let Some(other) = aliased_note(&path) {
+    let owner = other
+      .strip_prefix(notes_dir(repo))
+      .ok()
+      .and_then(branch_from_relative)
+      .unwrap_or_else(|| other.display().to_string());
+    return Err(crate::error::GwmError::CommandFailed(format!(
+      "this filesystem opens `{branch}`'s note and `{owner}`'s as one file — \
+       rename one of the two branches, editing either would rewrite the other"
+    )));
   }
   Ok(Some(path))
 }

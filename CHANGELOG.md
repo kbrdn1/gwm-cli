@@ -79,10 +79,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   note cannot exist on macOS and vanish on the same repo cloned to Windows;
   and `gwm doctor` reports a note whose branch is gone, rather than
   `gwm clean`, whose safety property is that `--yes` only removes directories
-  git already ignores. Two branches differing only in case — which
-  `git pack-refs` lets coexist — share one file where the filesystem folds
-  case, so `N` refuses the pair by name rather than opening one branch's
-  editor on the other's prose. Presence
+  git already ignores. Two branch names a volume folds together — which
+  `git pack-refs` lets coexist — share one file, so `N` refuses the pair
+  rather than opening one branch's editor on the other's prose: by name
+  before either has a note, and by asking the filesystem once one does, which
+  is the only thing that knows whether this volume folds `feat/é` onto
+  `feat/É` or an NFC name onto its NFD twin. Presence
   means "non-blank", not "the file exists", because `vi` over an empty buffer
   writes one byte. One upgrade note, the same one `z` carried in #484: `N` is
   now a shipped default, so a `.gwm.toml` binding a chord *starting* with `N`

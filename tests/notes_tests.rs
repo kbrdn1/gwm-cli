@@ -158,6 +158,46 @@ fn two_branches_differing_only_in_case_are_refused_a_note() {
 }
 
 #[test]
+fn a_note_the_filesystem_aliases_is_refused_whatever_folded_it() {
+  // The branch walk above compares with `eq_ignore_ascii_case`, so it cannot
+  // see `feat/é` / `feat/É`, nor an NFC name meeting an NFD one. Neither can
+  // any comparison that does not know this volume's folding rules — so the
+  // filesystem is asked instead of guessed (Codex review, PR #530). The two
+  // guards cover disjoint blind spots: the walk catches the pair before
+  // either has a note, the probe catches every folding the walk cannot
+  // compare, once one of them does.
+  let (_dir, repo) = init_repo();
+  write_note(&repo, "feat/é", "the real prose\n");
+  // Probed, not assumed: a case-sensitive volume must take the other leg.
+  let folds = notes::notes_dir(&repo).join("feat").join("É.md").exists();
+
+  match notes::prepare(&repo, "feat/É") {
+    Err(e) => {
+      assert!(folds, "a case-sensitive volume has nothing to refuse here: {e}");
+      let message = e.to_string();
+      assert!(
+        message.contains("feat/é"),
+        "the refusal has to name the note already on disk: {message}"
+      );
+    }
+    Ok(Some(path)) => {
+      assert!(
+        !folds,
+        "this volume aliases `feat/É.md` onto `feat/é.md`, so opening an editor there \
+         hands one branch the other's note"
+      );
+      std::fs::write(&path, "a second, separate note\n").unwrap();
+      assert_eq!(
+        notes::read(&repo, "feat/é").as_deref(),
+        Some("the real prose\n"),
+        "on a case-sensitive volume the two notes are two files"
+      );
+    }
+    Ok(None) => panic!("`feat/É` backs a portable filename"),
+  }
+}
+
+#[test]
 fn a_branch_with_no_case_variant_still_prepares() {
   // The counterpart: the guard above must not turn every note into a branch
   // walk that refuses on its own name.
