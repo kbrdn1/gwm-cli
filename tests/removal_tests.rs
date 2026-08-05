@@ -767,31 +767,33 @@ fn a_remove_hook_from_the_global_config_needs_no_repo_approval() {
 }
 
 #[test]
-fn a_hook_that_moves_the_target_leaves_no_journal_entry() {
-  // Codex review on PR #526 (P2). The advance path check runs before the
-  // hooks, so a `pre_remove` that moves the worktree itself passes it, and
-  // the journal entry was then written before `remove_verified` refused: the
-  // journal claimed a removal that never happened, and `gwm undo` would have
-  // popped that instead of a recoverable one.
+fn a_hook_that_invalidates_its_own_target_leaves_no_journal_entry() {
+  // Codex review on PR #526 (P2). The path check runs before the hooks, so a
+  // hook that invalidates its OWN target passed it, the entry was written,
+  // and the removal was then refused: the journal claimed a removal that
+  // never happened, and `gwm undo` would pop that instead of a recoverable
+  // one. Hence the second check, after the hooks and before the write.
+  //
+  // The hook deletes the admin entry rather than moving the worktree: a move
+  // renames the directory the hook is sitting in and that libgit2 has just
+  // memory-mapped an index from, which Windows refuses outright
+  // (`Permission denied`, red on windows-latest only). Deleting
+  // `.git/worktrees/<id>` invalidates the target just as thoroughly and
+  // touches nothing anyone holds open.
   let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
 
   let (dir, repo) = init_repo();
   let wt_root = TempDir::new().unwrap();
-  let original = wt_root.path().join("wt-521-self-move");
-  worktree::add(&repo, "wt-521-self-move", &original, "feat/#521-self-move", false).unwrap();
-  let moved = wt_root.path().join("wt-521-self-move-elsewhere");
+  let doomed = wt_root.path().join("wt-521-self-invalidate");
+  worktree::add(&repo, "wt-521-self-invalidate", &doomed, "feat/#521-self", false).unwrap();
+  let admin = dir.path().join(".git").join("worktrees").join("wt-521-self-invalidate");
+  assert!(admin.is_dir(), "the admin entry exists before the hook runs");
 
-  // The hook moves the very worktree being removed, out from under the plan.
   std::fs::write(
     dir.path().join(".gwm.toml"),
     format!(
-      // `cd /` first: the hook's cwd is the worktree it is about to rename,
-      // and Windows refuses to rename a directory that is a live process's
-      // working directory (`Permission denied`, seen on windows-latest only).
-      "\n[[hooks.pre_remove]]\nname = \"move myself\"\nrun = \"cd / && git -C '{}' worktree move '{}' '{}'\"\n",
-      shell_path(dir.path()),
-      shell_path(&original),
-      shell_path(&moved)
+      "\n[[hooks.pre_remove]]\nname = \"pull the rug\"\nrun = \"rm -rf '{}'\"\n",
+      shell_path(&admin)
     ),
   )
   .unwrap();
@@ -810,12 +812,17 @@ fn a_hook_that_moves_the_target_leaves_no_journal_entry() {
   let mut app = App::new_at_layered(Some(dir.path()), None)
     .unwrap()
     .with_trust_mode(gwm::trust::TrustMode::Allow);
-  select_row(&mut app, "wt-521-self-move");
+  select_row(&mut app, "wt-521-self-invalidate");
   app.enter_confirm_delete();
   app.confirm_delete().unwrap();
   wait_for_delete(&mut app);
 
-  assert!(moved.exists(), "the moved worktree survives (status: {})", app.status);
+  assert!(!admin.exists(), "the hook ran, so the check below is not vacuous");
+  assert!(
+    doomed.exists(),
+    "nothing was removed from disk (status: {})",
+    app.status
+  );
   assert!(
     history::Journal::load(&journal_path).unwrap().entries().is_empty(),
     "nothing was removed, so nothing may claim to be undoable"
