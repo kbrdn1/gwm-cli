@@ -40,6 +40,13 @@
 //!   two branches share one note). [`relative_path`] returns `None` for
 //!   those rather than writing a file whose name means something else on
 //!   another platform.
+//! - **Two branches differing only in case share one note** where the
+//!   filesystem folds case, which is macOS's default volume and every
+//!   Windows one. `git pack-refs` is what lets `feat/foo` and `feat/Foo`
+//!   both go live there. [`prepare`] refuses the pair, so no editor is ever
+//!   pointed at the other branch's prose; [`read`] stays permissive and will
+//!   show one branch the other's note, because refusing to *display* a file
+//!   that is plainly there helps nobody.
 //!
 //! ## Presence is "non-blank", not "exists"
 //!
@@ -57,16 +64,6 @@ use std::path::{Component, Path, PathBuf};
 /// `feat` and a branch `feat/x` from colliding on disk: `feat.md` is a
 /// file, `feat/` a directory, and the two coexist.
 const NOTE_EXT: &str = ".md";
-
-/// Device names Windows reserves at every directory level, with or without
-/// an extension — `CON.md` is `CON`. A branch named after one is legal in
-/// git and unwritable there, so it carries no note anywhere (the check is
-/// platform-independent on purpose: a note must not exist on macOS and
-/// vanish on the same repo cloned to Windows).
-const WINDOWS_RESERVED: &[&str] = &[
-  "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2",
-  "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
 
 /// The notes directory for `repo` — `<main>/.git/gwm/notes`. `commondir`
 /// rather than `path`, so a handle opened on a *linked* worktree resolves
@@ -93,8 +90,17 @@ fn component_is_portable(c: &str) -> bool {
   {
     return false;
   }
-  let stem = c.split('.').next().unwrap_or_default().to_ascii_lowercase();
-  !WINDOWS_RESERVED.contains(&stem.as_str())
+  // Device names Windows reserves at every directory level, with or without
+  // an extension — `CON.md` is `CON`. A branch named after one is legal in
+  // git and unwritable there, so it carries no note anywhere: the check is
+  // platform-independent on purpose, a note must not exist on macOS and
+  // vanish on the same repo cloned to Windows.
+  //
+  // Borrowed from `naming.rs` rather than restated. The local copy was six
+  // entries short — it had no `COM¹ COM² COM³ LPT¹ LPT² LPT³`, the ISO 8859-1
+  // superscripts Win32 reads as digits — which is what a second list of the
+  // same facts does (Codex review, PR #530).
+  !crate::naming::is_windows_reserved_segment(c)
 }
 
 /// Path of `branch`'s note **relative to [`notes_dir`]**, mirroring
@@ -178,15 +184,50 @@ fn read_at(path: &Path) -> Option<String> {
   (!text.trim().is_empty()).then_some(text)
 }
 
+/// Another live local branch whose note is the same file as `branch`'s.
+///
+/// [`relative_path`] keeps every component of the branch name, so two
+/// branches share a note file exactly when their names differ only in case —
+/// and only where the filesystem folds case, which is macOS's default volume
+/// and every Windows one. `git branch feat/Foo` is refused while `feat/foo`
+/// is a *loose* ref there, but accepted once `git pack-refs` has run, after
+/// which both are live and both are enumerated here (measured, PR #530).
+///
+/// Checked on every platform rather than behind a `cfg`, for the reason
+/// [`component_is_portable`] gives: the answer must not depend on which
+/// machine wrote the note. `eq_ignore_ascii_case` is the conservative half of
+/// the comparison — a filesystem folding beyond ASCII would alias a pair this
+/// misses, and [`crate::doctor`] is what surfaces the leftover.
+fn case_fold_rival(repo: &git2::Repository, branch: &str) -> Option<String> {
+  repo
+    .branches(Some(git2::BranchType::Local))
+    .ok()?
+    .filter_map(|found| found.ok())
+    .filter_map(|(found, _)| found.name().ok().flatten().map(str::to_string))
+    .find(|other| other != branch && other.eq_ignore_ascii_case(branch))
+}
+
 /// Create the directory `branch`'s note lives in and return the file path,
 /// ready to hand to `$EDITOR`. The file itself is not created — an editor
 /// exited without saving leaves no note behind.
+///
+/// `Ok(None)` is "this branch name cannot back a portable file"; the error is
+/// "it can, but writing there would take someone else's prose" — the one
+/// place the case-fold aliasing is refused rather than documented, because it
+/// is the only path that hands a user an editor pointed at the file.
 pub fn prepare(repo: &git2::Repository, branch: &str) -> Result<Option<PathBuf>> {
   let Some(path) = path_for(repo, branch) else {
     return Ok(None);
   };
+  if let Some(rival) = case_fold_rival(repo, branch) {
+    return Err(crate::error::GwmError::CommandFailed(format!(
+      "`{branch}` and `{rival}` differ only in case and would share one note file — \
+       rename one of the two branches, the filesystem cannot tell their notes apart"
+    )));
+  }
   if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent)
+      .map_err(|e| crate::error::GwmError::CommandFailed(format!("could not create the notes directory: {e}")))?;
   }
   Ok(Some(path))
 }
@@ -288,6 +329,15 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 /// left by a previous branch of that name, and `fs::rename` would replace it
 /// silently on Unix. Prose nothing can regenerate is not something to lose
 /// to a name reuse.
+///
+/// The check and the move are two syscalls, and that window stays open on
+/// purpose. std has no no-clobber rename (`renameat2`/`renamex_np` are not
+/// exposed), and the substitute — `create_new` the destination, copy, unlink
+/// the source — trades a window no writer can enter for a real one: a crash
+/// between the copy and the unlink leaves the note under *both* keys, the
+/// old one now an orphan [`crate::doctor`] reports. Nothing legitimate writes
+/// a note for `new_branch` during the call, because `git branch -m old new`
+/// has just proved `new` did not exist.
 pub fn rename(repo: &git2::Repository, old_branch: &str, new_branch: &str) -> Result<bool> {
   let (Some(from), Some(to)) = (path_for(repo, old_branch), path_for(repo, new_branch)) else {
     return Ok(false);

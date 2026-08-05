@@ -3902,8 +3902,10 @@ impl App {
         self.status = format!("`{branch}` cannot back a note file — the name is not a portable filename");
         None
       }
+      // `prepare` writes its own message: the directory it could not create,
+      // or the other branch that already owns this note file.
       Err(e) => {
-        self.status = format!("could not create the notes directory: {e}");
+        self.status = e.to_string();
         None
       }
     }

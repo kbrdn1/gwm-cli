@@ -104,6 +104,12 @@ fn a_branch_name_that_cannot_back_a_portable_file_carries_no_note() {
     "CON",
     "nested/CON",
     "com1",
+    // Win32 reads the ISO 8859-1 superscripts as digits in a device name, so
+    // `COM¹` is `COM1`. The full list already lives in `naming.rs`; a second,
+    // shorter copy in `notes.rs` is what let these through (Codex review, PR
+    // #530).
+    "COM¹",
+    "nested/LPT³",
     "..",
     "feat/../escape",
     "",
@@ -115,6 +121,55 @@ fn a_branch_name_that_cannot_back_a_portable_file_carries_no_note() {
       "{branch:?} must not back a note file"
     );
   }
+}
+
+#[test]
+fn two_branches_differing_only_in_case_are_refused_a_note() {
+  // Measured, not assumed: `git branch feat/Foo` is refused while `feat/foo`
+  // is a *loose* ref on a case-insensitive volume, and accepted once the
+  // refs are packed. Both then show up in `git branch --list`, so two live
+  // branches map to one note file and editing either one silently rewrites
+  // the other's prose (Codex review, PR #530).
+  let (dir, repo) = init_repo();
+  repo
+    .branch("feat/foo", &repo.head().unwrap().peel_to_commit().unwrap(), false)
+    .unwrap();
+  let packed = std::process::Command::new("git")
+    .args(["pack-refs", "--all"])
+    .current_dir(dir.path())
+    .status()
+    .expect("git is on PATH");
+  assert!(packed.success(), "git pack-refs --all failed");
+  repo
+    .branch("feat/Foo", &repo.head().unwrap().peel_to_commit().unwrap(), false)
+    .expect("a packed ref no longer blocks the case variant");
+
+  let err =
+    notes::prepare(&repo, "feat/Foo").expect_err("a branch that shares a note file with another must be refused");
+  let message = err.to_string();
+  assert!(
+    message.contains("feat/foo") && message.contains("feat/Foo"),
+    "the refusal has to name both branches, it is the user who picks which one to rename: {message}"
+  );
+  assert!(
+    !notes::notes_dir(&repo).join("feat").join("Foo.md").exists(),
+    "nothing is written for a refused branch"
+  );
+}
+
+#[test]
+fn a_branch_with_no_case_variant_still_prepares() {
+  // The counterpart: the guard above must not turn every note into a branch
+  // walk that refuses on its own name.
+  let (_dir, repo) = init_repo();
+  repo
+    .branch("feat/foo", &repo.head().unwrap().peel_to_commit().unwrap(), false)
+    .unwrap();
+
+  assert!(notes::prepare(&repo, "feat/foo").unwrap().is_some());
+  // And a branch with no ref at all (a note prepared before the branch is
+  // created) is not a collision either.
+  assert!(notes::prepare(&repo, "feat/never-created").unwrap().is_some());
 }
 
 #[test]
