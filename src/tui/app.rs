@@ -1843,7 +1843,7 @@ impl App {
           }
           if let Ok(status) = &result {
             self.persist_loaded_issue_title(status);
-            self.refresh_rich_overlay_on_issue_landing(status);
+            self.sync_rich_overlay(RichSource::Issue(status.clone()));
           }
           self.github.complete_issue(number, result);
           applied = true;
@@ -1859,7 +1859,7 @@ impl App {
               // The overlay-close message owns the status line this tick.
               refresh_applied = true;
             }
-            self.refresh_rich_overlay_on_pr_landing(status);
+            self.sync_rich_overlay(RichSource::Pr(status.clone()));
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -5976,6 +5976,7 @@ impl App {
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
     if let Ok(status) = &r {
       self.persist_loaded_issue_title(status);
+      self.sync_rich_overlay(RichSource::Issue(status.clone()));
     }
     self.github.apply_issue_result(r);
   }
@@ -5984,6 +5985,10 @@ impl App {
     if let Ok(status) = &r {
       self.persist_loaded_pr_title(status);
       self.refresh_ci_overlay_on_pr_landing(status);
+      // Wired here AND in the drain, the same pairing the CI counterpart
+      // documents right below: a landing path that exists only in the seam
+      // leaves the running TUI without the refresh.
+      self.sync_rich_overlay(RichSource::Pr(status.clone()));
     }
     self.github.apply_pr_result(r);
   }
@@ -6026,35 +6031,84 @@ impl App {
     false
   }
 
-  /// Rich-view counterpart of [`Self::refresh_ci_overlay_on_pr_landing`]
-  /// (issue #420). A sibling rather than a widened guard: that one closes
-  /// the overlay on an empty rollup, because a CI list with no checks *is*
-  /// the bordered void it refuses to open — while a rich view of a PR
-  /// whose workflows have not started is perfectly good content. So this
-  /// one only ever re-renders, and never claims the status line.
-  fn refresh_rich_overlay_on_pr_landing(&mut self, status: &PrStatus) {
+  /// **The rich view's invariant** (issue #420, Codex review #529, second
+  /// pass): while it is open, the rich view renders the side the **link**
+  /// prefers, in its freshest version, **title included**.
+  ///
+  /// Written once here rather than as a third patch, because three
+  /// findings in a row were the same class of bug: the view mixed the link
+  /// state, the fetch-cache state and the overlay's own kind, and each fix
+  /// reconciled one more pair of them. The consequences all follow from
+  /// the one sentence above:
+  ///
+  /// - a landing PR **takes over** an issue view that was only standing in
+  ///   for it (an earlier fetch had errored), rather than leaving the user
+  ///   on the issue until they close the overlay;
+  /// - a landing issue refreshes the view only when the issue **is** the
+  ///   view, since the link prefers the PR;
+  /// - the title is recomputed on every landing, so a PR renamed upstream
+  ///   cannot show fresh content under a stale heading.
+  ///
+  /// A kind change reopens (the content is a different object, so keeping
+  /// the cursor would be meaningless); a same-kind refresh keeps the
+  /// selection and the filter cursor clamped through `set_rows`.
+  ///
+  /// Unlike the CI counterpart this never closes the overlay and never
+  /// claims the status line: a CI list with no checks is the bordered void
+  /// `enter_ci_checks` refuses to open, while a rich view of a PR whose
+  /// workflows have not started is perfectly good content.
+  fn sync_rich_overlay(&mut self, source: RichSource) {
+    use crate::tui::state::detail_overlay::DetailKind;
     if self.view != View::DetailOverlay
-      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::RichPr
-      || self.github.link.pr != Some(status.number)
+      || !matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr)
     {
       return;
     }
-    let rows = crate::tui::state::rich_view::rich_pr_rows(status, self.rich_view_width());
-    self.rich_overlay_source = Some(RichSource::Pr(status.clone()));
-    self.detail_overlay.set_rows(rows);
-  }
-
-  /// Issue-side counterpart of [`Self::refresh_rich_overlay_on_pr_landing`].
-  fn refresh_rich_overlay_on_issue_landing(&mut self, status: &IssueStatus) {
-    if self.view != View::DetailOverlay
-      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::RichIssue
-      || self.github.link.issue != Some(status.number)
-    {
-      return;
+    let (kind, title) = match &source {
+      RichSource::Pr(pr) => {
+        // Only the linked PR may claim the view; another number landing is
+        // a stale worker's result and must not retarget the overlay.
+        if self.github.link.pr != Some(pr.number) {
+          return;
+        }
+        (
+          DetailKind::RichPr,
+          format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+        )
+      }
+      RichSource::Issue(issue) => {
+        if self.github.link.issue != Some(issue.number) || self.detail_overlay.kind != DetailKind::RichIssue {
+          return;
+        }
+        (
+          DetailKind::RichIssue,
+          format!("Issue #{} · {}", issue.number, issue.title),
+        )
+      }
+    };
+    let width = self.rich_view_width();
+    let (rows, target, number) = match &source {
+      RichSource::Pr(pr) => (
+        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        LinkTarget::Pr,
+        pr.number,
+      ),
+      RichSource::Issue(issue) => (
+        crate::tui::state::rich_view::rich_issue_rows(issue, width),
+        LinkTarget::Issue,
+        issue.number,
+      ),
+    };
+    let title = crate::naming::sanitise_for_terminal(&title);
+    let promoted = self.detail_overlay.kind != kind;
+    self.rich_overlay_source = Some(source);
+    self.detail_overlay_link = Some((self.github.link_slug.clone(), target, number));
+    if promoted {
+      self.detail_overlay.open(kind, title, rows);
+    } else {
+      self.detail_overlay.title = title;
+      self.detail_overlay.set_rows(rows);
     }
-    let rows = crate::tui::state::rich_view::rich_issue_rows(status, self.rich_view_width());
-    self.rich_overlay_source = Some(RichSource::Issue(status.clone()));
-    self.detail_overlay.set_rows(rows);
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {

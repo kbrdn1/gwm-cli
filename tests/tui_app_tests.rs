@@ -12099,3 +12099,73 @@ fn a_resize_still_rewraps_after_the_cache_was_flushed() {
     "the overlay must re-wrap from its own source, not from a flushed cache"
   );
 }
+
+#[test]
+fn a_landing_pr_promotes_the_rich_view_off_the_issue() {
+  // Codex review #529, second pass. The invariant, written once instead of
+  // patched a third time: while the rich view is open it renders the side
+  // the LINK prefers, in its freshest version, title included. So a PR
+  // landing takes over an issue view that was only standing in for it.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Err("gh: transient".into()));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue, "precondition");
+
+  // `f` succeeds this time.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "the PR must claim the view it is entitled to"
+  );
+  assert!(
+    app.detail_overlay.title.contains("#61"),
+    "the title must follow the content: {}",
+    app.detail_overlay.title
+  );
+}
+
+#[test]
+fn a_landing_issue_does_not_displace_the_pr_view() {
+  // The other direction of the same invariant: the link prefers the PR, so
+  // an issue landing refreshes the view only when the issue IS the view.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "precondition");
+
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn a_refreshed_title_follows_a_renamed_pr() {
+  // Same invariant, third consequence: `f` used to replace the source and
+  // the rows while keeping the title computed at open, so a PR renamed
+  // upstream showed fresh content under a stale heading.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(app.detail_overlay.title.contains("rich fixture"), "precondition");
+
+  let mut renamed = rich_pr_fixture(61);
+  renamed.title = "renamed upstream".into();
+  app.apply_pr_fetch_result(Ok(renamed));
+
+  assert!(
+    app.detail_overlay.title.contains("renamed upstream"),
+    "stale heading over fresh content: {}",
+    app.detail_overlay.title
+  );
+}
