@@ -324,3 +324,52 @@ fn a_zero_width_budget_does_not_panic_or_loop() {
   let rows = rich_pr_rows(&sample_pr(), 0);
   assert!(!rows.is_empty());
 }
+
+#[test]
+fn a_preformatted_block_keeps_its_indentation() {
+  // Codex review #529: the wrap ran every line through `split_whitespace`,
+  // which drops the leading indent and collapses runs of spaces. That is
+  // the nominal case, not an edge one: a PR description on this repo
+  // almost always carries a fenced block, and for YAML or Python the
+  // indentation IS the meaning.
+  let mut pr = sample_pr();
+  pr.detail.body = "Config:\n\n```yaml\njobs:\n  build:\n    runs-on: ubuntu\n```\n\nA | B\n--- | ---\n1 | 2".into();
+
+  let rows = rich_pr_rows(&pr, W);
+  let vals = values(&rows);
+
+  assert!(
+    vals.iter().any(|v| v == "  build:"),
+    "the two-space indent must survive: {vals:?}"
+  );
+  assert!(
+    vals.iter().any(|v| v == "    runs-on: ubuntu"),
+    "and so must the four-space one: {vals:?}"
+  );
+  assert!(
+    vals.iter().any(|v| v == "--- | ---"),
+    "aligned table separators must not be re-spaced: {vals:?}"
+  );
+}
+
+#[test]
+fn a_wrapped_continuation_keeps_the_line_indent() {
+  // A preformatted line too long for the modal still has to wrap, but its
+  // continuations belong under the original indent, not at column zero.
+  let mut pr = sample_pr();
+  pr.detail.body = format!("    {}", "alpha ".repeat(40));
+
+  let rows = rich_pr_rows(&pr, W);
+  let body: Vec<&String> = rows.iter().map(|r| &r.value).filter(|v| v.contains("alpha")).collect();
+
+  assert!(body.len() > 1, "precondition: the line had to wrap");
+  for line in &body {
+    assert!(line.starts_with("    "), "continuation lost the indent: {line:?}");
+    assert!(row_width_of(line) <= W, "indent must be inside the budget: {line:?}");
+  }
+}
+
+/// `row_width` for a bare value string.
+fn row_width_of(v: &str) -> usize {
+  LABEL_W + 2 + v.chars().count()
+}

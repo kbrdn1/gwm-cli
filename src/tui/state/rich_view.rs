@@ -328,11 +328,32 @@ fn wrap_block(body: &str, budget: usize) -> Vec<String> {
 /// budget. A URL or a base64 blob has no break opportunity, and a
 /// word-only wrap would emit an over-wide row the renderer then ellipsises
 /// — losing exactly the tail the user was after.
+///
+/// **A line that already fits is returned untouched** (Codex review #529).
+/// The word loop below runs on `split_whitespace`, which drops the leading
+/// indent and collapses runs of spaces, and that is not cosmetic: a PR
+/// description almost always carries a fenced block, and for YAML or
+/// Python the indentation *is* the meaning. Since preformatted lines are
+/// short by nature, passing short lines through verbatim preserves them
+/// while prose still wraps. A preformatted line long enough to need
+/// wrapping is re-spaced anyway, but its continuations are re-indented to
+/// the original column so the block keeps its shape.
 fn wrap_line(line: &str, budget: usize) -> Vec<String> {
   let budget = budget.max(1);
+  if line.chars().count() <= budget {
+    return vec![line.to_string()];
+  }
+  let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+  // An indent wider than the budget would leave no room to make progress.
+  let indent = if indent.chars().count() + 8 <= budget {
+    indent
+  } else {
+    String::new()
+  };
   let mut out = Vec::new();
   let mut cur = String::new();
   let mut cur_cols = 0usize;
+  let budget = budget - indent.chars().count();
   for word in line.split_whitespace() {
     let word_cols = word.chars().count();
     if word_cols > budget {
@@ -376,7 +397,11 @@ fn wrap_line(line: &str, budget: usize) -> Vec<String> {
   if out.is_empty() {
     out.push(String::new());
   }
-  out
+  if indent.is_empty() {
+    out
+  } else {
+    out.into_iter().map(|l| format!("{indent}{l}")).collect()
+  }
 }
 
 /// Single-line ellipsis for the header rows, which are built from short
