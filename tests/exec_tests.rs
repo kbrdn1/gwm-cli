@@ -6,15 +6,20 @@
 //! repo. Spawning uses `sh -c`, present at `/bin/sh` even on a stripped
 //! CI PATH, so these stay environment-independent (CLAUDE.md).
 
+// Only the linked-worktree test needs a real repo, and it is unix-gated (the
+// wrapper is refused on Windows), so the module would be dead code there.
+#[cfg(unix)]
 mod common;
 
 use clap::Parser;
 use gwm::cli::{Cli, Command};
 use gwm::config::{ContainerConfig, ExecConfig, ExecProfile};
+#[cfg(unix)]
+use gwm::exec::build_container_argv;
 use gwm::exec::{
-  build_container_argv, exec_capture_in_dir, exec_in_dir, format_outcome, resolve_container_runtime,
-  resolve_exec_command, resolve_exec_container, resolve_jobs, resolve_program, rollup_exit_code, run_in_dirs_parallel,
-  validate_exec_profile, ContainerPlan, ExecOutcome, ExecStatus, CONTAINER_RUNTIMES,
+  exec_capture_in_dir, exec_in_dir, format_outcome, resolve_container_runtime, resolve_exec_command,
+  resolve_exec_container, resolve_jobs, resolve_program, rollup_exit_code, run_in_dirs_parallel, validate_exec_profile,
+  ContainerPlan, ExecOutcome, ExecStatus, CONTAINER_RUNTIMES,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -496,6 +501,7 @@ fn argv(tokens: &[&str]) -> Vec<String> {
 }
 
 /// The `-v` mount sources in `out`, in order (`-v <src>:<dst>` → `<src>`).
+#[cfg(unix)]
 fn mount_sources(out: &[String]) -> Vec<String> {
   out
     .windows(2)
