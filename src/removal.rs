@@ -104,35 +104,29 @@ pub fn remove_with_lifecycle(
     }
   }
 
-  // Issue #29: capture the branch OID via libgit2 BEFORE the destructive
-  // call so `gwm undo` can resurrect the branch at the tip that was deleted.
+  // Issue #29: capture the branch OID via libgit2 BEFORE the branch is
+  // deleted, so `gwm undo` can resurrect it at the tip that was dropped.
   //
-  // Written here, after every refusal has had its say and before the first
-  // destructive effect. `worktree::remove` prunes the admin entry BEFORE
-  // deleting the directory (#98), so a filesystem failure mid-removal leaves
-  // the repo mutated, and with `--delete-branch` the branch tip gone: writing
-  // the entry afterwards would leave that case with no recovery anchor at all
-  // (Codex review on PR #526). Everything that refuses without mutating
-  // anything — the path check above, a `pre_remove` hook, the trust gate —
-  // happens earlier, so a refusal still records nothing.
-  // Checked again, because the hooks just ran and one of them can move the
-  // very worktree it was given: the advance check above passed, so without
-  // this the entry would claim a removal `remove_verified` is about to refuse,
-  // and `gwm undo` would pop that instead of a recoverable one (Codex review
-  // on PR #526).
-  if let Err(e) = worktree::verify_path(repo, &found.id, expected_path) {
-    return Err(Box::new(RemovalFailure { outcome, error: e }));
-  }
-
-  let entry = journal_entry(repo, found, delete_branch);
-  if let Err(e) = history::record(entry) {
-    outcome.journal_warning = Some(format!(
-      "failed to record undo journal entry: {} (continuing with the removal anyway)",
-      e
-    ));
-  }
-
-  if let Err(e) = worktree::remove_verified(repo, &found.id, expected_path, delete_branch) {
+  // The removal itself decides *when*: `remove_verified_recording` calls back
+  // at its point of no return, once the worktree is gone and before the
+  // branch delete. Nothing between the last thing that can refuse and the
+  // write, which is what a second `verify_path` here used to be — it narrowed
+  // the window rather than closing it, and an entry that slipped through
+  // wedges `gwm undo` for the whole repo until `history.toml` is edited by
+  // hand (issue #531). The `HeadBranch` handed back is the observation the
+  // deletion acts on, so the entry cannot name a different branch.
+  let mut journal_warning = None;
+  let removal = worktree::remove_verified_recording(repo, &found.id, expected_path, delete_branch, |head| {
+    let entry = journal_entry(repo, found, head, delete_branch);
+    if let Err(e) = history::record(entry) {
+      journal_warning = Some(format!(
+        "failed to record undo journal entry: {} (continuing with the removal anyway)",
+        e
+      ));
+    }
+  });
+  outcome.journal_warning = journal_warning;
+  if let Err(e) = removal {
     return Err(Box::new(RemovalFailure { outcome, error: e }));
   }
   outcome.removed = true;
@@ -152,38 +146,33 @@ pub fn remove_with_lifecycle(
   Ok(outcome)
 }
 
-/// The branch a removal will actually delete: the one checked out in the
-/// worktree right now, which is what `worktree::remove` reads.
+/// The branch to record, from the observation the removal itself acted on.
 ///
 /// Not `WorktreeInfo::branch`, which comes from a listing the caller may have
-/// taken a while ago. A batch resolves its listing once, so a `pre_remove`
+/// taken a while ago: a batch resolves its listing once, so a `pre_remove`
 /// hook on an earlier target can check out another branch in a later one
-/// without moving it; recording the stale name would have `gwm undo` restore
-/// a ref that was never deleted while the deleted one stayed lost (Codex
-/// review on PR #526). Falls back to the listing when the worktree cannot be
-/// opened, and yields `None` on a detached HEAD, matching what the removal
-/// does with it.
-fn branch_at_removal_time(found: &WorktreeInfo) -> Option<String> {
-  // "Opened it and HEAD is detached" and "could not open it" are different
-  // answers and must not collapse into the same `None`: the first one means
-  // there is no branch, so falling back to the listing would have the entry
-  // name a branch the removal deletes nothing of (Codex review on PR #526).
-  match Repository::open(&found.path) {
-    Ok(wt_repo) => match wt_repo.head() {
-      Ok(head) if head.is_branch() => head.shorthand().ok().map(String::from),
-      // Detached: `worktree::remove` reads the same HEAD, gets a bare OID,
-      // finds no branch by that name and deletes none.
-      Ok(_) => None,
-      // Unborn or unreadable HEAD: nothing observed, so keep the listing's.
-      Err(_) => found.branch.clone(),
-    },
-    Err(_) => found.branch.clone(),
+/// without moving it, and recording the stale name would have `gwm undo`
+/// restore a ref that was never deleted while the deleted one stayed lost
+/// (Codex review on PR #526).
+///
+/// The three answers stay distinct. `Detached` records no branch, because the
+/// removal deleted none and `gwm undo` refuses such an entry rather than
+/// re-attaching the worktree to a branch it was never on. `Unreadable` is the
+/// only case that falls back to the listing: nothing was observed, so the
+/// caller's older name is better than no name at all — it is what `gwm undo`
+/// re-attaches to, and no branch was deleted for it to contradict.
+fn branch_to_record(found: &WorktreeInfo, head: &worktree::HeadBranch) -> Option<String> {
+  match head {
+    worktree::HeadBranch::Attached(b) => Some(b.clone()),
+    worktree::HeadBranch::Detached => None,
+    worktree::HeadBranch::Unreadable => found.branch.clone(),
   }
 }
 
-/// The undo-journal entry for a removal that is about to happen.
-fn journal_entry(repo: &Repository, found: &WorktreeInfo, delete_branch: bool) -> OpEntry {
-  let branch = branch_at_removal_time(found);
+/// The undo-journal entry for a removal that has just passed its point of no
+/// return, built from the same `head` the removal acted on.
+fn journal_entry(repo: &Repository, found: &WorktreeInfo, head: &worktree::HeadBranch, delete_branch: bool) -> OpEntry {
+  let branch = branch_to_record(found, head);
   let branch_oid = branch.as_deref().and_then(|b| {
     repo
       .find_branch(b, git2::BranchType::Local)
