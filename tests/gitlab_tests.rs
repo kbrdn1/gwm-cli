@@ -1580,3 +1580,49 @@ fn parse_mr_json_fills_the_rich_tier_it_can_serve() {
   assert!(pr.detail.reviews.is_empty(), "approvals are a separate request");
   assert!(pr.detail.comments.is_empty(), "notes are a separate request");
 }
+
+#[test]
+fn parse_mr_json_survives_a_null_description() {
+  // Codex review #529, same class as the GitHub side and more likely here:
+  // GitLab sends `"description": null` for an MR that has none, which is
+  // the common case, and `#[serde(default)]` only covers an ABSENT key. So
+  // reading the description would have aborted the whole parse.
+  let json = r#"{
+  "iid": 61,
+  "title": "no description",
+  "state": "opened",
+  "web_url": "https://gitlab.com/group/proj/-/merge_requests/61",
+  "updated_at": null,
+  "source_branch": null,
+  "target_branch": null,
+  "description": null,
+  "author": null,
+  "head_pipeline": null
+}"#;
+
+  let pr = gitlab::parse_mr_json(json).expect("a null must degrade, never abort the parse");
+
+  assert_eq!(pr.number, 61);
+  assert!(pr.detail.body.is_empty());
+  assert!(pr.detail.author.is_empty());
+}
+
+#[test]
+fn parse_issue_json_survives_a_null_description() {
+  let json = r#"{
+  "iid": 42,
+  "title": "no description",
+  "state": "opened",
+  "labels": null,
+  "updated_at": null,
+  "web_url": "https://gitlab.com/group/proj/-/issues/42",
+  "description": null,
+  "author": null
+}"#;
+
+  let issue = gitlab::parse_issue_json(json).expect("a null must degrade, never abort the parse");
+
+  assert!(issue.detail.body.is_empty());
+  assert!(issue.detail.author.is_empty());
+  assert!(issue.labels.is_empty());
+}

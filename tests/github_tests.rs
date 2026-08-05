@@ -1833,3 +1833,63 @@ fn review_state_classifies_every_github_variant() {
   // `CheckOutcome::Unknown`): a future state must not read as a verdict.
   assert_eq!(ReviewState::classify("SOMETHING_NEW"), ReviewState::Unknown);
 }
+
+#[test]
+fn parse_pr_json_survives_null_string_fields() {
+  // Codex review #529: `#[serde(default)]` covers an ABSENT key, not an
+  // explicit `null`, so a single null string aborted the whole parse and
+  // took the CI summary down with the rich view. GitHub sends
+  // `submittedAt: null` for a review that has not been submitted, and any
+  // of these can come back null on a deleted account or an empty body.
+  let json = r#"{
+    "number": 519,
+    "title": "nulls everywhere",
+    "state": "OPEN",
+    "isDraft": false,
+    "url": "https://github.com/kbrdn1/gwm-cli/pull/519",
+    "updatedAt": null,
+    "statusCheckRollup": [],
+    "body": null,
+    "author": null,
+    "baseRefName": null,
+    "headRefName": null,
+    "reviews": [
+      {"author": null, "body": null, "state": "PENDING", "submittedAt": null}
+    ],
+    "comments": [
+      {"author": null, "body": null, "createdAt": null, "url": null}
+    ]
+  }"#;
+
+  let pr = parse_pr_json(json).expect("a null must degrade, never abort the parse");
+
+  assert_eq!(pr.number, 519);
+  assert!(pr.detail.body.is_empty());
+  assert!(pr.detail.author.is_empty());
+  assert_eq!(pr.detail.reviews.len(), 1);
+  assert_eq!(pr.detail.reviews[0].state, gwm::github::ReviewState::Pending);
+  assert!(pr.detail.reviews[0].submitted_at.is_empty());
+  assert_eq!(pr.detail.comments.len(), 1);
+  assert!(pr.detail.comments[0].created_at.is_empty());
+}
+
+#[test]
+fn parse_issue_json_survives_null_string_fields() {
+  let json = r#"{
+    "number": 420,
+    "title": "nulls everywhere",
+    "state": "OPEN",
+    "url": "https://github.com/kbrdn1/gwm-cli/issues/420",
+    "labels": [],
+    "updatedAt": null,
+    "body": null,
+    "author": null,
+    "comments": [{"author": null, "body": null, "createdAt": null, "url": null}]
+  }"#;
+
+  let issue = parse_issue_json(json).expect("a null must degrade, never abort the parse");
+
+  assert!(issue.detail.body.is_empty());
+  assert!(issue.detail.author.is_empty());
+  assert_eq!(issue.detail.comments.len(), 1);
+}
