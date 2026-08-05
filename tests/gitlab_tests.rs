@@ -1626,3 +1626,24 @@ fn parse_issue_json_survives_a_null_description() {
   assert!(issue.detail.author.is_empty());
   assert!(issue.labels.is_empty());
 }
+
+#[test]
+fn the_backend_answers_that_it_cannot_reach_inline_comments() {
+  // Issue #528. Answered explicitly, and answered *without spawning
+  // `glab`*: this is a property of the backend, not of a request that
+  // might fail. The distinction matters because the view renders
+  // `Unsupported` as "gwm cannot show these here" and an empty list as
+  // "this merge request has none" — only one of those is true here.
+  let f = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    origin("https://gitlab.com/group/proj.git"),
+  );
+
+  let threads = f.fetch_pr_threads(42).expect("answering costs no request");
+
+  assert!(
+    matches!(threads, gwm::forge::ReviewThreads::Unsupported),
+    "an empty list here would be a claim about the MR that gwm never checked"
+  );
+  assert!(threads.threads().is_empty());
+}

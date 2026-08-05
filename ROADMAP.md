@@ -340,12 +340,16 @@ worktree → branch → PR → issue chain and can open on the current row direc
 That last point is why bulk selection (#484) goes ahead of it: "the current row"
 has to mean its final thing before two features are written against it.
 
-Shipped in two of the three steps the issue laid out: `gwm` now asks `gh` for
-the description, the author, the reviews and the conversation in the request it
+Shipped, all three steps the issue laid out. `gwm` asks `gh` for the
+description, the author, the reviews and the conversation in the request it
 already made for the rollup, and `I` renders all of it. The third step, the
-comments anchored to a diff hunk, is [#528](https://github.com/kbrdn1/gwm-cli/issues/528):
-those are reachable through GraphQL alone, so they are a second transport rather
-than a wider field list, and they were always the last of the three.
+comments anchored to a diff hunk ([#528](https://github.com/kbrdn1/gwm-cli/issues/528)),
+landed as what it always was: a **second transport**, not a wider field list.
+Those threads are reachable through GraphQL alone, so they ride a separate
+request fired when the view opens, which keeps `gwm status` (same PR fetch,
+every invocation) from paying for a query it never reads. GitLab answers that
+it cannot reach them rather than answering an empty list, since the two are
+different facts.
 
 ### 5. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515))
 
