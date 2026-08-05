@@ -205,8 +205,11 @@ impl GitHubFetch {
   /// the backend reading it, because `forge = "gitlab"` can flip over an
   /// unchanged remote and the caches are keyed by number alone, so
   /// cached issue #42 would otherwise be served as merge request !42
-  /// (Codex review #458).
-  fn forge_identity(&self) -> Option<String> {
+  /// (Codex review #458). Public since #420: the forge-linked overlays pin
+  /// their identity on it for the same reason, so an origin that moves
+  /// between two instances sharing a slug closes them instead of leaving
+  /// `Enter` on the old host's URL (Codex review #529).
+  pub fn forge_identity(&self) -> Option<String> {
     self
       .forge
       .as_ref()

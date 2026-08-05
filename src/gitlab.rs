@@ -534,6 +534,19 @@ fn project_path(slug: &str) -> String {
 
 // ---- issues --------------------------------------------------------------
 
+/// GitLab counterpart of [`crate::github::null_to_default`] (Codex review
+/// #529): read `null` as the type's default rather than aborting the
+/// parse. More likely to fire here than on the GitHub side, since
+/// `"description": null` is what GitLab sends for an issue or MR that has
+/// none, which is the common case.
+fn null_to_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+  D: serde::Deserializer<'de>,
+  T: Deserialize<'de> + Default,
+{
+  Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 struct RawIssue {
   /// The project-scoped number the user sees and every URL uses. The
@@ -543,16 +556,16 @@ struct RawIssue {
   iid: u64,
   title: String,
   state: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   labels: Vec<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   updated_at: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   web_url: String,
   /// GitLab's name for the issue body (issue #420).
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   description: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawAuthor>,
 }
 
@@ -599,50 +612,50 @@ pub fn issue_view_argv(slug: &str, number: u64) -> Vec<String> {
 #[derive(Deserialize)]
 struct RawMr {
   iid: u64,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   title: String,
   state: String,
   /// `draft` superseded `work_in_progress`; older self-hosted instances
   /// still only send the legacy key, so both are read.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   draft: bool,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   work_in_progress: bool,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   web_url: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   updated_at: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   source_branch: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   target_branch: String,
-  // `Option` (not just `#[serde(default)]`) so an explicit
+  // `Option` (not just `#[serde(default, deserialize_with = "null_to_default")]`) so an explicit
   // `"author": null` — a deleted account — deserialises to `None`
   // instead of erroring; `default` alone only covers a *missing* key.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawAuthor>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   head_pipeline: Option<RawPipeline>,
   /// GitLab's name for the MR body (issue #420).
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   description: String,
 }
 
 #[derive(Deserialize, Default)]
 struct RawAuthor {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   username: String,
 }
 
 #[derive(Deserialize)]
 struct RawPipeline {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   status: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   web_url: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   started_at: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   finished_at: Option<String>,
 }
 

@@ -805,24 +805,39 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
 
 // ---- Issue / PR status ---------------------------------------------------
 
+/// Read `null` as the type's default instead of aborting the parse
+/// (Codex review #529). `#[serde(default)]` covers an **absent** key only:
+/// an explicit `"submittedAt": null` on a `String` is a hard error, and
+/// one such field takes the whole `gh` payload down with it, so the CI
+/// summary and the status pane go dark along with the rich view. Applied
+/// to every field of the issue / PR shapes, because "which of these can
+/// the forge null out" is not a question worth answering field by field.
+pub(crate) fn null_to_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+  D: serde::Deserializer<'de>,
+  T: Deserialize<'de> + Default,
+{
+  Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 struct RawIssue {
   number: u64,
   title: String,
   state: String,
   url: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   labels: Vec<RawLabel>,
-  #[serde(rename = "updatedAt", default)]
+  #[serde(rename = "updatedAt", default, deserialize_with = "null_to_default")]
   updated_at: String,
   // Rich tier (issue #420). Every field is `default`ed: a summary-only
   // payload — a stubbed `gh`, an older CLI that does not know a field —
   // must degrade to the summary tier, not fail the whole parse.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   body: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawActor>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   comments: Vec<RawComment>,
 }
 
@@ -836,31 +851,31 @@ struct RawLabel {
 /// instead of erroring, the same guard the GitLab backend already carries.
 #[derive(Deserialize, Default)]
 struct RawActor {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   login: String,
 }
 
 #[derive(Deserialize)]
 struct RawComment {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawActor>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   body: String,
-  #[serde(rename = "createdAt", default)]
+  #[serde(rename = "createdAt", default, deserialize_with = "null_to_default")]
   created_at: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   url: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RawReview {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawActor>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   state: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   body: String,
-  #[serde(rename = "submittedAt", default)]
+  #[serde(rename = "submittedAt", default, deserialize_with = "null_to_default")]
   submitted_at: String,
 }
 
@@ -886,29 +901,29 @@ struct RawPr {
   number: u64,
   title: String,
   state: String,
-  #[serde(rename = "isDraft", default)]
+  #[serde(rename = "isDraft", default, deserialize_with = "null_to_default")]
   is_draft: bool,
   url: String,
-  #[serde(rename = "updatedAt", default)]
+  #[serde(rename = "updatedAt", default, deserialize_with = "null_to_default")]
   updated_at: String,
-  #[serde(rename = "statusCheckRollup", default)]
+  #[serde(rename = "statusCheckRollup", default, deserialize_with = "null_to_default")]
   status_check_rollup: Vec<RawCheck>,
   // Rich tier (issue #420) — see `RawIssue` for why everything defaults.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   body: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawActor>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   additions: u32,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   deletions: u32,
-  #[serde(rename = "baseRefName", default)]
+  #[serde(rename = "baseRefName", default, deserialize_with = "null_to_default")]
   base_ref_name: String,
-  #[serde(rename = "headRefName", default)]
+  #[serde(rename = "headRefName", default, deserialize_with = "null_to_default")]
   head_ref_name: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   reviews: Vec<RawReview>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   comments: Vec<RawComment>,
 }
 
@@ -918,29 +933,29 @@ struct RawPr {
 /// deserialize all three so both shapes classify correctly.
 #[derive(Deserialize)]
 struct RawCheck {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   status: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   conclusion: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   state: String,
   // Per-check identity + link, kept for the CI checks overlay (issue #436).
   // `name` + `detailsUrl` on the `CheckRun` shape; `context` + `targetUrl`
   // on the legacy `StatusContext` shape.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   name: String,
-  #[serde(rename = "detailsUrl", default)]
+  #[serde(rename = "detailsUrl", default, deserialize_with = "null_to_default")]
   details_url: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   context: String,
-  #[serde(rename = "targetUrl", default)]
+  #[serde(rename = "targetUrl", default, deserialize_with = "null_to_default")]
   target_url: Option<String>,
   // Run metadata (CheckRun shape), kept for the overlay's detail column.
-  #[serde(rename = "workflowName", default)]
+  #[serde(rename = "workflowName", default, deserialize_with = "null_to_default")]
   workflow_name: Option<String>,
-  #[serde(rename = "startedAt", default)]
+  #[serde(rename = "startedAt", default, deserialize_with = "null_to_default")]
   started_at: Option<String>,
-  #[serde(rename = "completedAt", default)]
+  #[serde(rename = "completedAt", default, deserialize_with = "null_to_default")]
   completed_at: Option<String>,
 }
 

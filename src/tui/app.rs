@@ -597,7 +597,13 @@ pub struct App {
   /// The `LinkTarget` is part of the identity, not decoration (issue
   /// #420): issue #42 and PR #42 are different things, and a tuple that
   /// dropped the discriminant would reproduce the #138 bug class the
-  /// fetch cache already paid for once.
+  /// fetch cache already paid for once. The first element is the **forge
+  /// identity** (`<kind> <web origin>/<slug>`), not the bare slug, for
+  /// the reason `GitHubFetch::forge_identity` already documents: an
+  /// origin moving from `github.com/acme/widgets` to
+  /// `gitlab.com/acme/widgets` keeps the slug, so a slug-keyed tuple
+  /// compared equal and left `Enter` pointing at the old host (Codex
+  /// review #529).
   detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
@@ -3091,7 +3097,7 @@ impl App {
       .github
       .link
       .pr
-      .map(|n| (self.github.link_slug.clone(), LinkTarget::Pr, n));
+      .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n));
     self.ci_overlay_checks = checks;
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
@@ -3114,11 +3120,14 @@ impl App {
   /// the overlay to already be `RichPr`. So the contract held only when
   /// the PR was the faster of two concurrent fetches.
   ///
-  /// A PR still **in flight** therefore holds the view back with a status
-  /// line rather than quietly substituting the issue; a PR whose fetch
-  /// **errored** is never going to land, so the issue opens instead of
-  /// leaving the user with nothing. Without either side fetched the
-  /// overlay would be a bordered void, exactly what `enter_ci_checks`
+  /// It opens on whatever is available and lets [`Self::sync_rich_overlay`]
+  /// promote the PR the moment it lands. The first cut of this instead
+  /// refused to open while the PR was `Loading`, which was a guard against
+  /// a symptom of the missing promotion; once the promotion existed the
+  /// guard only produced its own edge case, since `Idle` ("nobody asked
+  /// yet") is indistinguishable from `Loading` for the user staring at an
+  /// issue that is not the thing they wanted. Without either side fetched
+  /// the overlay would be a bordered void, exactly what `enter_ci_checks`
   /// refuses.
   pub fn enter_rich_view(&mut self) {
     // Same workspace contract as the CI checks overlay (#304 / Codex
@@ -3132,21 +3141,11 @@ impl App {
     let width = self.rich_view_width();
     // The PR side is preferred whenever one is LINKED. Only its fetch
     // state decides whether it can be shown yet.
-    if self.github.link.pr.is_some() {
-      match self.pr_fetch_state() {
-        GitHubFetchState::Loaded(pr) => {
-          let source = RichSource::Pr(pr.clone());
-          let title = format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title);
-          self.open_rich_overlay(source, title, width);
-          return;
-        }
-        GitHubFetchState::Loading => {
-          self.status = format!("{} still loading", self.pr_noun_titlecase());
-          return;
-        }
-        // Cold or errored: it is not coming, fall through to the issue.
-        GitHubFetchState::Idle | GitHubFetchState::Error(_) => {}
-      }
+    if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+      let source = RichSource::Pr(pr.clone());
+      let title = format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title);
+      self.open_rich_overlay(source, title, width);
+      return;
     }
     if let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() {
       let source = RichSource::Issue(issue.clone());
@@ -3182,7 +3181,7 @@ impl App {
     // Drop the agents consumer's target; pin this overlay to the link it
     // renders so a disagreeing mutation can close it.
     self.detail_overlay_target = None;
-    self.detail_overlay_link = Some((self.github.link_slug.clone(), target, number));
+    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
     self.rich_overlay_source = Some(source);
     self
       .detail_overlay
@@ -5561,12 +5560,12 @@ impl App {
         .github
         .link
         .issue
-        .map(|n| (self.github.link_slug.clone(), LinkTarget::Issue, n)),
+        .map(|n| (self.github.forge_identity(), LinkTarget::Issue, n)),
       _ => self
         .github
         .link
         .pr
-        .map(|n| (self.github.link_slug.clone(), LinkTarget::Pr, n)),
+        .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n)),
     };
     if current != self.detail_overlay_link {
       self.close_detail_overlay();
@@ -6102,7 +6101,7 @@ impl App {
     let title = crate::naming::sanitise_for_terminal(&title);
     let promoted = self.detail_overlay.kind != kind;
     self.rich_overlay_source = Some(source);
-    self.detail_overlay_link = Some((self.github.link_slug.clone(), target, number));
+    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
     if promoted {
       self.detail_overlay.open(kind, title, rows);
     } else {

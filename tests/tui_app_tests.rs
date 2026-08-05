@@ -12026,12 +12026,16 @@ fn a_resize_rewraps_the_rich_view() {
 }
 
 #[test]
-fn rich_view_does_not_silently_open_the_issue_while_the_pr_is_loading() {
-  // Codex review #529: the contract is "the PR wins when both are linked",
-  // but the side was picked from the CACHE, so an issue that landed first
-  // opened instead — and the PR landing could not replace it, since the
-  // landing refresh requires the overlay to already be `RichPr`. The choice
-  // follows the LINK now; the cache only decides whether it can open yet.
+fn an_issue_standing_in_for_a_slower_pr_is_replaced_when_it_lands() {
+  // The original concern (Codex review #529, first pass) replayed by hand
+  // after the guard that answered it was REMOVED. It refused to open while
+  // the PR was `Loading`, which guarded a symptom of the missing
+  // promotion; once `sync_rich_overlay` existed the guard only produced
+  // its own edge case, since `Idle` ("nobody asked yet") is
+  // indistinguishable from `Loading` for a user staring at the wrong side.
+  //
+  // What actually had to hold is this: the user never gets STUCK on the
+  // issue. Showing it meanwhile beats showing nothing.
   use gwm::tui::state::detail_overlay::DetailKind;
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
@@ -12040,18 +12044,45 @@ fn rich_view_does_not_silently_open_the_issue_while_the_pr_is_loading() {
   app.mark_pr_loading_for_test(61);
 
   app.enter_rich_view();
-
-  assert_eq!(app.view, View::List, "the issue is not a stand-in for the PR");
-  assert!(
-    app.status.contains("loading"),
-    "the status must say the PR is still in flight: {}",
-    app.status
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "what is available opens rather than nothing"
   );
 
-  // Once it lands, `I` opens the PR.
   app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "and the PR claims the view the moment it lands"
+  );
+}
+
+#[test]
+fn an_origin_move_between_instances_closes_the_rich_view() {
+  // Codex review #529: the overlay identity was keyed on the bare SLUG, so
+  // an origin moving from github.com/acme/widgets to gitlab.com/acme/widgets
+  // compared equal, the overlay survived, and `Enter` still opened the old
+  // host's URL. Same failure `open_menu_drops_a_cached_url_from_the_previous_origin`
+  // pins for the fetch caches (Codex review #458); the identity now carries
+  // the full `<kind> <web origin>/<slug>`.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
   app.enter_rich_view();
-  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert_eq!(app.view, View::DetailOverlay, "precondition");
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "the overlay outlived the instance its rows describe"
+  );
 }
 
 #[test]
