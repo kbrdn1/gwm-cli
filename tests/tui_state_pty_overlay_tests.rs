@@ -346,11 +346,14 @@ fn kill_runs_the_attached_teardown() {
   let marker = dir.path().join("torn-down");
   let mut pty = PtyOverlay::spawn(PtyKind::Exec, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
     .expect("PTY spawn must succeed on Unix")
-    .with_teardown(vec![
-      "sh".to_string(),
-      "-c".to_string(),
-      format!("touch {}", marker.display()),
-    ]);
+    .with_teardown(
+      vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("touch {}", marker.display()),
+      ],
+      app.workdir.clone(),
+    );
   assert!(pty.teardown_argv().is_some(), "the teardown is attached");
   assert!(!marker.exists(), "and has not run before the kill");
 
@@ -369,11 +372,14 @@ fn kill_runs_the_teardown_even_when_the_client_already_exited() {
   let marker = dir.path().join("torn-down-late");
   let mut pty = PtyOverlay::spawn(PtyKind::Exec, &["sh", "-c", "exit 0"], &app.workdir, 80, 24)
     .expect("PTY spawn must succeed on Unix")
-    .with_teardown(vec![
-      "sh".to_string(),
-      "-c".to_string(),
-      format!("touch {}", marker.display()),
-    ]);
+    .with_teardown(
+      vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("touch {}", marker.display()),
+      ],
+      app.workdir.clone(),
+    );
   // Let the leader exit and be reaped through the normal liveness path.
   for _ in 0..100 {
     if !pty.is_alive() {

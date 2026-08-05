@@ -58,7 +58,7 @@ pub struct PtyOverlay {
   /// the worktree after the overlay visibly closed. This tears it down by
   /// name. `None` for every other overlay (lazygit, review, a host command),
   /// which the process-group signal already covers.
-  teardown: Option<Vec<String>>,
+  teardown: Option<(Vec<String>, std::path::PathBuf)>,
   /// Set by the run loop when a [`PtyKind::Exec`] child has exited and the
   /// overlay is *lingering* so its final output stays on screen (issue #325).
   /// Unlike lazygit / a shell — which close the overlay the instant the child
@@ -178,16 +178,21 @@ impl PtyOverlay {
     })
   }
 
-  /// Attach a teardown command run once on [`Self::kill`] (issue #421).
-  /// Builder form, so no existing `spawn` call site changes.
-  pub fn with_teardown(mut self, argv: Vec<String>) -> Self {
-    self.teardown = Some(argv);
+  /// Attach a teardown command run once on [`Self::kill`], in `cwd` (issue
+  /// #421). Builder form, so no existing `spawn` call site changes.
+  ///
+  /// The directory matters: the `runtime` may be a relative wrapper script
+  /// (`./tools/docker-wrapper`), which the pty spawn resolves against the
+  /// worktree. A teardown inheriting gwm's own cwd would run a different
+  /// binary, or none, and leave the container up.
+  pub fn with_teardown(mut self, argv: Vec<String>, cwd: std::path::PathBuf) -> Self {
+    self.teardown = Some((argv, cwd));
     self
   }
 
   /// The attached teardown argv, if any. Exposed for the state tests.
   pub fn teardown_argv(&self) -> Option<&[String]> {
-    self.teardown.as_deref()
+    self.teardown.as_ref().map(|(argv, _)| argv.as_slice())
   }
 
   /// Drain the reader channel and feed pending bytes into the vt100 parser.
@@ -331,7 +336,7 @@ impl PtyOverlay {
   /// own), and a TUI has no channel for the error of a cleanup the user did
   /// not ask about. Output is discarded so nothing can corrupt the frame.
   fn run_teardown(&mut self) {
-    let Some(argv) = self.teardown.take() else {
+    let Some((argv, cwd)) = self.teardown.take() else {
       return;
     };
     let Some((bin, args)) = argv.split_first() else {
@@ -339,6 +344,7 @@ impl PtyOverlay {
     };
     let _ = std::process::Command::new(bin)
       .args(args)
+      .current_dir(&cwd)
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::null())

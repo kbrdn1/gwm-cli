@@ -89,17 +89,35 @@ pub fn validate_exec_profile(profile: &str, entry: &ExecProfile) -> Result<()> {
     )));
   }
   if let Some(c) = container {
-    validate_container_image(profile, &c.image)?;
+    validate_container(profile, c)?;
   }
   Ok(())
 }
 
-/// Reject an empty `[exec.profiles.<name>.container] image` (issue #421) —
-/// the one field of the block that carries no default.
-pub fn validate_container_image(profile: &str, image: &str) -> Result<()> {
+/// Validate a `[exec.profiles.<name>.container]` block (issue #421): a
+/// non-empty `image` (the one field with no default), and `extra_args` that
+/// does not take over `--name`.
+///
+/// `--name` is gwm's: the TUI overlay tears its container down **by name**,
+/// and a runtime honours the last `--name` it is given, so an `extra_args`
+/// one would leave the teardown removing a container that was never started
+/// — possibly one belonging to something else.
+pub fn validate_container(profile: &str, cfg: &ContainerConfig) -> Result<()> {
+  let ContainerConfig {
+    image,
+    runtime: _, // any non-empty string is a candidate binary; a bad one fails at spawn.
+    extra_args,
+    selinux_relabel: _, // a bool cannot be invalid.
+  } = cfg;
   if image.trim().is_empty() {
     return Err(GwmError::Config(format!(
       "exec: profile `{profile}` has a `[container]` with an empty `image` — give it one like `image = \"rust:1.90\"`"
+    )));
+  }
+  if extra_args.iter().any(|a| a == "--name" || a.starts_with("--name=")) {
+    return Err(GwmError::Config(format!(
+      "exec: profile `{profile}` sets `--name` in `[container] extra_args` — gwm owns that flag, \
+       because the TUI overlay removes its container by name when it closes. Drop it."
     )));
   }
   Ok(())
@@ -127,7 +145,7 @@ pub fn resolve_exec_container(profile: Option<&str>, cfg: &ExecConfig) -> Result
   let Some(container) = p.container.clone() else {
     return Ok(None);
   };
-  validate_container_image(name, &container.image)?;
+  validate_container(name, &container)?;
   Ok(Some(container))
 }
 
@@ -237,11 +255,16 @@ impl ContainerPlan {
   }
 }
 
-/// A container name for the TUI overlay: `gwm-<worktree>-<seq>`, reduced to
-/// the character class a container name accepts
-/// (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`). `seq` disambiguates two overlays opened on
-/// the same worktree within one session, where the pid alone would collide.
-pub fn container_run_name(worktree: &Path, seq: u64) -> String {
+/// A container name for the TUI overlay: `gwm-<worktree>-<pid>-<seq>`, reduced
+/// to the character class a container name accepts
+/// (`[a-zA-Z0-9][a-zA-Z0-9_.-]*`).
+///
+/// Both halves are load-bearing. `seq` separates two overlays opened on the
+/// same worktree within one session; `pid` separates two gwm processes, which
+/// would otherwise both produce `…-1` for their first overlay — and there the
+/// collision is not a failed `docker run` but the loser's teardown removing
+/// the winner's container.
+pub fn container_run_name(worktree: &Path, pid: u32, seq: u64) -> String {
   let stem: String = worktree
     .file_name()
     .map(|n| n.to_string_lossy().to_string())
@@ -257,7 +280,7 @@ pub fn container_run_name(worktree: &Path, seq: u64) -> String {
     .collect();
   // Leading `gwm-` guarantees the required alphanumeric first character even
   // when the worktree name starts with `.` or `-`, or is empty.
-  format!("gwm-{stem}-{seq}")
+  format!("gwm-{stem}-{pid}-{seq}")
 }
 
 /// Build the argv that runs `argv` inside the container described by `cfg`.

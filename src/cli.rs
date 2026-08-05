@@ -1378,15 +1378,20 @@ fn exec_run(targets: &[worktree::WorktreeInfo], plan: &ExecPlan, tag: Option<&st
   };
   let suffix = plan.header_suffix();
 
+  // Build EVERY worktree's argv before running anything. Resolution is
+  // upfront by contract (#326): a worktree whose path cannot be expressed as
+  // a container mount must fail the whole fan-out, not after the first
+  // worktree already ran.
+  let argvs: Vec<Vec<String>> = targets.iter().map(|w| plan.argv_for(&w.path)).collect::<Result<_>>()?;
+
   let mut outcomes = Vec::with_capacity(targets.len());
   if plan.job_count <= 1 {
     // Sequential: inherit the parent's stdio so output streams live, in order.
-    for w in targets {
+    for (w, argv) in targets.iter().zip(&argvs) {
       println!("\n━━ {} ({}){}", w.name, w.path.display(), suffix);
       // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv,
       // but split defensively rather than indexing — a panic would be
       // user-facing.
-      let argv = plan.argv_for(&w.path)?;
       let (program, args) = argv
         .split_first()
         .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
@@ -1405,8 +1410,9 @@ fn exec_run(targets: &[worktree::WorktreeInfo], plan: &ExecPlan, tag: Option<&st
     use std::io::Write;
     let items: Vec<(String, std::path::PathBuf, Vec<String>)> = targets
       .iter()
-      .map(|w| Ok((w.name.clone(), w.path.clone(), plan.argv_for(&w.path)?)))
-      .collect::<Result<_>>()?;
+      .zip(argvs)
+      .map(|(w, argv)| (w.name.clone(), w.path.clone(), argv))
+      .collect();
     let results = exec::run_in_dirs_parallel(plan.job_count, &items);
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();

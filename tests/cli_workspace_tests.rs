@@ -257,3 +257,37 @@ fn exec_workspace_mounts_each_repos_own_gitdir() {
     "the per-worktree header announces the container: {stdout}"
   );
 }
+
+#[cfg(unix)]
+#[test]
+fn exec_refuses_an_unmountable_worktree_before_running_any_other() {
+  // Resolution is upfront by contract (#326): a worktree whose path cannot be
+  // expressed as a `-v source:destination` mount must fail the whole fan-out,
+  // not after an earlier worktree already ran. The marker file is the proof —
+  // if the first worktree ran, it exists.
+  let root = workspace_root();
+  let worktrees = TempDir::new().unwrap();
+  let repo_path = root.path().join("alpha");
+  fs::write(repo_path.join(".gwm.toml"), container_profile_toml()).unwrap();
+  let repo = Repository::open(&repo_path).unwrap();
+  // `aaa` sorts before `zz:z`, so it is the one that would run first.
+  repo.worktree("aaa", &worktrees.path().join("aaa"), None).unwrap();
+  repo.worktree("zzz", &worktrees.path().join("zz:z"), None).unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let out = cmd
+    .current_dir(&repo_path)
+    .args(["exec", "--profile", "ci"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert!(
+    stderr.contains("zz:z") || stderr.contains(':'),
+    "the error names the path it cannot mount:\n{stderr}"
+  );
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(
+    !stdout.contains("run --rm"),
+    "no worktree ran before the refusal:\n{stdout}"
+  );
+}

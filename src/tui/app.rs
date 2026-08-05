@@ -3004,7 +3004,7 @@ impl App {
               // profile runs on the host here.
               Ok(plan) => {
                 self.exec_container_seq += 1;
-                let name = crate::exec::container_run_name(&cwd, self.exec_container_seq);
+                let name = crate::exec::container_run_name(&cwd, std::process::id(), self.exec_container_seq);
                 match plan.wrap_interactive(&cwd, &argv, &name) {
                   Ok(wrapped) => {
                     argv = wrapped;

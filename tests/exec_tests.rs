@@ -1001,8 +1001,8 @@ fn the_interactive_wrap_names_the_container_so_it_can_be_torn_down() {
   // is nothing to remove, and a long command keeps writing to the worktree
   // after the overlay closed.
   let plan = ContainerPlan::resolve(container_cfg("rust:1.90"), Path::new("/main/.git"), |_| true).unwrap();
-  let name = gwm::exec::container_run_name(Path::new("/wt/feat-421-container-exec"), 3);
-  assert_eq!(name, "gwm-feat-421-container-exec-3");
+  let name = gwm::exec::container_run_name(Path::new("/wt/feat-421-container-exec"), 4242, 3);
+  assert_eq!(name, "gwm-feat-421-container-exec-4242-3");
 
   let out = plan
     .wrap_interactive(Path::new("/wt/feat-1"), &argv(&["cargo", "test"]), &name)
@@ -1013,7 +1013,7 @@ fn the_interactive_wrap_names_the_container_so_it_can_be_torn_down() {
   );
   assert_eq!(
     plan.container_teardown_argv(&name),
-    argv(&["docker", "rm", "-f", "gwm-feat-421-container-exec-3"]),
+    argv(&["docker", "rm", "-f", "gwm-feat-421-container-exec-4242-3"]),
     "and the teardown removes exactly that name, with the same runtime"
   );
   // The fan-out form names nothing: its client is never killed mid-run.
@@ -1026,8 +1026,8 @@ fn the_interactive_wrap_names_the_container_so_it_can_be_torn_down() {
 fn a_container_name_is_reduced_to_the_accepted_character_class() {
   // A container name must match `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. A worktree
   // directory is not held to that: `gwm link` adopts any path.
-  let name = gwm::exec::container_run_name(Path::new("/wt/feat/#421 spike:x"), 1);
-  assert_eq!(name, "gwm--421-spike-x-1");
+  let name = gwm::exec::container_run_name(Path::new("/wt/feat/#421 spike:x"), 9, 1);
+  assert_eq!(name, "gwm--421-spike-x-9-1");
   assert!(
     name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()),
     "starts with an alphanumeric: {name}"
@@ -1039,5 +1039,82 @@ fn a_container_name_is_reduced_to_the_accepted_character_class() {
     "every character is accepted: {name}"
   );
   // An unnameable directory still yields a legal name.
-  assert_eq!(gwm::exec::container_run_name(Path::new("/"), 7), "gwm--7");
+  assert_eq!(gwm::exec::container_run_name(Path::new("/"), 5, 7), "gwm--5-7");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_container_name_separates_two_gwm_processes() {
+  // The seq restarts at 1 in every process, so without the pid two TUIs
+  // opening their first overlay on the same worktree would agree on a name.
+  // The loser of that race does not merely fail to start: its teardown then
+  // removes the winner's container.
+  let a = gwm::exec::container_run_name(Path::new("/wt/feat-1"), 111, 1);
+  let b = gwm::exec::container_run_name(Path::new("/wt/feat-1"), 222, 1);
+  assert_ne!(a, b, "two processes, same worktree, same seq: {a} vs {b}");
+  assert_eq!(a, "gwm-feat-1-111-1");
+  // And within one process the seq still separates two overlays.
+  assert_ne!(
+    gwm::exec::container_run_name(Path::new("/wt/feat-1"), 111, 2),
+    a,
+    "two overlays in one process"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn extra_args_may_not_take_over_the_container_name() {
+  // A runtime honours the LAST `--name`, so an `extra_args` one would leave
+  // the overlay's teardown removing a container that was never started, and
+  // possibly one belonging to something else.
+  let cfg = ContainerConfig {
+    image: "rust:1.90".to_string(),
+    runtime: None,
+    extra_args: argv(&["--name", "custom"]),
+    selinux_relabel: false,
+  };
+  let err = gwm::exec::validate_container("ci", &cfg).expect_err("`--name` in extra_args must be refused");
+  let msg = err.to_string();
+  assert!(
+    msg.contains("--name") && msg.contains("ci"),
+    "names the flag and the profile: {msg}"
+  );
+
+  // The `--name=value` spelling is refused too.
+  let cfg = ContainerConfig {
+    extra_args: argv(&["--name=custom"]),
+    ..cfg.clone()
+  };
+  assert!(gwm::exec::validate_container("ci", &cfg).is_err(), "`--name=…` too");
+
+  // A flag that merely starts with the same letters is fine.
+  let cfg = ContainerConfig {
+    extra_args: argv(&["--network", "none"]),
+    ..cfg.clone()
+  };
+  assert!(
+    gwm::exec::validate_container("ci", &cfg).is_ok(),
+    "unrelated flags pass"
+  );
+
+  // And the same refusal reaches the command path, not only config validation.
+  let mut profiles = BTreeMap::new();
+  profiles.insert(
+    "ci".to_string(),
+    ExecProfile {
+      command: argv(&["cargo", "test"]),
+      jobs: None,
+      container: Some(ContainerConfig {
+        image: "rust:1.90".to_string(),
+        runtime: None,
+        extra_args: argv(&["--name", "custom"]),
+        selinux_relabel: false,
+      }),
+    },
+  );
+  let cfg = ExecConfig { jobs: None, profiles };
+  assert!(
+    resolve_exec_container(Some("ci"), &cfg).is_err(),
+    "`gwm exec --profile ci` refuses it too"
+  );
 }

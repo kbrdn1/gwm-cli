@@ -658,7 +658,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
               // A containerised profile carries a teardown: the container
               // survives its own client, so closing the overlay must remove it.
               Ok(pty) => app.open_pty_overlay(match teardown {
-                Some(argv) => pty.with_teardown(argv),
+                // Same cwd as the spawn, so a relative `runtime` resolves
+                // identically on the way out.
+                Some(argv) => pty.with_teardown(argv, cwd.clone()),
                 None => pty,
               }),
               Err(e) => {
