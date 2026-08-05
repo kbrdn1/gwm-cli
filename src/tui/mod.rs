@@ -1241,10 +1241,23 @@ fn run_subshell(
 /// #530). A program path that genuinely contains a space is quoted, which the
 /// splitter honours.
 ///
+/// A string that already **names a file** is not a shell line and is handed
+/// over whole. Word-splitting is POSIX and filenames are not: `shell_words`
+/// drops an unprotected backslash, so `EDITOR=C:\Tools\nvim.exe` — an
+/// absolute path `Command::new` launched fine before any splitting existed —
+/// came back as `C:Toolsnvim.exe` and stopped launching (Codex review, PR
+/// #530). One `is_file` before the splitter is what keeps that working. It
+/// cannot see a path that is not on *this* machine, nor one carrying flags;
+/// those are written quoted, and POSIX preserves a backslash inside double
+/// quotes unless it precedes `$`, `` ` ``, `"`, `\` or a newline.
+///
 /// Never empty: an unbalanced quote or a blank value falls back to the raw
 /// string, which keeps the previous behaviour and lets the spawn failure name
 /// what was actually configured.
 pub fn launch_argv(cmd: &str) -> Vec<String> {
+  if std::path::Path::new(cmd).is_file() {
+    return vec![cmd.to_string()];
+  }
   match shell_words::split(cmd) {
     Ok(argv) if !argv.is_empty() => argv,
     _ => vec![cmd.to_string()],

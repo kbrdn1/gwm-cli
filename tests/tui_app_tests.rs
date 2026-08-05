@@ -11971,3 +11971,46 @@ fn an_unparseable_command_is_passed_through_whole() {
   );
   assert_eq!(launch_argv(""), vec![""]);
 }
+
+#[test]
+fn a_command_that_names_a_real_file_is_never_split() {
+  // Word-splitting is POSIX, filenames are not. `shell_words` drops an
+  // unprotected backslash, so `EDITOR=C:\Tools\nvim.exe` — an absolute path
+  // that `Command::new` launched fine before word-splitting was introduced —
+  // came back as `C:Toolsnvim.exe` and stopped launching (Codex review, PR
+  // #530). A string that already names a file is not a shell line: nothing is
+  // left to split, so it is handed over whole.
+  use gwm::tui::launch_argv;
+  let dir = tempfile::TempDir::new().unwrap();
+
+  let spaced = dir.path().join("My Editor.sh");
+  std::fs::write(&spaced, "#!/bin/sh\n").unwrap();
+  let spaced = spaced.to_str().unwrap();
+  assert_eq!(launch_argv(spaced), vec![spaced]);
+
+  // The backslash is the case the splitter actually mangles. Windows has no
+  // filename that can carry one, so the file that proves it is a Unix file;
+  // the code path it exercises is the same one a Windows path takes.
+  #[cfg(unix)]
+  {
+    let backslashed = dir.path().join(r"Tools\nvim");
+    std::fs::write(&backslashed, "#!/bin/sh\n").unwrap();
+    let backslashed = backslashed.to_str().unwrap();
+    assert_eq!(launch_argv(backslashed), vec![backslashed]);
+  }
+}
+
+#[test]
+fn quoting_protects_a_backslashed_path_that_takes_arguments() {
+  // The escape hatch for the case the fast path above cannot see: a path that
+  // does not exist on this machine, or one that carries flags. Double quotes
+  // are what the doc tells the user to reach for, so the claim is pinned
+  // rather than asserted in prose — POSIX only treats `\` as an escape inside
+  // double quotes before `$`, `` ` ``, `"`, `\` and a newline.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("\"C:\\Tools\\nvim.exe\" --clean"),
+    vec!["C:\\Tools\\nvim.exe", "--clean"]
+  );
+}
