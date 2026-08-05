@@ -99,6 +99,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An editor or shell configured with arguments now launches.** `editor_cmd`
+  / `shell_cmd` in `[tui.open]`, and the `$EDITOR` / `$SHELL` they fall back
+  to, were handed to the spawner whole, so a perfectly ordinary
+  `EDITOR="code --wait"` made the system look for an executable literally
+  named `code --wait` and `o` in `mode = "editor"` could never open anything.
+  These are shell lines by convention (git, cargo and systemctl all word-split
+  them), and gwm already reads `[review]` tools and hook `run =` lines that
+  way, so they are word-split now, with a quoted program path staying one
+  token and an unbalanced quote falling back to the raw string. Found while
+  reviewing the note editor (#515), which reuses the same handoff and would
+  have shipped with the same hole. The path also reaches the child as an
+  `OsStr` rather than a lossy string, so a repo path carrying non-UTF-8 bytes
+  no longer opens a different file than the one gwm resolved.
+
 - **`gwm doctor` now reads `[hooks.*]`, not just `[[bootstrap.command]]`.**
   Two checks walked the bootstrap commands alone, so a config whose commands
   all live in lifecycle hooks got a report about a file the doctor had barely

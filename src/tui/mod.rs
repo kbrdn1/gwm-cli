@@ -911,9 +911,11 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
       None => app.status = "nothing selected".into(),
       Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
       Some(OpenTarget::Shell { path, command }) => run_subshell(terminal, &command, &[], Some(&path), app, "shell")?,
+      // #515 review: the path goes through as an `OsStr`. `display()` is
+      // lossy, so a repo path carrying non-UTF-8 bytes handed the editor a
+      // DIFFERENT path than the one gwm resolved.
       Some(OpenTarget::Editor { path, command }) => {
-        let path_str = path.display().to_string();
-        run_subshell(terminal, &command, &[&path_str], None, app, "editor")?
+        run_subshell(terminal, &command, &[path.as_os_str()], None, app, "editor")?
       }
     },
     // #290: TerminalPty replaces OpenTerminalOverlay — open a native $SHELL
@@ -996,8 +998,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // have created the note, or emptied it.
     Action::EditNote if !app.picker_mode => {
       if let Some((command, path)) = app.prepare_note_edit() {
-        let path = path.to_string_lossy().to_string();
-        run_subshell(terminal, &command, &[&path], None, app, "note")?;
+        run_subshell(terminal, &command, &[path.as_os_str()], None, app, "note")?;
         app.sync_selected_note_marker();
       }
     }
@@ -1191,16 +1192,24 @@ fn run_launcher(
 fn run_subshell(
   terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   cmd: &str,
-  args: &[&str],
+  args: &[&std::ffi::OsStr],
   cwd: Option<&std::path::Path>,
   app: &mut App,
   label: &str,
 ) -> Result<()> {
+  // Split before spawning (issue #515, Codex review PR #530): `cmd` comes
+  // from `editor_cmd` / `shell_cmd` or `$EDITOR` / `$SHELL`, which are shell
+  // lines, so `code --wait` is a program plus an argument rather than an
+  // executable whose name contains a space.
+  let argv = launch_argv(cmd);
+  let (program, leading) = argv.split_first().expect("launch_argv never returns empty");
+
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
   terminal.show_cursor()?;
 
-  let mut command = std::process::Command::new(cmd);
+  let mut command = std::process::Command::new(program);
+  command.args(leading);
   command.args(args);
   if let Some(dir) = cwd {
     command.current_dir(dir);
@@ -1219,6 +1228,27 @@ fn run_subshell(
     Err(e) => app.status = format!("failed to launch {} ({}): {}", label, cmd, e),
   }
   Ok(())
+}
+
+/// Split a configured launch command into argv.
+///
+/// `$EDITOR`, `$SHELL` and their `.gwm.toml` overrides are shell lines by
+/// convention — git, cargo and systemctl all word-split them — and this repo
+/// already reads `[review]` tools and hook `run =` lines the same way
+/// (`launcher.rs`, `doctor.rs`). Handing the whole string to `Command::new`
+/// looked for an executable literally named `code --wait`, so an editor
+/// configured with a flag could never launch (issue #515, Codex review on PR
+/// #530). A program path that genuinely contains a space is quoted, which the
+/// splitter honours.
+///
+/// Never empty: an unbalanced quote or a blank value falls back to the raw
+/// string, which keeps the previous behaviour and lets the spawn failure name
+/// what was actually configured.
+pub fn launch_argv(cmd: &str) -> Vec<String> {
+  match shell_words::split(cmd) {
+    Ok(argv) if !argv.is_empty() => argv,
+    _ => vec![cmd.to_string()],
+  }
 }
 
 /// Push the selected worktree's path into the system clipboard via

@@ -11922,3 +11922,52 @@ fn the_marker_follows_what_the_editor_left_behind() {
   app.sync_selected_note_marker();
   assert!(!app.worktrees[0].has_note, "a blanked note must clear the marker");
 }
+
+// ---- launcher argv splitting (#515, Codex review pass 6) ------------------
+
+#[test]
+fn a_configured_editor_command_splits_into_program_and_arguments() {
+  // `$EDITOR` and `$SHELL` are shell lines by convention: git, cargo and
+  // systemctl all word-split them, and `[review]` / hook `run =` lines in
+  // this repo already go through `shell_words`. Handing the whole string to
+  // `Command::new` looked for an executable literally named `code --wait`,
+  // so `N` could never open a note for a VS Code or Sublime user.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(launch_argv("vi"), vec!["vi"]);
+  assert_eq!(launch_argv("code --wait"), vec!["code", "--wait"]);
+  assert_eq!(launch_argv("nvim -f"), vec!["nvim", "-f"]);
+  assert_eq!(launch_argv("subl -w -n"), vec!["subl", "-w", "-n"]);
+}
+
+#[test]
+fn a_program_path_containing_a_space_is_quoted_not_split() {
+  // The counterpart of word-splitting: a real path with a space stays one
+  // token when it is quoted, which is how every other consumer of these
+  // variables expects it to be written.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("\"/Applications/My App/bin/edit\" --wait"),
+    vec!["/Applications/My App/bin/edit", "--wait"]
+  );
+  assert_eq!(
+    launch_argv("'/Applications/My App/bin/edit'"),
+    vec!["/Applications/My App/bin/edit"]
+  );
+}
+
+#[test]
+fn an_unparseable_command_is_passed_through_whole() {
+  // An unbalanced quote is a user typo in `.gwm.toml`. Falling back to the
+  // raw string keeps the pre-existing behaviour and lets the spawn failure
+  // name what was configured, instead of turning a typo into a panic or a
+  // silently different program.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("edit --flag \"unbalanced"),
+    vec!["edit --flag \"unbalanced"]
+  );
+  assert_eq!(launch_argv(""), vec![""]);
+}
