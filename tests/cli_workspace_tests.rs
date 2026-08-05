@@ -291,3 +291,40 @@ fn exec_refuses_an_unmountable_worktree_before_running_any_other() {
     "no worktree ran before the refusal:\n{stdout}"
   );
 }
+
+#[cfg(unix)]
+#[test]
+fn exec_workspace_refuses_an_unmountable_worktree_before_any_repo_runs() {
+  // Upfront resolution is a WORKSPACE-wide contract (#326), not a per-repo
+  // one: a worktree of the last repo that cannot be expressed as a container
+  // mount must surface before the first repo has run its command.
+  let root = workspace_root();
+  let worktrees = TempDir::new().unwrap();
+  for name in ["alpha", "beta"] {
+    let repo_path = root.path().join(name);
+    fs::write(repo_path.join(".gwm.toml"), container_profile_toml()).unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    // `beta` (second in discovery order) is the one holding the bad path.
+    let dir = if name == "beta" {
+      worktrees.path().join("od:d")
+    } else {
+      worktrees.path().join(name)
+    };
+    repo.worktree(&format!("{name}-wt"), &dir, None).unwrap();
+  }
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let out = cmd
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ci"])
+    .assert()
+    .failure();
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(
+    !stdout.contains("run --rm"),
+    "no repo ran before the refusal:\n{stdout}"
+  );
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert!(stderr.contains("od:d"), "the error names the path:\n{stderr}");
+}

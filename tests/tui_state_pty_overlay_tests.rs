@@ -406,3 +406,28 @@ fn an_overlay_without_a_teardown_runs_nothing_extra() {
   assert!(pty.teardown_argv().is_none(), "host commands carry none");
   pty.kill(); // must not panic
 }
+
+#[cfg(unix)]
+#[test]
+fn run_teardown_now_runs_from_the_given_directory() {
+  // `PtyOverlay::spawn` can fail AFTER launching the child (the reader clone
+  // and the writer take are both fallible), leaving a container with no
+  // overlay to close it. The run loop calls this directly there.
+  //
+  // The cwd is the point: a `runtime` may be a relative wrapper script, which
+  // the spawn resolves against the worktree.
+  let dir = tempfile::TempDir::new().unwrap();
+  let script = dir.path().join("wrapper.sh");
+  std::fs::write(&script, "#!/bin/sh\ntouch torn-down\n").unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+  }
+
+  gwm::tui::state::pty_overlay::run_teardown_now(&["./wrapper.sh".to_string()], dir.path());
+  assert!(
+    dir.path().join("torn-down").exists(),
+    "a relative teardown binary resolves against the given directory"
+  );
+}

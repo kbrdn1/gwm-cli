@@ -1223,6 +1223,16 @@ fn cmd_exec_workspace(
     return Ok(());
   }
 
+  // Build every repo's argv before ANY repo runs. `exec_run` already does this
+  // within a repo; upfront resolution is a workspace-wide contract (#326), so
+  // a worktree of the last repo that cannot be expressed as a container mount
+  // must not surface after the first repo has already run its command.
+  for (_, targets, plan) in &plans {
+    for w in targets.iter() {
+      plan.argv_for(&w.path)?;
+    }
+  }
+
   // Run sequentially per repo, aggregating the repo-tagged outcomes.
   let mut all = Vec::new();
   for (name, targets, plan) in &plans {

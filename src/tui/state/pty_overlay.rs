@@ -97,6 +97,26 @@ impl std::fmt::Debug for PtyOverlay {
   }
 }
 
+/// Run a teardown argv in `cwd`, ignoring its outcome (issue #421).
+///
+/// Best-effort by design: the container may already be gone (the command
+/// finished on its own), and a TUI has no channel for the error of a cleanup
+/// the user did not ask about. Output is discarded so nothing can corrupt the
+/// frame. Free-standing because it is also needed when `PtyOverlay::spawn`
+/// fails **after** launching the child, where there is no overlay to hold it.
+pub fn run_teardown_now(argv: &[String], cwd: &Path) {
+  let Some((bin, args)) = argv.split_first() else {
+    return;
+  };
+  let _ = std::process::Command::new(bin)
+    .args(args)
+    .current_dir(cwd)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status();
+}
+
 impl PtyOverlay {
   /// Spawn `argv[0] argv[1..]` in a fresh PTY of `cols × rows`, with the
   /// working directory set to `cwd`. Sets `TERM=xterm-256color` so
@@ -339,16 +359,7 @@ impl PtyOverlay {
     let Some((argv, cwd)) = self.teardown.take() else {
       return;
     };
-    let Some((bin, args)) = argv.split_first() else {
-      return;
-    };
-    let _ = std::process::Command::new(bin)
-      .args(args)
-      .current_dir(&cwd)
-      .stdin(std::process::Stdio::null())
-      .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::null())
-      .status();
+    run_teardown_now(&argv, &cwd);
   }
 
   /// `true` once the child leader has been observed exited and reaped.

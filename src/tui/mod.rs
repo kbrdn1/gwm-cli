@@ -664,6 +664,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
                 None => pty,
               }),
               Err(e) => {
+                // `spawn` can fail AFTER the child is launched (the reader
+                // clone and the writer take are both fallible), and a
+                // containerised run that reached the daemon would then keep
+                // going with no overlay to close. Tear it down here too.
+                if let Some(argv) = teardown {
+                  crate::tui::state::pty_overlay::run_teardown_now(&argv, &cwd);
+                }
                 app.status = format!("exec overlay failed: {}", e);
                 app.close_exec_picker();
               }
