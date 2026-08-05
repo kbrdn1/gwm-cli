@@ -368,7 +368,7 @@ three per-branch keys there.
 Comes after the PR/Issue view, which pays for the overlay machinery it would
 reuse.
 
-### 6. Container execution ([#421](https://github.com/kbrdn1/gwm-cli/issues/421))
+### 6. Container execution ([#421](https://github.com/kbrdn1/gwm-cli/issues/421) ✅)
 
 A `container:` block on the existing `exec` / aliases surface, wrapping the
 command in `docker run`. Anything exposing a Docker-compatible socket works for
@@ -384,6 +384,22 @@ It was deferred for want of observed demand. It moves into the line because the
 comparison page now sits behind it rather than ahead: container execution is a
 column in that table, and writing the table first would mean publishing a column
 gwm loses by default.
+
+Built narrower than the reference's nine fields: `image`, `runtime`,
+`extra_args`. The dropped ones are not missing, they are covered: `-w`, `-e`
+and `-v` are `docker run` flags, and `extra_args` lands after gwm's own so a
+repeat overrides them. Two decisions the issue asked to be resolved rather than
+discovered: there is no `interactive` knob, because `gwm exec` is a fan-out over
+N worktrees and a TTY per container means nothing there, while the TUI exec
+overlay owns a real pty and therefore runs its container with `-i -t`; and the
+command is the container's CMD, so an image's ENTRYPOINT receives it as
+arguments. Refused on Windows, where mirroring a host path into a Linux
+container cannot work and the `.git` file would name a drive letter anyway. The block rides a
+profile only: the inline `gwm exec -- <cmd>` is the frozen surface (#319) and a
+config file must not change what an unchanged command line does. `[aliases]`
+needed nothing, contrary to what the issue title suggests. A gwm alias is argv
+substitution towards a subcommand, not a custom command, so `t = "exec --profile
+ci"` inherits the container through the profile it expands to.
 
 ### 7. Comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422))
 

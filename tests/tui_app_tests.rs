@@ -9633,13 +9633,88 @@ fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.build]\ncommand = [\"cargo\", \"build\", \"--release\"]\n");
   app.enter_exec_picker();
   let expected_cwd = app.selected().unwrap().path.clone();
-  let (argv, cwd) = app.exec_picker_resolve().expect("a valid profile resolves");
+  let (argv, cwd, _) = app.exec_picker_resolve().expect("a valid profile resolves");
   assert_eq!(
     argv,
     vec!["cargo".to_string(), "build".to_string(), "--release".to_string()],
     "argv is the frozen command array verbatim (no shell)"
   );
   assert_eq!(cwd, expected_cwd, "cwd is the selected worktree's path");
+}
+
+#[cfg(unix)] // `[container]` is refused on Windows (host paths cannot be mirrored there).
+#[test]
+fn exec_picker_wraps_a_container_profile_the_same_way_the_cli_does() {
+  // Issue #421: the same profile must not mean "in a container" on the CLI
+  // and "on the host" in the TUI. `runtime` is explicit so the test never
+  // depends on the runner having docker or podman installed.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  app.enter_exec_picker();
+  let cwd = app.selected().unwrap().path.clone();
+  let (argv, _, _) = app.exec_picker_resolve().expect("a container profile resolves");
+  assert_eq!(argv[0], "docker", "argv[0] is the runtime the PTY overlay spawns");
+  assert_eq!(argv[1], "run");
+  // This overlay owns a real pty, so the container gets stdin and a terminal
+  // (the fan-out on the CLI deliberately does not).
+  assert!(
+    argv.contains(&"-i".to_string()) && argv.contains(&"-t".to_string()),
+    "the overlay allocates stdin + tty: {argv:?}"
+  );
+  // The selected worktree here is the main checkout, whose gitdir lives
+  // inside it: one mount, its own path (the CLI dedupe, exercised through
+  // the TUI path).
+  let wt = cwd.components().collect::<std::path::PathBuf>().display().to_string();
+  assert!(
+    argv.windows(2).any(|w| w[0] == "-v" && w[1] == format!("{wt}:{wt}")),
+    "the worktree path is mirrored: {argv:?}"
+  );
+  assert_eq!(
+    argv.iter().filter(|t| *t == "-v").count(),
+    1,
+    "the gitdir already lives inside this worktree: {argv:?}"
+  );
+  assert_eq!(
+    &argv[argv.len() - 2..],
+    &["cargo".to_string(), "test".to_string()],
+    "the profile's command is the container's CMD"
+  );
+}
+
+#[cfg(unix)] // `[container]` is refused on Windows.
+#[test]
+fn exec_picker_hands_the_overlay_a_teardown_for_a_container_profile() {
+  // The overlay kills the `docker` client on close, which leaves the
+  // container running (the daemon owns it, `--rm` only fires on exit). So the
+  // resolve hands the run loop the command that removes it by name.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  app.enter_exec_picker();
+  let (argv, _, teardown) = app.exec_picker_resolve().expect("resolves");
+  let teardown = teardown.expect("a containerised profile carries a teardown");
+  let name = argv
+    .windows(2)
+    .find(|w| w[0] == "--name")
+    .map(|w| w[1].clone())
+    .expect("the run is named");
+  assert_eq!(
+    teardown,
+    vec!["docker".to_string(), "rm".to_string(), "-f".to_string(), name],
+    "the teardown removes the very container that was started"
+  );
+}
+
+#[test]
+fn exec_picker_leaves_a_hostless_profile_alone() {
+  // The complement: no `[container]` ⇒ the argv is the command verbatim, the
+  // pre-#421 behaviour.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.plain]\ncommand = [\"cargo\", \"test\"]\n");
+  app.enter_exec_picker();
+  let (argv, _, teardown) = app.exec_picker_resolve().expect("resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+  assert!(teardown.is_none(), "a host command has nothing to tear down");
 }
 
 #[test]
@@ -9899,7 +9974,7 @@ fn exec_picker_runs_in_the_open_time_worktree_and_config_after_a_drift() {
   // Drift: the list AND the live config moved out from under the overlay.
   app.worktrees = vec![worktree_fixture("other")];
   app.config.exec.profiles.clear();
-  let (argv, cwd) = app
+  let (argv, cwd, _) = app
     .exec_picker_resolve()
     .expect("resolves against the captured cfg + cwd");
   assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
@@ -9942,7 +10017,7 @@ fn exec_picker_pins_a_worktree_relative_program_to_the_target() {
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.run]\ncommand = [\"./run.sh\", \"--ci\"]\n");
   let wt = app.selected().unwrap().path.clone();
   app.enter_exec_picker();
-  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  let (argv, _cwd, _) = app.exec_picker_resolve().expect("resolves");
   // Same anchoring the CLI exec path applies — an absolute path under the
   // worktree, not gwm's own cwd.
   assert_eq!(
@@ -9960,7 +10035,7 @@ fn exec_picker_leaves_a_bare_command_for_path_lookup() {
   // PATH resolution inside the worktree.
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.t]\ncommand = [\"cargo\", \"test\"]\n");
   app.enter_exec_picker();
-  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  let (argv, _cwd, _) = app.exec_picker_resolve().expect("resolves");
   assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
 }
 
