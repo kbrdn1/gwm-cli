@@ -2121,9 +2121,25 @@ fn the_recorded_branch_is_the_one_the_removal_deletes() {
     .path;
 
   let mut seen = None;
-  worktree::remove_verified_recording(&repo, "feat-531-b", &expected, true, |head| seen = Some(head.clone())).unwrap();
+  let mut oid_at_record = None;
+  worktree::remove_verified_recording(&repo, "feat-531-b", &expected, true, |head| {
+    seen = Some(head.clone());
+    // What the undo journal does at this instant. The callback fires after
+    // the prune and after the directory is gone, so the ref has to still
+    // resolve here or `gwm undo` loses the tip it would resurrect, and it is
+    // the last instant at which it can: the branch delete is next.
+    oid_at_record = head
+      .name()
+      .and_then(|b| repo.find_branch(b, git2::BranchType::Local).ok())
+      .and_then(|br| br.into_reference().target());
+  })
+  .unwrap();
 
   assert_eq!(seen, Some(worktree::HeadBranch::Attached("feat/#531-b".into())));
+  assert!(
+    oid_at_record.is_some(),
+    "the branch tip must still resolve when the removal reports itself"
+  );
   assert!(
     repo.find_branch("feat/#531-b", git2::BranchType::Local).is_err(),
     "the branch the callback was handed is the one that got deleted"
