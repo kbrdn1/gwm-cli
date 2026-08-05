@@ -149,6 +149,8 @@ define_actions! {
   ConfigPanel       => "config_panel",
   // #436: CI checks overlay — also reachable via `c` in the status context.
   CiChecks          => "ci_checks",
+  // #420: rich PR / issue view — description, checks, reviews, comments.
+  RichView          => "rich_view",
   ExecOverlay       => "exec_overlay",
   CleanOverlay      => "clean_overlay",
   AgentSessions     => "agent_sessions",
@@ -514,6 +516,9 @@ impl Keymap {
       // view; `c` does the same while the status pane holds the focus
       // (contextual routing, same mechanism as j/k sidebar scroll).
       def(Action::CiChecks, &["C"]),
+      // #420: `I` opens the rich PR / issue view. `i` is the link prompt,
+      // so the pair reads as "link it" / "look at it".
+      def(Action::RichView, &["I"]),
       // #325: `x` opens the exec profile picker overlay.
       def(Action::ExecOverlay, &["x"]),
       def(Action::AgentSessions, &["a"]),

@@ -81,8 +81,11 @@ pub enum KeyContext {
   Confirm,
   /// Keybindings / help overlay (scroll-only).
   Help,
-  /// Generic detail overlay (issue #408, scroll-only / close) — agent
-  /// sessions today, the rich PR/Issue view tomorrow.
+  /// Generic detail overlay (issue #408, scroll-only / close) — the agent
+  /// session pane. The rich PR/Issue view got its own context (#420): it
+  /// shares the shell but not the verbs (no attach / detach, and `Enter`
+  /// opens a URL rather than pinning a session), so folding them together
+  /// would have made rebinding one silently rebind the other.
   Detail,
   /// Command-logs overlay (issue #226, scroll-only + copy).
   CommandLogs,
@@ -109,6 +112,9 @@ pub enum KeyContext {
   /// CI checks overlay (issue #436) — the detail-overlay shell opened on
   /// the linked PR's per-check rollup list.
   CiChecks,
+  /// Rich PR / issue view (issue #420) — the same shell opened on the
+  /// linked PR's or issue's description, reviews and conversation.
+  RichView,
 }
 
 impl KeyContext {
@@ -163,6 +169,7 @@ impl KeyContext {
       KeyContext::ExecPicker => "exec",
       KeyContext::Clean => "clean",
       KeyContext::CiChecks => "ci_checks",
+      KeyContext::RichView => "rich_view",
     }
   }
 
@@ -191,6 +198,7 @@ impl KeyContext {
       ExecPicker,
       Clean,
       CiChecks,
+      RichView,
     ]
   }
 }
@@ -350,6 +358,15 @@ define_modal_actions! {
     CiChecksOpen    => "open"        [ "Enter" ],
     CiChecksFilter  => "filter"      [ "/" ],
     CiChecksRefresh => "refresh"     [ "f" ],
+  }
+  // #420: the same list-view keys as the CI checks context above, minus
+  // the filter — a rich view is prose, not a searchable row set.
+  RichView {
+    RichViewClose   => "close"       [ "Esc", "q" ],
+    RichViewNext    => "select_next" [ "j", "Down" ],
+    RichViewPrev    => "select_prev" [ "k", "Up" ],
+    RichViewOpen    => "open"        [ "Enter" ],
+    RichViewRefresh => "refresh"     [ "f" ],
   }
 }
 

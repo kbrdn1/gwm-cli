@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rich PR / issue view in the TUI**
+  ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)). `I` opens the linked
+  PR (or the linked issue when there is no PR) on its description, author,
+  branch pair, diff size, CI rollup, submitted reviews and conversation,
+  without leaving the TUI. `gwm` already asked `gh` for the rollup and threw
+  the per-check detail away; it now asks for `body`, `author`, `comments`,
+  `reviews`, `additions` / `deletions` and the branch refs in the same single
+  request, so the view costs no extra round trip. Bodies are wrapped against
+  the modal width and re-wrapped on resize, and every cap says how much it
+  dropped (`… 312 more lines`) rather than stopping silently. Remote text is
+  neutralised on the way in, so a bidi override in a comment cannot reorder
+  what the terminal paints. `Enter` opens the selected row's URL, `f`
+  re-fetches, and the whole verb set is rebindable under
+  `[tui.keys.modal.rich_view]`. On GitLab the view renders the summary tier
+  plus the description, author and branch pair; approvals, notes and the diff
+  size need separate API calls and are not fetched. Inline review comments
+  (the ones anchored to a diff hunk) are GitHub GraphQL only and are not part
+  of this change.
+
 - **Multi-row selection in the TUI, and a batch delete on top of it**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)). `Space` marks the
   highlighted worktree, `d` then deletes every marked row in one batch; with

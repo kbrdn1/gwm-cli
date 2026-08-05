@@ -388,6 +388,7 @@ fn issue_summary_line_closed_badge_agrees_with_the_header_dot() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = gwm::tui::issue_summary_line(
     42,
@@ -426,6 +427,7 @@ fn pr_summary_line_merged_badge_routes_through_pr_badge_color() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = gwm::tui::pr_summary_line(
     42,
@@ -552,6 +554,7 @@ fn summary_line_loaded_icons_resolve_through_state_roles() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let issue = gwm::tui::issue_summary_line(
     7,
@@ -576,6 +579,7 @@ fn summary_line_loaded_icons_resolve_through_state_roles() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   };
   let pr = gwm::tui::pr_summary_line(
     9,

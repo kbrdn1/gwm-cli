@@ -179,6 +179,16 @@ pub enum LinkPromptKey {
 /// (issue #106).
 pub use crate::cli::LinkTarget;
 
+/// What the open rich view (issue #420) was built from. Kept whole rather
+/// than as pre-built rows so a resize can re-wrap it, and owned by the
+/// overlay rather than read back from the fetch cache, which the manual
+/// refresh flushes (Codex review #529).
+#[derive(Debug, Clone)]
+enum RichSource {
+  Issue(IssueStatus),
+  Pr(PrStatus),
+}
+
 /// Dispatch target for the `o` key (issue #73). Resolved by
 /// [`App::resolve_open_target`] from the current selection + the
 /// `[tui.open]` config so the event loop can hand off to the right
@@ -576,16 +586,42 @@ pub struct App {
   /// auto-refresh drifts the live selection (clean-overlay pattern).
   detail_overlay_target: Option<(PathBuf, Option<String>)>,
 
-  /// CI-consumer counterpart of `detail_overlay_target` (Codex review
-  /// #455): the `(remote slug, PR number)` the open CI checks overlay was
-  /// built for, captured by [`Self::enter_ci_checks`]. Any link mutation
-  /// that disagrees — the PR changed, disappeared, or (workspace mode)
-  /// the slug moved to another repo whose PR happens to share the
-  /// number — closes the overlay up front via
-  /// [`Self::close_ci_overlay_if_link_disagrees`]; otherwise the stale
-  /// checks stay up through the new fetch, and forever if it fails, with
-  /// `Enter` opening an old PR's check URL.
-  detail_overlay_pr: Option<(Option<String>, u64)>,
+  /// Forge-consumer counterpart of `detail_overlay_target` (Codex review
+  /// #455): the `(remote slug, side, number)` the open forge-linked
+  /// overlay was built for, captured by [`Self::enter_ci_checks`] and
+  /// [`Self::enter_rich_view`]. Any link mutation that disagrees — the PR
+  /// changed, disappeared, or (workspace mode) the slug moved to another
+  /// repo whose PR happens to share the number — closes the overlay up
+  /// front via [`Self::close_forge_overlay_if_link_disagrees`]; otherwise
+  /// the stale rows stay up through the new fetch, and forever if it
+  /// fails, with `Enter` opening an old PR's URL.
+  ///
+  /// The `LinkTarget` is part of the identity, not decoration (issue
+  /// #420): issue #42 and PR #42 are different things, and a tuple that
+  /// dropped the discriminant would reproduce the #138 bug class the
+  /// fetch cache already paid for once. The first element is the **forge
+  /// identity** (`<kind> <web origin>/<slug>`), not the bare slug, for
+  /// the reason `GitHubFetch::forge_identity` already documents: an
+  /// origin moving from `github.com/acme/widgets` to
+  /// `gitlab.com/acme/widgets` keeps the slug, so a slug-keyed tuple
+  /// compared equal and left `Enter` pointing at the old host (Codex
+  /// review #529).
+  detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
+
+  /// Terminal width in columns as of the last draw (issue #420). The rich
+  /// view wraps its bodies against the modal's inner width, which only the
+  /// renderer knows, so the event loop stamps it here — see
+  /// [`Self::set_term_width`], which also re-wraps an open overlay.
+  term_width: u16,
+
+  /// The status the open rich view renders (issue #420 / Codex review
+  /// #529). The overlay owns its source rather than reading it back from
+  /// the fetch cache, for the same reason `ci_overlay_checks` does: the
+  /// manual refresh flushes that cache before re-requesting, so a rebuild
+  /// landing in that window would find nothing and, if the refresh then
+  /// failed, would never get another chance. Populated at open and on
+  /// every landing, cleared on close.
+  rich_overlay_source: Option<RichSource>,
 
   /// The `PrCheck`s the open CI overlay renders (Codex review #455): the
   /// duration tick used to read them back from the PR fetch cache, so an
@@ -719,7 +755,12 @@ impl App {
       clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
-      detail_overlay_pr: None,
+      detail_overlay_link: None,
+      // Overwritten by the event loop on the first draw; the default is
+      // the classic 80-column terminal so a headless `App` (every state
+      // test) still wraps against something sane.
+      term_width: 80,
+      rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
       edit_original_branch: None,
@@ -935,16 +976,15 @@ impl App {
     ])
   }
 
-  /// Mark the workspace selection stale AND close the open CI checks
+  /// Mark the workspace selection stale AND close an open forge-linked
   /// overlay (Codex review #455): its rows belong to the previously
-  /// active repo, so every verb — `Enter` opening a check URL included —
+  /// active repo, so every verb — `Enter` opening a URL included —
   /// would act on the wrong repo. One funnel so a new stale site cannot
-  /// forget the close.
+  /// forget the close; `is_forge_linked` is what makes the rich view
+  /// (issue #420) covered without a second equality here.
   fn mark_workspace_stale(&mut self) {
     self.workspace_active_stale = true;
-    if self.view == View::DetailOverlay
-      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
-    {
+    if self.view == View::DetailOverlay && self.detail_overlay.kind.is_forge_linked() {
       self.close_detail_overlay();
     }
   }
@@ -1800,6 +1840,7 @@ impl App {
           }
           if let Ok(status) = &result {
             self.persist_loaded_issue_title(status);
+            self.sync_rich_overlay(RichSource::Issue(status.clone()));
           }
           self.github.complete_issue(number, result);
           applied = true;
@@ -1815,6 +1856,7 @@ impl App {
               // The overlay-close message owns the status line this tick.
               refresh_applied = true;
             }
+            self.sync_rich_overlay(RichSource::Pr(status.clone()));
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -2501,13 +2543,12 @@ impl App {
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
-      View::DetailOverlay => {
-        if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
-          HintContext::CiChecks
-        } else {
-          HintContext::Detail
-        }
-      }
+      View::DetailOverlay => match self.detail_overlay.kind {
+        crate::tui::state::detail_overlay::DetailKind::CiChecks => HintContext::CiChecks,
+        crate::tui::state::detail_overlay::DetailKind::RichIssue
+        | crate::tui::state::detail_overlay::DetailKind::RichPr => HintContext::RichView,
+        crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
+      },
       View::List => self.pane_hint_context(),
     }
   }
@@ -3043,7 +3084,11 @@ impl App {
     // Pin the overlay to the PR it renders, so a link mutation that
     // disagrees can close it (Codex review #455). The checks themselves
     // are kept too — the duration tick's cache-independent source.
-    self.detail_overlay_pr = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
+    self.detail_overlay_link = self
+      .github
+      .link
+      .pr
+      .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n));
     self.ci_overlay_checks = checks;
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
@@ -3051,6 +3096,161 @@ impl App {
       rows,
     );
     self.view = View::DetailOverlay;
+  }
+
+  /// Open the rich PR / issue view (issue #420, `I`): the description,
+  /// the metadata block, the reviews and the conversation of whichever
+  /// side is linked.
+  ///
+  /// The **PR wins when both are linked**: a worktree that has one is a
+  /// worktree whose work is in review, and the issue is one `gwm link`
+  /// away. That choice follows the **link**, not the cache (Codex review
+  /// #529): picking the side by which status happened to land first meant
+  /// an issue that came back before the PR opened in its place, and the
+  /// PR landing could not replace it, since the landing refresh requires
+  /// the overlay to already be `RichPr`. So the contract held only when
+  /// the PR was the faster of two concurrent fetches.
+  ///
+  /// It opens on whatever is available and lets [`Self::sync_rich_overlay`]
+  /// promote the PR the moment it lands. The first cut of this instead
+  /// refused to open while the PR was `Loading`, which was a guard against
+  /// a symptom of the missing promotion; once the promotion existed the
+  /// guard only produced its own edge case, since `Idle` ("nobody asked
+  /// yet") is indistinguishable from `Loading` for the user staring at an
+  /// issue that is not the thing they wanted. Without either side fetched
+  /// the overlay would be a bordered void, exactly what `enter_ci_checks`
+  /// refuses.
+  pub fn enter_rich_view(&mut self) {
+    // Same workspace contract as the CI checks overlay (#304 / Codex
+    // review #455): a failed `Repository::open` for the selected row
+    // leaves the link and its cache pointing at the previously active
+    // repo, and this view would then browse the OLD repo's PR.
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable — can't open its PR/issue view".into();
+      return;
+    }
+    let width = self.rich_view_width();
+    // The PR side is preferred whenever one is LINKED. Only its fetch
+    // state decides whether it can be shown yet.
+    if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+      let source = RichSource::Pr(pr.clone());
+      let title = format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title);
+      self.open_rich_overlay(source, title, width);
+      return;
+    }
+    if let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() {
+      let source = RichSource::Issue(issue.clone());
+      let title = format!("Issue #{} · {}", issue.number, issue.title);
+      self.open_rich_overlay(source, title, width);
+      return;
+    }
+    // Resolve the active binding rather than hard-coding `F`, the same way
+    // `enter_ci_checks` does.
+    self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+      Some(key) => format!("nothing to show — link an issue or PR and fetch ({key}) first"),
+      None => "nothing to show — link an issue or PR and fetch first".into(),
+    };
+  }
+
+  /// Common tail of [`Self::enter_rich_view`]: build the rows, pin the
+  /// overlay to the link it renders, and take the view.
+  fn open_rich_overlay(&mut self, source: RichSource, title: String, width: usize) {
+    let (kind, rows, target, number) = match &source {
+      RichSource::Pr(pr) => (
+        crate::tui::state::detail_overlay::DetailKind::RichPr,
+        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        LinkTarget::Pr,
+        pr.number,
+      ),
+      RichSource::Issue(issue) => (
+        crate::tui::state::detail_overlay::DetailKind::RichIssue,
+        crate::tui::state::rich_view::rich_issue_rows(issue, width),
+        LinkTarget::Issue,
+        issue.number,
+      ),
+    };
+    // Drop the agents consumer's target; pin this overlay to the link it
+    // renders so a disagreeing mutation can close it.
+    self.detail_overlay_target = None;
+    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    self.rich_overlay_source = Some(source);
+    self
+      .detail_overlay
+      .open(kind, crate::naming::sanitise_for_terminal(&title), rows);
+    self.view = View::DetailOverlay;
+  }
+
+  /// `Pull request` / `Merge request`, following the resolved forge so the
+  /// GitLab title does not say "PR" (issue #419).
+  fn pr_noun_titlecase(&self) -> String {
+    let noun = self.github.forge.as_ref().map(|f| f.pr_noun()).unwrap_or("PR");
+    let mut c = noun.chars();
+    match c.next() {
+      Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+      None => noun.to_string(),
+    }
+  }
+
+  /// The wrap budget handed to the row builders: the overlay modal's inner
+  /// width for the terminal the App was last drawn at.
+  fn rich_view_width(&self) -> usize {
+    crate::tui::ui::overlay_modal_width(self.term_width).saturating_sub(6) as usize
+  }
+
+  /// Stamp the terminal width and re-wrap an open rich view (issue #420).
+  ///
+  /// The event loop calls this on `Event::Resize` and once per draw. A
+  /// resize that never reached the `App` would leave the rows wrapped for
+  /// the previous width, and the renderer ellipsises whatever overflows —
+  /// so the widened terminal would show *less* text, not more.
+  pub fn set_term_width(&mut self, cols: u16) {
+    if self.term_width == cols {
+      return;
+    }
+    self.term_width = cols;
+    self.rebuild_rich_rows();
+  }
+
+  /// Rebuild the open rich view's rows. Pure in-memory formatting, no I/O
+  /// — a no-op for every other view.
+  ///
+  /// Reads the overlay's **own** source, not the fetch cache (Codex review
+  /// #529): the manual refresh flushes that cache before re-requesting, so
+  /// a resize landing in that window found no `Loaded` and gave up. A
+  /// refresh that then failed left nothing to ever rebuild from, and the
+  /// view stayed wrapped for the previous terminal for good. Same fix
+  /// `ci_overlay_checks` already carries for the duration tick (#455), for
+  /// the same reason.
+  fn rebuild_rich_rows(&mut self) {
+    if self.view != View::DetailOverlay {
+      return;
+    }
+    let width = self.rich_view_width();
+    let rows = match &self.rich_overlay_source {
+      Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(pr, width),
+      Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
+      None => return,
+    };
+    self.detail_overlay.set_rows(rows);
+  }
+
+  /// The URL of the selected rich-view row, when it carries one — the
+  /// PR/issue permalink on the `url` row, a comment permalink on a
+  /// comment header. Body rows are inert.
+  pub fn rich_selected_url(&self) -> Option<String> {
+    self.detail_overlay.selected_meta().map(str::to_string)
+  }
+
+  /// `f` inside the rich view — re-fetch, same workspace re-check the CI
+  /// overlay's refresh carries (the modal dispatch bypasses `run_action`'s
+  /// guard).
+  pub fn rich_view_refresh(&mut self) {
+    if self.workspace_active_stale {
+      self.close_detail_overlay();
+      self.status = "workspace: selected repo is unavailable — PR/issue view closed".into();
+      return;
+    }
+    self.refresh_github_status();
   }
 
   /// Contextual KEY routing (issue #436) — same mechanism that turns
@@ -3380,8 +3580,9 @@ impl App {
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
-    self.detail_overlay_pr = None;
+    self.detail_overlay_link = None;
     self.ci_overlay_checks.clear();
+    self.rich_overlay_source = None;
     self.view = View::List;
   }
 
@@ -5316,19 +5517,35 @@ impl App {
     // pinned identity (Codex review #455): an auto-refresh relist can move
     // the selection (the current worktree disappeared) while the overlay
     // is up, and its checks must not survive their PR.
-    self.close_ci_overlay_if_link_disagrees();
+    self.close_forge_overlay_if_link_disagrees();
   }
 
-  /// Close the open CI checks overlay when the link no longer matches the
-  /// `(slug, PR)` it was built for — see `detail_overlay_pr`.
-  fn close_ci_overlay_if_link_disagrees(&mut self) {
-    if self.view != View::DetailOverlay
-      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
-    {
+  /// Close an open forge-linked overlay when the link no longer matches
+  /// the `(slug, side, number)` it was built for — see
+  /// `detail_overlay_link`. Covers the CI checks list and the rich view
+  /// alike (issue #420): the failure is the same one, the rows describe a
+  /// PR/issue that is no longer the linked one, so the membership test is
+  /// `is_forge_linked` rather than an equality repeated per consumer.
+  fn close_forge_overlay_if_link_disagrees(&mut self) {
+    if self.view != View::DetailOverlay || !self.detail_overlay.kind.is_forge_linked() {
       return;
     }
-    let current = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
-    if current != self.detail_overlay_pr {
+    // Compare against the side the overlay was opened for: a rich *issue*
+    // view must not close because the PR link moved, and must close when
+    // the issue link does.
+    let current = match self.detail_overlay_link {
+      Some((_, LinkTarget::Issue, _)) => self
+        .github
+        .link
+        .issue
+        .map(|n| (self.github.forge_identity(), LinkTarget::Issue, n)),
+      _ => self
+        .github
+        .link
+        .pr
+        .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n)),
+    };
+    if current != self.detail_overlay_link {
       self.close_detail_overlay();
     }
   }
@@ -5527,7 +5744,7 @@ impl App {
     // The re-probe can CHANGE the PR identity — a persisted detection
     // coming back None, or re-detecting a different number (#61 → #62).
     // The flow below owns the status line ("nothing linked" / "fetching…").
-    self.close_ci_overlay_if_link_disagrees();
+    self.close_forge_overlay_if_link_disagrees();
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = format!(
@@ -5723,9 +5940,20 @@ impl App {
     }
   }
 
+  /// Test seam (issue #420): flip the PR cache entry to `Loading` without
+  /// going through the spine's `request → complete` generation flow, so a
+  /// test can exercise the in-flight window `enter_rich_view` treats
+  /// differently from a cold or errored cache.
+  pub fn mark_pr_loading_for_test(&mut self, number: u64) {
+    self
+      .github
+      .mark_loading(crate::tui::state::github_fetch::FetchKey::Pr(number));
+  }
+
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
     if let Ok(status) = &r {
       self.persist_loaded_issue_title(status);
+      self.sync_rich_overlay(RichSource::Issue(status.clone()));
     }
     self.github.apply_issue_result(r);
   }
@@ -5734,6 +5962,10 @@ impl App {
     if let Ok(status) = &r {
       self.persist_loaded_pr_title(status);
       self.refresh_ci_overlay_on_pr_landing(status);
+      // Wired here AND in the drain, the same pairing the CI counterpart
+      // documents right below: a landing path that exists only in the seam
+      // leaves the running TUI without the refresh.
+      self.sync_rich_overlay(RichSource::Pr(status.clone()));
     }
     self.github.apply_pr_result(r);
   }
@@ -5774,6 +6006,86 @@ impl App {
     self.ci_overlay_checks = status.checks.clone();
     self.detail_overlay.set_rows(rows);
     false
+  }
+
+  /// **The rich view's invariant** (issue #420, Codex review #529, second
+  /// pass): while it is open, the rich view renders the side the **link**
+  /// prefers, in its freshest version, **title included**.
+  ///
+  /// Written once here rather than as a third patch, because three
+  /// findings in a row were the same class of bug: the view mixed the link
+  /// state, the fetch-cache state and the overlay's own kind, and each fix
+  /// reconciled one more pair of them. The consequences all follow from
+  /// the one sentence above:
+  ///
+  /// - a landing PR **takes over** an issue view that was only standing in
+  ///   for it (an earlier fetch had errored), rather than leaving the user
+  ///   on the issue until they close the overlay;
+  /// - a landing issue refreshes the view only when the issue **is** the
+  ///   view, since the link prefers the PR;
+  /// - the title is recomputed on every landing, so a PR renamed upstream
+  ///   cannot show fresh content under a stale heading.
+  ///
+  /// A kind change reopens (the content is a different object, so keeping
+  /// the cursor would be meaningless); a same-kind refresh keeps the
+  /// selection and the filter cursor clamped through `set_rows`.
+  ///
+  /// Unlike the CI counterpart this never closes the overlay and never
+  /// claims the status line: a CI list with no checks is the bordered void
+  /// `enter_ci_checks` refuses to open, while a rich view of a PR whose
+  /// workflows have not started is perfectly good content.
+  fn sync_rich_overlay(&mut self, source: RichSource) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay
+      || !matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr)
+    {
+      return;
+    }
+    let (kind, title) = match &source {
+      RichSource::Pr(pr) => {
+        // Only the linked PR may claim the view; another number landing is
+        // a stale worker's result and must not retarget the overlay.
+        if self.github.link.pr != Some(pr.number) {
+          return;
+        }
+        (
+          DetailKind::RichPr,
+          format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+        )
+      }
+      RichSource::Issue(issue) => {
+        if self.github.link.issue != Some(issue.number) || self.detail_overlay.kind != DetailKind::RichIssue {
+          return;
+        }
+        (
+          DetailKind::RichIssue,
+          format!("Issue #{} · {}", issue.number, issue.title),
+        )
+      }
+    };
+    let width = self.rich_view_width();
+    let (rows, target, number) = match &source {
+      RichSource::Pr(pr) => (
+        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        LinkTarget::Pr,
+        pr.number,
+      ),
+      RichSource::Issue(issue) => (
+        crate::tui::state::rich_view::rich_issue_rows(issue, width),
+        LinkTarget::Issue,
+        issue.number,
+      ),
+    };
+    let title = crate::naming::sanitise_for_terminal(&title);
+    let promoted = self.detail_overlay.kind != kind;
+    self.rich_overlay_source = Some(source);
+    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    if promoted {
+      self.detail_overlay.open(kind, title, rows);
+    } else {
+      self.detail_overlay.title = title;
+      self.detail_overlay.set_rows(rows);
+    }
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
