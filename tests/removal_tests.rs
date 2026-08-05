@@ -785,7 +785,10 @@ fn a_hook_that_moves_the_target_leaves_no_journal_entry() {
   std::fs::write(
     dir.path().join(".gwm.toml"),
     format!(
-      "\n[[hooks.pre_remove]]\nname = \"move myself\"\nrun = \"git -C '{}' worktree move '{}' '{}'\"\n",
+      // `cd /` first: the hook's cwd is the worktree it is about to rename,
+      // and Windows refuses to rename a directory that is a live process's
+      // working directory (`Permission denied`, seen on windows-latest only).
+      "\n[[hooks.pre_remove]]\nname = \"move myself\"\nrun = \"cd / && git -C '{}' worktree move '{}' '{}'\"\n",
       shell_path(dir.path()),
       shell_path(&original),
       shell_path(&moved)
@@ -833,29 +836,29 @@ fn a_hook_that_moves_the_target_leaves_no_journal_entry() {
 
 #[test]
 fn the_journal_names_the_branch_the_removal_actually_deletes() {
-  // Codex review on PR #526 (P1). A batch resolves its listing once, so a
-  // `pre_remove` hook on an earlier target can change a later target's branch
-  // without changing its path: every path check still passes. `remove_inner`
-  // reads the branch to delete off the worktree's HEAD at removal time, while
-  // the journal entry took it from that stale listing, so `gwm undo` would
-  // restore the wrong ref and the branch really deleted would stay lost.
+  // Codex review on PR #526 (P1). `worktree::remove` deletes the branch it
+  // reads off the worktree's HEAD at removal time, while the journal entry
+  // took it from the listing the caller resolved earlier. Anything that
+  // checks out another branch in between — a `pre_remove` hook here, a hook
+  // on an earlier target of the same batch in the wild — made `gwm undo`
+  // restore a ref that was never deleted while the deleted one stayed lost.
+  //
+  // Driven by the target's own hook rather than by a sibling's: `list()` does
+  // not sort, so batch order follows `.git/worktrees/` and is a filesystem
+  // detail (this test read the branch of whichever ran first on ubuntu). The
+  // divergence under test is snapshot-versus-HEAD, which one target shows.
   let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
 
   let (dir, repo) = init_repo();
   let wt_root = TempDir::new().unwrap();
-  let first = wt_root.path().join("wt-521-lot-a");
-  let second = wt_root.path().join("wt-521-lot-b");
-  worktree::add(&repo, "wt-521-lot-a", &first, "feat/#521-lot-a", false).unwrap();
-  worktree::add(&repo, "wt-521-lot-b", &second, "feat/#521-b-before", false).unwrap();
+  let doomed = wt_root.path().join("wt-521-branch-swap");
+  worktree::add(&repo, "wt-521-branch-swap", &doomed, "feat/#521-before", false).unwrap();
 
-  // `when:` resolves against the hook's cwd, which is the worktree being
-  // removed, so the marker scopes the hook to the first target only.
-  std::fs::write(first.join(".trigger"), "").unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
     format!(
-      "\n[[hooks.pre_remove]]\nname = \"swap the other branch\"\nwhen = \"file_exists:.trigger\"\nrun = \"git -C '{}' checkout -b feat/#521-b-after\"\n",
-      shell_path(&second)
+      "\n[[hooks.pre_remove]]\nname = \"swap the branch\"\nrun = \"git -C '{}' checkout -b feat/#521-after\"\n",
+      shell_path(&doomed)
     ),
   )
   .unwrap();
@@ -874,27 +877,18 @@ fn the_journal_names_the_branch_the_removal_actually_deletes() {
   let mut app = App::new_at_layered(Some(dir.path()), None)
     .unwrap()
     .with_trust_mode(gwm::trust::TrustMode::Allow);
-  for name in ["wt-521-lot-a", "wt-521-lot-b"] {
-    select_row(&mut app, name);
-    app.toggle_select();
-  }
+  select_row(&mut app, "wt-521-branch-swap");
   app.enter_confirm_delete();
-  assert_eq!(app.pending_delete().len(), 2, "status was: {}", app.status);
   app.confirm_delete().unwrap();
   wait_for_delete(&mut app);
-
-  assert!(!second.exists(), "both targets are gone (status: {})", app.status);
+  assert!(!doomed.exists(), "the worktree is gone (status: {})", app.status);
 
   let journal = history::Journal::load(&journal_path).unwrap();
-  let entry = journal
-    .entries()
-    .iter()
-    .find(|e| e.worktree == "wt-521-lot-b")
-    .expect("the second removal is recorded");
+  let entry = journal.entries().first().expect("the removal is recorded");
   assert_eq!(
     entry.branch.as_deref(),
-    Some("feat/#521-b-after"),
-    "the entry must name the branch the removal saw, not the one the batch listing had"
+    Some("feat/#521-after"),
+    "the entry must name the branch the removal saw, not the one the listing had"
   );
 
   // SAFETY: still under the `env_lock` guard taken at the top of this test.
