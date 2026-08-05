@@ -218,14 +218,27 @@ fn collect_files(dir: &Path, base: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
 
 /// The note a move onto `branch` would destroy, if any.
 ///
-/// `None` when the destination is free, blank, or unreadable: overwriting a
-/// file an editor left empty loses nothing, so the presence predicate is the
-/// same one every other surface uses. Preflighted by
-/// [`crate::worktree::rename_worktree`], which refuses the whole rename
-/// before touching a ref rather than reporting the loss afterwards.
+/// Deliberately **not** [`read`]. That one answers *does this worktree carry
+/// a note* and collapses absent, unreadable and blank into `None`, which is
+/// right for a marker and wrong here: "there is nothing there" and "I could
+/// not read what is there" are different answers, and only the first makes a
+/// move safe (Codex review, PR #530). A file that exists but fails to read
+/// (invalid UTF-8 from a stray paste, a permission problem, a directory in
+/// the way) is treated as occupied, so the only destination ever replaced is
+/// one read successfully and found blank.
+///
+/// Preflighted by [`crate::worktree::rename_worktree`], which refuses the
+/// whole rename before touching a ref rather than reporting the loss
+/// afterwards.
 pub fn occupied_by(repo: &git2::Repository, branch: &str) -> Option<PathBuf> {
-  read(repo, branch)?;
-  path_for(repo, branch)
+  let path = path_for(repo, branch)?;
+  match std::fs::read_to_string(&path) {
+    // Read, and provably empty: replacing it loses nothing.
+    Ok(text) if text.trim().is_empty() => None,
+    Ok(_) => Some(path),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+    Err(_) => Some(path),
+  }
 }
 
 /// Follow a branch rename (#479). Returns `true` when a note was actually

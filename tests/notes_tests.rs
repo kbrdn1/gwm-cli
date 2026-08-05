@@ -312,3 +312,46 @@ fn neither_order_of_the_colliding_pair_can_break_the_other() {
   write_note(&repo, "baz", "still writable\n");
   assert_eq!(notes::read(&repo, "baz").as_deref(), Some("still writable\n"));
 }
+
+#[test]
+fn an_unreadable_note_at_the_destination_blocks_the_move_too() {
+  // "Absent" and "I could not read it" are different answers, and only the
+  // first makes a move safe. `read` collapses both to `None` because it
+  // answers *does this worktree carry a note* for display; overwriting asks
+  // a different question and must not reuse that answer (Codex review, PR
+  // #530, pass 2).
+  let (_dir, repo) = init_repo();
+  write_note(&repo, "feat/#515-old", "the note I am carrying over\n");
+  let occupied = notes::prepare(&repo, "feat/#515-new").unwrap().unwrap();
+  // Invalid UTF-8: prose an editor could have written from a latin-1 paste.
+  // `read_to_string` fails on it, so the destination reads as free unless
+  // the failure itself is treated as occupied.
+  std::fs::write(&occupied, [0xff, 0xfe, b'h', b'i']).unwrap();
+
+  assert!(
+    notes::occupied_by(&repo, "feat/#515-new").is_some(),
+    "a file that exists but cannot be read is not a free destination"
+  );
+  assert!(!notes::rename(&repo, "feat/#515-old", "feat/#515-new").unwrap());
+  assert_eq!(
+    std::fs::read(&occupied).unwrap(),
+    vec![0xff, 0xfe, b'h', b'i'],
+    "the unreadable file must survive byte for byte"
+  );
+  assert_eq!(
+    notes::read(&repo, "feat/#515-old").as_deref(),
+    Some("the note I am carrying over\n")
+  );
+}
+
+#[test]
+fn a_destination_that_is_provably_blank_is_still_free() {
+  // The counterpart: only a file read successfully AND found blank may be
+  // replaced. Without this the previous test's rule would block every move
+  // onto an editor's leftover empty file.
+  let (_dir, repo) = init_repo();
+  write_note(&repo, "feat/#515-blank", "   \n\n");
+
+  assert_eq!(notes::occupied_by(&repo, "feat/#515-blank"), None);
+  assert_eq!(notes::occupied_by(&repo, "feat/#515-absent"), None);
+}
