@@ -246,3 +246,36 @@ fn an_empty_placeholder_expands_to_nothing_not_to_an_empty_argument() {
   let out = run_one_hook(dir.path(), &hostile, "set -- {issue}; echo $#", HashMap::new());
   assert_eq!(out.trim(), "1", "a non-empty value stays a single quoted argument");
 }
+
+/// Issue #531: the removal hook context must parse the branch with the config
+/// the caller already loaded, not with a fresh read of `.gwm.toml`.
+///
+/// `HookContext::for_worktree` used to build its parser through
+/// `BranchParser::for_repo`, which calls `Config::load_for_repo` — a fourth
+/// open of the same file inside one delete, and one that re-resolves the
+/// global config path the caller may have deliberately overridden (#194).
+#[test]
+fn the_hook_context_parses_the_branch_with_the_config_it_was_given() {
+  let dir = tempfile::tempdir().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  // On disk: a pattern no `feat/#531-x` branch can match, so a re-read
+  // leaves every derived placeholder empty.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"wt/{desc}\"\n",
+  )
+  .unwrap();
+
+  let ctx = HookContext::for_worktree(
+    &repo,
+    dir.path(),
+    dir.path(),
+    dir.path(),
+    Some("feat/#531-x"),
+    &Config::default(),
+  );
+
+  assert_eq!(ctx.branch_type, "feat", "{{type}} must come from the given config");
+  assert_eq!(ctx.issue, "531", "{{issue}} must come from the given config");
+  assert_eq!(ctx.desc, "x", "{{desc}} must come from the given config");
+}

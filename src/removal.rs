@@ -92,7 +92,7 @@ pub fn remove_with_lifecycle(
     return Err(Box::new(RemovalFailure { outcome, error: e }));
   }
 
-  let pre_ctx = HookContext::for_worktree(repo, workdir, &found.path, &found.path, found.branch.as_deref());
+  let pre_ctx = HookContext::for_worktree(repo, workdir, &found.path, &found.path, found.branch.as_deref(), config);
   match lifecycle::run_phase_quiet(config, HookPhase::PreRemove, &pre_ctx, skips, false) {
     Ok(report) => outcome.pre = report,
     Err(f) => {

@@ -115,13 +115,25 @@ impl HookContext {
     }
   }
 
-  pub fn for_worktree(repo: &Repository, main_repo: &Path, cwd: &Path, path: &Path, branch: Option<&str>) -> Self {
+  /// `config` is the caller's effective config, not one this function loads:
+  /// `BranchParser::for_repo` opens `.gwm.toml` again — a fourth read inside
+  /// one delete, past the bytes the trust gate ruled on — and re-resolves the
+  /// global config path a caller may have deliberately overridden (#194,
+  /// issue #531).
+  pub fn for_worktree(
+    repo: &Repository,
+    main_repo: &Path,
+    cwd: &Path,
+    path: &Path,
+    branch: Option<&str>,
+    config: &crate::config::Config,
+  ) -> Self {
     let meta = RepoMeta::from_repo(repo);
     // Issue #417: the remove / bootstrap hook context rebuilds `{type}` /
     // `{issue}` / `{desc}` by re-reading the branch, so it reads it with the
     // pattern that wrote it. `for_create` does not come through here — it
     // carries the original `BranchSpec` straight through.
-    let parser = crate::naming::BranchParser::for_repo(repo);
+    let parser = crate::naming::BranchParser::from_config(config, &crate::worktree::repo_name(repo));
     let parsed = branch.and_then(|b| parser.parse(b));
     Self {
       main_repo: main_repo.to_path_buf(),

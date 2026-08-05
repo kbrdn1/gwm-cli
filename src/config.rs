@@ -1162,6 +1162,16 @@ fn read_config_value(path: &Path) -> Result<toml::Value> {
   Ok(val)
 }
 
+/// [`read_config_value`] for bytes a caller already read (issue #531). The
+/// UTF-8 check is explicit here because `read_to_string` does it on the file
+/// path and a snapshot must fail the same way rather than lossily.
+fn parse_config_bytes(bytes: &[u8]) -> Result<toml::Value> {
+  let raw = std::str::from_utf8(bytes)
+    .map_err(|e| crate::error::GwmError::Config(format!("{} is not valid UTF-8: {}", CONFIG_FILE, e)))?;
+  let val: toml::Value = toml::from_str(raw)?;
+  Ok(val)
+}
+
 /// Deep-merge `over` onto `base`: two tables merge key-by-key
 /// recursively (so disjoint sections from both files coexist and a
 /// nested table override keeps the untouched sibling keys); for every
@@ -1607,16 +1617,38 @@ impl Config {
   /// the merge contract can be pinned by a test without touching the
   /// runner's real `$HOME` / `$XDG_CONFIG_HOME`.
   pub fn load_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
-    let cfg = Self::merge_layered(repo_root, global_path)?;
-    cfg.validate_branch_types()?;
-    cfg.validate_bootstrap_paths()?;
-    cfg.validate_bootstrap_guards()?;
-    cfg.validate_labels()?;
-    cfg.validate_aliases()?;
-    cfg.validate_tui_keys()?;
-    cfg.validate_theme()?;
-    cfg.validate_profiles()?;
-    Ok(cfg)
+    Self::merge_layered(repo_root, global_path)?.validated()
+  }
+
+  /// [`Self::load_layered`] for a caller that has already read the repo's
+  /// `.gwm.toml` and must not have it read again (issue #531).
+  ///
+  /// A delete asks the same file three questions — which hooks run, whether
+  /// the repo declares any remove hook at all, and whether the ledger
+  /// approved it — and each answer used to come from its own `open`. A
+  /// `.gwm.toml` rewritten between two of them had the trust gate rule on a
+  /// file that is not the one whose hooks then execute. One read, one
+  /// snapshot, three answers about the same bytes.
+  ///
+  /// `None` is "this repo has no `.gwm.toml`", the same answer an absent
+  /// file gives through [`Self::load_layered`].
+  pub fn load_layered_from_bytes(repo_bytes: Option<&[u8]>, global_path: Option<&Path>) -> Result<Self> {
+    Self::merge_layered_from_bytes(repo_bytes, global_path)?.validated()
+  }
+
+  /// The semantic validators, in one place, so both load forms run the same
+  /// set — a snapshot must never become a way in for a config the path form
+  /// rejects.
+  fn validated(self) -> Result<Self> {
+    self.validate_branch_types()?;
+    self.validate_bootstrap_paths()?;
+    self.validate_bootstrap_guards()?;
+    self.validate_labels()?;
+    self.validate_aliases()?;
+    self.validate_tui_keys()?;
+    self.validate_theme()?;
+    self.validate_profiles()?;
+    Ok(self)
   }
 
   /// Reject semantically invalid `[exec.profiles.*]` / `[clean.profiles.*]`
@@ -1646,14 +1678,29 @@ impl Config {
   /// (issue #219 review).
   pub(crate) fn merge_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
     let repo_path = repo_root.join(CONFIG_FILE);
-    let global_val = match global_path {
-      Some(p) if p.exists() => Some(read_config_value(p)?),
-      _ => None,
-    };
     let repo_val = if repo_path.exists() {
       Some(read_config_value(&repo_path)?)
     } else {
       None
+    };
+    Self::merge_values(repo_val, global_path)
+  }
+
+  /// [`Self::merge_layered`] from a snapshot of the repo layer's bytes
+  /// (issue #531). See [`Self::load_layered_from_bytes`].
+  pub(crate) fn merge_layered_from_bytes(repo_bytes: Option<&[u8]>, global_path: Option<&Path>) -> Result<Self> {
+    let repo_val = match repo_bytes {
+      Some(b) => Some(parse_config_bytes(b)?),
+      None => None,
+    };
+    Self::merge_values(repo_val, global_path)
+  }
+
+  /// Deep-merge an already-parsed repo layer over the global file.
+  fn merge_values(repo_val: Option<toml::Value>, global_path: Option<&Path>) -> Result<Self> {
+    let global_val = match global_path {
+      Some(p) if p.exists() => Some(read_config_value(p)?),
+      _ => None,
     };
 
     Ok(match (global_val, repo_val) {
