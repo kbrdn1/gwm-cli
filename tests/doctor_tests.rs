@@ -1812,3 +1812,85 @@ fn a_drive_relative_operand_is_not_evaluated() {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Orphan notes (issue #515)
+// ---------------------------------------------------------------------------
+
+fn write_note_file(repo: &git2::Repository, branch: &str, body: &str) {
+  let path = gwm::notes::prepare(repo, branch).unwrap().unwrap();
+  std::fs::write(path, body).unwrap();
+}
+
+fn orphan_note_check(report: &doctor::DoctorReport) -> &doctor::Check {
+  report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan worktree notes"))
+    .expect("expected an orphan-notes check in the report")
+}
+
+#[test]
+fn a_repo_without_notes_reports_ok() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = orphan_note_check(&report);
+  assert_eq!(check.status, CheckStatus::Ok);
+  assert!(check.detail.contains("no notes"), "got: {}", check.detail);
+}
+
+#[test]
+fn a_note_on_a_live_branch_is_not_an_orphan() {
+  let (dir, repo) = init_repo();
+  write_note_file(&repo, "main", "still working on it\n");
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = orphan_note_check(&report);
+  assert_eq!(check.status, CheckStatus::Ok, "got: {}", check.detail);
+}
+
+#[test]
+fn a_note_whose_branch_is_gone_warns_and_names_it() {
+  // The note's lifecycle rule is "it lives as long as the branch", and
+  // `doctor` is the only place that enforces it — `clean` reclaims
+  // regenerable artefacts, and surviving `gwm remove` is the whole point of
+  // storing the note in the main checkout's git dir.
+  let (dir, repo) = init_repo();
+  write_note_file(&repo, "feat/#515-long-merged", "the flaky test is ETXTBSY\n");
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = orphan_note_check(&report);
+  assert_eq!(check.status, CheckStatus::Warning, "got: {}", check.detail);
+  assert!(
+    check.detail.contains("feat/#515-long-merged"),
+    "the warning must name the note so the user can find it, got: {}",
+    check.detail
+  );
+  // Warning, never Failed: an orphan note costs a few hundred bytes and may
+  // well be deliberate while the PR is still open.
+  assert_eq!(report.severity(), Severity::Warning);
+  assert!(
+    check
+      .fix_hint
+      .as_deref()
+      .is_some_and(|h| h.contains("gwm") && h.contains("notes")),
+    "the hint must point at the directory, got: {:?}",
+    check.fix_hint
+  );
+}
+
+#[test]
+fn a_blank_orphan_note_does_not_warn() {
+  // Presence is "non-blank" everywhere, this check included — an editor
+  // opened and saved empty must not produce a diagnostic.
+  let (dir, repo) = init_repo();
+  write_note_file(&repo, "feat/#515-long-merged", "\n");
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  assert_eq!(orphan_note_check(&report).status, CheckStatus::Ok);
+}

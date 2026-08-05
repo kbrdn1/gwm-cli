@@ -138,6 +138,7 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
     }
   }
 
+  report.checks.push(check_orphan_notes(ctx));
   report.checks.push(check_base_dir_writable(ctx));
   report.checks.push(check_tui_keymap(ctx));
   report.checks.push(check_branch_pattern(ctx));
@@ -729,6 +730,64 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
 
   Check::warning(name, format!("not on PATH: {}", missing.join(", ")))
     .with_hint("install the missing binaries or remove the steps that need them")
+}
+
+/// Every stored note still has the branch it is keyed on (issue #515).
+///
+/// The note's lifecycle rule is "it lives as long as the branch", and this
+/// is where that rule is enforced — advisory, like the rest of `doctor`.
+/// Deliberately **not** wired into `gwm clean`: that command reclaims
+/// regenerable build artefacts, its safety property is that `--yes` only
+/// removes directories git already ignores, and its surface has been frozen
+/// since #319. Deleting non-regenerable user prose under it would
+/// contradict all three. Nor is it wired into `gwm remove`: surviving a
+/// removed worktree until the work actually lands is the reason the note
+/// lives in the main checkout's git dir rather than inside the worktree.
+///
+/// Warning, never Failed: an orphan note costs a few hundred bytes and may
+/// well be deliberate (the worktree is gone, the PR is not merged yet).
+fn check_orphan_notes(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "no orphan worktree notes";
+
+  let noted = crate::notes::branches_with_notes(ctx.repo);
+  if noted.is_empty() {
+    return Check::ok(name, "no notes stored");
+  }
+
+  let live: BTreeSet<String> = match ctx.repo.branches(Some(BranchType::Local)) {
+    Ok(branches) => branches
+      .flatten()
+      .filter_map(|(b, _)| b.name().ok().flatten().map(|n| n.to_string()))
+      .collect(),
+    Err(e) => return Check::failed(name, format!("could not list local branches: {}", e)),
+  };
+
+  let orphans: Vec<String> = noted.iter().filter(|b| !live.contains(*b)).cloned().collect();
+  if orphans.is_empty() {
+    return Check::ok(
+      name,
+      format!("{} note(s) stored, every branch still exists", noted.len()),
+    );
+  }
+
+  let noun = if orphans.len() == 1 { "note" } else { "notes" };
+  Check::warning(
+    name,
+    format!(
+      "{} orphan {}: {}",
+      orphans.len(),
+      noun,
+      orphans
+        .iter()
+        .map(|b| crate::naming::sanitise_for_terminal(b))
+        .collect::<Vec<_>>()
+        .join(", ")
+    ),
+  )
+  .with_hint(format!(
+    "the branch is gone — delete the file under {} when the work has landed",
+    crate::notes::notes_dir(ctx.repo).display()
+  ))
 }
 
 /// Check #7: the configured worktree `base` directory exists and is

@@ -4127,6 +4127,66 @@ impl App {
     }
   }
 
+  /// The `$EDITOR` command and the note file to hand it for the selected
+  /// row (issue #515), with the note's parent directory already created.
+  ///
+  /// `None` when the row cannot carry a note, and the reason is on the
+  /// status bar rather than nothing happening: a detached row has no
+  /// branch to key on (the rule [`crate::github::pinnable_branch`] settled
+  /// for the agent pin), and a branch name git accepts but no filesystem
+  /// can back is refused rather than silently written somewhere else.
+  ///
+  /// The editor handoff itself is the `o`-with-`mode = "editor"` one — same
+  /// `editor_cmd` → `$EDITOR` → `vi` precedence, same suspend-and-restore
+  /// loop — so pressing `N` cannot feel different from pressing `o`.
+  pub fn prepare_note_edit(&mut self) -> Option<(String, PathBuf)> {
+    let Some(selected) = self.selected() else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    let Some(branch) = crate::github::pinnable_branch(selected.branch.as_deref()).map(str::to_string) else {
+      self.status = "detached HEAD — a note is keyed on the branch".into();
+      return None;
+    };
+    match crate::notes::prepare(&self.repo, &branch) {
+      Ok(Some(path)) => Some((resolve_editor_command(&self.config.tui.open), path)),
+      Ok(None) => {
+        self.status = format!("`{branch}` cannot back a note file — the name is not a portable filename");
+        None
+      }
+      // `prepare` writes its own message: the directory it could not create,
+      // or the other branch that already owns this note file.
+      Err(e) => {
+        self.status = e.to_string();
+        None
+      }
+    }
+  }
+
+  /// Re-read the selected row's note presence once the editor has exited
+  /// (issue #515).
+  ///
+  /// One file read for one row, on a key press — not a full `refresh()`,
+  /// which would drop the mark set (#484) and re-shell every row's git
+  /// config just to repaint a single marker.
+  pub fn sync_selected_note_marker(&mut self) {
+    let Some(index) = self.selected_raw_index() else {
+      return;
+    };
+    let Some(branch) = self
+      .worktrees
+      .get(index)
+      .and_then(|w| crate::github::pinnable_branch(w.branch.as_deref()))
+      .map(str::to_string)
+    else {
+      return;
+    };
+    let has_note = crate::notes::read(&self.repo, &branch).is_some();
+    if let Some(row) = self.worktrees.get_mut(index) {
+      row.has_note = has_note;
+    }
+  }
+
   /// Reveal the selected worktree's directory in the OS file manager.
   /// macOS: `open`, Linux: `xdg-open`, Windows: `explorer`. Used by
   /// `resolve_open_target` when the config picks `mode = "finder"`,

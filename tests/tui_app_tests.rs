@@ -44,6 +44,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -5393,6 +5394,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -6367,6 +6369,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -11980,6 +11983,182 @@ fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
   );
 }
 
+// ---- per-worktree notes (#515) -------------------------------------------
+
+#[test]
+fn preparing_a_note_edit_returns_the_editor_and_the_file() {
+  // The handoff is the `o`-with-`mode = "editor"` one, so `N` cannot feel
+  // different from `o`: same `editor_cmd` -> `$EDITOR` -> `vi` precedence.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+
+  let (command, path) = app.prepare_note_edit().expect("the main row carries a branch");
+
+  assert!(!command.is_empty(), "an editor command must always resolve");
+  // `paths_equal` canonicalises: on macOS the tempdir is `/var/...` and the
+  // resolved note is `/private/var/...`, the same inode spelled two ways.
+  assert!(
+    common::paths_equal(
+      path.parent().unwrap(),
+      &dir.path().join(".git").join("gwm").join("notes")
+    ),
+    "the note belongs in the main checkout's git dir, got {}",
+    path.display()
+  );
+  assert_eq!(path.file_name().unwrap(), "main.md", "keyed on the branch");
+  assert!(
+    path.parent().unwrap().is_dir(),
+    "the parent directory must exist before $EDITOR is spawned"
+  );
+  assert!(
+    !path.exists(),
+    "the file itself is the editor's to create — quitting without saving leaves no note"
+  );
+}
+
+#[test]
+fn preparing_a_note_edit_on_a_detached_row_says_why() {
+  // No branch, no filename. The rule `pinnable_branch` settled for the agent
+  // pin, restated so the key press explains itself instead of no-oping.
+  let (_dir, mut app) = make_app();
+  let mut row = worktree_fixture("detached");
+  row.branch = None;
+  app.worktrees = vec![row];
+  app.list_state.select(Some(0));
+
+  assert!(app.prepare_note_edit().is_none());
+  assert!(
+    app.status.contains("detached"),
+    "the status bar must carry the reason, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn preparing_a_note_edit_with_nothing_selected_says_so() {
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  assert!(app.prepare_note_edit().is_none());
+  assert_eq!(app.status, "nothing selected");
+}
+
+#[test]
+fn a_branch_name_no_filesystem_can_back_refuses_the_note_out_loud() {
+  // git accepts `feat/bad|name`; Windows does not. Refusing beats writing a
+  // file whose name means a different branch once the repo is cloned there.
+  let (_dir, mut app) = make_app();
+  let mut row = worktree_fixture("weird");
+  row.branch = Some("feat/bad|name".into());
+  app.worktrees = vec![row];
+  app.list_state.select(Some(0));
+
+  assert!(app.prepare_note_edit().is_none());
+  assert!(
+    app.status.contains("portable"),
+    "the status bar must say the name is the problem, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn the_marker_follows_what_the_editor_left_behind() {
+  // One file read for one row on the way back from `$EDITOR` — not a full
+  // `refresh()`, which would drop the mark set (#484) and re-shell every
+  // row's git config to repaint a single glyph.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let (_, path) = app.prepare_note_edit().unwrap();
+  assert!(!app.worktrees[0].has_note, "no note yet");
+
+  std::fs::write(&path, "what I had just figured out\n").unwrap();
+  app.sync_selected_note_marker();
+  assert!(app.worktrees[0].has_note, "the marker must light up after a save");
+
+  // Emptied rather than deleted: the marker must go back down.
+  std::fs::write(&path, "\n").unwrap();
+  app.sync_selected_note_marker();
+  assert!(!app.worktrees[0].has_note, "a blanked note must clear the marker");
+}
+
+// ---- launcher argv splitting (#515, Codex review pass 6) ------------------
+
+#[test]
+fn a_configured_editor_command_splits_into_program_and_arguments() {
+  // `$EDITOR` and `$SHELL` are shell lines by convention: git, cargo and
+  // systemctl all word-split them, and `[review]` / hook `run =` lines in
+  // this repo already go through `shell_words`. Handing the whole string to
+  // `Command::new` looked for an executable literally named `code --wait`,
+  // so `N` could never open a note for a VS Code or Sublime user.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(launch_argv("vi"), vec!["vi"]);
+  assert_eq!(launch_argv("code --wait"), vec!["code", "--wait"]);
+  assert_eq!(launch_argv("nvim -f"), vec!["nvim", "-f"]);
+  assert_eq!(launch_argv("subl -w -n"), vec!["subl", "-w", "-n"]);
+}
+
+#[test]
+fn a_program_path_containing_a_space_is_quoted_not_split() {
+  // The counterpart of word-splitting: a real path with a space stays one
+  // token when it is quoted, which is how every other consumer of these
+  // variables expects it to be written.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("\"/Applications/My App/bin/edit\" --wait"),
+    vec!["/Applications/My App/bin/edit", "--wait"]
+  );
+  assert_eq!(
+    launch_argv("'/Applications/My App/bin/edit'"),
+    vec!["/Applications/My App/bin/edit"]
+  );
+}
+
+#[test]
+fn an_unparseable_command_is_passed_through_whole() {
+  // An unbalanced quote is a user typo in `.gwm.toml`. Falling back to the
+  // raw string keeps the pre-existing behaviour and lets the spawn failure
+  // name what was configured, instead of turning a typo into a panic or a
+  // silently different program.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("edit --flag \"unbalanced"),
+    vec!["edit --flag \"unbalanced"]
+  );
+  assert_eq!(launch_argv(""), vec![""]);
+}
+
+#[test]
+fn a_command_that_names_a_real_file_is_never_split() {
+  // Word-splitting is POSIX, filenames are not. `shell_words` drops an
+  // unprotected backslash, so `EDITOR=C:\Tools\nvim.exe` — an absolute path
+  // that `Command::new` launched fine before word-splitting was introduced —
+  // came back as `C:Toolsnvim.exe` and stopped launching (Codex review, PR
+  // #530). A string that already names a file is not a shell line: nothing is
+  // left to split, so it is handed over whole.
+  use gwm::tui::launch_argv;
+  let dir = tempfile::TempDir::new().unwrap();
+
+  let spaced = dir.path().join("My Editor.sh");
+  std::fs::write(&spaced, "#!/bin/sh\n").unwrap();
+  let spaced = spaced.to_str().unwrap();
+  assert_eq!(launch_argv(spaced), vec![spaced]);
+
+  // The backslash is the case the splitter actually mangles. Windows has no
+  // filename that can carry one, so the file that proves it is a Unix file;
+  // the code path it exercises is the same one a Windows path takes.
+  #[cfg(unix)]
+  {
+    let backslashed = dir.path().join(r"Tools\nvim");
+    std::fs::write(&backslashed, "#!/bin/sh\n").unwrap();
+    let backslashed = backslashed.to_str().unwrap();
+    assert_eq!(launch_argv(backslashed), vec![backslashed]);
+  }
+}
+
 // --- rich PR / issue view wiring (issue #420) -----------------------------
 
 /// A PR with enough rich payload for the view to have something to render.
@@ -12021,6 +12200,21 @@ fn rich_issue_fixture(number: u64) -> gwm::github::IssueStatus {
       comments: vec![],
     },
   }
+}
+
+#[test]
+fn quoting_protects_a_backslashed_path_that_takes_arguments() {
+  // The escape hatch for the case the fast path above cannot see: a path that
+  // does not exist on this machine, or one that carries flags. Double quotes
+  // are what the doc tells the user to reach for, so the claim is pinned
+  // rather than asserted in prose — POSIX only treats `\` as an escape inside
+  // double quotes before `$`, `` ` ``, `"`, `\` and a newline.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("\"C:\\Tools\\nvim.exe\" --clean"),
+    vec!["C:\\Tools\\nvim.exe", "--clean"]
+  );
 }
 
 #[test]

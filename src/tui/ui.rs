@@ -526,7 +526,15 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // round D): a no-agent setup keeps the exact pre-#408 table instead of an
   // empty fixed column squeezing NAME/BRANCH/PATH on narrow terminals.
   let show_agent = app.any_agent_sessions();
+  // #515: the note column follows the same rule as AGENT and the mark
+  // column — it only exists once something is in it, so a user with no
+  // notes keeps the exact pre-#515 table instead of an empty column eating
+  // two cells on a narrow terminal. Caption-less: the marker is binary.
+  let show_note = visible.iter().any(|w| w.has_note);
   header_cells.push(Cell::from("I/P"));
+  if show_note {
+    header_cells.push(Cell::from(""));
+  }
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
   header_cells.push(Cell::from("STATUS"));
@@ -563,7 +571,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
       let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
       let agent = show_agent.then_some(agent_cells[vi]);
       let mark = marks.get(vi).copied();
-      build_row(w, mark, repo, row_widths, agent, &theme)
+      build_row(w, mark, repo, row_widths, agent, show_note, &theme)
     })
     .collect();
 
@@ -591,8 +599,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     // solver doesn't starve it on narrow terminals.
     widths.push(Constraint::Length(repo_w));
   }
+  widths.push(Constraint::Length(3));
+  if show_note {
+    // #515: one cell for the note marker, hard-fixed like the I/P column.
+    widths.push(Constraint::Length(1));
+  }
   widths.extend([
-    Constraint::Length(3),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
@@ -1906,6 +1918,22 @@ fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
   }
 }
 
+/// The note marker (issue #515). Binary by design: this row carries a note
+/// or it does not — no preview, no length, no freshness colour, and no
+/// second meaning layered onto a glyph that already has one (`★`, `●` and
+/// `✓` are all spoken for). It paints with the neutral `name` role, the
+/// same one the empty I/P slots use, because presence is not a status.
+///
+/// A row without a note in a shown column renders an empty cell so the
+/// columns stay aligned — the rule [`mark_cell`] follows.
+fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
+  if has_note {
+    Cell::from("≡").style(Style::default().fg(theme.name))
+  } else {
+    Cell::from("")
+  }
+}
+
 /// The three width-constrained column budgets a row truncates against.
 /// Grouped rather than passed one by one so the mark column (#484) could join
 /// `build_row`'s signature without pushing it past the argument limit.
@@ -1930,6 +1958,9 @@ fn build_row(
   // Outer `Option` = is the AGENT column shown at all (round D:
   // conditional on any detected session); inner = this row's top agent.
   agent: Option<Option<(&'static str, crate::agent_sessions::Freshness)>>,
+  // #515: is the note column shown at all (any visible row carries one)?
+  // The row's own answer is `w.has_note`.
+  show_note: bool,
   theme: &Theme,
 ) -> Row<'static> {
   let RowWidths {
@@ -1983,6 +2014,9 @@ fn build_row(
     );
   }
   cells.push(Cell::from(marker));
+  if show_note {
+    cells.push(note_cell(w.has_note, theme));
+  }
   cells.push(name_cell);
   cells.push(branch_cell);
   cells.push(status_cell);
@@ -3072,6 +3106,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
     rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
     rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
+    rows.push(entry(Action::EditNote, "open the selected worktree's note in $EDITOR"));
     rows.push(entry(
       Action::ExitToWorktree,
       "quit TUI and print selected path to stdout",

@@ -29,6 +29,7 @@ fn wt(path: &str, name: &str, branch: Option<&str>) -> JsonWorktree {
     age_seconds: None,
     issue: None,
     agents: None,
+    note: None,
     pr: None,
   }
 }

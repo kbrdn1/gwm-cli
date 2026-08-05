@@ -378,7 +378,7 @@ const WINDOWS_RESERVED_STEMS: [&str; 28] = [
 /// Case-insensitive, since Windows path comparison is. `eq_ignore_ascii_case`
 /// is enough even for the superscript entries: `¹ ² ³` have no case variants,
 /// so their bytes compare equal either way.
-fn is_windows_reserved_segment(segment: &str) -> bool {
+pub(crate) fn is_windows_reserved_segment(segment: &str) -> bool {
   let stem = segment.split('.').next().unwrap_or(segment);
   WINDOWS_RESERVED_STEMS
     .iter()
