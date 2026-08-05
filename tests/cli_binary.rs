@@ -3312,10 +3312,13 @@ run = "git -C {repo} worktree move {second} {relocated}"
   );
   std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
 
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
     .args(["remove", "moved-first", "moved-second"])
     .assert()
     .failure()
@@ -3328,6 +3331,20 @@ run = "git -C {repo} worktree move {second} {relocated}"
   assert!(
     relocated.exists(),
     "the one that moved is left alone rather than removed at its new path"
+  );
+
+  // Issue #521: the journal entry is written once the removal succeeded. It
+  // used to be written before the destructive call, so a refused target still
+  // showed up in `gwm history` as something `gwm undo` would replay — and
+  // replaying it would recreate a worktree that never went away.
+  let journal = std::fs::read_to_string(&history_file).unwrap_or_default();
+  assert!(
+    journal.contains("feat-30-moved-first"),
+    "the removal that happened is recorded: {journal}"
+  );
+  assert!(
+    !journal.contains("feat-31-moved-second"),
+    "the refused removal must not be recorded as undoable: {journal}"
   );
 }
 

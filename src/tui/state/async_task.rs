@@ -219,6 +219,12 @@ pub struct DeleteBatchOutcome {
   pub removed: Vec<(String, PathBuf)>,
   /// One entry per failed removal, in batch order.
   pub failed: Vec<DeleteFailure>,
+  /// Something went wrong *around* a removal that still happened (#521): a
+  /// `post_remove` hook that aborted, an undo-journal entry that could not be
+  /// written. Deliberately not a `failed` entry — the worktree is gone, so
+  /// counting it as a failure would report the opposite of what is on disk,
+  /// and would keep the confirm overlay open offering to remove it again.
+  pub warnings: Vec<String>,
 }
 
 /// A target the batch could not remove. Carries the `path` as well as the id
@@ -237,6 +243,19 @@ impl DeleteBatchOutcome {
   /// the pre-#484 single-row delete printed, so the common case reads
   /// exactly as it did.
   pub fn status_line(&self) -> String {
+    let mut line = self.removal_line();
+    // Warnings ride the status line rather than the failure banner: the
+    // banner decides whether the confirm overlay stays open, and a removal
+    // that succeeded has nothing left to confirm. The hook's own output is on
+    // the Command Logs transcript either way.
+    if !self.warnings.is_empty() {
+      line.push_str("; ");
+      line.push_str(&self.warnings.join(" · "));
+    }
+    line
+  }
+
+  fn removal_line(&self) -> String {
     let total = self.removed.len() + self.failed.len();
     if self.failed.is_empty() {
       return match self.removed.as_slice() {
