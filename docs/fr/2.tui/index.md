@@ -34,7 +34,7 @@ La passe de polish v0.8.0 a resserré le cadre de la TUI. Toutes les couleurs su
 
 ### disposition compacte
 
-`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) retire les filets du panneau des worktrees et des sections de la sidebar, et délimite chacun par un en-tête d'une ligne en aplat. Le raccourci ouvre l'en-tête, le compteur passe à droite de cette même ligne, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split.
+`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) retire les filets du panneau des worktrees et des sections de la sidebar, et délimite chacun par un en-tête d'une ligne en aplat. Le titre garde son raccourci entre crochets et passe en majuscules, le compteur passe à droite de cette même ligne, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split. Le focus se lit sur l'en-tête : le panneau actif prend l'aplat `selection_bg`, les autres `section_bg`.
 
 ![TUI gwm en mode compact : en-têtes de section en aplat, aucun filet](../../2.tui/_assets/compact.png)
 

@@ -34,7 +34,7 @@ The v0.8.0 polish pass tightened the TUI's frame. All colours follow the resolve
 
 ### compact layout
 
-`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) drops the box rules from the worktrees pane and the sidebar sections and delimits each with a filled one-line header instead. The keybinding leads the header, the counter moves to the right of that same line, and the worktrees pane sizes itself to its row count rather than reserving its share of the split.
+`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) drops the box rules from the worktrees pane and the sidebar sections and delimits each with a filled one-line header instead. The title keeps its bracketed keybinding and goes uppercase, the counter moves to the right of that same line, and the worktrees pane sizes itself to its row count rather than reserving its share of the split. Focus reads on the header: the active pane takes the `selection_bg` fill, the others `section_bg`.
 
 ![gwm TUI in compact mode: filled section headers, no box rules](./_assets/compact.png)
 

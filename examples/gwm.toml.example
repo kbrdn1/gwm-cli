@@ -282,13 +282,15 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # --- TUI compact layout (issue #545) -----------------------------------------
 # `compact` — drop the box rules around the worktrees pane and the sidebar
 # sections, and delimit each with a filled one-line header instead. Buys back
-# two rows and two columns per section: the title carries its keybinding
-# (`1 WORKTREES`, `F ISSUE / PR`), the counter moves to the right of that same
-# line rather than into a bottom rule, and the worktrees pane sizes itself to
-# its row count instead of reserving its full share of the stacked split.
+# two rows and two columns per section: the title keeps its bracketed
+# keybinding and goes uppercase (`[1] WORKTREES`, `ISSUE / PR [F]`), the
+# counter moves to the right of that same line rather than into a bottom rule,
+# and the worktrees pane sizes itself to its row count instead of reserving its
+# full share of the stacked split.
 #
-# Focus moves with it: the header text wears the `focus` role on the active
-# pane and `muted` elsewhere, where the border colour used to say it.
+# Focus moves with it, where the border colour used to say it: the active
+# pane's header wears the `focus` role and the `selection_bg` fill, the others
+# `muted` over `section_bg`.
 #
 # Off by default — it changes what every screenshot in the docs looks like.
 # Overlays and modals keep their borders either way.
