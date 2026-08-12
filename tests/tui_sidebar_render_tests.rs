@@ -333,16 +333,21 @@ fn status_pane_renders_diff_vs_base_line_on_a_feature_branch() {
 // Compact mode (issue #545)
 // ---------------------------------------------------------------------------
 
-/// Count the box-drawing glyphs the panes and sidebar sections draw. The
+/// Count the box *corners* the panes and sidebar sections draw. The
 /// worktrees pane uses square corners, the sidebar sections rounded ones;
 /// both are covered.
-fn rule_glyph_count(terminal: &Terminal<TestBackend>) -> usize {
+///
+/// Corners rather than every box-drawing glyph: since the compact mode
+/// gained a separator rule between the two panes, a bare `─` no longer
+/// implies a box. A corner still does — nothing else draws one — so this
+/// stays the honest test for "the frames are gone".
+fn box_corner_count(terminal: &Terminal<TestBackend>) -> usize {
   terminal
     .backend()
     .buffer()
     .content()
     .iter()
-    .filter(|c| matches!(c.symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘" | "╭" | "╮" | "╰" | "╯"))
+    .filter(|c| matches!(c.symbol(), "┌" | "┐" | "└" | "┘" | "╭" | "╮" | "╰" | "╯"))
     .count()
 }
 
@@ -361,17 +366,48 @@ fn draw_list_view(dir: &Path, compact: bool) -> Terminal<TestBackend> {
 }
 
 #[test]
-fn compact_mode_drops_the_rules_and_default_mode_keeps_them() {
-  // The observable half of issue #545: with `compact = true` the panes and
-  // sidebar sections draw no box rules at all. Asserted against the default
-  // render of the *same* repo, so a change that silently stopped drawing
-  // borders everywhere would fail the second half rather than pass both.
+fn compact_mode_drops_the_frames_and_default_mode_keeps_them() {
+  // The observable half of issue #545: with `compact = true` no pane and
+  // no sidebar section is boxed. Asserted against the default render of
+  // the *same* repo, so a change that silently stopped drawing borders
+  // everywhere would fail the second half rather than pass both.
   let dir = repo_with_commits(6);
-  let bordered = rule_glyph_count(&draw_list_view(dir.path(), false));
-  let compact = rule_glyph_count(&draw_list_view(dir.path(), true));
+  let bordered = box_corner_count(&draw_list_view(dir.path(), false));
+  let compact = box_corner_count(&draw_list_view(dir.path(), true));
 
-  assert!(bordered > 0, "the default layout must still draw its box rules");
-  assert_eq!(compact, 0, "compact mode must draw no box rules at all");
+  assert!(bordered > 0, "the default layout must still draw its boxes");
+  assert_eq!(compact, 0, "compact mode must draw no box at all");
+}
+
+#[test]
+fn compact_mode_rules_the_boundary_between_the_two_panes() {
+  // Validation feedback on PR #546: with every section delimited the same
+  // way — a filled header — nothing said where the worktrees pane ended
+  // and the sidebar began. The two are separately focusable, so that
+  // boundary is worth one line.
+  //
+  // Checked as a full-width run of `─` on its own row, which is what
+  // distinguishes the separator from a stray glyph in a commit subject,
+  // and absent by default (the box rules already do the job there).
+  let dir = repo_with_commits(6);
+  let full_width_rule_rows = |compact: bool| {
+    let terminal = draw_list_view(dir.path(), compact);
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    (area.y..area.y + area.height)
+      .filter(|&y| (area.x..area.x + area.width).all(|x| buffer[(x, y)].symbol() == "─"))
+      .count()
+  };
+  assert_eq!(
+    full_width_rule_rows(true),
+    1,
+    "compact must rule the pane boundary exactly once"
+  );
+  assert_eq!(
+    full_width_rule_rows(false),
+    0,
+    "the bordered layout draws no such rule — its boxes already separate the panes"
+  );
 }
 
 #[test]

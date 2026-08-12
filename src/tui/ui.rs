@@ -315,22 +315,35 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     }
   };
 
+  // Compact mode spends one line or column on a rule between the two
+  // panes (validation feedback on PR #546). Without it, the boundary
+  // between the worktrees pane and the sidebar reads exactly like the
+  // boundary between two sidebar sections — both are just a filled
+  // header — so nothing says where one focusable pane ends and the other
+  // begins. The bordered layout does not need it: its box rules already
+  // do. Zero-width in the bordered mode so the split is unchanged there.
+  let separator = if app.config.tui.compact { 1 } else { 0 };
+
   match layout {
     Resolved::Hidden => unreachable!("Hidden returns None from split_percentages, handled above"),
     Resolved::SideBySide { sidebar_left } => {
+      let (first, second) = if sidebar_left {
+        (sidebar_pct, table_pct)
+      } else {
+        (table_pct, sidebar_pct)
+      };
       let split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints(if sidebar_left {
-          [sidebar_pct, table_pct]
-        } else {
-          [table_pct, sidebar_pct]
-        })
+        .constraints([first, Constraint::Length(separator), second])
         .split(area);
       let (list_area, sidebar_area) = if sidebar_left {
-        (split[1], split[0])
+        (split[2], split[0])
       } else {
-        (split[0], split[1])
+        (split[0], split[2])
       };
+      if separator > 0 {
+        draw_pane_separator(f, split[1], Direction::Horizontal, &app.theme);
+      }
       draw_list(f, list_area, app);
       draw_sidebar(f, sidebar_area, app);
     }
@@ -359,10 +372,37 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       };
       let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([table_constraint, sidebar_constraint])
+        .constraints([table_constraint, Constraint::Length(separator), sidebar_constraint])
         .split(area);
+      if separator > 0 {
+        draw_pane_separator(f, split[1], Direction::Vertical, &app.theme);
+      }
       draw_list(f, split[0], app);
-      draw_sidebar(f, split[1], app);
+      draw_sidebar(f, split[2], app);
+    }
+  }
+}
+
+/// The rule between the two focusable panes in compact mode.
+///
+/// `direction` is the one the *split* runs in, so a vertical split
+/// (stacked) draws a horizontal rule and vice versa. Painted in `muted`:
+/// it is a boundary, not a focus signal — the headers carry that, and a
+/// separator that also changed with focus would compete with them.
+fn draw_pane_separator(f: &mut Frame, area: Rect, split: Direction, theme: &Theme) {
+  let (glyph, count) = match split {
+    Direction::Vertical => ("─", area.width),
+    Direction::Horizontal => ("│", area.height),
+  };
+  let style = Style::default().fg(theme.muted);
+  match split {
+    Direction::Vertical => {
+      let line = Line::from(Span::styled(glyph.repeat(count as usize), style));
+      f.render_widget(Paragraph::new(line), area);
+    }
+    Direction::Horizontal => {
+      let lines: Vec<Line<'static>> = (0..count).map(|_| Line::from(Span::styled(glyph, style))).collect();
+      f.render_widget(Paragraph::new(lines), area);
     }
   }
 }
