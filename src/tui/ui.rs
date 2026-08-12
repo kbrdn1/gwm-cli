@@ -825,6 +825,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let fixed = h(worktree_len).saturating_add(h(issue_pr_lines.len()));
   let (agents_height, working_tree_height, commits_height) = super::state::sidebar::split_section_heights(
     area.height.saturating_sub(fixed),
+    2,
     agent_lines.len() as u16,
     working_tree_len as u16,
     commits_len,

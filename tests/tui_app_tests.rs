@@ -1401,7 +1401,7 @@ fn section_heights_fit_naturally_with_commits_absorbing_slack() {
   // remaining space — the exact behaviour the old `Min(3)` constraint
   // produced, now pinned through the pure solver.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(60, 3, 10, 20), (5, 12, 43));
+  assert_eq!(split_section_heights(60, 2, 3, 10, 20), (5, 12, 43));
 }
 
 #[test]
@@ -1417,7 +1417,7 @@ fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
   // commits=50 (natural 52, floor 5): base 20, surplus 1 → give =
   // 1*len/86 = (0, 0, 0), residue 1 → commits. Sum == available exactly.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 7, 6));
+  assert_eq!(split_section_heights(21, 2, 6, 30, 50), (8, 7, 6));
 }
 
 #[test]
@@ -1428,7 +1428,7 @@ fn section_heights_never_clamp_the_agents_pane() {
   // agent_pane_lines). A non-scrollable section keeps its natural height
   // even when the column overflows; only the scrollable sections clamp.
   use gwm::tui::state::sidebar::split_section_heights;
-  let (agents, wt, commits) = split_section_heights(21, 4, 30, 50);
+  let (agents, wt, commits) = split_section_heights(21, 2, 4, 30, 50);
   assert_eq!(agents, 6, "agents must keep natural height (4 rows + borders)");
   assert_eq!((agents, wt, commits), (6, 8, 7));
 }
@@ -1439,8 +1439,8 @@ fn section_heights_keep_empty_sections_collapsed() {
   // when no session, Working Tree at 0 when the tree is clean. The
   // collapsed section never eats a 5-line floor.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(40, 0, 5, 10), (0, 7, 33));
-  assert_eq!(split_section_heights(30, 2, 0, 8), (4, 0, 26));
+  assert_eq!(split_section_heights(40, 2, 0, 5, 10), (0, 7, 33));
+  assert_eq!(split_section_heights(30, 2, 2, 0, 8), (4, 0, 26));
 }
 
 #[test]
@@ -1449,7 +1449,7 @@ fn section_heights_degrade_commits_first_on_tiny_terminal() {
   // Commits served first (the historical always-visible section), then
   // Working Tree, then Agents. Sum must never exceed the available height.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(8, 6, 30, 50), (0, 3, 5));
+  assert_eq!(split_section_heights(8, 2, 6, 30, 50), (0, 3, 5));
 }
 
 #[test]
@@ -1461,7 +1461,7 @@ fn section_heights_survive_empty_commits_under_overflow() {
   // old `Min(3)` rendered an empty bordered panel at 3 lines anyway), so
   // the invariant holds and the split stays additive.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(8, 0, 5, 0), (0, 5, 3));
+  assert_eq!(split_section_heights(8, 2, 0, 5, 0), (0, 5, 3));
 }
 
 #[test]
@@ -1469,7 +1469,46 @@ fn section_heights_give_everything_to_commits_when_alone() {
   // No agents, clean tree, empty history: Recent Commits keeps the whole
   // column, matching the pre-#438 rendering of an empty bottom panel.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(20, 0, 0, 0), (0, 0, 20));
+  assert_eq!(split_section_heights(20, 2, 0, 0, 0), (0, 0, 20));
+}
+
+#[test]
+fn section_heights_hand_the_saved_rows_back_in_compact_mode() {
+  // Issue #545: compact mode replaces the two box rules with a single
+  // filled header, so a section's chrome costs 1 row instead of 2. The
+  // whole point of the mode is that those rows come back as content —
+  // pinned here against the bordered baseline of
+  // `section_heights_fit_naturally_with_commits_absorbing_slack`, same
+  // inputs, chrome = 1.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let bordered = split_section_heights(60, 2, 3, 10, 20);
+  let compact = split_section_heights(60, 1, 3, 10, 20);
+  assert_eq!(bordered, (5, 12, 43), "bordered baseline unchanged");
+  assert_eq!(
+    compact,
+    (4, 11, 45),
+    "each section sheds a chrome row, commits absorbs them"
+  );
+  // The column is fully used either way — a compact section must not
+  // leave a blank row where its bottom rule used to be.
+  assert_eq!(compact.0 + compact.1 + compact.2, 60);
+}
+
+#[test]
+fn section_heights_scale_their_floors_with_the_chrome() {
+  // The overflow floors are "chrome + N content rows", not the literals
+  // 7 / 5: in compact mode a 7-row floor would hand Working Tree six
+  // content rows where the bordered mode gives five, silently making the
+  // denser layout *taller*. Same inputs as
+  // `section_heights_guarantee_floor_and_share_proportionally_on_overflow`.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let (agents, wt, commits) = split_section_heights(21, 1, 6, 30, 50);
+  assert_eq!(
+    (agents, wt, commits),
+    (7, 7, 7),
+    "floors follow the chrome (wt 1+5, commits 1+3)"
+  );
+  assert_eq!(agents + wt + commits, 21, "the split stays additive");
 }
 
 #[test]
