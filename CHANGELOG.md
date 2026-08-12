@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drifts from its English page, and two captures sharing a basename, which
   the docs sync rejects by throwing.
 
+### Docs
+
+- Re-recorded `docs/_capture/demo.gif` so it shows the agent surfaces
+  (#523). The demo fixture now seeds a Claude Code and a Codex session
+  through gwm's own `GWM_AGENTS_HOME` seam, so the table renders its
+  `AGENT` column in frame 0 and the tape opens the `a` overlay. The
+  fixture also backdates `branch.<b>.gwm-created-at`, so the `AGE`
+  column reads like a week of work instead of showing five worktrees
+  seconds old. `docs/_capture/README.md` documents the agents fixture
+  and states that regeneration is a maintainer task while the tapes
+  hardcode the demo path.
+- Fixed the demo tape typing its worktree note onto
+  `docs-71-openapi-examples` — the text is about the rate limiter, so it
+  belongs to `fix-57-rate-limit-headers`.
+
 ## Past releases
 
 In reverse chronological order:
