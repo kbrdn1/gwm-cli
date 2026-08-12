@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One width policy for every modal** ([#550](https://github.com/kbrdn1/gwm-cli/issues/550)).
+  Overlays used to size themselves with four different rules, two of which
+  branched on `term_width <= 80` to spend a bigger percentage on a small
+  terminal. Width was therefore **not monotonic**: dragging a pane past 80
+  columns made the link prompt 16 columns *narrower* and the exec / clean /
+  detail overlay 22. Four others sized on a bare percentage with no ceiling, so
+  on a 200-column terminal the delete confirmation reached 124 columns for a
+  four-row detail grid, and the help, config and command-palette overlays 120.
+
+  Every bounded overlay now resolves its width through a single
+  `modal_width(term_width, pct, min, max)`: its own knobs, one rule. Never
+  narrower as the terminal widens, never past its ceiling, always two columns
+  of margin per side. The floor also makes 80 columns, the width the docs
+  advertise, a size the surfaces were actually sized for. The confirm modal was
+  49 columns wide there and its hint row read `Enter activa`, cut mid-word with
+  no ellipsis and the `n cancel` hint entirely off screen.
+
+  The PTY overlay, the command-log transcript, the note editor and the
+  bootstrap report keep spending a percentage of the frame: they are text
+  canvases, and the width is content. `render_section` hard-clips by design
+  (one logical row, one visual row), so on those surfaces every column the
+  frame gives up is a column of a hook's error nobody can reach.
+
 - **The TUI is compact by default** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)).
   Panes and sidebar sections no longer draw box rules; each is delimited by a
   filled one-line header instead, which buys back two rows and two columns per
