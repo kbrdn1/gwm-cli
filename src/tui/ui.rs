@@ -5645,7 +5645,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     for _ in matches.len().min(end).saturating_sub(start)..list_h {
       lines.push(Line::from(String::new()));
     }
-    let height = (2 + list_h + 2) as u16 + 2 /* border */ + 2 /* padding */;
+    // `2` = the query line + its blank spacer. The two title rows left
+    // this count in #549 — the title rides the top rule now (Codex review,
+    // PR #546: keeping them here left the frame two rows too tall and the
+    // scrollbar two rows too low).
+    let height = (2 + list_h) as u16 + 2 /* border */ + 2 /* padding */;
     let area = centered_abs(width, height, term);
     f.render_widget(Clear, area);
     f.render_widget(
@@ -5653,12 +5657,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       area,
     );
     // Scrollbar over the LISTING sub-area (Codex review #455): the rows
-    // start after border (1) + padding (1) + two title lines + the query
-    // line + its blank spacer = y + 6 — anchoring at + 4 overlapped the
-    // query and stopped short of the last rows.
+    // start after border (1) + padding (1) + the query line + its blank
+    // spacer = y + 4.
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 6,
+      y: area.y + 4,
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -5748,7 +5751,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // past the ratatui buffer and panic (Codex review #445).
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 2 /* border + padding */ + 2 /* title */ + 2, /* id line + blank */
+      y: area.y + 2 /* border + padding */ + 2, /* id line + blank */
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -5844,7 +5847,12 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
   };
   push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
-  let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
+  // `visible` rows + the hint's blank spacer and its line. The two title
+  // rows left this count in #549 — the title rides the top rule now, and
+  // keeping them here left the frame two rows too tall, so the hint row
+  // floated with dead space under it (validation feedback + Codex review,
+  // PR #546).
+  let height = (visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(
@@ -5857,7 +5865,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
-    y: area.y + 2 /* border + padding */ + 2, /* title lines */
+    y: area.y + 2, /* border + padding */
     width: area.width.saturating_sub(2),
     height: visible as u16,
   }
