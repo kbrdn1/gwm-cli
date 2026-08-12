@@ -118,6 +118,63 @@ git add Cargo.deps
 # docs/#71 → clean, no local commits (fresh branch)
 cd "$(wt docs-71-openapi-examples)" >/dev/null
 
+# ── backdate the branch ages ──────────────────────────────────────────────
+# The AGE column reads `branch.<b>.gwm-created-at`, which `gwm create` stamps
+# with the wall clock — so a capture taken right after this script shows five
+# worktrees all seconds old, which reads as staged rather than as a week of
+# work. Offsets are relative to now, so the spread stays stable whenever the
+# recording happens (issue #523; this is the "relative times drift" wart the
+# header comment flags, closed for the four fixture worktrees).
+now=$(date +%s)
+age() { git -C "$REPO" config "branch.$1.gwm-created-at" "$((now - $2))"; }
+age 'feat/#42-payment-webhooks'   $((9 * 86400))
+age 'fix/#57-rate-limit-headers'  $((4 * 86400))
+age 'chore/#63-bump-axum'         $((2 * 86400))
+age 'docs/#71-openapi-examples'   $((5 * 3600))
+
+# ── fabricated agent sessions (issue #523) ────────────────────────────────
+# The repo's pitch is "shows which AI agent is working where", so the demo
+# fixture has to carry agent artefacts. `GWM_AGENTS_HOME` is gwm's own
+# artefact-root seam, so they live INSIDE $ROOT: the real ~/.claude and
+# ~/.codex are never written to, and the `rm -rf "$ROOT"` above cleans them.
+AGENTS_HOME="$ROOT/agents-home"
+export GWM_AGENTS_HOME="$AGENTS_HOME"
+CLAUDE_SID=2f8c1a94-7d0e-4b52-9c31-6ae08f5db417
+CODEX_SID=0199f2b6-4c7a-7331-8d15-2be9c04af8e1
+
+# Claude Code: one `.jsonl` per session under the slugged worktree path
+# (every non-alphanumeric byte becomes `-`); the first user message is the
+# session name gwm displays.
+claude_slug=$(printf '%s' "$(wt feat-42-payment-webhooks)" | sed 's/[^A-Za-z0-9]/-/g')
+mkdir -p "$AGENTS_HOME/.claude/projects/$claude_slug"
+printf '%s\n' '{"type":"user","message":{"content":"Add idempotency keys to the Stripe webhook handler"}}' \
+  > "$AGENTS_HOME/.claude/projects/$claude_slug/$CLAUDE_SID.jsonl"
+
+# Codex: a rollout under today's day-dir, worktree carried by the
+# `session_meta` first line; the thread name comes from session_index.jsonl.
+codex_day="$AGENTS_HOME/.codex/sessions/$(date -u +%Y/%m/%d)"
+mkdir -p "$codex_day"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' \
+  "$CODEX_SID" "$(wt fix-57-rate-limit-headers)" > "$codex_day/rollout-$CODEX_SID.jsonl"
+printf '{"id":"%s","thread_name":"Emit Retry-After on every 429"}\n' \
+  "$CODEX_SID" > "$AGENTS_HOME/.codex/session_index.jsonl"
+
+# Pin both. The table's AGENT column reads detection, the sidebar Agents
+# pane reads pins only — the demo shows both, so both are needed.
+#
+# Non-fatal on purpose. `gwm agents attach` refuses an id detection has not
+# seen, so it is the one step here that can fail for an environmental reason,
+# and under `set -e` that would abort the script before the untrusted
+# `payments-svc` fixture below — costing `trust-ledger.tape` its subject over
+# a missing pin. Warn loudly instead: the pane degrades, the rest survives.
+cd "$REPO"
+pin() {
+  gwm agents attach "$1" "$2" >/dev/null \
+    || echo "warning: could not pin $2 to $1 — the sidebar Agents pane will be empty" >&2
+}
+pin feat-42 "$CLAUDE_SID"
+pin fix-57 "$CODEX_SID"
+
 # ── untrusted fixture for the TOFU trust-ledger capture ────────────────────
 # A second repo we deliberately never add to the trust ledger, with a juicy
 # bootstrap surface so the first-run "Trust this .gwm.toml?" prompt has content.

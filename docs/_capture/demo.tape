@@ -1,5 +1,6 @@
 # gwm - usage demo for the Terminal Trove listing.
-# Worktree lifecycle in the TUI: read a note (N), create (n) + bootstrap report, delete (d).
+# Worktree lifecycle in the TUI: agents (a), read a note (N), create (n) +
+# bootstrap report, delete (d).
 #
 # The TUI is launched inside the hidden block and given time to paint before
 # `Show`, so frame 0 is the interface rather than an empty prompt (issue #523).
@@ -16,20 +17,34 @@ Set Framerate 14
 Set Theme { "name": "gwm-grey", "background": "#2b2b2b", "foreground": "#d6d6d6", "cursor": "#d6d6d6", "selection": "#3d3d3d", "black": "#3a3a3a", "red": "#e06c75", "green": "#98c379", "yellow": "#e5c07b", "blue": "#61afef", "magenta": "#c678dd", "cyan": "#56b6c2", "white": "#d6d6d6", "brightBlack": "#6a6a6a", "brightRed": "#e06c75", "brightGreen": "#98c379", "brightYellow": "#e5c07b", "brightBlue": "#61afef", "brightMagenta": "#c678dd", "brightCyan": "#56b6c2", "brightWhite": "#ffffff" }
 
 Hide
-Type `export PS1="$ " GWM_ALLOW_BOOTSTRAP=1`
+Type `export PS1="$ " GWM_ALLOW_BOOTSTRAP=1 GWM_AGENTS_HOME="$HOME/gwm-demo/agents-home"`
 Enter
 Type "cd /Users/kbrdn1/gwm-demo/acme-api"
 Enter
 Type "gwm remove feat-91-rate-limit-alerts --force --delete-branch >/dev/null 2>&1; git branch -D 'feat/#91-rate-limit-alerts' 'feat/#88-rate-limit-alerts' >/dev/null 2>&1; git worktree prune >/dev/null 2>&1; rm -rf .git/gwm/notes; clear"
+Enter
+# The fabricated agent artefacts age between `setup-demo.sh` and this
+# recording, and past ACTIVE_WINDOW (5 min) they render "idle" grey. The
+# freshness colour is half of what the AGENT column says, so refresh the
+# mtimes here rather than depending on how recently the fixture was built.
+Type `find "$GWM_AGENTS_HOME" -name '*.jsonl' -exec touch {} + 2>/dev/null; clear`
 Enter
 Type "gwm"
 Enter
 Sleep 3000ms
 Show
 
-Sleep 1400ms
-Down 2
-Sleep 1200ms
+Sleep 1600ms
+
+# Who is working where (#408): the AGENT column names the agent per row,
+# `a` opens the full detected list. The sidebar pane below shows the pinned
+# session only, which is why the table and the overlay both earn a beat.
+Down 1
+Sleep 1600ms
+Type "a"
+Sleep 2200ms
+Escape
+Sleep 1000ms
 
 # The note: `N` opens it in a modal, `Esc` saves and closes (#515).
 Type "N"
