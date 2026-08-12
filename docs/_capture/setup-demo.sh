@@ -164,9 +164,19 @@ printf '{"id":"%s","thread_name":"Emit Retry-After on every 429"}\n' \
 
 # Pin both. The table's AGENT column reads detection, the sidebar Agents
 # pane reads pins only — the demo shows both, so both are needed.
+#
+# Non-fatal on purpose. `gwm agents attach` refuses an id detection has not
+# seen, so it is the one step here that can fail for an environmental reason,
+# and under `set -e` that would abort the script before the untrusted
+# `payments-svc` fixture below — costing `trust-ledger.tape` its subject over
+# a missing pin. Warn loudly instead: the pane degrades, the rest survives.
 cd "$REPO"
-gwm agents attach feat-42 "$CLAUDE_SID" >/dev/null
-gwm agents attach fix-57 "$CODEX_SID" >/dev/null
+pin() {
+  gwm agents attach "$1" "$2" >/dev/null \
+    || echo "warning: could not pin $2 to $1 — the sidebar Agents pane will be empty" >&2
+}
+pin feat-42 "$CLAUDE_SID"
+pin fix-57 "$CODEX_SID"
 
 # ── more sessions, for the agent-surface captures (issue #524) ─────────────
 # The overlay and `gwm agents` are only worth a screenshot with more than one
@@ -185,7 +195,14 @@ printf '%s\n' '{"type":"user","message":{"content":"Draft the OpenAPI examples f
 # Freshness is a function of mtime, so it decays: without this the fixture
 # reads all-idle a few minutes after setup. `refresh-agents.sh` is the single
 # place that owns the ages, and every agent tape re-runs it before capturing.
-bash "$CAPTURE_DIR/refresh-agents.sh"
+#
+# Deliberately non-fatal. The script exits non-zero when one of its globs
+# matches nothing, and under `set -e` that would abort this one BEFORE the
+# untrusted payments-svc fixture below, so a stale session id here would cost
+# the trust-ledger capture its subject. A wrong age costs one capture; it must
+# not cost an unrelated one its fixture.
+bash "$CAPTURE_DIR/refresh-agents.sh" ||
+  echo "warning: could not stamp the agent artefact ages - the agent captures will read idle" >&2
 
 # ── untrusted fixture for the TOFU trust-ledger capture ────────────────────
 # A second repo we deliberately never add to the trust ledger, with a juicy

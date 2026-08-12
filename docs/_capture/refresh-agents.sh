@@ -21,7 +21,7 @@ age() {
     my ($secs, @files) = @ARGV;
     my $t = time - $secs;
     @files = grep { -f } @files;
-    die "no such artefact\n" unless @files;
+    die "no artefact matches @ARGV[1..$#ARGV]\n" unless @files;
     utime($t, $t, @files) == @files or die "utime: $!\n";
   ' "$@"
 }
