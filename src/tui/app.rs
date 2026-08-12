@@ -1,7 +1,10 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
-use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::async_task::{
+  CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
+  TaskRunner,
+};
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
@@ -21,11 +24,13 @@ use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode}
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
+use crate::lifecycle::{self, HookPhase, HookSkips};
 use crate::naming::{BranchSpec, WorktreeName};
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -118,6 +123,27 @@ pub enum View {
   /// PR/Issue view reuses it. State lives on [`App::detail_overlay`]; keys
   /// resolve through [`crate::tui::modal_keymap::KeyContext::Detail`].
   DetailOverlay,
+  /// The in-TUI note editor (issue #515). A centred modal holding the
+  /// selected worktree's note in an editable buffer; `Esc` writes and
+  /// closes, `Ctrl+e` hands the same file to `$EDITOR`. State lives on
+  /// [`App::note_editor`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::Note`].
+  Note,
+}
+
+/// What the run loop must do after [`App::handle_note_key`] processes a key
+/// in the note editor (issue #515). Mirrors [`CreateKey`] / [`ExecPickerKey`]
+/// — the testable handler owns the buffer, the cursor and the write, and the
+/// loop owns the one side effect it cannot do: suspending the terminal to
+/// run `$EDITOR`.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum NoteKey {
+  /// The key edited the buffer, moved the cursor, or closed the editor.
+  Handled,
+  /// `Ctrl+e` — the buffer has been flushed to the returned path and the
+  /// loop should run the command on it, then call
+  /// [`App::reload_note_after_editor`].
+  LaunchEditor(String, std::path::PathBuf),
 }
 
 /// What the run loop must do after [`App::handle_exec_picker_key`]
@@ -173,6 +199,16 @@ pub enum LinkPromptKey {
 /// crossing the cli/tui boundary doesn't need a manual conversion
 /// (issue #106).
 pub use crate::cli::LinkTarget;
+
+/// What the open rich view (issue #420) was built from. Kept whole rather
+/// than as pre-built rows so a resize can re-wrap it, and owned by the
+/// overlay rather than read back from the fetch cache, which the manual
+/// refresh flushes (Codex review #529).
+#[derive(Debug, Clone)]
+enum RichSource {
+  Issue(IssueStatus),
+  Pr(PrStatus),
+}
 
 /// Dispatch target for the `o` key (issue #73). Resolved by
 /// [`App::resolve_open_target`] from the current selection + the
@@ -285,6 +321,27 @@ pub struct App {
   pub workspace_active_stale: bool,
   pub worktrees: Vec<WorktreeInfo>,
   pub list_state: TableState,
+  /// Rows marked for a bulk action (issue #484), keyed by on-disk path.
+  ///
+  /// Two different things are called a selection in this file: `list_state`
+  /// holds the *cursor* row (one index into the filtered view), while this
+  /// set holds the rows the user marked with `Space`. `d` acts on this set
+  /// when it is non-empty and on the cursor row otherwise; every other verb
+  /// stays on the cursor row, which the list footer makes visible by
+  /// carrying the mark count.
+  ///
+  /// Keyed by path rather than by index or id: the fuzzy filter reranks
+  /// indices on every keystroke, and worktree ids are only unique within one
+  /// repo (workspace mode merges several). `BTreeSet` so a batch, its
+  /// confirm copy and its status line are all in a deterministic order.
+  /// Private — the mutation surface is [`App::toggle_select`] /
+  /// [`App::clear_marks`], both of which keep the status line in sync.
+  marked: BTreeSet<PathBuf>,
+  /// The batch the open confirm overlay is about (issue #484). Snapshotted by
+  /// [`App::enter_confirm_delete`] and read by [`App::confirm_delete`], so an
+  /// auto-refresh landing during the safety countdown cannot retarget the
+  /// deletion.
+  pending_delete: Vec<DeleteTarget>,
   pub view: View,
   pub status: String,
   pub delete_branch_on_remove: bool,
@@ -516,12 +573,29 @@ pub struct App {
   /// ([`PtyKind::Exec`]) in the selected worktree's directory.
   pub exec_picker: ExecPicker,
 
+  /// The open note editor (issue #515), or `None` when no note is being
+  /// edited. An `Option` rather than an always-present empty buffer: the
+  /// editor owns a branch and a path it can only have while open.
+  pub note_editor: Option<crate::tui::state::note_editor::NoteEditor>,
+
   /// The `[exec]` config captured when the exec picker opened (issue #325).
   /// In workspace mode `sync_active_repo` can swap `self.config` to another
   /// repo while the overlay is open, so `Enter` resolves the argv against
   /// this snapshot — the active repo's `[exec]` at open time — not the live
   /// config (Codex #333 review).
   exec_picker_cfg: ExecConfig,
+
+  /// The active repo's `commondir` (`<main>/.git`), captured alongside
+  /// [`Self::exec_picker_cfg`] for the same reason: in workspace mode the
+  /// active repo can swap while the overlay is open. Only read when the
+  /// picked profile carries a `[container]` block (issue #421), which mounts
+  /// it so git answers inside the container.
+  exec_picker_common_dir: PathBuf,
+
+  /// Monotonic counter behind the container name of an overlay run (issue
+  /// #421). The pid alone would collide across two overlays opened on the
+  /// same worktree within one session.
+  exec_container_seq: u64,
 
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
@@ -550,16 +624,42 @@ pub struct App {
   /// auto-refresh drifts the live selection (clean-overlay pattern).
   detail_overlay_target: Option<(PathBuf, Option<String>)>,
 
-  /// CI-consumer counterpart of `detail_overlay_target` (Codex review
-  /// #455): the `(remote slug, PR number)` the open CI checks overlay was
-  /// built for, captured by [`Self::enter_ci_checks`]. Any link mutation
-  /// that disagrees — the PR changed, disappeared, or (workspace mode)
-  /// the slug moved to another repo whose PR happens to share the
-  /// number — closes the overlay up front via
-  /// [`Self::close_ci_overlay_if_link_disagrees`]; otherwise the stale
-  /// checks stay up through the new fetch, and forever if it fails, with
-  /// `Enter` opening an old PR's check URL.
-  detail_overlay_pr: Option<(Option<String>, u64)>,
+  /// Forge-consumer counterpart of `detail_overlay_target` (Codex review
+  /// #455): the `(remote slug, side, number)` the open forge-linked
+  /// overlay was built for, captured by [`Self::enter_ci_checks`] and
+  /// [`Self::enter_rich_view`]. Any link mutation that disagrees — the PR
+  /// changed, disappeared, or (workspace mode) the slug moved to another
+  /// repo whose PR happens to share the number — closes the overlay up
+  /// front via [`Self::close_forge_overlay_if_link_disagrees`]; otherwise
+  /// the stale rows stay up through the new fetch, and forever if it
+  /// fails, with `Enter` opening an old PR's URL.
+  ///
+  /// The `LinkTarget` is part of the identity, not decoration (issue
+  /// #420): issue #42 and PR #42 are different things, and a tuple that
+  /// dropped the discriminant would reproduce the #138 bug class the
+  /// fetch cache already paid for once. The first element is the **forge
+  /// identity** (`<kind> <web origin>/<slug>`), not the bare slug, for
+  /// the reason `GitHubFetch::forge_identity` already documents: an
+  /// origin moving from `github.com/acme/widgets` to
+  /// `gitlab.com/acme/widgets` keeps the slug, so a slug-keyed tuple
+  /// compared equal and left `Enter` pointing at the old host (Codex
+  /// review #529).
+  detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
+
+  /// Terminal width in columns as of the last draw (issue #420). The rich
+  /// view wraps its bodies against the modal's inner width, which only the
+  /// renderer knows, so the event loop stamps it here — see
+  /// [`Self::set_term_width`], which also re-wraps an open overlay.
+  term_width: u16,
+
+  /// The status the open rich view renders (issue #420 / Codex review
+  /// #529). The overlay owns its source rather than reading it back from
+  /// the fetch cache, for the same reason `ci_overlay_checks` does: the
+  /// manual refresh flushes that cache before re-requesting, so a rebuild
+  /// landing in that window would find nothing and, if the refresh then
+  /// failed, would never get another chance. Populated at open and on
+  /// every landing, cleared on close.
+  rich_overlay_source: Option<RichSource>,
 
   /// The `PrCheck`s the open CI overlay renders (Codex review #455): the
   /// duration tick used to read them back from the PR fetch cache, so an
@@ -643,6 +743,8 @@ impl App {
       view: View::List,
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
+      marked: BTreeSet::new(),
+      pending_delete: Vec::new(),
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
       create_failure: None,
@@ -685,13 +787,21 @@ impl App {
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
+      note_editor: None,
       exec_picker_cfg: ExecConfig::default(),
+      exec_picker_common_dir: PathBuf::new(),
+      exec_container_seq: 0,
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
-      detail_overlay_pr: None,
+      detail_overlay_link: None,
+      // Overwritten by the event loop on the first draw; the default is
+      // the classic 80-column terminal so a headless `App` (every state
+      // test) still wraps against something sane.
+      term_width: 80,
+      rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
       edit_original_branch: None,
@@ -907,16 +1017,15 @@ impl App {
     ])
   }
 
-  /// Mark the workspace selection stale AND close the open CI checks
+  /// Mark the workspace selection stale AND close an open forge-linked
   /// overlay (Codex review #455): its rows belong to the previously
-  /// active repo, so every verb — `Enter` opening a check URL included —
+  /// active repo, so every verb — `Enter` opening a URL included —
   /// would act on the wrong repo. One funnel so a new stale site cannot
-  /// forget the close.
+  /// forget the close; `is_forge_linked` is what makes the rich view
+  /// (issue #420) covered without a second equality here.
   fn mark_workspace_stale(&mut self) {
     self.workspace_active_stale = true;
-    if self.view == View::DetailOverlay
-      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
-    {
+    if self.view == View::DetailOverlay && self.detail_overlay.kind.is_forge_linked() {
       self.close_detail_overlay();
     }
   }
@@ -1141,24 +1250,13 @@ impl App {
   ///   (`gwm bootstrap` from another terminal).
   /// * `Err(e)` — ledger I/O / config read error propagated verbatim.
   pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
-    use crate::trust::{self, TrustOutcome};
-
-    let origin = trust::origin_key_for_repo(&self.repo, &self.workdir);
-
-    match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
-      TrustOutcome::Proceed => Ok(None),
-      TrustOutcome::Refuse { message } => Ok(Some(message)),
-      TrustOutcome::Prompt { cfg_path, sha, .. } => {
-        let short_sha: String = sha.chars().take(12).collect();
-        Ok(Some(format!(
-          ".gwm.toml at {} not in trust ledger (hash {}) — \
-           run `gwm bootstrap` from a CLI in another terminal to approve, \
-           or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap",
-          cfg_path.display(),
-          short_sha
-        )))
-      }
-    }
+    let origin = crate::trust::origin_key_for_repo(&self.repo, &self.workdir);
+    crate::trust::evaluate_silent(
+      &self.workdir,
+      &origin,
+      self.trust_mode,
+      crate::trust::APPROVE_VIA_BOOTSTRAP,
+    )
   }
 
   /// Constructor for `gwm switch`: same App, but picker mode is on and the
@@ -1261,6 +1359,10 @@ impl App {
 
     self.worktrees = worktrees;
     self.filter.invalidate();
+    // #484: a mark whose row is gone must not survive as a phantom target.
+    // Pruning (not clearing) is deliberate — this tail also runs for the
+    // background auto-refresh, which must not eat a selection mid-build.
+    self.prune_marks();
     self.clamp_selection_to_filter();
     let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
@@ -1306,6 +1408,10 @@ impl App {
   /// while loading is a no-op) and seeds the loader label + spinner. The
   /// result is applied by [`Self::drain_task_results`].
   pub fn request_refresh(&mut self) {
+    // #484: the explicit `f` drops the marks. The periodic
+    // `maybe_auto_refresh` deliberately does not — it only prunes rows that
+    // vanished, otherwise a timer would eat a selection mid-build.
+    self.clear_marks();
     if self.is_workspace() {
       // Workspace mode re-lists every repo off-thread on its own slot (issue
       // #343): the single-repo worker can't be reused (it would clobber the
@@ -1775,6 +1881,7 @@ impl App {
           }
           if let Ok(status) = &result {
             self.persist_loaded_issue_title(status);
+            self.sync_rich_overlay(RichSource::Issue(status.clone()));
           }
           self.github.complete_issue(number, result);
           applied = true;
@@ -1790,8 +1897,17 @@ impl App {
               // The overlay-close message owns the status line this tick.
               refresh_applied = true;
             }
+            self.sync_rich_overlay(RichSource::Pr(status.clone()));
           }
           self.github.complete_pr(number, result);
+          applied = true;
+          github_applied = true;
+        }
+        TaskMsg::GithubPrThreads(generation, number, result) => {
+          if !self.tasks.complete(TaskKind::GithubPrThreads(number), generation) {
+            continue;
+          }
+          self.land_pr_threads(number, result);
           applied = true;
           github_applied = true;
         }
@@ -1849,26 +1965,41 @@ impl App {
           // refresh / sync arms use).
           refresh_applied = true;
         }
-        TaskMsg::DeleteWorktree(generation, name, label, result) => {
+        TaskMsg::DeleteWorktree(generation, outcome) => {
           if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
             // Late result — a newer run (or an invalidate) superseded it.
             continue;
           }
-          match result {
-            Ok(()) => {
-              self.delete_failure = None;
+          // Re-list first in both arms: the removed rows have to leave the
+          // table (and their marks with them, via `prune_marks`) even on a
+          // partial batch, so what stays marked is exactly what failed and a
+          // retry is one keystroke (#484).
+          let refresh_result = self.refresh();
+          let status = outcome.status_line();
+          self.delete_failure = outcome.failure_banner();
+          match &self.delete_failure {
+            None => {
               self.view = View::List;
               self.confirm.reset();
-              let refresh_result = self.refresh();
+              self.pending_delete.clear();
               self.status = match refresh_result {
-                Ok(()) => format!("removed {} ({})", name, label),
-                Err(e) => format!("removed {} ({}); refresh failed: {}", name, label, e),
+                Ok(()) => status,
+                Err(e) => format!("{}; refresh failed: {}", status, e),
               };
             }
-            Err(e) => {
-              self.delete_failure = Some(e.clone());
+            Some(_) => {
+              // Stay on the overlay so the failure is read, narrowed to the
+              // targets that actually failed. NARROWED, never recomputed:
+              // `worktree::remove` prunes the admin entry before deleting the
+              // directory (#98), so a removal that fails on the filesystem
+              // still drops its row from the list, the refresh above prunes
+              // its mark, and a recomputed batch would fall back to the
+              // CURSOR row. A second confirm would then delete a worktree the
+              // user never marked (Codex review on PR #520).
+              let failed: std::collections::BTreeSet<&Path> = outcome.failed.iter().map(|f| f.path.as_path()).collect();
+              self.pending_delete.retain(|t| failed.contains(t.path.as_path()));
               self.view = View::Confirm;
-              self.status = format!("delete failed: {}", e);
+              self.status = status;
             }
           }
           applied = true;
@@ -2458,16 +2589,16 @@ impl App {
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
+      View::Note => HintContext::Note,
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
-      View::DetailOverlay => {
-        if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
-          HintContext::CiChecks
-        } else {
-          HintContext::Detail
-        }
-      }
+      View::DetailOverlay => match self.detail_overlay.kind {
+        crate::tui::state::detail_overlay::DetailKind::CiChecks => HintContext::CiChecks,
+        crate::tui::state::detail_overlay::DetailKind::RichIssue
+        | crate::tui::state::detail_overlay::DetailKind::RichPr => HintContext::RichView,
+        crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
+      },
       View::List => self.pane_hint_context(),
     }
   }
@@ -2870,6 +3001,7 @@ impl App {
     // *this* worktree against *this* config — not whatever is live later
     // (Codex #333 review).
     self.exec_picker_cfg = self.config.exec.clone();
+    self.exec_picker_common_dir = self.repo.commondir().to_path_buf();
     self.exec_picker.open(names, cwd);
     self.view = View::ExecPicker;
   }
@@ -2894,13 +3026,17 @@ impl App {
     }
   }
 
-  /// Resolve the highlighted exec profile to an `(argv, cwd)` pair for the
-  /// run loop to spawn in a PTY overlay (issue #325). `None` (with a
+  /// Resolve the highlighted exec profile to an `(argv, cwd, teardown)` triple
+  /// for the run loop to spawn in a PTY overlay (issue #325). `None` (with a
   /// status-bar message) when nothing is selected or the profile fails to
   /// resolve — e.g. an empty `command` array. The argv is the frozen
   /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
   /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
-  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
+  ///
+  /// `teardown` is `Some` only for a containerised profile (issue #421):
+  /// killing the pty leader kills the `docker` client, never the container it
+  /// asked the daemon for, so the overlay removes it by name on close.
+  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf, Option<Vec<String>>)> {
     let profile = self.exec_picker.selected_profile()?.to_string();
     // Resolve against the worktree captured when the picker opened, NOT the
     // live selection (which an auto-refresh may have drifted) — #333 review.
@@ -2909,6 +3045,7 @@ impl App {
       return None;
     };
     // Resolve against the `[exec]` config captured at open, not the live one.
+    let mut teardown: Option<Vec<String>> = None;
     match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
       Ok(mut argv) => {
         // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
@@ -2919,7 +3056,47 @@ impl App {
         if let Some(first) = argv.first_mut() {
           *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
         }
-        Some((argv, cwd))
+        // A profile carrying `[container]` runs in a container here too
+        // (issue #421) — the same profile must not mean "on the host" in the
+        // TUI and "in a container" on the CLI. The wrap comes AFTER the
+        // relative-program anchoring: host paths are mirrored inside the
+        // container, so the anchored absolute path is valid on both sides.
+        match crate::exec::resolve_exec_container(Some(&profile), &self.exec_picker_cfg) {
+          Ok(Some(container)) => {
+            match crate::exec::ContainerPlan::resolve(container, &self.exec_picker_common_dir, |bin| {
+              which::which(bin).is_ok()
+            }) {
+              // `wrap_interactive`: this overlay spawns into a real pty, so
+              // the container gets `-i -t` and a REPL / debugger / prompting
+              // command keeps working, exactly as it does when the same
+              // profile runs on the host here.
+              Ok(plan) => {
+                self.exec_container_seq += 1;
+                let name = crate::exec::container_run_name(&cwd, std::process::id(), self.exec_container_seq);
+                match plan.wrap_interactive(&cwd, &argv, &name) {
+                  Ok(wrapped) => {
+                    argv = wrapped;
+                    teardown = Some(plan.container_teardown_argv(&name));
+                  }
+                  Err(e) => {
+                    self.status = format!("exec profile {profile:?}: {e}");
+                    return None;
+                  }
+                }
+              }
+              Err(e) => {
+                self.status = format!("exec profile {profile:?}: {e}");
+                return None;
+              }
+            }
+          }
+          Ok(None) => {}
+          Err(e) => {
+            self.status = format!("exec profile {profile:?}: {e}");
+            return None;
+          }
+        }
+        Some((argv, cwd, teardown))
       }
       Err(e) => {
         self.status = format!("exec profile {profile:?}: {e}");
@@ -3003,7 +3180,11 @@ impl App {
     // Pin the overlay to the PR it renders, so a link mutation that
     // disagrees can close it (Codex review #455). The checks themselves
     // are kept too — the duration tick's cache-independent source.
-    self.detail_overlay_pr = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
+    self.detail_overlay_link = self
+      .github
+      .link
+      .pr
+      .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n));
     self.ci_overlay_checks = checks;
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
@@ -3011,6 +3192,182 @@ impl App {
       rows,
     );
     self.view = View::DetailOverlay;
+  }
+
+  /// Open the rich PR / issue view (issue #420, `I`): the description,
+  /// the metadata block, the reviews and the conversation of whichever
+  /// side is linked.
+  ///
+  /// The **PR wins when both are linked**: a worktree that has one is a
+  /// worktree whose work is in review, and the issue is one `gwm link`
+  /// away. That choice follows the **link**, not the cache (Codex review
+  /// #529): picking the side by which status happened to land first meant
+  /// an issue that came back before the PR opened in its place, and the
+  /// PR landing could not replace it, since the landing refresh requires
+  /// the overlay to already be `RichPr`. So the contract held only when
+  /// the PR was the faster of two concurrent fetches.
+  ///
+  /// It opens on whatever is available and lets [`Self::sync_rich_overlay`]
+  /// promote the PR the moment it lands. The first cut of this instead
+  /// refused to open while the PR was `Loading`, which was a guard against
+  /// a symptom of the missing promotion; once the promotion existed the
+  /// guard only produced its own edge case, since `Idle` ("nobody asked
+  /// yet") is indistinguishable from `Loading` for the user staring at an
+  /// issue that is not the thing they wanted. Without either side fetched
+  /// the overlay would be a bordered void, exactly what `enter_ci_checks`
+  /// refuses.
+  pub fn enter_rich_view(&mut self) {
+    // Same workspace contract as the CI checks overlay (#304 / Codex
+    // review #455): a failed `Repository::open` for the selected row
+    // leaves the link and its cache pointing at the previously active
+    // repo, and this view would then browse the OLD repo's PR.
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable — can't open its PR/issue view".into();
+      return;
+    }
+    let width = self.rich_view_width();
+    // The PR side is preferred whenever one is LINKED. Only its fetch
+    // state decides whether it can be shown yet.
+    if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+      let source = RichSource::Pr(pr.clone());
+      let title = format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title);
+      let number = pr.number;
+      // Before the rows are built, so the section opens as "loading"
+      // instead of appearing out of nowhere one landing later.
+      self.spawn_github_pr_threads(number);
+      self.open_rich_overlay(source, title, width);
+      return;
+    }
+    if let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() {
+      let source = RichSource::Issue(issue.clone());
+      let title = format!("Issue #{} · {}", issue.number, issue.title);
+      self.open_rich_overlay(source, title, width);
+      return;
+    }
+    // Resolve the active binding rather than hard-coding `F`, the same way
+    // `enter_ci_checks` does.
+    self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+      Some(key) => format!("nothing to show — link an issue or PR and fetch ({key}) first"),
+      None => "nothing to show — link an issue or PR and fetch first".into(),
+    };
+  }
+
+  /// Common tail of [`Self::enter_rich_view`]: build the rows, pin the
+  /// overlay to the link it renders, and take the view.
+  fn open_rich_overlay(&mut self, source: RichSource, title: String, width: usize) {
+    let (kind, rows, target, number) = match &source {
+      RichSource::Pr(pr) => (
+        crate::tui::state::detail_overlay::DetailKind::RichPr,
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        LinkTarget::Pr,
+        pr.number,
+      ),
+      RichSource::Issue(issue) => (
+        crate::tui::state::detail_overlay::DetailKind::RichIssue,
+        crate::tui::state::rich_view::rich_issue_rows(issue, width),
+        LinkTarget::Issue,
+        issue.number,
+      ),
+    };
+    // Drop the agents consumer's target; pin this overlay to the link it
+    // renders so a disagreeing mutation can close it.
+    self.detail_overlay_target = None;
+    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    self.rich_overlay_source = Some(source);
+    self
+      .detail_overlay
+      .open(kind, crate::naming::sanitise_for_terminal(&title), rows);
+    self.view = View::DetailOverlay;
+  }
+
+  /// `Pull request` / `Merge request`, following the resolved forge so the
+  /// GitLab title does not say "PR" (issue #419).
+  fn pr_noun_titlecase(&self) -> String {
+    let noun = self.github.forge.as_ref().map(|f| f.pr_noun()).unwrap_or("PR");
+    let mut c = noun.chars();
+    match c.next() {
+      Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+      None => noun.to_string(),
+    }
+  }
+
+  /// The wrap budget handed to the row builders: the overlay modal's inner
+  /// width for the terminal the App was last drawn at.
+  fn rich_view_width(&self) -> usize {
+    crate::tui::ui::overlay_modal_width(self.term_width).saturating_sub(6) as usize
+  }
+
+  /// Stamp the terminal width and re-wrap an open rich view (issue #420).
+  ///
+  /// The event loop calls this on `Event::Resize` and once per draw. A
+  /// resize that never reached the `App` would leave the rows wrapped for
+  /// the previous width, and the renderer ellipsises whatever overflows —
+  /// so the widened terminal would show *less* text, not more.
+  pub fn set_term_width(&mut self, cols: u16) {
+    if self.term_width == cols {
+      return;
+    }
+    self.term_width = cols;
+    self.rebuild_rich_rows();
+  }
+
+  /// Rebuild the open rich view's rows. Pure in-memory formatting, no I/O
+  /// — a no-op for every other view.
+  ///
+  /// Reads the overlay's **own** source, not the fetch cache (Codex review
+  /// #529): the manual refresh flushes that cache before re-requesting, so
+  /// a resize landing in that window found no `Loaded` and gave up. A
+  /// refresh that then failed left nothing to ever rebuild from, and the
+  /// view stayed wrapped for the previous terminal for good. Same fix
+  /// `ci_overlay_checks` already carries for the duration tick (#455), for
+  /// the same reason.
+  fn rebuild_rich_rows(&mut self) {
+    if self.view != View::DetailOverlay {
+      return;
+    }
+    let width = self.rich_view_width();
+    let rows = match &self.rich_overlay_source {
+      Some(RichSource::Pr(pr)) => {
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width)
+      }
+      Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
+      None => return,
+    };
+    self.detail_overlay.set_rows(rows);
+  }
+
+  /// The URL of the selected rich-view row, when it carries one — the
+  /// PR/issue permalink on the `url` row, a comment permalink on a
+  /// comment header. Body rows are inert.
+  pub fn rich_selected_url(&self) -> Option<String> {
+    self.detail_overlay.selected_meta().map(str::to_string)
+  }
+
+  /// `f` inside the rich view — re-fetch, same workspace re-check the CI
+  /// overlay's refresh carries (the modal dispatch bypasses `run_action`'s
+  /// guard).
+  pub fn rich_view_refresh(&mut self) {
+    if self.workspace_active_stale {
+      self.close_detail_overlay();
+      self.status = "workspace: selected repo is unavailable — PR/issue view closed".into();
+      return;
+    }
+    self.refresh_github_status();
+    // The invalidation above dropped the cached threads as well, so the
+    // section would otherwise stay empty until the view was reopened.
+    //
+    // Gated on the VIEW too, not just the overlay kind: the refresh can
+    // close the overlay (`close_forge_overlay_if_link_disagrees`, when the
+    // re-probe moved the PR), and `close_detail_overlay` leaves `kind`
+    // holding its last value. A kind-only guard would then fire a GraphQL
+    // request for a view that is no longer on screen.
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::RichPr
+    {
+      if let Some(n) = self.github.link.pr {
+        self.spawn_github_pr_threads(n);
+      }
+    }
   }
 
   /// Contextual KEY routing (issue #436) — same mechanism that turns
@@ -3340,8 +3697,9 @@ impl App {
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
-    self.detail_overlay_pr = None;
+    self.detail_overlay_link = None;
     self.ci_overlay_checks.clear();
+    self.rich_overlay_source = None;
     self.view = View::List;
   }
 
@@ -3823,6 +4181,191 @@ impl App {
   pub fn copy_path_to_status(&mut self) {
     if let Some(w) = self.selected() {
       self.status = format!("path: {}", w.path.display());
+    }
+  }
+
+  /// Open the selected row's note in the in-TUI editor (issue #515).
+  ///
+  /// `N` used to hand the file straight to `$EDITOR`. It does not any more:
+  /// a note is usually three lines written between two thoughts, and
+  /// suspending the whole TUI to spawn `vi` for that is a heavier gesture
+  /// than the note. `$EDITOR` is still one keystroke away inside the modal.
+  ///
+  /// A row that cannot carry a note leaves the view alone and says why on
+  /// the status bar, rather than opening an editor over nothing —
+  /// [`Self::note_target`] owns those three refusals.
+  pub fn open_note_editor(&mut self) {
+    let Some((branch, path)) = self.note_target() else {
+      return;
+    };
+    let text = crate::notes::read(&self.repo, &branch).unwrap_or_default();
+    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    self.view = View::Note;
+  }
+
+  /// The branch and note path for the selected row, or `None` with the
+  /// reason on the status bar.
+  ///
+  /// A detached row has no branch to key on (the rule
+  /// [`crate::github::pinnable_branch`] settled for the agent pin), and a
+  /// branch name git accepts but no filesystem can back is refused rather
+  /// than silently written somewhere else.
+  fn note_target(&mut self) -> Option<(String, PathBuf)> {
+    let Some(selected) = self.selected() else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    let Some(branch) = crate::github::pinnable_branch(selected.branch.as_deref()).map(str::to_string) else {
+      self.status = "detached HEAD — a note is keyed on the branch".into();
+      return None;
+    };
+    match crate::notes::prepare(&self.repo, &branch) {
+      Ok(Some(path)) => Some((branch, path)),
+      Ok(None) => {
+        self.status = format!("`{branch}` cannot back a note file — the name is not a portable filename");
+        None
+      }
+      // `prepare` writes its own message: the directory it could not create,
+      // or the other branch that already owns this note file.
+      Err(e) => {
+        self.status = e.to_string();
+        None
+      }
+    }
+  }
+
+  /// Write the open buffer to disk.
+  ///
+  /// A blank buffer **removes** the file rather than writing one byte: that
+  /// is the only way to discard a note (there is no "quit without saving"),
+  /// and a blank file left behind would read as absent everywhere while
+  /// still being what `gwm doctor` reports once the branch is gone.
+  ///
+  /// A clean buffer writes nothing at all, so opening a note to read it
+  /// does not touch its mtime.
+  fn flush_note(&mut self) {
+    let Some(editor) = self.note_editor.as_mut() else {
+      return;
+    };
+    if !editor.dirty {
+      return;
+    }
+    let text = editor.text();
+    let path = editor.path.clone();
+    let outcome = if text.is_empty() {
+      match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+      }
+    } else {
+      std::fs::write(&path, &text)
+    };
+    match outcome {
+      Ok(()) => editor.dirty = false,
+      Err(e) => self.status = format!("could not write the note: {e}"),
+    }
+  }
+
+  /// Route one key while the note editor is open (issue #515).
+  ///
+  /// **Typing routes before everything else**, which is the contract every
+  /// always-typing context in this TUI holds (Codex review #456, and
+  /// [`crate::tui::modal_keymap::KeyContext::reserved_typing_stroke`] is
+  /// where it is declared). Get it wrong here and writing "done" in a note
+  /// fires the global `d` — the delete confirm, on the very worktree the
+  /// note is about.
+  pub fn handle_note_key(&mut self, key: KeyEvent) -> NoteKey {
+    use crate::tui::modal_keymap::{KeyContext, ModalAction};
+    use crossterm::event::KeyCode as KC;
+
+    let stroke = crate::tui::keymap::KeyStroke::from_event(&key);
+    if KeyContext::Note.reserved_typing_stroke(&stroke) {
+      if let Some(editor) = self.note_editor.as_mut() {
+        match key.code {
+          KC::Char(c) => editor.insert_char(c),
+          KC::Enter => editor.newline(),
+          KC::Backspace => editor.backspace(),
+          KC::Delete => editor.delete(),
+          _ => {}
+        }
+      }
+      return NoteKey::Handled;
+    }
+
+    match self.resolve_modal(KeyContext::Note, key) {
+      Some(ModalAction::NoteClose) => {
+        self.flush_note();
+        self.note_editor = None;
+        self.view = View::List;
+        self.sync_selected_note_marker();
+        return NoteKey::Handled;
+      }
+      // `$EDITOR` opens the *file*, so the buffer is flushed first —
+      // otherwise it shows the note as it was before the keys just typed,
+      // and saving there would overwrite them.
+      Some(ModalAction::NoteOpenEditor) => {
+        self.flush_note();
+        if let Some(editor) = self.note_editor.as_ref() {
+          let path = editor.path.clone();
+          return NoteKey::LaunchEditor(resolve_editor_command(&self.config.tui.open), path);
+        }
+        return NoteKey::Handled;
+      }
+      _ => {}
+    }
+
+    // Movement. Hard-coded rather than bindable for the same reason the
+    // module note gives for `Esc` / `Enter`: an arrow key means one thing
+    // in a text buffer and rebinding it would only take it away.
+    let height = self.note_editor.as_ref().map_or(10, |e| e.viewport);
+    if let Some(editor) = self.note_editor.as_mut() {
+      match key.code {
+        KC::Left => editor.left(),
+        KC::Right => editor.right(),
+        KC::Up => editor.up(),
+        KC::Down => editor.down(),
+        KC::Home => editor.home(),
+        KC::End => editor.end(),
+        KC::PageUp => editor.page_up(height),
+        KC::PageDown => editor.page_down(height),
+        _ => {}
+      }
+    }
+    NoteKey::Handled
+  }
+
+  /// Re-read the note after `$EDITOR` exited (issue #515), so the modal
+  /// shows what was written outside rather than the stale buffer.
+  pub fn reload_note_after_editor(&mut self) {
+    let Some(editor) = self.note_editor.as_ref() else {
+      return;
+    };
+    let (branch, path) = (editor.branch.clone(), editor.path.clone());
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+  }
+
+  /// Re-read the selected row's note presence once the editor has exited
+  /// (issue #515).
+  ///
+  /// One file read for one row, on a key press — not a full `refresh()`,
+  /// which would drop the mark set (#484) and re-shell every row's git
+  /// config just to repaint a single marker.
+  pub fn sync_selected_note_marker(&mut self) {
+    let Some(index) = self.selected_raw_index() else {
+      return;
+    };
+    let Some(branch) = self
+      .worktrees
+      .get(index)
+      .and_then(|w| crate::github::pinnable_branch(w.branch.as_deref()))
+      .map(str::to_string)
+    else {
+      return;
+    };
+    let has_note = crate::notes::read(&self.repo, &branch).is_some();
+    if let Some(row) = self.worktrees.get_mut(index) {
+      row.has_note = has_note;
     }
   }
 
@@ -4763,17 +5306,122 @@ impl App {
     });
   }
 
-  // ---- Delete flow ---------------------------------------------------------
+  // ---- Row marks (issue #484) ---------------------------------------------
 
-  pub fn enter_confirm_delete(&mut self) {
+  /// Toggle the mark on the cursor row (`Space`). The main worktree is
+  /// refused here rather than at delete time: `d` can never remove it, so a
+  /// mark on it could only build a batch with a target that fails.
+  pub fn toggle_select(&mut self) {
     let Some(sel) = self.selected() else {
       self.status = "nothing selected".into();
       return;
     };
     if sel.is_main {
-      self.status = "cannot remove the main worktree".into();
+      self.status = "cannot select the main worktree".into();
       return;
     }
+    let path = sel.path.clone();
+    if !self.marked.remove(&path) {
+      self.marked.insert(path);
+    }
+    let delete_key = self
+      .keymap
+      .primary_chord(Action::DeleteConfirm)
+      .map(|c| format!(" · {} deletes them", c))
+      .unwrap_or_default();
+    self.status = match self.marked.len() {
+      0 => "selection cleared".into(),
+      1 => format!("1 worktree selected{}", delete_key),
+      n => format!("{} worktrees selected{}", n, delete_key),
+    };
+  }
+
+  /// Drop every mark. Called when the filter opens and on the manual
+  /// refresh (`f`), per the contract agreed on #484.
+  pub fn clear_marks(&mut self) {
+    self.marked.clear();
+  }
+
+  /// How many rows are marked. Drives the list footer so a live selection is
+  /// never invisible while a cursor-row verb (`b` / `s` / `p`) runs.
+  pub fn marked_count(&self) -> usize {
+    self.marked.len()
+  }
+
+  /// Whether `path`'s row carries a mark. Read per row by the table renderer.
+  pub fn is_marked(&self, path: &Path) -> bool {
+    self.marked.contains(path)
+  }
+
+  /// Drop marks whose row is gone from the list. Called from the shared
+  /// refresh tail so a row removed by ANY refresh (including the background
+  /// one, which must not clear a selection the user is still building) can
+  /// never survive as a phantom target.
+  fn prune_marks(&mut self) {
+    if self.marked.is_empty() {
+      return;
+    }
+    let live: BTreeSet<&PathBuf> = self.worktrees.iter().map(|w| &w.path).collect();
+    self.marked.retain(|p| live.contains(p));
+  }
+
+  /// The owning repo's workdir for raw row `raw_index`. In workspace mode
+  /// (#36) it comes from the `row_repo` map so a row is acted on through its
+  /// own repo; in single-repo mode every row belongs to the active one.
+  fn row_workdir(&self, raw_index: usize) -> Option<PathBuf> {
+    match &self.workspace {
+      Some(ws) => ws.repos.get(*ws.row_repo.get(raw_index)?).map(|r| r.workdir.clone()),
+      None => Some(self.workdir.clone()),
+    }
+  }
+
+  /// What a `d` would delete: the marked rows in list order when the mark set
+  /// is non-empty, else the cursor row. Marks pointing at a row that no
+  /// longer exists resolve to nothing, so a stale mark drops out instead of
+  /// targeting whatever took its place.
+  pub fn delete_targets(&self) -> Vec<DeleteTarget> {
+    let rows: Vec<usize> = if self.marked.is_empty() {
+      self.selected_raw_index().into_iter().collect()
+    } else {
+      (0..self.worktrees.len())
+        .filter(|i| self.worktrees.get(*i).is_some_and(|w| self.marked.contains(&w.path)))
+        .collect()
+    };
+    rows
+      .into_iter()
+      .filter_map(|i| {
+        let w = self.worktrees.get(i)?;
+        if w.is_main {
+          return None;
+        }
+        Some(DeleteTarget {
+          workdir: self.row_workdir(i)?,
+          // `worktree::remove` resolves by the internal git id, which can
+          // diverge from the display name after a rename (#290).
+          id: w.id.clone(),
+          path: w.path.clone(),
+        })
+      })
+      .collect()
+  }
+
+  /// The batch the open confirm overlay is about. Empty outside the overlay.
+  pub fn pending_delete(&self) -> &[DeleteTarget] {
+    &self.pending_delete
+  }
+
+  // ---- Delete flow ---------------------------------------------------------
+
+  pub fn enter_confirm_delete(&mut self) {
+    let targets = self.delete_targets();
+    if targets.is_empty() {
+      self.status = match self.selected() {
+        Some(w) if w.is_main => "cannot remove the main worktree".into(),
+        _ => "nothing selected".into(),
+      };
+      return;
+    }
+    self.pending_delete = targets;
     self.view = View::Confirm;
     self.confirm.reset();
     self.delete_failure = None;
@@ -4783,12 +5431,13 @@ impl App {
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
-    // `worktree::remove` resolves by the internal git id, which can diverge
-    // from the display name after a rename (#290), so pass `id` here.
-    let (id, label) = match self.selected() {
-      Some(s) => (s.id.clone(), s.path.display().to_string()),
-      None => return Ok(()),
-    };
+    // Fire the snapshot taken when the overlay opened, not a fresh
+    // resolution: an auto-refresh can land during the safety countdown and
+    // reorder the list under the cursor (#484).
+    let targets = self.pending_delete.clone();
+    if targets.is_empty() {
+      return Ok(());
+    }
     if self.is_delete_worktree_loading() {
       return Ok(());
     }
@@ -4808,18 +5457,22 @@ impl App {
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::DeleteWorktree.loading_label().into();
-    self.spawn_delete_worktree(generation, id, label, delete_branch);
+    self.spawn_delete_worktrees(generation, targets, delete_branch);
     Ok(())
   }
 
-  fn spawn_delete_worktree(&self, generation: u64, id: String, label: String, delete_branch: bool) {
+  /// Run the batch sequentially on one worker thread. Never stops at the
+  /// first error (#484): a locked or already-pruned row must not strand the
+  /// rest of a cleanup the user explicitly asked for. Each target is opened
+  /// through its own repo, so a workspace batch spanning several repos is
+  /// removed from the right one.
+  fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
-    let workdir = self.workdir.clone();
+    let trust_mode = self.trust_mode;
+    let global_path = self.global_path.clone();
     std::thread::spawn(move || {
-      let result = worktree::discover_repo(Some(&workdir))
-        .and_then(|repo| worktree::remove(&repo, &id, delete_branch))
-        .map_err(|e| e.to_string());
-      let _ = tx.send(TaskMsg::DeleteWorktree(generation, id, label, result));
+      let outcome = run_delete_batch(targets, delete_branch, global_path, trust_mode);
+      let _ = tx.send(TaskMsg::DeleteWorktree(generation, outcome));
     });
   }
 
@@ -4892,6 +5545,7 @@ impl App {
     }
     self.confirm.dismiss();
     self.delete_failure = None;
+    self.pending_delete.clear();
     self.view = View::List;
   }
 
@@ -4925,6 +5579,9 @@ impl App {
   /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
     self.filter.open();
+    // #484: narrowing the list is a fresh start — the marks the user built
+    // against the previous match set do not carry over.
+    self.clear_marks();
     self.sidebar.focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
@@ -5162,19 +5819,35 @@ impl App {
     // pinned identity (Codex review #455): an auto-refresh relist can move
     // the selection (the current worktree disappeared) while the overlay
     // is up, and its checks must not survive their PR.
-    self.close_ci_overlay_if_link_disagrees();
+    self.close_forge_overlay_if_link_disagrees();
   }
 
-  /// Close the open CI checks overlay when the link no longer matches the
-  /// `(slug, PR)` it was built for — see `detail_overlay_pr`.
-  fn close_ci_overlay_if_link_disagrees(&mut self) {
-    if self.view != View::DetailOverlay
-      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
-    {
+  /// Close an open forge-linked overlay when the link no longer matches
+  /// the `(slug, side, number)` it was built for — see
+  /// `detail_overlay_link`. Covers the CI checks list and the rich view
+  /// alike (issue #420): the failure is the same one, the rows describe a
+  /// PR/issue that is no longer the linked one, so the membership test is
+  /// `is_forge_linked` rather than an equality repeated per consumer.
+  fn close_forge_overlay_if_link_disagrees(&mut self) {
+    if self.view != View::DetailOverlay || !self.detail_overlay.kind.is_forge_linked() {
       return;
     }
-    let current = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
-    if current != self.detail_overlay_pr {
+    // Compare against the side the overlay was opened for: a rich *issue*
+    // view must not close because the PR link moved, and must close when
+    // the issue link does.
+    let current = match self.detail_overlay_link {
+      Some((_, LinkTarget::Issue, _)) => self
+        .github
+        .link
+        .issue
+        .map(|n| (self.github.forge_identity(), LinkTarget::Issue, n)),
+      _ => self
+        .github
+        .link
+        .pr
+        .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n)),
+    };
+    if current != self.detail_overlay_link {
       self.close_detail_overlay();
     }
   }
@@ -5373,7 +6046,7 @@ impl App {
     // The re-probe can CHANGE the PR identity — a persisted detection
     // coming back None, or re-detecting a different number (#61 → #62).
     // The flow below owns the status line ("nothing linked" / "fetching…").
-    self.close_ci_overlay_if_link_disagrees();
+    self.close_forge_overlay_if_link_disagrees();
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = format!(
@@ -5507,6 +6180,26 @@ impl App {
     true
   }
 
+  /// Inline-review-thread counterpart to [`Self::spawn_github_pr`] (issue
+  /// #528). Not part of the bulk prefetch: this is a second request per
+  /// PR, and the only surface that reads it is the rich view, so it is
+  /// spawned when that view opens rather than alongside every PR fetch.
+  fn spawn_github_pr_threads(&mut self, n: u64) -> bool {
+    let key = FetchKey::PrThreads(n);
+    // Checked here rather than in `spawn_github_fetch`, which bails out
+    // silently: marking `Loading` for a request that is never made leaves
+    // the section spinning forever.
+    if self.github.forge.is_none() || self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubPrThreads(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, String::new(), generation);
+    true
+  }
+
   /// Spawn one background `gh` shell-out for `key` tagged with `generation`
   /// and wire its result back over the shared task channel (issue #255,
   /// migrated from #217's dedicated channel). Deliberately a thin shell: it
@@ -5528,6 +6221,9 @@ impl App {
       let msg = match key {
         FetchKey::Issue(n) => TaskMsg::GithubIssue(generation, n, forge.fetch_issue(n).map_err(|e| e.to_string())),
         FetchKey::Pr(n) => TaskMsg::GithubPr(generation, n, forge.fetch_pr(n).map_err(|e| e.to_string())),
+        FetchKey::PrThreads(n) => {
+          TaskMsg::GithubPrThreads(generation, n, forge.fetch_pr_threads(n).map_err(|e| e.to_string()))
+        }
       };
       let _ = tx.send(msg);
     });
@@ -5569,9 +6265,20 @@ impl App {
     }
   }
 
+  /// Test seam (issue #420): flip the PR cache entry to `Loading` without
+  /// going through the spine's `request → complete` generation flow, so a
+  /// test can exercise the in-flight window `enter_rich_view` treats
+  /// differently from a cold or errored cache.
+  pub fn mark_pr_loading_for_test(&mut self, number: u64) {
+    self
+      .github
+      .mark_loading(crate::tui::state::github_fetch::FetchKey::Pr(number));
+  }
+
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
     if let Ok(status) = &r {
       self.persist_loaded_issue_title(status);
+      self.sync_rich_overlay(RichSource::Issue(status.clone()));
     }
     self.github.apply_issue_result(r);
   }
@@ -5580,8 +6287,50 @@ impl App {
     if let Ok(status) = &r {
       self.persist_loaded_pr_title(status);
       self.refresh_ci_overlay_on_pr_landing(status);
+      // Wired here AND in the drain, the same pairing the CI counterpart
+      // documents right below: a landing path that exists only in the seam
+      // leaves the running TUI without the refresh.
+      self.sync_rich_overlay(RichSource::Pr(status.clone()));
     }
     self.github.apply_pr_result(r);
+  }
+
+  /// Test seam for the inline-review-thread fetch (issue #528), the
+  /// counterpart of [`Self::apply_pr_fetch_result`]. Routes through the
+  /// same [`Self::land_pr_threads`] the drain uses, so the two cannot
+  /// desync.
+  pub fn apply_pr_threads_fetch_result(
+    &mut self,
+    number: u64,
+    r: std::result::Result<crate::forge::ReviewThreads, String>,
+  ) {
+    self.land_pr_threads(number, r);
+  }
+
+  /// The cached inline-review-thread state for `number` (issue #528).
+  pub fn pr_threads_fetch_state(&self, number: u64) -> &GitHubFetchState<crate::forge::ReviewThreads> {
+    self.github.pr_threads_state(number)
+  }
+
+  /// Stamp a landed thread fetch and, when the rich view is showing that
+  /// very PR, re-run its invariant so the section stops saying "loading".
+  ///
+  /// Called from **both** landing paths — the drain and the test seam —
+  /// for the reason the CI counterpart spells out below: a landing wired
+  /// only into the seam leaves the running TUI without the refresh. The
+  /// threads are a second transport, so this is the third path where that
+  /// pairing has to hold.
+  fn land_pr_threads(&mut self, number: u64, r: std::result::Result<crate::forge::ReviewThreads, String>) {
+    self.github.complete_pr_threads(number, r);
+    // Re-render through the one invariant rather than touching the rows
+    // here: the view renders the side the LINK prefers, and these threads
+    // belong to it only when the linked PR is the one that landed.
+    if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+      if pr.number == number {
+        let pr = pr.clone();
+        self.sync_rich_overlay(RichSource::Pr(pr));
+      }
+    }
   }
 
   /// Rebuild the open CI checks overlay from a landed PR fetch (validation
@@ -5620,6 +6369,86 @@ impl App {
     self.ci_overlay_checks = status.checks.clone();
     self.detail_overlay.set_rows(rows);
     false
+  }
+
+  /// **The rich view's invariant** (issue #420, Codex review #529, second
+  /// pass): while it is open, the rich view renders the side the **link**
+  /// prefers, in its freshest version, **title included**.
+  ///
+  /// Written once here rather than as a third patch, because three
+  /// findings in a row were the same class of bug: the view mixed the link
+  /// state, the fetch-cache state and the overlay's own kind, and each fix
+  /// reconciled one more pair of them. The consequences all follow from
+  /// the one sentence above:
+  ///
+  /// - a landing PR **takes over** an issue view that was only standing in
+  ///   for it (an earlier fetch had errored), rather than leaving the user
+  ///   on the issue until they close the overlay;
+  /// - a landing issue refreshes the view only when the issue **is** the
+  ///   view, since the link prefers the PR;
+  /// - the title is recomputed on every landing, so a PR renamed upstream
+  ///   cannot show fresh content under a stale heading.
+  ///
+  /// A kind change reopens (the content is a different object, so keeping
+  /// the cursor would be meaningless); a same-kind refresh keeps the
+  /// selection and the filter cursor clamped through `set_rows`.
+  ///
+  /// Unlike the CI counterpart this never closes the overlay and never
+  /// claims the status line: a CI list with no checks is the bordered void
+  /// `enter_ci_checks` refuses to open, while a rich view of a PR whose
+  /// workflows have not started is perfectly good content.
+  fn sync_rich_overlay(&mut self, source: RichSource) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay
+      || !matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr)
+    {
+      return;
+    }
+    let (kind, title) = match &source {
+      RichSource::Pr(pr) => {
+        // Only the linked PR may claim the view; another number landing is
+        // a stale worker's result and must not retarget the overlay.
+        if self.github.link.pr != Some(pr.number) {
+          return;
+        }
+        (
+          DetailKind::RichPr,
+          format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+        )
+      }
+      RichSource::Issue(issue) => {
+        if self.github.link.issue != Some(issue.number) || self.detail_overlay.kind != DetailKind::RichIssue {
+          return;
+        }
+        (
+          DetailKind::RichIssue,
+          format!("Issue #{} · {}", issue.number, issue.title),
+        )
+      }
+    };
+    let width = self.rich_view_width();
+    let (rows, target, number) = match &source {
+      RichSource::Pr(pr) => (
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        LinkTarget::Pr,
+        pr.number,
+      ),
+      RichSource::Issue(issue) => (
+        crate::tui::state::rich_view::rich_issue_rows(issue, width),
+        LinkTarget::Issue,
+        issue.number,
+      ),
+    };
+    let title = crate::naming::sanitise_for_terminal(&title);
+    let promoted = self.detail_overlay.kind != kind;
+    self.rich_overlay_source = Some(source);
+    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    if promoted {
+      self.detail_overlay.open(kind, title, rows);
+    } else {
+      self.detail_overlay.title = title;
+      self.detail_overlay.set_rows(rows);
+    }
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
@@ -5883,6 +6712,188 @@ impl App {
     self.refresh_link();
     Ok(())
   }
+}
+
+/// What one repo in a batch needs, resolved once rather than per target: the
+/// config carrying its hooks, its worktree list, and whether the trust ledger
+/// cleared it to run `.gwm.toml` code. A ten-row batch in one repo used to
+/// mean ten `worktree::list` calls, each walking every worktree's git status.
+struct RepoBatch {
+  repo: git2::Repository,
+  workdir: PathBuf,
+  config: Config,
+  worktrees: Vec<crate::worktree::WorktreeInfo>,
+  /// `Some(message)` when the config carries remove hooks the ledger has not
+  /// approved. Every target in this repo refuses with it.
+  trust_refusal: Option<String>,
+}
+
+impl RepoBatch {
+  /// `global_path` is the App's, not a fresh `global_config_path()`: the two
+  /// agree at runtime, and re-resolving here would make the hooks a delete
+  /// runs differ from the ones the config panel shows — and would read the
+  /// runner's real `~/.config/gwm/config.toml` from tests that injected
+  /// `None` precisely to avoid it (#194).
+  fn open(workdir: &Path, global_path: Option<&Path>, trust_mode: crate::trust::TrustMode) -> Result<Self> {
+    let repo = worktree::discover_repo(Some(workdir))?;
+    // One read of `.gwm.toml`, three answers (issue #531): the config whose
+    // hooks run, the repo layer that says whether this operation runs any,
+    // and the bytes the ledger rules on. Three separate opens meant a file
+    // rewritten in between could be approved as one thing and executed as
+    // another; they are now the same snapshot by construction, so no window
+    // is left to narrow.
+    let cfg_path = workdir.join(crate::config::CONFIG_FILE);
+    let repo_bytes = match std::fs::read(&cfg_path) {
+      Ok(b) => Some(b),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+      Err(e) => return Err(e.into()),
+    };
+    let config = Config::load_layered_from_bytes(repo_bytes.as_deref(), global_path)?;
+    let repo_only = Config::load_layered_from_bytes(repo_bytes.as_deref(), None)?;
+    let worktrees = worktree::list(&repo)?;
+    // Gate on the phases this operation actually runs, asked of the file the
+    // trust decision is about. Two narrowings, both load-bearing:
+    //
+    // - the phases, not the whole `[hooks]` table: a repo whose only hook is
+    //   `post_create` executes no code on a removal, so asking it a trust
+    //   question would refuse a delete that has always worked;
+    // - the repo's own `.gwm.toml`, not the layered config: a remove hook out
+    //   of `~/.config/gwm/config.toml` is the user's own and needs no
+    //   approval, yet it would make the merged config answer yes and send the
+    //   repo file to a ledger check that no line of it would survive to
+    //   justify (Codex review on PR #526).
+    let runs_hooks =
+      lifecycle::has_steps(&repo_only, HookPhase::PreRemove) || lifecycle::has_steps(&repo_only, HookPhase::PostRemove);
+    let trust_refusal = if runs_hooks {
+      let origin = crate::trust::origin_key_for_repo(&repo, workdir);
+      crate::trust::evaluate_silent_bytes(
+        &cfg_path,
+        repo_bytes.as_deref(),
+        &origin,
+        trust_mode,
+        crate::trust::APPROVE_VIA_TRUST_ADD,
+      )?
+    } else {
+      None
+    };
+    Ok(Self {
+      repo,
+      workdir: workdir.to_path_buf(),
+      config,
+      worktrees,
+      trust_refusal,
+    })
+  }
+}
+
+/// The `on_fail = "warn"` steps of a phase report, as status-line lines.
+fn warned_steps(report: &BootstrapReport) -> Vec<String> {
+  report
+    .steps
+    .iter()
+    .filter(|s| s.status == StepStatus::Warning)
+    .map(|s| format!("{}: {}", s.label, s.detail))
+    .collect()
+}
+
+/// Run a delete batch on a worker thread (issue #484), through the same
+/// sequence `gwm remove` uses (issue #521): `pre_remove` hooks, undo-journal
+/// entry, destruction, `post_remove` hooks.
+///
+/// Never stops at the first error: a locked, hook-blocked or already-pruned
+/// row must not strand the rest of a cleanup the user asked for. Each target
+/// is acted on through its own repo, so a workspace batch spanning several
+/// repos is removed from the right one.
+fn run_delete_batch(
+  targets: Vec<DeleteTarget>,
+  delete_branch: bool,
+  global_path: Option<PathBuf>,
+  trust_mode: crate::trust::TrustMode,
+) -> DeleteBatchOutcome {
+  let mut outcome = DeleteBatchOutcome::default();
+  let mut repos: HashMap<PathBuf, RepoBatch> = HashMap::new();
+  // The TUI has no `--skip-hooks`; `d` is the plain form of `gwm remove`.
+  let skips = HookSkips::default();
+
+  for target in targets {
+    let batch = match repos.entry(target.workdir.clone()) {
+      Entry::Occupied(e) => e.into_mut(),
+      Entry::Vacant(e) => match RepoBatch::open(&target.workdir, global_path.as_deref(), trust_mode) {
+        Ok(b) => e.insert(b),
+        Err(err) => {
+          outcome.failed.push(DeleteFailure {
+            id: target.id,
+            path: target.path,
+            error: err.to_string(),
+          });
+          continue;
+        }
+      },
+    };
+
+    if let Some(message) = &batch.trust_refusal {
+      outcome.failed.push(DeleteFailure {
+        id: target.id,
+        path: target.path,
+        error: message.clone(),
+      });
+      continue;
+    }
+
+    // The live row, for the branch and name the journal entry records. The
+    // path it commits to destroying stays `target.path` — the one the
+    // confirm overlay showed — because git hands a worktree id back to
+    // whoever recreates a worktree with that basename.
+    let Some(found) = batch.worktrees.iter().find(|w| w.id == target.id) else {
+      outcome.failed.push(DeleteFailure {
+        id: target.id,
+        path: target.path,
+        error: "no longer listed in this repository".into(),
+      });
+      continue;
+    };
+
+    match crate::removal::remove_with_lifecycle(
+      &batch.repo,
+      &batch.workdir,
+      &batch.config,
+      &skips,
+      found,
+      &target.path,
+      delete_branch,
+    ) {
+      Ok(done) => {
+        // `on_fail = "warn"` is a success with a `Warning` step in the report.
+        // The CLI prints the whole report so the user sees the `!`; the TUI
+        // has no report to print, so the warning has to reach the status line
+        // or the phase silently means nothing here (Codex review on PR #526).
+        outcome.warnings.extend(warned_steps(&done.pre));
+        outcome.warnings.extend(warned_steps(&done.post));
+        outcome.removed.push((target.id, target.path));
+        outcome.warnings.extend(done.journal_warning);
+      }
+      Err(failure) => {
+        outcome.warnings.extend(warned_steps(&failure.outcome.pre));
+        outcome.warnings.extend(warned_steps(&failure.outcome.post));
+        outcome.warnings.extend(failure.outcome.journal_warning.clone());
+        if failure.outcome.removed {
+          // A `post_remove` hook aborted on a worktree that IS gone. Calling
+          // that a failed removal would report the opposite of what is on
+          // disk, and would keep the confirm overlay open offering to remove
+          // a row that no longer exists (Codex review on PR #520).
+          outcome.removed.push((target.id, target.path));
+          outcome.warnings.push(failure.error.to_string());
+        } else {
+          outcome.failed.push(DeleteFailure {
+            id: target.id,
+            path: target.path,
+            error: failure.error.to_string(),
+          });
+        }
+      }
+    }
+  }
+  outcome
 }
 
 /// Resolve the shell command for `mode = "shell"`. Precedence:

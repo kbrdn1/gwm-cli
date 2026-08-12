@@ -5,7 +5,7 @@ use gwm::naming::BRANCH_TYPES;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
-  ConfirmKeyAction, CountdownTickOutcome, Field, View,
+  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -44,6 +44,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -293,8 +294,10 @@ fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
   let (repo, _) = init_repo();
   let home = tempfile::tempdir().unwrap();
   let global = home.path().join("gwm").join("config.toml");
-  // The global layer binds `top` to a two-stroke chord.
-  set_array_at(&global, "tui.keys.top", &["z z".to_string()]).unwrap();
+  // The global layer binds `top` to a two-stroke chord. `u` rather than `z`
+  // since #484 moved `cycle_sidebar_layout` onto `z`, and a shipped default
+  // is a prefix conflict for any chord starting with the same key.
+  set_array_at(&global, "tui.keys.top", &["u u".to_string()]).unwrap();
 
   let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
   app.enter_config_panel();
@@ -308,10 +311,10 @@ fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
     .unwrap();
   app.config_panel.selected = idx;
 
-  // `z` alone is a prefix of the global `z z` — valid in the repo file by
+  // `u` alone is a prefix of the global `u u` — valid in the repo file by
   // itself, invalid once the layers merge.
   app.config_panel.begin_capture();
-  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
   app.commit_key_capture();
 
   assert!(app.status.starts_with("keys:"), "rejection surfaced: {}", app.status);
@@ -2667,6 +2670,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     url: "https://example.test".into(),
     labels: vec!["feature".into()],
     updated_at: "2026-05-19T00:00:00Z".into(),
+    detail: Default::default(),
   };
   let pr = PrStatus {
     number: 61,
@@ -2678,6 +2682,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     checks_total: 3,
     ci: CiState::Running,
     checks: vec![],
+    detail: Default::default(),
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -2706,6 +2711,7 @@ fn loaded_issue_status_persists_title_for_no_fetch_startup() {
     url: "https://example.test/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2750,6 +2756,7 @@ fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
         completed_at: None,
       },
     ],
+    detail: Default::default(),
   }));
 
   app.enter_ci_checks();
@@ -2782,6 +2789,7 @@ fn pr_summary_line_advertises_the_ci_checks_key_after_the_indicator() {
     ci,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -2838,6 +2846,7 @@ fn pr_line_ci_hint_follows_the_focus_context() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   let text_of = |app: &App| -> String {
@@ -3027,6 +3036,7 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   // Codex review on PR #455: the contextual routing lives on the KEY path
@@ -3094,6 +3104,7 @@ fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(
     61,
@@ -3180,6 +3191,7 @@ fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(vec![PrCheck {
     name: "a".into(),
@@ -3230,6 +3242,7 @@ fn app_with_open_ci_overlay_on_pr_61() -> (tempfile::TempDir, git2::Repository, 
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
@@ -3366,6 +3379,7 @@ fn ci_filter_cursor_clamps_when_a_refresh_shrinks_the_matches() {
     checks_total: checks.len() as u32,
     ci: CiState::Passing,
     checks,
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(vec![
     mk_check("check-a"),
@@ -3419,6 +3433,7 @@ fn ci_overlay_ticks_running_check_durations() {
       started_at,
       completed_at: None,
     }],
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Running, Some(started.clone()))));
   app.enter_ci_checks();
@@ -3473,6 +3488,7 @@ fn ci_overlay_ticks_survive_a_pr_cache_invalidation() {
       started_at: Some(started),
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.enter_ci_checks();
 
@@ -3518,6 +3534,7 @@ fn pr_line_ci_hint_is_hidden_in_picker_mode() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   let text: String = gwm::tui::github_status_lines(&app, 120)
     .iter()
@@ -3573,6 +3590,7 @@ fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
 
   // Agents overlay opened (captures the target), then interrupted without
@@ -3630,6 +3648,7 @@ fn pr_line_ci_hint_disappears_when_the_binding_is_removed() {
       started_at: None,
       completed_at: None,
     }],
+    detail: Default::default(),
   }));
   app.focus_worktrees();
   app.keymap.apply_override(Action::CiChecks, Vec::new()).unwrap();
@@ -3683,6 +3702,7 @@ fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -3706,6 +3726,7 @@ fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -3865,6 +3886,7 @@ fn sample_issue_titled(n: u64, title: &str) -> gwm::github::IssueStatus {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }
 }
 
@@ -4267,6 +4289,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -4860,6 +4883,7 @@ fn refresh_github_status_message_celebrates_full_success() {
     url: "https://example.test".into(),
     labels: vec![],
     updated_at: "".into(),
+    detail: Default::default(),
   };
   app.apply_issue_fetch_result(Ok(issue));
   app.report_github_refresh_status();
@@ -5192,6 +5216,7 @@ fn table_marker_issue_pastille_uses_loaded_closed_issue_state() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   let theme = Theme::default();
@@ -5233,6 +5258,7 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }));
 
   let theme = Theme::default();
@@ -5368,6 +5394,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -5876,6 +5903,7 @@ fn issue_summary_line_truncates_loaded_state_to_budget() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     828,
@@ -5908,6 +5936,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     ci: CiState::Passing,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     70,
@@ -5936,6 +5965,7 @@ fn issue_summary_line_keeps_short_title_intact() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     1,
@@ -6019,6 +6049,7 @@ fn issue_summary_line_loaded_icon_uses_issue_state_color() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = issue_summary_line(
@@ -6064,6 +6095,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6109,6 +6141,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -6140,6 +6173,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     ci: gwm::github::CiState::Failing,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let theme = Theme::default();
   let line = pr_summary_line(
@@ -6175,6 +6209,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     ci: gwm::github::CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6222,6 +6257,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     ci: CiState::None,
     checks: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = pr_summary_line(
     9,
@@ -6285,6 +6321,7 @@ fn issue_summary_line_state_badge_is_a_reverse_video_chip() {
     url: String::new(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   };
   let line = issue_summary_line(
     7,
@@ -6332,6 +6369,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
@@ -8287,7 +8325,7 @@ fn drain_drops_a_superseded_sync_result() {
 
 #[test]
 fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
-  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
@@ -8297,9 +8335,11 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
     .task_result_sender()
     .send(TaskMsg::DeleteWorktree(
       generation,
-      "alpha".into(),
-      "/tmp/alpha".into(),
-      Ok(()),
+      DeleteBatchOutcome {
+        removed: vec![("alpha".into(), "/tmp/alpha".into())],
+        failed: vec![],
+        warnings: vec![],
+      },
     ))
     .unwrap();
   let applied = app.drain_task_results();
@@ -8317,7 +8357,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
 
 #[test]
 fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
-  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, DeleteFailure, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
@@ -8326,9 +8366,15 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
     .task_result_sender()
     .send(TaskMsg::DeleteWorktree(
       generation,
-      "alpha".into(),
-      "/tmp/alpha".into(),
-      Err("permission denied".into()),
+      DeleteBatchOutcome {
+        removed: vec![],
+        failed: vec![DeleteFailure {
+          id: "alpha".into(),
+          path: "/tmp/alpha".into(),
+          error: "permission denied".into(),
+        }],
+        warnings: vec![],
+      },
     ))
     .unwrap();
   let applied = app.drain_task_results();
@@ -8346,7 +8392,7 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
 
 #[test]
 fn drain_drops_a_superseded_delete_worktree_result() {
-  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, TaskKind, TaskMsg};
   let (_dir, mut app) = make_app();
   let stale = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.tasks.invalidate(TaskKind::DeleteWorktree);
@@ -8357,9 +8403,11 @@ fn drain_drops_a_superseded_delete_worktree_result() {
     .task_result_sender()
     .send(TaskMsg::DeleteWorktree(
       stale,
-      "alpha".into(),
-      "/tmp/alpha".into(),
-      Ok(()),
+      DeleteBatchOutcome {
+        removed: vec![("alpha".into(), "/tmp/alpha".into())],
+        failed: vec![],
+        warnings: vec![],
+      },
     ))
     .unwrap();
   app.drain_task_results();
@@ -9588,13 +9636,88 @@ fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.build]\ncommand = [\"cargo\", \"build\", \"--release\"]\n");
   app.enter_exec_picker();
   let expected_cwd = app.selected().unwrap().path.clone();
-  let (argv, cwd) = app.exec_picker_resolve().expect("a valid profile resolves");
+  let (argv, cwd, _) = app.exec_picker_resolve().expect("a valid profile resolves");
   assert_eq!(
     argv,
     vec!["cargo".to_string(), "build".to_string(), "--release".to_string()],
     "argv is the frozen command array verbatim (no shell)"
   );
   assert_eq!(cwd, expected_cwd, "cwd is the selected worktree's path");
+}
+
+#[cfg(unix)] // `[container]` is refused on Windows (host paths cannot be mirrored there).
+#[test]
+fn exec_picker_wraps_a_container_profile_the_same_way_the_cli_does() {
+  // Issue #421: the same profile must not mean "in a container" on the CLI
+  // and "on the host" in the TUI. `runtime` is explicit so the test never
+  // depends on the runner having docker or podman installed.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  app.enter_exec_picker();
+  let cwd = app.selected().unwrap().path.clone();
+  let (argv, _, _) = app.exec_picker_resolve().expect("a container profile resolves");
+  assert_eq!(argv[0], "docker", "argv[0] is the runtime the PTY overlay spawns");
+  assert_eq!(argv[1], "run");
+  // This overlay owns a real pty, so the container gets stdin and a terminal
+  // (the fan-out on the CLI deliberately does not).
+  assert!(
+    argv.contains(&"-i".to_string()) && argv.contains(&"-t".to_string()),
+    "the overlay allocates stdin + tty: {argv:?}"
+  );
+  // The selected worktree here is the main checkout, whose gitdir lives
+  // inside it: one mount, its own path (the CLI dedupe, exercised through
+  // the TUI path).
+  let wt = cwd.components().collect::<std::path::PathBuf>().display().to_string();
+  assert!(
+    argv.windows(2).any(|w| w[0] == "-v" && w[1] == format!("{wt}:{wt}")),
+    "the worktree path is mirrored: {argv:?}"
+  );
+  assert_eq!(
+    argv.iter().filter(|t| *t == "-v").count(),
+    1,
+    "the gitdir already lives inside this worktree: {argv:?}"
+  );
+  assert_eq!(
+    &argv[argv.len() - 2..],
+    &["cargo".to_string(), "test".to_string()],
+    "the profile's command is the container's CMD"
+  );
+}
+
+#[cfg(unix)] // `[container]` is refused on Windows.
+#[test]
+fn exec_picker_hands_the_overlay_a_teardown_for_a_container_profile() {
+  // The overlay kills the `docker` client on close, which leaves the
+  // container running (the daemon owns it, `--rm` only fires on exit). So the
+  // resolve hands the run loop the command that removes it by name.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  app.enter_exec_picker();
+  let (argv, _, teardown) = app.exec_picker_resolve().expect("resolves");
+  let teardown = teardown.expect("a containerised profile carries a teardown");
+  let name = argv
+    .windows(2)
+    .find(|w| w[0] == "--name")
+    .map(|w| w[1].clone())
+    .expect("the run is named");
+  assert_eq!(
+    teardown,
+    vec!["docker".to_string(), "rm".to_string(), "-f".to_string(), name],
+    "the teardown removes the very container that was started"
+  );
+}
+
+#[test]
+fn exec_picker_leaves_a_hostless_profile_alone() {
+  // The complement: no `[container]` ⇒ the argv is the command verbatim, the
+  // pre-#421 behaviour.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.plain]\ncommand = [\"cargo\", \"test\"]\n");
+  app.enter_exec_picker();
+  let (argv, _, teardown) = app.exec_picker_resolve().expect("resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+  assert!(teardown.is_none(), "a host command has nothing to tear down");
 }
 
 #[test]
@@ -9854,7 +9977,7 @@ fn exec_picker_runs_in_the_open_time_worktree_and_config_after_a_drift() {
   // Drift: the list AND the live config moved out from under the overlay.
   app.worktrees = vec![worktree_fixture("other")];
   app.config.exec.profiles.clear();
-  let (argv, cwd) = app
+  let (argv, cwd, _) = app
     .exec_picker_resolve()
     .expect("resolves against the captured cfg + cwd");
   assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
@@ -9897,7 +10020,7 @@ fn exec_picker_pins_a_worktree_relative_program_to_the_target() {
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.run]\ncommand = [\"./run.sh\", \"--ci\"]\n");
   let wt = app.selected().unwrap().path.clone();
   app.enter_exec_picker();
-  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  let (argv, _cwd, _) = app.exec_picker_resolve().expect("resolves");
   // Same anchoring the CLI exec path applies — an absolute path under the
   // worktree, not gwm's own cwd.
   assert_eq!(
@@ -9915,7 +10038,7 @@ fn exec_picker_leaves_a_bare_command_for_path_lookup() {
   // PATH resolution inside the worktree.
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.t]\ncommand = [\"cargo\", \"test\"]\n");
   app.enter_exec_picker();
-  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  let (argv, _cwd, _) = app.exec_picker_resolve().expect("resolves");
   assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
 }
 
@@ -9951,8 +10074,9 @@ fn destructive_overlay_open_flags_exec_and_clean_views() {
   assert!(app.destructive_overlay_open());
   app.view = View::CleanReport;
   assert!(app.destructive_overlay_open());
-  // The delete-confirm modal is not in this class — it has no captured target
-  // to protect and reads the live selection by design.
+  // The delete-confirm modal is not in this class: since #484 it does capture
+  // its targets, but by path rather than by row index, so a refresh landing
+  // mid-countdown cannot retarget it and there is nothing to suspend for.
   app.view = View::Confirm;
   assert!(!app.destructive_overlay_open());
 }
@@ -10787,6 +10911,7 @@ fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
     url: "https://web.acme.internal:8443/team/proj/-/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   app.enter_open_menu();
@@ -10816,6 +10941,7 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
     url: "https://github.com/acme/widgets/issues/42".into(),
     labels: vec![],
     updated_at: String::new(),
+    detail: Default::default(),
   }));
 
   repo.remote_delete("origin").unwrap();
@@ -11573,4 +11699,1288 @@ fn a_hidden_segment_cannot_block_the_rename_it_is_not_part_of() {
     app.status
   );
   let _ = out;
+}
+
+// --- #484: multi-row selection + bulk delete -----------------------------
+//
+// The cursor row (`list_state`) and the marked set are two different things:
+// `d` acts on the marked set when it is non-empty, on the cursor row
+// otherwise. Every assertion below is on the pure state, no ratatui.
+
+fn app_with_rows(names: &[&str]) -> (tempfile::TempDir, App) {
+  let (dir, mut app) = make_app();
+  app.worktrees = names.iter().map(|n| worktree_fixture(n)).collect();
+  app.list_state.select(Some(0));
+  (dir, app)
+}
+
+#[test]
+fn toggle_select_marks_and_unmarks_the_cursor_row() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1, "status was: {}", app.status);
+  assert!(app.is_marked(&PathBuf::from("/tmp/gwm-test/alpha")));
+
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 0, "a second press must unmark the row");
+}
+
+#[test]
+fn the_main_worktree_can_never_be_marked() {
+  // `d` refuses the main worktree, so marking it would build a batch with a
+  // target that can only fail.
+  let (_d, mut app) = app_with_rows(&["main"]);
+  app.worktrees[0].is_main = true;
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 0, "status was: {}", app.status);
+  assert!(app.status.contains("main"), "and it must say why: {}", app.status);
+}
+
+#[test]
+fn delete_targets_are_the_marked_rows_in_list_order() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta", "gamma"]);
+  // Mark gamma first, then alpha: the batch must still run in list order.
+  app.list_state.select(Some(2));
+  app.toggle_select();
+  app.list_state.select(Some(0));
+  app.toggle_select();
+
+  let ids: Vec<String> = app.delete_targets().into_iter().map(|t| t.id).collect();
+  assert_eq!(ids, vec!["alpha".to_string(), "gamma".to_string()]);
+}
+
+#[test]
+fn delete_targets_fall_back_to_the_cursor_row_when_nothing_is_marked() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.list_state.select(Some(1));
+  let ids: Vec<String> = app.delete_targets().into_iter().map(|t| t.id).collect();
+  assert_eq!(ids, vec!["beta".to_string()]);
+}
+
+#[test]
+fn a_mark_on_a_row_that_no_longer_exists_targets_nothing() {
+  // Marks are keyed by path; a row that vanished must not survive as a
+  // phantom target, and must NOT silently fall back to the cursor row
+  // either — that would delete a worktree the user never marked.
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  app.worktrees.remove(0);
+  app.list_state.select(Some(0));
+  assert!(app.delete_targets().is_empty(), "a stale mark must target nothing");
+}
+
+#[test]
+fn a_refresh_prunes_the_marks_whose_row_is_gone() {
+  // The background auto-refresh must not clear a selection mid-build, but it
+  // has to drop the rows that no longer exist. Refreshing against the real
+  // repo replaces the synthetic rows, so every mark below is stale.
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1);
+  app.refresh().unwrap();
+  assert_eq!(app.marked_count(), 0, "a mark whose row is gone must be pruned");
+}
+
+#[test]
+fn opening_the_filter_clears_the_marks() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  app.enter_filter();
+  assert_eq!(app.marked_count(), 0);
+}
+
+#[test]
+fn the_manual_refresh_clears_the_marks() {
+  let (_d, mut app) = app_with_rows(&["alpha", "beta"]);
+  app.toggle_select();
+  app.request_refresh();
+  assert_eq!(app.marked_count(), 0);
+}
+
+#[test]
+fn entering_the_confirm_overlay_snapshots_the_batch() {
+  // The countdown can run while an auto-refresh lands and reorders the list,
+  // so the targets are resolved once, at open time.
+  let (_d, mut app) = app_with_rows(&["alpha", "beta", "gamma"]);
+  app.toggle_select();
+  app.list_state.select(Some(1));
+  app.toggle_select();
+
+  app.enter_confirm_delete();
+  assert_eq!(app.view, View::Confirm, "status was: {}", app.status);
+  assert_eq!(app.pending_delete().len(), 2);
+
+  app.worktrees.clear();
+  assert_eq!(app.pending_delete().len(), 2, "the snapshot must not track the list");
+}
+
+#[test]
+fn the_batch_status_names_the_failures() {
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+  let single = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![],
+    warnings: vec![],
+  };
+  assert_eq!(single.status_line(), "removed alpha (/tmp/alpha)");
+
+  let batch = DeleteBatchOutcome {
+    removed: vec![
+      ("alpha".into(), "/tmp/alpha".into()),
+      ("beta".into(), "/tmp/beta".into()),
+    ],
+    failed: vec![DeleteFailure {
+      id: "gamma".into(),
+      path: "/tmp/gamma".into(),
+      error: "locked".into(),
+    }],
+    warnings: vec![],
+  };
+  assert_eq!(batch.status_line(), "removed 2 of 3 worktrees; failed: gamma (locked)");
+
+  let all_ok = DeleteBatchOutcome {
+    removed: vec![
+      ("alpha".into(), "/tmp/alpha".into()),
+      ("beta".into(), "/tmp/beta".into()),
+    ],
+    failed: vec![],
+    warnings: vec![],
+  };
+  assert_eq!(all_ok.status_line(), "removed 2 worktrees");
+}
+
+#[test]
+fn a_warning_rides_the_status_line_without_becoming_a_failure() {
+  // Issue #521: a `post_remove` hook that aborts, or an undo-journal entry
+  // that could not be written, happens around a removal that DID happen.
+  // Counting it as a failure would report the opposite of what is on disk,
+  // and `failure_banner` is what keeps the confirm overlay open, so a
+  // warning must not reach it.
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+
+  let with_warning = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![],
+    warnings: vec!["hook post_remove 'cleanup' failed: exited with 1".into()],
+  };
+  assert_eq!(
+    with_warning.status_line(),
+    "removed alpha (/tmp/alpha); hook post_remove 'cleanup' failed: exited with 1"
+  );
+  assert_eq!(
+    with_warning.failure_banner(),
+    None,
+    "a warning must not hold the confirm overlay open"
+  );
+
+  // A real failure still owns the banner, and warnings ride along.
+  let both = DeleteBatchOutcome {
+    removed: vec![("alpha".into(), "/tmp/alpha".into())],
+    failed: vec![DeleteFailure {
+      id: "beta".into(),
+      path: "/tmp/beta".into(),
+      error: "locked".into(),
+    }],
+    warnings: vec!["journal unwritable".into()],
+  };
+  assert_eq!(
+    both.status_line(),
+    "removed 1 of 2 worktrees; failed: beta (locked); journal unwritable"
+  );
+  assert_eq!(both.failure_banner(), Some("/tmp/beta: locked".into()));
+}
+
+#[test]
+fn a_partial_batch_narrows_the_confirm_to_the_failures_never_to_the_cursor() {
+  // Codex review on PR #520 (P1). `worktree::remove` prunes the admin entry
+  // BEFORE deleting the directory (#98), so a removal that fails on the
+  // filesystem still drops its row from `repo.worktrees()`. The refresh in
+  // the drain then prunes its mark, and a batch RECOMPUTED from an empty
+  // mark set falls back to the cursor row: a second confirm would delete a
+  // worktree the user never marked. The batch may only ever narrow.
+  use gwm::tui::state::async_task::{DeleteBatchOutcome, DeleteFailure, TaskKind, TaskMsg};
+
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let doomed = base.path().join("wt-doomed");
+  let bystander = base.path().join("wt-bystander");
+  gwm::worktree::add(&repo, "wt-doomed", &doomed, "feat/#484-doomed", false).unwrap();
+  gwm::worktree::add(&repo, "wt-bystander", &bystander, "feat/#484-bystander", false).unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let doomed_row = app
+    .worktrees
+    .iter()
+    .position(|w| w.name == "wt-doomed")
+    .expect("the doomed worktree is listed");
+  app.list_state.select(Some(doomed_row));
+  app.toggle_select();
+  app.enter_confirm_delete();
+  assert_eq!(app.pending_delete().len(), 1, "status was: {}", app.status);
+  let confirmed: Vec<std::path::PathBuf> = app.pending_delete().iter().map(|t| t.path.clone()).collect();
+
+  // The worktree is gone from git's list (pruned) but its removal reported a
+  // failure — the exact shape a mid-removal filesystem error leaves behind.
+  gwm::worktree::remove(&repo, "wt-doomed", false).unwrap();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      DeleteBatchOutcome {
+        removed: vec![],
+        failed: vec![DeleteFailure {
+          id: "wt-doomed".into(),
+          path: doomed.clone(),
+          error: "directory not empty".into(),
+        }],
+        warnings: vec![],
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Confirm, "the failure keeps the overlay open");
+  for target in app.pending_delete() {
+    assert!(
+      confirmed.contains(&target.path),
+      "the retry batch must only ever contain rows the user confirmed, got {:?}",
+      target.path
+    );
+  }
+  assert!(
+    !app.pending_delete().iter().any(|t| t.path == bystander),
+    "and never the row the cursor landed on after the refresh"
+  );
+}
+
+#[test]
+fn the_failure_banner_separates_two_repos_sharing_a_worktree_id() {
+  // Codex review on PR #520 (P2): a workspace batch spans repos, and two of
+  // them can hold the same worktree id. The banner is where the user goes to
+  // fix things, so it names each failure by path.
+  use gwm::tui::{DeleteBatchOutcome, DeleteFailure};
+  let outcome = DeleteBatchOutcome {
+    removed: vec![],
+    failed: vec![
+      DeleteFailure {
+        id: "feat-1-auth".into(),
+        path: "/repos/alpha/feat-1-auth".into(),
+        error: "locked".into(),
+      },
+      DeleteFailure {
+        id: "feat-1-auth".into(),
+        path: "/repos/beta/feat-1-auth".into(),
+        error: "dirty".into(),
+      },
+    ],
+    warnings: vec![],
+  };
+  let banner = outcome.failure_banner().expect("two failures produce a banner");
+  assert!(
+    banner.contains("/repos/alpha/feat-1-auth") && banner.contains("/repos/beta/feat-1-auth"),
+    "both repos must be tellable apart: {banner}"
+  );
+}
+
+// ---- per-worktree notes (#515) -------------------------------------------
+
+#[test]
+fn opening_the_note_editor_resolves_the_file_in_the_main_git_dir() {
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+
+  app.open_note_editor();
+
+  let path = app
+    .note_editor
+    .as_ref()
+    .expect("the main row carries a branch")
+    .path
+    .clone();
+  // `paths_equal` canonicalises: on macOS the tempdir is `/var/...` and the
+  // resolved note is `/private/var/...`, the same inode spelled two ways.
+  assert!(
+    common::paths_equal(
+      path.parent().unwrap(),
+      &dir.path().join(".git").join("gwm").join("notes")
+    ),
+    "the note belongs in the main checkout's git dir, got {}",
+    path.display()
+  );
+  assert_eq!(path.file_name().unwrap(), "main.md", "keyed on the branch");
+  assert!(
+    path.parent().unwrap().is_dir(),
+    "the parent directory must exist before $EDITOR is spawned"
+  );
+  assert!(
+    !path.exists(),
+    "the file itself is the editor's to create — quitting without saving leaves no note"
+  );
+}
+
+#[test]
+fn opening_a_note_on_a_detached_row_says_why() {
+  // No branch, no filename. The rule `pinnable_branch` settled for the agent
+  // pin, restated so the key press explains itself instead of no-oping.
+  let (_dir, mut app) = make_app();
+  let mut row = worktree_fixture("detached");
+  row.branch = None;
+  app.worktrees = vec![row];
+  app.list_state.select(Some(0));
+
+  app.open_note_editor();
+
+  assert!(app.note_editor.is_none());
+  assert_eq!(
+    app.view,
+    View::List,
+    "no modal opened over a row that cannot carry a note"
+  );
+  assert!(
+    app.status.contains("detached"),
+    "the status bar must carry the reason, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn opening_a_note_with_nothing_selected_says_so() {
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.open_note_editor();
+
+  assert!(app.note_editor.is_none());
+  assert_eq!(app.view, View::List);
+  assert_eq!(app.status, "nothing selected");
+}
+
+#[test]
+fn a_branch_name_no_filesystem_can_back_refuses_the_note_out_loud() {
+  // git accepts `feat/bad|name`; Windows does not. Refusing beats writing a
+  // file whose name means a different branch once the repo is cloned there.
+  let (_dir, mut app) = make_app();
+  let mut row = worktree_fixture("weird");
+  row.branch = Some("feat/bad|name".into());
+  app.worktrees = vec![row];
+  app.list_state.select(Some(0));
+
+  app.open_note_editor();
+
+  assert!(app.note_editor.is_none());
+  assert_eq!(app.view, View::List);
+  assert!(
+    app.status.contains("portable"),
+    "the status bar must say the name is the problem, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn the_marker_follows_what_the_editor_left_behind() {
+  // One file read for one row on the way back from `$EDITOR` — not a full
+  // `refresh()`, which would drop the mark set (#484) and re-shell every
+  // row's git config to repaint a single glyph.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+  assert!(!app.worktrees[0].has_note, "no note yet");
+
+  std::fs::write(&path, "what I had just figured out\n").unwrap();
+  app.sync_selected_note_marker();
+  assert!(app.worktrees[0].has_note, "the marker must light up after a save");
+
+  // Emptied rather than deleted: the marker must go back down.
+  std::fs::write(&path, "\n").unwrap();
+  app.sync_selected_note_marker();
+  assert!(!app.worktrees[0].has_note, "a blanked note must clear the marker");
+}
+
+// ---- launcher argv splitting (#515, Codex review pass 6) ------------------
+
+#[test]
+fn a_configured_editor_command_splits_into_program_and_arguments() {
+  // `$EDITOR` and `$SHELL` are shell lines by convention: git, cargo and
+  // systemctl all word-split them, and `[review]` / hook `run =` lines in
+  // this repo already go through `shell_words`. Handing the whole string to
+  // `Command::new` looked for an executable literally named `code --wait`,
+  // so `N` could never open a note for a VS Code or Sublime user.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(launch_argv("vi"), vec!["vi"]);
+  assert_eq!(launch_argv("code --wait"), vec!["code", "--wait"]);
+  assert_eq!(launch_argv("nvim -f"), vec!["nvim", "-f"]);
+  assert_eq!(launch_argv("subl -w -n"), vec!["subl", "-w", "-n"]);
+}
+
+#[test]
+fn a_program_path_containing_a_space_is_quoted_not_split() {
+  // The counterpart of word-splitting: a real path with a space stays one
+  // token when it is quoted, which is how every other consumer of these
+  // variables expects it to be written.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("\"/Applications/My App/bin/edit\" --wait"),
+    vec!["/Applications/My App/bin/edit", "--wait"]
+  );
+  assert_eq!(
+    launch_argv("'/Applications/My App/bin/edit'"),
+    vec!["/Applications/My App/bin/edit"]
+  );
+}
+
+#[test]
+fn an_unparseable_command_is_passed_through_whole() {
+  // An unbalanced quote is a user typo in `.gwm.toml`. Falling back to the
+  // raw string keeps the pre-existing behaviour and lets the spawn failure
+  // name what was configured, instead of turning a typo into a panic or a
+  // silently different program.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("edit --flag \"unbalanced"),
+    vec!["edit --flag \"unbalanced"]
+  );
+  assert_eq!(launch_argv(""), vec![""]);
+}
+
+#[test]
+fn a_command_that_names_a_real_file_is_never_split() {
+  // Word-splitting is POSIX, filenames are not. `shell_words` drops an
+  // unprotected backslash, so `EDITOR=C:\Tools\nvim.exe` — an absolute path
+  // that `Command::new` launched fine before word-splitting was introduced —
+  // came back as `C:Toolsnvim.exe` and stopped launching (Codex review, PR
+  // #530). A string that already names a file is not a shell line: nothing is
+  // left to split, so it is handed over whole.
+  use gwm::tui::launch_argv;
+  let dir = tempfile::TempDir::new().unwrap();
+
+  let spaced = dir.path().join("My Editor.sh");
+  std::fs::write(&spaced, "#!/bin/sh\n").unwrap();
+  let spaced = spaced.to_str().unwrap();
+  assert_eq!(launch_argv(spaced), vec![spaced]);
+
+  // The backslash is the case the splitter actually mangles. Windows has no
+  // filename that can carry one, so the file that proves it is a Unix file;
+  // the code path it exercises is the same one a Windows path takes.
+  #[cfg(unix)]
+  {
+    let backslashed = dir.path().join(r"Tools\nvim");
+    std::fs::write(&backslashed, "#!/bin/sh\n").unwrap();
+    let backslashed = backslashed.to_str().unwrap();
+    assert_eq!(launch_argv(backslashed), vec![backslashed]);
+  }
+}
+
+// --- rich PR / issue view wiring (issue #420) -----------------------------
+
+/// A PR with enough rich payload for the view to have something to render.
+fn rich_pr_fixture(number: u64) -> PrStatus {
+  PrStatus {
+    number,
+    title: "rich fixture".into(),
+    state: PrState::Open,
+    url: format!("https://example.test/pull/{number}"),
+    updated_at: "2026-08-04T13:00:00Z".into(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: "A description worth reading.".into(),
+      author: "kbrdn1".into(),
+      additions: 10,
+      deletions: 2,
+      base_ref: "dev".into(),
+      head_ref: "feat/#42-tui-search".into(),
+      reviews: vec![],
+      comments: vec![],
+    },
+  }
+}
+
+fn rich_issue_fixture(number: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number,
+    title: "rich issue fixture".into(),
+    state: gwm::github::IssueState::Open,
+    url: format!("https://example.test/issues/{number}"),
+    labels: vec!["feature".into()],
+    updated_at: "2026-08-01T10:00:00Z".into(),
+    detail: gwm::forge::IssueDetail {
+      body: "The issue body.".into(),
+      author: "sassman".into(),
+      comments: vec![],
+    },
+  }
+}
+
+#[test]
+fn quoting_protects_a_backslashed_path_that_takes_arguments() {
+  // The escape hatch for the case the fast path above cannot see: a path that
+  // does not exist on this machine, or one that carries flags. Double quotes
+  // are what the doc tells the user to reach for, so the claim is pinned
+  // rather than asserted in prose — POSIX only treats `\` as an escape inside
+  // double quotes before `$`, `` ` ``, `"`, `\` and a newline.
+  use gwm::tui::launch_argv;
+
+  assert_eq!(
+    launch_argv("\"C:\\Tools\\nvim.exe\" --clean"),
+    vec!["C:\\Tools\\nvim.exe", "--clean"]
+  );
+}
+
+#[test]
+fn rich_view_prefers_the_linked_pr() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "with both linked, the PR is the thing being worked on"
+  );
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.contains(&"kbrdn1"), "the metadata block rendered: {vals:?}");
+  assert!(
+    vals.iter().any(|v| v.contains("A description worth reading.")),
+    "the body rendered: {vals:?}"
+  );
+}
+
+#[test]
+fn rich_view_falls_back_to_the_issue() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.iter().any(|v| v.contains("The issue body.")), "{vals:?}");
+}
+
+#[test]
+fn rich_view_without_a_fetched_status_explains_instead_of_opening_blank() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+
+  app.enter_rich_view();
+
+  assert_eq!(app.view, View::List, "an empty overlay is a bordered void");
+  assert!(
+    app.status.contains("fetch"),
+    "the status must name the way out: {}",
+    app.status
+  );
+}
+
+#[test]
+fn rich_view_enter_opens_the_selected_row_url() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  let url_row = app
+    .detail_overlay
+    .rows
+    .iter()
+    .position(|r| r.label == "url")
+    .expect("a url row");
+  app.detail_overlay.selected = url_row;
+
+  assert_eq!(app.rich_selected_url().as_deref(), Some("https://example.test/pull/61"));
+
+  // An inert row (the body) exposes nothing to open.
+  let body_row = app
+    .detail_overlay
+    .rows
+    .iter()
+    .position(|r| r.value.contains("A description worth reading."))
+    .expect("a body row");
+  app.detail_overlay.selected = body_row;
+  assert_eq!(app.rich_selected_url(), None);
+}
+
+#[test]
+fn a_link_change_closes_the_rich_view() {
+  // Same invariant the CI checks overlay carries (Codex review #455): the
+  // rows belong to the PR they were built for, and `Enter` would otherwise
+  // open the previous link's URL. `is_forge_linked` is what makes the
+  // guard cover every forge-backed consumer by construction.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+
+  assert_eq!(app.view, View::List, "the overlay must not outlive its link");
+}
+
+#[test]
+fn a_resize_rewraps_the_rich_view() {
+  // The builder wraps against a width the App carries; a resize that never
+  // reaches the App leaves rows wrapped for the old width and the renderer
+  // ellipsises them.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = "word ".repeat(120);
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  let wide = app.detail_overlay.rows.len();
+
+  app.set_term_width(60);
+  let narrow = app.detail_overlay.rows.len();
+
+  assert!(
+    narrow > wide,
+    "a narrower terminal must produce more wrapped rows ({narrow} vs {wide})"
+  );
+}
+
+#[test]
+fn an_issue_standing_in_for_a_slower_pr_is_replaced_when_it_lands() {
+  // The original concern (Codex review #529, first pass) replayed by hand
+  // after the guard that answered it was REMOVED. It refused to open while
+  // the PR was `Loading`, which guarded a symptom of the missing
+  // promotion; once `sync_rich_overlay` existed the guard only produced
+  // its own edge case, since `Idle` ("nobody asked yet") is
+  // indistinguishable from `Loading` for a user staring at the wrong side.
+  //
+  // What actually had to hold is this: the user never gets STUCK on the
+  // issue. Showing it meanwhile beats showing nothing.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.mark_pr_loading_for_test(61);
+
+  app.enter_rich_view();
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "what is available opens rather than nothing"
+  );
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "and the PR claims the view the moment it lands"
+  );
+}
+
+#[test]
+fn an_origin_move_between_instances_closes_the_rich_view() {
+  // Codex review #529: the overlay identity was keyed on the bare SLUG, so
+  // an origin moving from github.com/acme/widgets to gitlab.com/acme/widgets
+  // compared equal, the overlay survived, and `Enter` still opened the old
+  // host's URL. Same failure `open_menu_drops_a_cached_url_from_the_previous_origin`
+  // pins for the fetch caches (Codex review #458); the identity now carries
+  // the full `<kind> <web origin>/<slug>`.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay, "precondition");
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "the overlay outlived the instance its rows describe"
+  );
+}
+
+#[test]
+fn rich_view_falls_back_to_the_issue_when_the_pr_fetch_failed() {
+  // The other half of the same rule: a PR whose fetch ERRORED is never
+  // going to land, so refusing to show the issue would leave the user with
+  // nothing. Only an in-flight PR holds the view back.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Err("gh: not found".into()));
+
+  app.enter_rich_view();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+}
+
+#[test]
+fn a_resize_still_rewraps_after_the_cache_was_flushed() {
+  // Codex review #529: the rebuild read the fetch CACHE, so a resize while
+  // a refresh was in flight found no `Loaded` and gave up. If that refresh
+  // then failed, nothing ever rebuilt and the view stayed wrapped for the
+  // old terminal for good. The overlay owns its source instead, the same
+  // fix `ci_overlay_checks` already carries for the duration tick (#455).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = "word ".repeat(120);
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  let wide = app.detail_overlay.rows.len();
+
+  // The `F` refresh flushes the cache before re-requesting.
+  app.refresh_link();
+  assert_eq!(app.view, View::DetailOverlay, "same link, the overlay stays up");
+
+  app.set_term_width(60);
+
+  assert!(
+    app.detail_overlay.rows.len() > wide,
+    "the overlay must re-wrap from its own source, not from a flushed cache"
+  );
+}
+
+#[test]
+fn a_landing_pr_promotes_the_rich_view_off_the_issue() {
+  // Codex review #529, second pass. The invariant, written once instead of
+  // patched a third time: while the rich view is open it renders the side
+  // the LINK prefers, in its freshest version, title included. So a PR
+  // landing takes over an issue view that was only standing in for it.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Err("gh: transient".into()));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue, "precondition");
+
+  // `f` succeeds this time.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "the PR must claim the view it is entitled to"
+  );
+  assert!(
+    app.detail_overlay.title.contains("#61"),
+    "the title must follow the content: {}",
+    app.detail_overlay.title
+  );
+}
+
+#[test]
+fn a_landing_issue_does_not_displace_the_pr_view() {
+  // The other direction of the same invariant: the link prefers the PR, so
+  // an issue landing refreshes the view only when the issue IS the view.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "precondition");
+
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn a_refreshed_title_follows_a_renamed_pr() {
+  // Same invariant, third consequence: `f` used to replace the source and
+  // the rows while keeping the title computed at open, so a PR renamed
+  // upstream showed fresh content under a stale heading.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(app.detail_overlay.title.contains("rich fixture"), "precondition");
+
+  let mut renamed = rich_pr_fixture(61);
+  renamed.title = "renamed upstream".into();
+  app.apply_pr_fetch_result(Ok(renamed));
+
+  assert!(
+    app.detail_overlay.title.contains("renamed upstream"),
+    "stale heading over fresh content: {}",
+    app.detail_overlay.title
+  );
+}
+
+// ---- the in-TUI note editor (#515) ---------------------------------------
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Open the note editor on the main row, which always carries a branch.
+fn app_with_note_open() -> (tempfile::TempDir, App) {
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  assert_eq!(app.view, View::Note, "the editor must be the active view");
+  (dir, app)
+}
+
+#[test]
+fn typing_in_the_note_editor_never_reaches_the_global_keymap() {
+  // The bug this exists to stop: `d` is the global delete verb. A modal
+  // that captures every printable must consume it, or writing the word
+  // "done" in a note opens the delete confirm on the worktree the note is
+  // about — and the second `d` is inside a running countdown.
+  let (_dir, mut app) = app_with_note_open();
+
+  for c in "done".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  assert_eq!(app.view, View::Note, "no global verb fired");
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["done"],
+    "every keystroke landed in the buffer"
+  );
+}
+
+#[test]
+fn every_global_single_key_default_is_swallowed_by_the_note_editor() {
+  // Enumerated rather than sampled: `d` is the one that destroys data, but
+  // any global default reaching through would be a keystroke the user
+  // cannot type. Derived from the keymap so a verb added later is covered
+  // without editing this test.
+  let (_dir, mut app) = app_with_note_open();
+  let singles: Vec<char> = app
+    .keymap
+    .list()
+    .into_iter()
+    .flat_map(|binding| binding.chords)
+    .filter(|chord| chord.len() == 1)
+    .filter_map(|chord| match chord[0].code {
+      KeyCode::Char(c) if chord[0].modifiers.is_empty() => Some(c),
+      _ => None,
+    })
+    .collect();
+  assert!(singles.len() > 5, "the keymap should have plenty of single-key verbs");
+
+  for c in &singles {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(*c), KeyModifiers::NONE));
+    assert_eq!(app.view, View::Note, "`{c}` escaped the note editor");
+  }
+  let typed: String = singles.iter().collect();
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec![typed]);
+}
+
+#[test]
+fn esc_writes_the_note_and_closes() {
+  // Esc saves: the reflex on leaving a note is to keep it, and there is no
+  // "quit without saving" to lose prose to.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "kept".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert_eq!(app.view, View::List, "the editor closed");
+  assert!(app.note_editor.is_none(), "and dropped its buffer");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+}
+
+#[test]
+fn clearing_the_buffer_removes_the_note_instead_of_writing_a_blank_file() {
+  // The only way to discard, so it has to actually delete: a one-byte file
+  // reads as "no note" everywhere but would still sit on disk and be found
+  // by `gwm doctor` once the branch is gone.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let branch = app.selected().unwrap().branch.clone().unwrap();
+  let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
+    .unwrap()
+    .unwrap();
+  std::fs::write(&path, "old prose\n").unwrap();
+
+  app.open_note_editor();
+  for _ in 0..20 {
+    app.handle_note_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  }
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert!(!path.exists(), "an emptied note is removed, not blanked");
+}
+
+#[test]
+fn closing_an_untouched_note_does_not_rewrite_the_file() {
+  // Opening a note to read it must not touch its mtime, which is what
+  // `dirty` is for.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let branch = app.selected().unwrap().branch.clone().unwrap();
+  let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
+    .unwrap()
+    .unwrap();
+  std::fs::write(&path, "untouched\n").unwrap();
+  let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+  app.open_note_editor();
+  app.handle_note_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "untouched\n");
+}
+
+#[test]
+fn ctrl_e_writes_the_buffer_before_handing_the_file_to_the_editor() {
+  // `$EDITOR` opens the file, not the buffer. Launching without flushing
+  // would show the user their note as it was before the keys they just
+  // typed, and their save would then overwrite those keys.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "typed here".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  let outcome = app.handle_note_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+  let NoteKey::LaunchEditor(command, path) = outcome else {
+    panic!("Ctrl+e must hand the run loop an editor command, got {outcome:?}");
+  };
+  assert!(!command.is_empty(), "an editor command always resolves");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "typed here\n");
+  assert_eq!(app.view, View::Note, "the editor overlay stays open behind $EDITOR");
+}
+
+#[test]
+fn returning_from_the_external_editor_reloads_what_it_wrote() {
+  let (_dir, mut app) = app_with_note_open();
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+  let NoteKey::LaunchEditor(_, path) = app.handle_note_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+  else {
+    panic!("expected a launch");
+  };
+  std::fs::write(&path, "rewritten outside\n").unwrap();
+
+  app.reload_note_after_editor();
+
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["rewritten outside", ""],
+    "the buffer shows what $EDITOR left, not what was typed before it"
+  );
+}
+
+#[test]
+fn a_detached_row_says_so_rather_than_opening_an_editor_on_nothing() {
+  let (_dir, mut app) = make_app();
+  app.worktrees[0].branch = None;
+  app.list_state.select(Some(0));
+
+  app.open_note_editor();
+
+  assert_eq!(app.view, View::List, "no editor opened");
+  assert!(app.note_editor.is_none());
+  assert!(
+    app.status.contains("detached"),
+    "the refusal is on the status bar: {}",
+    app.status
+  );
+}
+
+// --- inline review comments wiring (issue #528) ---------------------------
+
+fn one_thread() -> gwm::forge::ReviewThreads {
+  gwm::forge::ReviewThreads::Threads {
+    threads: vec![gwm::forge::ReviewThread {
+      path: "src/tui/app.rs".into(),
+      line: Some(11),
+      start_line: Some(7),
+      is_resolved: false,
+      is_outdated: false,
+      diff_hunk: "@@ -4,10 +4,11 @@\n-old\n+new".into(),
+      total_comments: 1,
+      comments: vec![gwm::forge::ForgeComment {
+        author: "coderabbitai".into(),
+        body: "This drops the guard.".into(),
+        created_at: "2026-08-04T13:40:21Z".into(),
+        url: Some("https://example.test/pull/61#discussion_r1".into()),
+      }],
+    }],
+    total: 1,
+  }
+}
+
+fn overlay_text(app: &gwm::tui::App) -> String {
+  app
+    .detail_overlay
+    .rows
+    .iter()
+    .map(|r| r.value.clone())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+#[test]
+fn landed_threads_reach_an_already_open_rich_view() {
+  // Same invariant as the PR itself: while the view is open it renders
+  // the freshest version of what it is showing. A second transport that
+  // resolves *after* the view opened is the common case here, not an
+  // edge one — the view is what triggers the request.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(
+    !overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "precondition: the threads have not landed yet"
+  );
+
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "the landing never reached the open view:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_thread_result_for_another_pr_is_not_shown() {
+  // The cache is keyed by number for the reason #138 already paid for.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  app.apply_pr_threads_fetch_result(62, Ok(one_thread()));
+
+  assert!(
+    !overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "PR 62's threads rendered under PR 61"
+  );
+}
+
+#[test]
+fn a_failed_thread_fetch_is_shown_not_swallowed() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  app.apply_pr_threads_fetch_result(61, Err("gh: HTTP 403".into()));
+
+  assert!(
+    overlay_text(&app).contains("gh: HTTP 403"),
+    "in:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_link_refresh_drops_cached_threads_with_everything_else() {
+  // Threads live in their own cache, so the invalidation that clears the
+  // PR must clear them too — otherwise a refreshed PR renders next to the
+  // previous run's inline comments.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "precondition"
+  );
+
+  app.refresh_link();
+
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Idle),
+    "stale threads survived the invalidation"
+  );
+}
+
+#[test]
+fn the_issue_view_never_grows_a_threads_section() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  app.enter_rich_view();
+
+  assert!(!overlay_text(&app).to_lowercase().contains("inline comments"));
+}
+
+/// A `gh` stand-in that answers the review-threads GraphQL query, the PR
+/// re-probe (`pr list`) and the two `view` calls a refresh makes. Written
+/// once because the two tests below need the same surface.
+#[cfg(unix)]
+fn fake_gh_with_threads(dir: &std::path::Path) -> PathBuf {
+  use std::os::unix::fs::PermissionsExt;
+  let path = dir.join("fake-gh-threads");
+  std::fs::write(
+    &path,
+    r##"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  # `\\n` so printf emits a literal backslash-n: a raw newline inside a JSON
+  # string is a control character and takes the whole parse down.
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":1,"nodes":[{"isResolved":false,"isOutdated":false,"path":"src/tui/app.rs","line":11,"startLine":7,"comments":{"totalCount":1,"nodes":[{"author":{"login":"coderabbitai"},"body":"This drops the guard.","diffHunk":"@@ -4,10 +4,11 @@\\n+new","createdAt":"2026-08-04T13:40:21Z","url":"https://example.test/pull/61#discussion_r1"}]}}]}}}}}'
+elif [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[{"number":61}]'
+elif [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"number":61,"title":"pr 61","state":"OPEN","isDraft":false,"url":"https://example.test/pull/61","updatedAt":"2026-06-09T00:00:00Z","statusCheckRollup":[]}'
+elif [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"number":42,"title":"issue 42","state":"OPEN","url":"https://example.test/issues/42","labels":[],"updatedAt":"2026-06-09T00:00:00Z"}'
+else
+  exit 2
+fi
+"##,
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&path).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&path, perms).unwrap();
+  path
+}
+
+/// Drain until the threads worker for `n` has landed, or give up. Mirrors
+/// the polling the bulk-refresh test uses: whether a task is still in
+/// `running` at an arbitrary instant is a timing detail (issue #425), so
+/// the assertion is on the result, never on `is_loading`.
+#[cfg(unix)]
+fn settle_threads(app: &mut gwm::tui::App, n: u64) {
+  for _ in 0..200 {
+    app.drain_task_results();
+    if !app.tasks.is_loading(gwm::tui::TaskKind::GithubPrThreads(n)) {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  app.drain_task_results();
+}
+
+#[cfg(unix)]
+#[test]
+fn opening_the_view_requests_the_threads_and_renders_what_lands() {
+  // The one test that exercises the SPAWN path end to end: the request is
+  // fired by `enter_rich_view`, runs through the real worker, and lands via
+  // the drain rather than the `apply_*` seam. Everything else about the
+  // threads goes through the seam, which would leave the whole spawn +
+  // drain path green-but-unrun.
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  let fake_gh = fake_gh_with_threads(dir.path());
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` and restored below. The
+  // backend captures this path on the main thread when it is built.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  app.refresh_link(); // resolves the forge now that `origin` exists
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  settle_threads(&mut app, 61);
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "the view never asked, or the answer never landed:\n{}",
+    overlay_text(&app)
+  );
+  assert!(
+    overlay_text(&app).contains("This drops the guard."),
+    "the chain did not survive the round trip"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn refreshing_the_view_asks_for_the_threads_again() {
+  // `refresh_github_status` invalidates all three caches, so without a
+  // re-spawn `f` would blank the section until the view was reopened. The
+  // guard that re-spawns is also gated on the view still being open, which
+  // `close_detail_overlay` does not express through `kind` alone.
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  let fake_gh = fake_gh_with_threads(dir.path());
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: as above.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  settle_threads(&mut app, 61);
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "precondition: the first fetch landed"
+  );
+
+  app.rich_view_refresh();
+  settle_threads(&mut app, 61);
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  // Asserted on the CACHE, not on the rows. `refresh_github_status` does
+  // not rebuild the overlay (a landing does), so the previous run's rows
+  // are still on screen either way — an assertion on them stays green with
+  // the re-spawn deleted, which is exactly the vacant guard this test would
+  // otherwise be. `Idle` is what the invalidation leaves behind when
+  // nothing asks again.
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "`f` dropped the cached threads and never asked again: {:?}",
+    app.pr_threads_fetch_state(61)
+  );
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "and the section still renders them:\n{}",
+    overlay_text(&app)
+  );
 }

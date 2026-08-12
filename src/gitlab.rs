@@ -37,7 +37,7 @@
 use crate::error::{GwmError, Result};
 use crate::forge::{
   self, CheckOutcome, CreatedIssue, CreatedPr, Forge, ForgeKind, IssueCreateRequest, IssueState, IssueStatus, PrCheck,
-  PrCreateRequest, PrHead, PrState, PrStatus,
+  PrCreateRequest, PrHead, PrState, PrStatus, ReviewThreads,
 };
 use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{self, MilestoneSpec, MilestoneState, RemoteMilestone};
@@ -534,6 +534,19 @@ fn project_path(slug: &str) -> String {
 
 // ---- issues --------------------------------------------------------------
 
+/// GitLab counterpart of [`crate::github::null_to_default`] (Codex review
+/// #529): read `null` as the type's default rather than aborting the
+/// parse. More likely to fire here than on the GitHub side, since
+/// `"description": null` is what GitLab sends for an issue or MR that has
+/// none, which is the common case.
+fn null_to_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+  D: serde::Deserializer<'de>,
+  T: Deserialize<'de> + Default,
+{
+  Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 struct RawIssue {
   /// The project-scoped number the user sees and every URL uses. The
@@ -543,12 +556,17 @@ struct RawIssue {
   iid: u64,
   title: String,
   state: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   labels: Vec<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   updated_at: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   web_url: String,
+  /// GitLab's name for the issue body (issue #420).
+  #[serde(default, deserialize_with = "null_to_default")]
+  description: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  author: Option<RawAuthor>,
 }
 
 /// Parse `glab issue view <iid> --output json`.
@@ -569,6 +587,16 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
     url: raw.web_url,
     labels: raw.labels,
     updated_at: raw.updated_at,
+    // Partial rich tier (issue #420): the body and the author ride along
+    // in the payload gwm already asks for, so they cost nothing. Comments
+    // are GitLab *notes* behind a second `/notes` request and stay out —
+    // the rich view renders "no comments" from an honest empty vector
+    // rather than pretending the thread is empty.
+    detail: crate::forge::IssueDetail {
+      body: raw.description,
+      author: raw.author.unwrap_or_default().username,
+      comments: Vec::new(),
+    },
   })
 }
 
@@ -584,47 +612,50 @@ pub fn issue_view_argv(slug: &str, number: u64) -> Vec<String> {
 #[derive(Deserialize)]
 struct RawMr {
   iid: u64,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   title: String,
   state: String,
   /// `draft` superseded `work_in_progress`; older self-hosted instances
   /// still only send the legacy key, so both are read.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   draft: bool,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   work_in_progress: bool,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   web_url: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   updated_at: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   source_branch: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   target_branch: String,
-  // `Option` (not just `#[serde(default)]`) so an explicit
+  // `Option` (not just `#[serde(default, deserialize_with = "null_to_default")]`) so an explicit
   // `"author": null` — a deleted account — deserialises to `None`
   // instead of erroring; `default` alone only covers a *missing* key.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   author: Option<RawAuthor>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   head_pipeline: Option<RawPipeline>,
+  /// GitLab's name for the MR body (issue #420).
+  #[serde(default, deserialize_with = "null_to_default")]
+  description: String,
 }
 
 #[derive(Deserialize, Default)]
 struct RawAuthor {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   username: String,
 }
 
 #[derive(Deserialize)]
 struct RawPipeline {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   status: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   web_url: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   started_at: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   finished_at: Option<String>,
 }
 
@@ -703,6 +734,19 @@ pub fn parse_mr_json(s: &str) -> Result<PrStatus> {
     checks_total,
     ci,
     checks,
+    // Partial rich tier (issue #420), same rule as the issue side: the
+    // body, the author and the branch pair are already in this payload.
+    // `additions` / `deletions` are not — GitLab only reports a diff size
+    // through a separate `/changes` request — so they stay 0 and the view
+    // omits the diff line rather than printing a fabricated `+0 −0`.
+    // Reviews (approvals) and comments (notes) are separate requests too.
+    detail: crate::forge::PrDetail {
+      body: raw.description,
+      author: raw.author.unwrap_or_default().username,
+      base_ref: raw.target_branch,
+      head_ref: raw.source_branch,
+      ..Default::default()
+    },
   })
 }
 
@@ -1397,6 +1441,16 @@ impl Forge for GitLabForge {
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
     parse_mr_head_json(&self.run_argv_object(mr_view_argv(self.repo_selector(), number))?)
+  }
+
+  /// GitLab carries inline comments as *discussion notes* with `position`
+  /// data, under `/merge_requests/:iid/discussions` — a different shape
+  /// behind a different request, which issue #528 deliberately leaves out
+  /// of scope. Answered explicitly rather than as an empty list, so the
+  /// view can say "gwm cannot show these here" instead of the false
+  /// "this MR has none".
+  fn fetch_pr_threads(&self, _number: u64) -> Result<ReviewThreads> {
+    Ok(ReviewThreads::Unsupported)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {

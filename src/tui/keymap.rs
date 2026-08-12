@@ -115,6 +115,8 @@ define_actions! {
   FocusStatus       => "focus_status",
   // Filter
   Filter            => "filter",
+  // #484: mark the cursor row for a bulk action (delete today).
+  ToggleSelect      => "toggle_select",
   // Lifecycle / mutating
   Refresh           => "refresh",
   Sync              => "sync",
@@ -125,6 +127,8 @@ define_actions! {
   Pull              => "pull",
   Push              => "push",
   EditWorktree      => "edit_worktree",
+  // #515: open the selected worktree's note in $EDITOR.
+  EditNote          => "edit_note",
   ExitToWorktree    => "exit_to_worktree",
   LazyGitPty        => "lazygit_pty",
   LazyGitFullscreen => "lazygit_fullscreen",
@@ -147,6 +151,8 @@ define_actions! {
   ConfigPanel       => "config_panel",
   // #436: CI checks overlay — also reachable via `c` in the status context.
   CiChecks          => "ci_checks",
+  // #420: rich PR / issue view — description, checks, reviews, comments.
+  RichView          => "rich_view",
   ExecOverlay       => "exec_overlay",
   CleanOverlay      => "clean_overlay",
   AgentSessions     => "agent_sessions",
@@ -188,6 +194,10 @@ impl Action {
         | Action::Pull
         | Action::Push
         | Action::EditWorktree
+        // #515: the note path is derived from the ACTIVE repo's git dir, so
+        // a stale workspace selection would write the note into the
+        // previously active repo's `.git`.
+        | Action::EditNote
         | Action::LinkPrompt
         // FetchGithub persists detected PR/issue titles + states into the
         // active repo's git config, so it writes through `App.repo` too (#304).
@@ -496,10 +506,12 @@ impl Keymap {
       def(Action::WtScrollDown, &["J"]),
       def(Action::WtScrollUp, &["K"]),
       // #290: V=toggle show/hide, S=cycle content (Commits↔Stashes),
-      // Space=cycle orientation (auto/side-by-side/stacked), v=toggle position.
+      // v=toggle position. #484: the layout cycle moved off `Space` to `z`,
+      // which the row mark took (space-to-mark is the lazygit / k9s / fzf
+      // convention). Both pre-#484 defaults are one `[tui.keys]` line away.
       def(Action::ToggleSidebar, &["V"]),
       def(Action::ToggleSidebarMode, &["S"]),
-      def(Action::CycleSidebarLayout, &["Space"]),
+      def(Action::CycleSidebarLayout, &["z"]),
       def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::FocusWorktrees, &["1"]),
@@ -510,12 +522,17 @@ impl Keymap {
       // view; `c` does the same while the status pane holds the focus
       // (contextual routing, same mechanism as j/k sidebar scroll).
       def(Action::CiChecks, &["C"]),
+      // #420: `I` opens the rich PR / issue view. `i` is the link prompt,
+      // so the pair reads as "link it" / "look at it".
+      def(Action::RichView, &["I"]),
       // #325: `x` opens the exec profile picker overlay.
       def(Action::ExecOverlay, &["x"]),
       def(Action::AgentSessions, &["a"]),
       // #325: `X` opens the clean reclaim overlay.
       def(Action::CleanOverlay, &["X"]),
       def(Action::Filter, &["/"]),
+      // #484: Space marks / unmarks the cursor row for a bulk delete.
+      def(Action::ToggleSelect, &["Space"]),
       def(Action::Refresh, &["f"]),
       // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
       def(Action::Sync, &["s"]),
@@ -530,6 +547,9 @@ impl Keymap {
       def(Action::Push, &["P"]),
       // #290: `c` opens the edit-worktree modal (rename branch).
       def(Action::EditWorktree, &["c"]),
+      // #515: `N` opens the selected worktree's note in $EDITOR. `i`, which
+      // the reference implementation uses, is taken here — it is LinkPrompt.
+      def(Action::EditNote, &["N"]),
       // #290: `e` exits the TUI and prints the selected worktree path to stdout.
       def(Action::ExitToWorktree, &["e"]),
       // #35/#290: `l` opens lazygit in an embedded PTY overlay.

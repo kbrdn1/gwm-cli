@@ -259,3 +259,76 @@ fn load_malformed_toml_returns_error_not_empty() {
     msg
   );
 }
+
+/// Issue #531: the trust decision must be about the bytes the caller merged
+/// into the config it is going to execute, not about whatever `.gwm.toml`
+/// holds by the time `evaluate` gets around to opening it.
+///
+/// `TrustMode::Deny` is the seam that needs no ledger: it reports the hash it
+/// decided on, so a differing on-disk file proves which bytes were weighed.
+#[test]
+fn the_trust_decision_hashes_the_bytes_it_was_handed() {
+  use gwm::trust::{evaluate_bytes, TrustMode, TrustOutcome};
+
+  // `evaluate_bytes` can reach `$GWM_TRUST_LEDGER`, and "this call short-
+  // circuits before it does" is not something a reader — or the #507 guard —
+  // can check from the call site. Lock like every other reader.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let dir = TempDir::new().unwrap();
+  let cfg_path = dir.path().join(".gwm.toml");
+  std::fs::write(&cfg_path, b"[hooks]\n").unwrap();
+
+  let handed: &[u8] = b"[[hooks.pre_remove]]\nname = \"guard\"\nrun = \"exit 1\"\n";
+  let outcome = evaluate_bytes(&cfg_path, Some(handed), "origin", TrustMode::Deny).unwrap();
+
+  let expected: String = hash_config(handed).chars().take(12).collect();
+  match outcome {
+    TrustOutcome::Refuse { message } => assert!(
+      message.contains(&expected),
+      "the refusal must name the hash of the handed bytes ({expected}), got: {message}"
+    ),
+    other => panic!("--deny-bootstrap must refuse, got {other:?}"),
+  }
+}
+
+/// The empty-surface short-circuit reads the handed bytes too: a repo whose
+/// `.gwm.toml` grew a hook after the caller read it must not turn a delete
+/// the caller already resolved as hook-free into a ledger question.
+#[test]
+fn an_empty_surface_in_the_handed_bytes_proceeds_whatever_the_file_says() {
+  use gwm::trust::{evaluate_bytes, TrustMode, TrustOutcome};
+
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let dir = TempDir::new().unwrap();
+  let cfg_path = dir.path().join(".gwm.toml");
+  std::fs::write(&cfg_path, b"[[hooks.pre_remove]]\nname = \"guard\"\nrun = \"exit 1\"\n").unwrap();
+
+  // Reaching the ledger would mean touching `$GWM_TRUST_LEDGER`; `Proceed`
+  // here is precisely the assertion that it short-circuits before that.
+  let outcome = evaluate_bytes(&cfg_path, Some(b"[hooks]\n"), "origin", TrustMode::Prompt).unwrap();
+  assert!(
+    matches!(outcome, TrustOutcome::Proceed),
+    "an empty surface in the handed bytes must proceed, got {outcome:?}"
+  );
+}
+
+/// `None` is "there is no `.gwm.toml`", and it must stay that answer even
+/// when one appeared on disk after the caller looked.
+#[test]
+fn no_handed_bytes_means_no_config_whatever_the_file_says() {
+  use gwm::trust::{evaluate_bytes, TrustMode, TrustOutcome};
+
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let dir = TempDir::new().unwrap();
+  let cfg_path = dir.path().join(".gwm.toml");
+  std::fs::write(&cfg_path, b"[[hooks.pre_remove]]\nname = \"guard\"\nrun = \"exit 1\"\n").unwrap();
+
+  let outcome = evaluate_bytes(&cfg_path, None, "origin", TrustMode::Deny).unwrap();
+  assert!(
+    matches!(outcome, TrustOutcome::Proceed),
+    "no config means nothing to execute, got {outcome:?}"
+  );
+}

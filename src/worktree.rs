@@ -60,6 +60,12 @@ pub struct WorktreeInfo {
   /// per row per frame (issue #103). `None` for trunk branches and for
   /// worktrees whose repo can't be opened — the UI renders `-`.
   pub age: Option<Duration>,
+  /// Whether this row's branch carries a non-blank note (issue #515).
+  /// Resolved once per [`list`] call from a single walk of
+  /// `.git/gwm/notes`, for the same reason `link` and `age` are: the table
+  /// marker must not put a filesystem read back on the render path (issue
+  /// #343). Always `false` on a detached row — no branch, no note.
+  pub has_note: bool,
 }
 
 #[cfg(test)]
@@ -201,6 +207,12 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   // recompile the regex for every worktree in the listing.
   let parser = crate::naming::BranchParser::for_repo(repo);
 
+  // Issue #515: one walk of `.git/gwm/notes` for the whole listing, so the
+  // table's note marker is a set lookup per row instead of a file read per
+  // row per frame (the render path #343 cleared).
+  let noted = crate::notes::branches_with_notes(repo);
+  let carries_note = |branch: Option<&str>| branch.is_some_and(|b| noted.contains(b));
+
   // The main worktree is not listed by git2::Repository::worktrees(); add it manually.
   if let Some(workdir) = repo.workdir() {
     let head_ref = repo.head().ok();
@@ -222,6 +234,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       id: main_name.clone(),
       name: main_name,
       path: workdir.to_path_buf(),
+      has_note: carries_note(branch.as_deref()),
       branch,
       head,
       is_main: true,
@@ -290,6 +303,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       name: display_name,
       id: name.to_string(),
       path,
+      has_note: carries_note(branch.as_deref()),
       branch,
       head,
       is_main: false,
@@ -483,18 +497,170 @@ fn branch_created_age(repo: &Repository, branch: &str) -> Option<Duration> {
   Some(Duration::from_secs((now - created).max(0) as u64))
 }
 
+/// [`remove`], but only if `name` still resolves to `expected_path`.
+///
+/// For callers that resolve a target and remove it later (issue #484: the TUI
+/// confirm overlay snapshots its batch when it opens, then fires after a
+/// safety countdown). A worktree id is just the `.git/worktrees/<id>` entry
+/// name, and git hands the same id back to whoever recreates a worktree with
+/// that basename: remove and recreate from another shell during the countdown
+/// and the id now points somewhere else, so removing by id alone would delete
+/// a worktree the user never saw. The path is what the overlay showed, so the
+/// path is what has to still hold.
+///
+/// Compared verbatim rather than canonicalised: both sides come from
+/// `Worktree::path()`, so they carry the same normalisation, and the directory
+/// may be gone by now, which would make `canonicalize` fail rather than
+/// disagree.
+pub fn remove_verified(repo: &Repository, name: &str, expected_path: &Path, delete_branch: bool) -> Result<()> {
+  remove_inner(repo, name, Some(expected_path), delete_branch, |_| {})
+}
+
+/// [`remove_verified`], recording the removal at its point of no return
+/// (issue #531).
+///
+/// `record` fires once the worktree is gone and before the branch delete —
+/// the last instant at which nothing irreversible has happened, and the first
+/// at which the removal is committed. That placement is the whole point:
+///
+/// - **Nothing earlier**, because everything that can still refuse runs
+///   before it. An undo-journal entry written ahead of the path check
+///   described a removal that never happened, and `gwm undo` cannot get past
+///   one — it saves the journal only after the resurrection succeeds, and the
+///   resurrection fails on a worktree that is still on disk, so the stale
+///   entry comes back on every retry until someone edits `history.toml` by
+///   hand (Codex review on PR #526, issue #531).
+/// - **Nothing later**, because the branch delete is the only step that
+///   destroys something git cannot rebuild from the reflog alone (issue #29),
+///   so the recovery anchor has to exist before it.
+///
+/// The [`HeadBranch`] handed to `record` is the same observation the deletion
+/// below acts on, read once. Reading it twice let a concurrent checkout have
+/// the journal name one branch while another was deleted.
+pub fn remove_verified_recording(
+  repo: &Repository,
+  name: &str,
+  expected_path: &Path,
+  delete_branch: bool,
+  record: impl FnOnce(&HeadBranch),
+) -> Result<()> {
+  remove_inner(repo, name, Some(expected_path), delete_branch, record)
+}
+
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
 pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> {
+  remove_inner(repo, name, None, delete_branch, |_| {})
+}
+
+/// What a worktree's HEAD says, as three answers that must not collapse into
+/// one another (issue #531).
+///
+/// A removal deletes a branch only in the [`Attached`](HeadBranch::Attached)
+/// case, so whoever records the removal has to be able to tell "there is no
+/// branch" from "I could not look".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadBranch {
+  /// HEAD is on a branch: the one a removal deletes and a journal records.
+  Attached(String),
+  /// Detached HEAD. There is no branch to delete, and none to restore
+  /// either — `gwm undo` refuses such an entry rather than inventing one.
+  Detached,
+  /// The worktree could not be opened, or its HEAD not read (unborn, already
+  /// gone). Nothing was observed, so nothing is deleted; a caller with an
+  /// older listing may still prefer its own name for the record.
+  Unreadable,
+}
+
+impl HeadBranch {
+  /// The branch name, when one was actually observed.
+  pub fn name(&self) -> Option<&str> {
+    match self {
+      Self::Attached(b) => Some(b),
+      Self::Detached | Self::Unreadable => None,
+    }
+  }
+}
+
+/// Read the branch checked out in the worktree at `path`, once.
+pub fn head_branch(path: &Path) -> HeadBranch {
+  match Repository::open(path) {
+    Ok(wt) => match wt.head() {
+      Ok(head) if head.is_branch() => match head.shorthand() {
+        Ok(b) => HeadBranch::Attached(b.to_string()),
+        Err(_) => HeadBranch::Unreadable,
+      },
+      Ok(_) => HeadBranch::Detached,
+      Err(_) => HeadBranch::Unreadable,
+    },
+    Err(_) => HeadBranch::Unreadable,
+  }
+}
+
+/// The refusal a path mismatch produces, shared so the two check sites word
+/// it identically whichever one catches the move.
+fn path_changed(name: &str, actual: &Path, expected: &Path) -> GwmError {
+  GwmError::Other(format!(
+    "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
+    name,
+    actual.display(),
+    expected.display()
+  ))
+}
+
+/// Refuse unless the worktree `name` currently sits at `expected_path`.
+///
+/// An *advance* check, for callers that run something before the removal
+/// itself: a `pre_remove` hook executes with its cwd at the worktree, so
+/// leaving the whole question to [`remove_verified`] let a destructive hook
+/// act on a directory the user never confirmed (Codex review on PR #526).
+///
+/// It does NOT replace the check inside [`remove_inner`], which resolves the
+/// name a second time here. That is the point: this one narrows the window,
+/// and the one on the prune handle closes it (Codex review on PR #526 again,
+/// after this function was first written as the only check).
+///
+/// Compared verbatim: both sides come from `Worktree::path()`, so they carry
+/// the same normalisation.
+pub fn verify_path(repo: &Repository, name: &str, expected_path: &Path) -> Result<()> {
   let wt = repo
     .find_worktree(name)
     .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  if wt.path() != expected_path {
+    return Err(path_changed(name, wt.path(), expected_path));
+  }
+  Ok(())
+}
+
+/// Shared body of [`remove`] and [`remove_verified`].
+///
+/// The check lives here, on the handle the prune will actually act on, rather
+/// than delegating to [`verify_path`], which resolves the name a second time:
+/// another process that removes and recreates the id between the two lookups
+/// would have the first handle validated and the second one destroyed (Codex
+/// review on PR #520, then again on #526). `expected_path = None` is the
+/// historical, unverified removal.
+fn remove_inner(
+  repo: &Repository,
+  name: &str,
+  expected_path: Option<&Path>,
+  delete_branch: bool,
+  record: impl FnOnce(&HeadBranch),
+) -> Result<()> {
+  let wt = repo
+    .find_worktree(name)
+    .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  if let Some(expected) = expected_path {
+    if wt.path() != expected {
+      return Err(path_changed(name, wt.path(), expected));
+    }
+  }
   let path = wt.path().to_path_buf();
 
-  // Capture the branch (if any) so we can drop it after pruning.
-  let branch_name = match Repository::open(&path) {
-    Ok(sub) => sub.head().ok().and_then(|r| r.shorthand().ok().map(|s| s.to_string())),
-    Err(_) => None,
-  };
+  // The one observation of HEAD: it names what `record` writes down and what
+  // the branch delete below removes. Read twice, a concurrent checkout landed
+  // between them and the record named a branch the removal never touched
+  // (issue #531).
+  let head = head_branch(&path);
 
   // Prune admin files (.git/worktrees/<name>) FIRST so a subsequent
   // filesystem failure cannot leave a "phantom worktree" (issue #98):
@@ -510,9 +676,15 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
     std::fs::remove_dir_all(&path)?;
   }
 
+  // The point of no return, and the only place a record belongs: every
+  // refusal is behind us, and the branch delete — the one step that destroys
+  // something the caller cannot rebuild from what is left on disk — is still
+  // ahead. See [`remove_verified_recording`].
+  record(&head);
+
   if delete_branch {
-    if let Some(b) = branch_name {
-      if let Ok(mut branch) = repo.find_branch(&b, git2::BranchType::Local) {
+    if let Some(b) = head.name() {
+      if let Ok(mut branch) = repo.find_branch(b, git2::BranchType::Local) {
         let _ = branch.delete();
       }
     }
@@ -585,6 +757,53 @@ pub fn rename_worktree(
       "target path already exists: {}",
       new_path.display()
     )));
+  }
+
+  // 1b. Preflight the note too (issue #515, Codex review on PR #530). A note
+  //     already sitting under `new_branch` is an orphan left by a previous
+  //     branch of that name, and the move below would replace it silently on
+  //     Unix. Refused up front, like the pre-existing target path above, so
+  //     nothing is half-done and the message names the file to deal with:
+  //     `gwm doctor` already reports it as an orphan. A blank leftover does
+  //     not block, since overwriting it loses nothing.
+  //
+  //     The mirror case, same preflight: the note being CARRIED cannot land
+  //     under a name that backs no file. gwm's own name validation accepts
+  //     some of those (a segment ending in `.md`, which the note store keeps
+  //     off directory names), so the rename would report success while the
+  //     note stayed behind under the old branch, gone from the marker and
+  //     from `gwm note show`. Only a branch that actually carries a note is
+  //     refused: with nothing to move there is nothing to lose.
+  if new_branch != old_branch {
+    if let Ok(repo) = Repository::open(workdir) {
+      // `occupied_by` on BOTH sides, not `read` on one and `occupied_by` on
+      // the other: "there is prose here" is one question, and asking it two
+      // ways let an unreadable source note slip through this refusal and get
+      // stranded under the old branch, where the doctor's scan cannot see it
+      // either (Codex review, PR #530, pass 4).
+      if crate::notes::occupied_by(&repo, old_branch).is_some() && crate::notes::relative_path(new_branch).is_none() {
+        return Err(GwmError::CommandFailed(format!(
+          "`{old_branch}` carries a note and `{new_branch}` cannot back a note file — \
+           rename to a name a filesystem accepts, or move the note out of {} first",
+          crate::notes::notes_dir(&repo).display()
+        )));
+      }
+      // `move_conflict`, not `occupied_by`: a case-only rename resolves to
+      // the source file on a case-folding volume, and refusing that would
+      // break a rename that has always worked.
+      //
+      // The message names the file and stops there. An earlier version sent
+      // the user to `gwm doctor`, which is true for a readable note and
+      // false for exactly the ones this branch also catches: the doctor's
+      // scan reads content, so a note carrying invalid UTF-8 is absent from
+      // its report (Codex review, PR #530, pass 5).
+      if let Some(note) = crate::notes::move_conflict(&repo, old_branch, new_branch) {
+        return Err(GwmError::CommandFailed(format!(
+          "a note already exists for `{new_branch}`: {} — move or delete it first",
+          note.display()
+        )));
+      }
+    }
   }
 
   // 2. Move the worktree directory first: it is the most failure-prone step
@@ -788,6 +1007,20 @@ pub fn rename_worktree(
       ],
     );
     remote_renamed = true;
+  }
+
+  // 5. Follow the note (issue #515). Keyed on the branch, so a rename that
+  //    did not move it would orphan the note silently. Last, after every
+  //    step that can roll the rename back — a note sitting under a branch
+  //    name the repo reverted to is exactly the orphan this avoids. Gated
+  //    on `renames_branch` above: a path-only move leaves the key alone.
+  //
+  //    Best-effort: the rename itself has already landed in git, so a
+  //    filesystem hiccup here must not report a failure that would send the
+  //    user looking for a half-renamed worktree. A note left behind is
+  //    reported by `gwm doctor`, which is where the orphan rule lives.
+  if let Ok(repo) = Repository::open(workdir) {
+    let _ = crate::notes::rename(&repo, old_branch, new_branch);
   }
 
   Ok(remote_renamed)

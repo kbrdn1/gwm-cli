@@ -339,6 +339,384 @@ fn when_predicates_detail_says_none_when_no_predicates_configured() {
 }
 
 // --------------------------------------------------------------------------
+// Checks #3 and #4 also see `[hooks.*]`, not just `[[bootstrap.command]]`
+// --------------------------------------------------------------------------
+
+/// Every lifecycle phase that carries commands. `[hooks.*]` steps have the
+/// same `run` / `when` shape as `[[bootstrap.command]]`, so a check that
+/// inspects one surface and not the other reports on half the config. The
+/// list is the whole of `LifecycleHooksConfig`; the loops below run each
+/// case against all six so a phase cannot be covered by accident.
+const HOOK_PHASES: &[&str] = &[
+  "pre_create",
+  "post_create",
+  "pre_bootstrap",
+  "post_bootstrap",
+  "pre_remove",
+  "post_remove",
+];
+
+/// Load a `.gwm.toml` written into a fresh repo, so the test exercises the
+/// real `[hooks.<phase>]` key names rather than field access.
+fn config_from_toml(dir: &std::path::Path, body: &str) -> Config {
+  std::fs::write(dir.join(".gwm.toml"), body).unwrap();
+  Config::load_layered(dir, None).expect("test config must load")
+}
+
+#[test]
+fn unsupported_when_predicate_on_a_hook_is_failed() {
+  // Pre-fix the `when` check walked `[[bootstrap.command]]` only, so a
+  // typo in a hook's predicate was reported as "no `when:` predicates
+  // configured": the check passed vacuously on a config it never read.
+  for phase in HOOK_PHASES {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.{phase}]]\nname = \"noop\"\nrun = \"true\"\nwhen = \"bogus_predicate:FOO\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report
+      .checks
+      .iter()
+      .find(|c| c.name.contains("when"))
+      .expect("expected a `when` predicate check");
+    assert_eq!(
+      c.status,
+      CheckStatus::Failed,
+      "phase {phase} went unchecked: {}",
+      c.detail
+    );
+    assert!(
+      c.detail.contains("bogus_predicate"),
+      "phase {phase} must name the offending atom, got: {}",
+      c.detail
+    );
+    assert!(
+      c.detail.contains(phase),
+      "phase {phase} must be named so the user knows where to look, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn supported_when_predicate_on_a_hook_counts_as_recognised() {
+  // The other half of the vacuous pass: a hook with a *valid* predicate was
+  // reported as "no `when:` predicates configured", which reads as "nothing
+  // to check here" on a config that has plenty.
+  for phase in HOOK_PHASES {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.{phase}]]\nname = \"noop\"\nrun = \"true\"\nwhen = \"file_exists:composer.json\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
+    assert_eq!(c.status, CheckStatus::Ok);
+    assert!(
+      c.detail.contains("1 predicate"),
+      "phase {phase} predicate went uncounted, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn missing_hook_binary_is_warning() {
+  // Same blind spot on the PATH check: a hook invoking a binary that is not
+  // installed produced a clean report, so `gwm doctor` said the config was
+  // fine right up to the moment the hook failed at `gwm create` time.
+  for phase in HOOK_PHASES {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.{phase}]]\nname = \"phantom\"\nrun = \"definitely-not-on-path-xyz123 --help\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report
+      .checks
+      .iter()
+      .find(|c| c.name.contains("PATH"))
+      .expect("expected a PATH check");
+    assert_eq!(c.status, CheckStatus::Warning, "phase {phase}: {}", c.detail);
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "phase {phase} must name the missing binary, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn a_step_its_predicate_switches_off_is_not_probed() {
+  // The `node` preset ships two mutually exclusive install hooks: `bun
+  // install` when bun is on PATH, `npm ci` when it is not. Probing a step's
+  // binary regardless of its `when` warns about whichever of the two the
+  // predicate has just switched off, and a Warning takes `gwm doctor` to exit
+  // code 1, so a built-in preset that works perfectly reports as not green.
+  //
+  // Both surfaces, because both feed the same probe. The bootstrap-command
+  // half predates the hooks fix and was wrong the same way, it just had no
+  // preset with mutually exclusive steps to make it visible.
+  let off = "cmd_exists:definitely-not-a-command-xyz123";
+  let mut bodies: Vec<String> = vec![format!(
+    "[[bootstrap.command]]\nname = \"off\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{off}\"\n"
+  )];
+  bodies.extend(HOOK_PHASES.iter().map(|phase| {
+    format!("[[hooks.{phase}]]\nname = \"off\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{off}\"\n")
+  }));
+
+  for body in &bodies {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(dir.path(), body);
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      !c.detail.contains("definitely-not-on-path-xyz123"),
+      "a step gated off by its predicate must not be probed, got: {}\nconfig: {}",
+      c.detail,
+      body
+    );
+  }
+}
+
+#[test]
+fn a_step_its_predicate_switches_on_is_still_probed() {
+  // The other polarity, so the fix above cannot be "stop probing anything
+  // that carries a `when`". `sh` is on every POSIX system, and `cmd_exists:`
+  // is the one keyword the doctor evaluates.
+  let on = "cmd_exists:sh";
+  let mut bodies: Vec<String> = vec![format!(
+    "[[bootstrap.command]]\nname = \"on\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{on}\"\n"
+  )];
+  bodies.extend(HOOK_PHASES.iter().map(|phase| {
+    format!("[[hooks.{phase}]]\nname = \"on\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{on}\"\n")
+  }));
+
+  for body in &bodies {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(dir.path(), body);
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert_eq!(c.status, CheckStatus::Warning, "config: {}\n{}", body, c.detail);
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "a step its predicate switches on must still be probed, got: {}\nconfig: {}",
+      c.detail,
+      body
+    );
+  }
+}
+
+#[test]
+fn doctor_declines_to_evaluate_a_predicate_it_cannot_bound() {
+  // `gwm doctor` reads a `.gwm.toml` that never went through the trust gate
+  // (#473), so evaluating one of its predicates means evaluating input from a
+  // repo nobody has vetted, on a command that also runs as an advisory CI job
+  // on every PR. `glob_exists:` walks the filesystem from wherever its pattern
+  // points, so `glob_exists:/**/nope` is a whole-disk walk; `file_exists:../..`
+  // reaches outside the repo. Neither gets evaluated.
+  //
+  // Declining is safe by construction: the step stays probed, which is what
+  // the check did before it evaluated anything, so it can never silence a
+  // warning. Every pattern below is bounded and false, so an implementation
+  // that DID evaluate it would gate the step off and drop the binary from the
+  // report. That difference is what the assertion rides on, and it keeps the
+  // test instant instead of walking a real disk to prove a walk is possible.
+  //
+  // The list is the whole allowance in reverse: `cmd_exists:` on a bare name
+  // is the only keyword evaluated, and every entry here is a way of reaching
+  // past `$PATH` that a review pass on this PR found one at a time. The
+  // lexical defences that preceded this rule are why the list is the shape it
+  // is: `file_exists:sub/x` looks repo-relative and still leaves the repo when
+  // `sub` is a committed symlink, and `cmd_exists:/abs/tool` is `file_exists:`
+  // wearing a different keyword.
+  for when in [
+    "glob_exists:definitely-nope-xyz123-*",
+    "file_exists:../definitely-nope-xyz123",
+    "file_exists:sub/definitely-nope-xyz123",
+    "env_set:DEFINITELY_UNSET_XYZ123",
+    "env_eq:DEFINITELY_UNSET_XYZ123=guess",
+    "cmd_exists:/definitely/nope/xyz123",
+    "cmd_exists:./definitely-nope-xyz123",
+    "file_exists:.",
+    "file_exists:..",
+    // One declined atom taints the whole expression, however sound the rest.
+    "cmd_exists:sh && glob_exists:definitely-nope-xyz123-*",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!(
+        "[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nwhen = \"{when}\"\n"
+      ),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{when}` must not be evaluated, so its step stays probed; got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn a_step_whose_binary_cannot_be_resolved_statically_is_not_probed() {
+  // Two ways the probed string is not the binary the step will launch, both
+  // ending in a Warning and exit code 1 on a step that works fine:
+  //
+  //   - `lifecycle::run_step` expands `{path}` / `{repo}` in `run` before
+  //     spawning, so the raw string names `{path}/scripts/setup` and `which`
+  //     would look that up literally;
+  //   - a step that sets its own `PATH` in `env` resolves against that, since
+  //     `run_step` hands it to `Command::env`, not against the ambient `$PATH`
+  //     `gwm doctor` happens to have.
+  //
+  // Not probing is the safe side here, the mirror of the predicate rule above:
+  // there, declining to evaluate leaves the step probed; here, declining to
+  // resolve leaves it unprobed. Both refuse to emit an answer we know is wrong.
+  for body in [
+    "[[hooks.post_create]]\nname = \"templated\"\nrun = \"{path}/definitely-not-on-path-xyz123\"\n",
+    "[[hooks.post_create]]\nname = \"own-path\"\nrun = \"definitely-not-on-path-xyz123 --help\"\nenv = { PATH = \"/opt/project/bin\" }\n",
+    // `which` would resolve this against the doctor's working directory,
+    // while the step runs from the worktree root.
+    "[[hooks.post_create]]\nname = \"relative\"\nrun = \"./scripts/definitely-not-on-path-xyz123\"\n",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(dir.path(), body);
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      !c.detail.contains("definitely-not-on-path-xyz123"),
+      "a step whose binary cannot be resolved statically must not be probed, got: {}\nconfig: {}",
+      c.detail,
+      body
+    );
+  }
+}
+
+#[test]
+fn a_shell_keyword_is_not_probed_as_a_binary() {
+  // `run` is a shell script handed whole to `sh -c`, not an argv, so its
+  // first token is a shell word at least as often as it is a program. `cd`,
+  // `export`, `set` and `if` have no binary on disk to find, so probing them
+  // warns about a hook that works and takes the exit code to 1. This got
+  // sharper when the probe started walking hooks: a hook is a script far more
+  // often than a bootstrap command is.
+  for run in [
+    "cd sub && ./setup.sh",
+    "export APP_ENV=dev; ./setup.sh",
+    "set -e; ./setup.sh",
+    "if [ -f composer.json ]; then ./setup.sh; fi",
+    "while [ ! -f ready ]; do ./wait.sh; done",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"scripted\"\nrun = \"{run}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    let missing: Vec<String> = c
+      .detail
+      .split("not on PATH:")
+      .nth(1)
+      .unwrap_or("")
+      .split([',', '\n'])
+      .map(|s| s.trim().to_string())
+      .collect();
+    let keyword = run.split_whitespace().next().unwrap();
+    assert!(
+      !missing.iter().any(|m| m == keyword),
+      "`{keyword}` is a shell keyword, not a binary to probe; got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn a_wrapper_word_still_leads_to_the_real_binary() {
+  // `exec composer install` runs composer. Treating `exec` as a shell word to
+  // skip drops the whole step, so a missing composer goes unreported, which is
+  // the opposite of the point. It belongs with `env` and `command`: a wrapper
+  // to step over on the way to the binary, not a reason to stop looking.
+  for run in [
+    "exec definitely-not-on-path-xyz123 install",
+    "env FOO=bar definitely-not-on-path-xyz123",
+    "command definitely-not-on-path-xyz123",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"wrapped\"\nrun = \"{run}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{run}` must be probed past the wrapper, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn source_is_probed_because_sh_is_not_always_bash() {
+  // `source` is a bashism. Where `/bin/sh` is dash, which is most Linux
+  // distributions, it is neither a keyword nor a builtin and the step dies
+  // with "source: not found" at bootstrap time. Skipping it as a shell word
+  // would suppress exactly the warning that is worth having, and the fix the
+  // warning points at is the portable `.` form.
+  let (dir, repo) = init_repo();
+  let config = config_from_toml(
+    dir.path(),
+    "[[hooks.post_create]]\nname = \"sourced\"\nrun = \"source ./env.sh\"\n",
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("source"),
+    "`source` is not portable to sh, so it must stay probed, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn an_env_path_key_is_matched_regardless_of_case() {
+  // Windows environment variable names are case-insensitive, so
+  // `env = { Path = "C:\\project\\bin" }` really does replace the child's
+  // PATH, and an exact match on "PATH" would miss it and warn about a hook
+  // that resolves fine. Matched case-insensitively everywhere rather than
+  // behind `cfg(windows)`, so the behaviour is one thing and this test runs
+  // on every runner instead of only one of them.
+  for key in ["PATH", "Path", "path"] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!(
+        "[[hooks.post_create]]\nname = \"own-path\"\nrun = \"definitely-not-on-path-xyz123\"\nenv = {{ {key} = \"/opt/project/bin\" }}\n"
+      ),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      !c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{key}` sets the step's own PATH, so it must not be probed against ours; got: {}",
+      c.detail
+    );
+  }
+}
+
+// --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
 
@@ -1306,4 +1684,213 @@ fn branch_pattern_check_reads_the_on_disk_config_not_the_lenient_fallback() {
     .expect("expected a `branch_pattern` check in the report");
 
   assert_eq!(check.status, CheckStatus::Warning);
+}
+
+#[test]
+fn an_env_option_that_takes_an_operand_does_not_become_the_binary() {
+  // `env -u NODE_OPTIONS npm ci` runs npm. Skipping `-u` but not its operand
+  // leaves `NODE_OPTIONS` looking like the executable, so the report warns
+  // `not on PATH: NODE_OPTIONS` on a hook that works, and takes the exit code
+  // to 1 with it.
+  for run in [
+    "env -u NODE_OPTIONS definitely-not-on-path-xyz123 ci",
+    "env -C sub definitely-not-on-path-xyz123",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"wrapped\"\nrun = \"{run}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{run}` must resolve past the option's operand, got: {}",
+      c.detail
+    );
+    assert!(
+      !c.detail.contains("NODE_OPTIONS"),
+      "the operand is not the binary, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_exists_component_that_is_a_symlink_is_not_evaluated() {
+  // A single component passes the shape rule, but `exists()` follows a
+  // symlink, so a repo that commits `package.json -> /home/runner/.ssh/id_rsa`
+  // would learn from the report whether that file is on the host. Committing
+  // the link is exactly what an unvetted repo can do, so the component is
+  // checked with `symlink_metadata`, which does not follow, before the
+  // predicate is trusted.
+  //
+  // The link below dangles, so evaluating `file_exists:` would return false
+  // and gate the step off. It stays probed, which is what proves the
+  // predicate was declined.
+  let (dir, repo) = init_repo();
+  std::os::unix::fs::symlink("/definitely-nope-xyz123", dir.path().join("marker")).unwrap();
+
+  let config = config_from_toml(
+    dir.path(),
+    "[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123\"\nwhen = \"file_exists:marker\"\n",
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-xyz123"),
+    "a symlinked component must not be evaluated, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn the_node_preset_pair_still_gates_on_the_package_manager() {
+  // The case the whole allowance exists for, asserted against the shipped
+  // preset rather than a hand-written config. With `package.json` present and
+  // a package manager that is not installed, the hook under
+  // `cmd_exists:<pm>` must go quiet while its `!cmd_exists:<pm>` twin stays
+  // probed. Uses a fake manager name so the assertion does not depend on
+  // whether the runner has bun.
+  let (dir, repo) = init_repo();
+  std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+  let config = config_from_toml(
+    dir.path(),
+    concat!(
+      "[[hooks.post_create]]\nname = \"pm\"\nrun = \"definitely-not-on-path-xyz123 install\"\n",
+      "when = \"file_exists:package.json && cmd_exists:definitely-no-pm-xyz123\"\n",
+      "[[hooks.post_create]]\nname = \"fallback\"\nrun = \"also-not-on-path-xyz123 ci\"\n",
+      "when = \"file_exists:package.json && !cmd_exists:definitely-no-pm-xyz123\"\n",
+    ),
+  );
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    !c.detail.contains("definitely-not-on-path-xyz123"),
+    "the hook its predicate switched off must not be probed, got: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.contains("also-not-on-path-xyz123"),
+    "the hook that will actually run must still be probed, got: {}",
+    c.detail
+  );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_drive_relative_operand_is_not_evaluated() {
+  // `C:secret` carries no separator, so a scan for `/` and `\\` waves it
+  // through, and on Windows it is still drive-relative: `join` drops the base
+  // it was given and `which` resolves it against another directory entirely.
+  // That is the same escape as `../`, spelled in a way only one of the three
+  // runners can see, which is why the shape check goes through `Components`
+  // rather than a character scan.
+  //
+  // Unix-side this string is an ordinary filename and evaluating it is
+  // correct, so the case is scoped to the platform where it is not.
+  for when in [
+    "file_exists:C:definitely-nope-xyz123",
+    "cmd_exists:C:definitely-nope-xyz123",
+  ] {
+    let (dir, repo) = init_repo();
+    let config = config_from_toml(
+      dir.path(),
+      &format!("[[hooks.post_create]]\nname = \"probe\"\nrun = \"definitely-not-on-path-xyz123\"\nwhen = \"{when}\"\n"),
+    );
+
+    let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+    let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+    assert!(
+      c.detail.contains("definitely-not-on-path-xyz123"),
+      "`{when}` is drive-relative here, so it must not be evaluated; got: {}",
+      c.detail
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orphan notes (issue #515)
+// ---------------------------------------------------------------------------
+
+fn write_note_file(repo: &git2::Repository, branch: &str, body: &str) {
+  let path = gwm::notes::prepare(repo, branch).unwrap().unwrap();
+  std::fs::write(path, body).unwrap();
+}
+
+fn orphan_note_check(report: &doctor::DoctorReport) -> &doctor::Check {
+  report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan worktree notes"))
+    .expect("expected an orphan-notes check in the report")
+}
+
+#[test]
+fn a_repo_without_notes_reports_ok() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = orphan_note_check(&report);
+  assert_eq!(check.status, CheckStatus::Ok);
+  assert!(check.detail.contains("no notes"), "got: {}", check.detail);
+}
+
+#[test]
+fn a_note_on_a_live_branch_is_not_an_orphan() {
+  let (dir, repo) = init_repo();
+  write_note_file(&repo, "main", "still working on it\n");
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = orphan_note_check(&report);
+  assert_eq!(check.status, CheckStatus::Ok, "got: {}", check.detail);
+}
+
+#[test]
+fn a_note_whose_branch_is_gone_warns_and_names_it() {
+  // The note's lifecycle rule is "it lives as long as the branch", and
+  // `doctor` is the only place that enforces it — `clean` reclaims
+  // regenerable artefacts, and surviving `gwm remove` is the whole point of
+  // storing the note in the main checkout's git dir.
+  let (dir, repo) = init_repo();
+  write_note_file(&repo, "feat/#515-long-merged", "the flaky test is ETXTBSY\n");
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = orphan_note_check(&report);
+  assert_eq!(check.status, CheckStatus::Warning, "got: {}", check.detail);
+  assert!(
+    check.detail.contains("feat/#515-long-merged"),
+    "the warning must name the note so the user can find it, got: {}",
+    check.detail
+  );
+  // Warning, never Failed: an orphan note costs a few hundred bytes and may
+  // well be deliberate while the PR is still open.
+  assert_eq!(report.severity(), Severity::Warning);
+  assert!(
+    check
+      .fix_hint
+      .as_deref()
+      .is_some_and(|h| h.contains("gwm") && h.contains("notes")),
+    "the hint must point at the directory, got: {:?}",
+    check.fix_hint
+  );
+}
+
+#[test]
+fn a_blank_orphan_note_does_not_warn() {
+  // Presence is "non-blank" everywhere, this check included — an editor
+  // opened and saved empty must not produce a diagnostic.
+  let (dir, repo) = init_repo();
+  write_note_file(&repo, "feat/#515-long-merged", "\n");
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  assert_eq!(orphan_note_check(&report).status, CheckStatus::Ok);
 }

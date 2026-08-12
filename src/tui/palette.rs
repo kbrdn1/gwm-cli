@@ -49,7 +49,12 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
     PaletteEntry {
       action: Action::DeleteConfirm,
       name: "delete",
-      description: "delete the selected worktree (with confirm)",
+      description: "delete the selected worktree(s) (with confirm)",
+    },
+    PaletteEntry {
+      action: Action::ToggleSelect,
+      name: "select",
+      description: "mark / unmark the highlighted worktree for a bulk delete",
     },
     PaletteEntry {
       action: Action::Bootstrap,
@@ -80,6 +85,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       action: Action::EditWorktree,
       name: "edit-worktree",
       description: "rename the selected worktree's branch",
+    },
+    PaletteEntry {
+      action: Action::EditNote,
+      name: "edit-note",
+      description: "edit the selected worktree's note",
     },
     PaletteEntry {
       action: Action::ExitToWorktree,
@@ -200,6 +210,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       action: Action::CiChecks,
       name: "ci-checks",
       description: "list the linked PR's CI checks (Enter opens in browser)",
+    },
+    PaletteEntry {
+      action: Action::RichView,
+      name: "rich-view",
+      description: "open the linked PR/issue: description, checks, reviews, comments",
     },
     PaletteEntry {
       action: Action::WtScrollDown,

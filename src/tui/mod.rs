@@ -29,9 +29,11 @@ use std::time::{Duration, Instant};
 
 pub use app::{
   read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
-  OpenTarget, RepoMeta, View, WorkspaceState,
+  NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
 };
-pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+pub use state::async_task::{
+  CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
+};
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
@@ -43,6 +45,7 @@ pub use state::exec_picker::ExecPicker;
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
+pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
 
@@ -70,17 +73,18 @@ pub use ui::{
   branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style,
   ci_indicator, clean_dir_icon, command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints,
   config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line,
-  delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, format_status,
-  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
-  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
-  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
-  modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, overlay_modal_width, palette_name_style,
-  pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line, recent_commits_lines,
-  recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line, status_pane_title, table_marker,
-  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON,
-  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  delete_batch_title, delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress,
+  footer_line, format_status, freshness_color, github_status_lines, header_line, help_body_section_color,
+  help_entry_line, help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style,
+  issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width,
+  link_target_keys, link_target_line, list_pane_counter, modal_hint_for_context, modal_hint_for_context_with_fields,
+  modal_hint_line, overlay_modal_width, palette_name_style, pane_counter, panel_border_color, picker_window,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
+  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -277,6 +281,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       app.maybe_refresh_agent_sessions();
     }
 
+    // #420: the rich view's wrap budget is the terminal width. `Resize`
+    // covers the changes, this covers the FIRST frame — an overlay opened
+    // before any resize event would otherwise wrap against the 80-column
+    // default whatever the real terminal is. A no-op once they agree.
+    app.set_term_width(terminal.size().unwrap_or_default().width);
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before
@@ -344,6 +354,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           pty.resize(inner_cols, inner_rows);
         }
       }
+      // #420: the rich view wraps against the width the App carries, so a
+      // resize that never reached it would leave the rows wrapped for the
+      // previous terminal and the renderer would ellipsise the overflow.
+      app.set_term_width(cols);
       terminal.clear()?;
       continue;
     }
@@ -629,6 +643,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // detach, and routing it through a rebindable context would silently
       // steal a keystroke from the child program. See the `modal_keymap`
       // module note ("What stays hard-coded").
+      // #515: the note editor. Every printable, `Enter`, `Backspace` and
+      // `Delete` are text — `App::handle_note_key` routes them before the
+      // modal resolution, which is what keeps `d` from reaching the global
+      // delete verb while someone writes "done".
+      View::Note => {
+        if let NoteKey::LaunchEditor(command, path) = app.handle_note_key(key) {
+          run_subshell(terminal, &command, &[path.as_os_str()], None, &mut app, "note")?;
+          app.reload_note_after_editor();
+        }
+      }
       View::Pty => {
         // #325: once a one-shot exec command has finished, the overlay is
         // just showing its final output — there is no live child to receive
@@ -646,14 +670,28 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // overlay rooted at the selected worktree (mirrors `LazyGitPty`).
       View::ExecPicker => match app.handle_exec_picker_key(key) {
         ExecPickerKey::Submit => {
-          if let Some((argv, cwd)) = app.exec_picker_resolve() {
+          if let Some((argv, cwd, teardown)) = app.exec_picker_resolve() {
             let sz = terminal.size().unwrap_or_default();
             let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
             let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
             let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
             match PtyOverlay::spawn(PtyKind::Exec, &argv_refs, &cwd, inner_cols, inner_rows) {
-              Ok(pty) => app.open_pty_overlay(pty),
+              // A containerised profile carries a teardown: the container
+              // survives its own client, so closing the overlay must remove it.
+              Ok(pty) => app.open_pty_overlay(match teardown {
+                // Same cwd as the spawn, so a relative `runtime` resolves
+                // identically on the way out.
+                Some(argv) => pty.with_teardown(argv, cwd.clone()),
+                None => pty,
+              }),
               Err(e) => {
+                // `spawn` can fail AFTER the child is launched (the reader
+                // clone and the writer take are both fallible), and a
+                // containerised run that reached the daemon would then keep
+                // going with no overlay to close. Tear it down here too.
+                if let Some(argv) = teardown {
+                  crate::tui::state::pty_overlay::run_teardown_now(&argv, &cwd);
+                }
                 app.status = format!("exec overlay failed: {}", e);
                 app.close_exec_picker();
               }
@@ -724,6 +762,27 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           // Validation feedback on PR #455: `f` re-fetches the PR from
           // inside the overlay; the landing refreshes the rows in place.
           Some(ModalAction::CiChecksRefresh) => app.ci_checks_refresh(),
+          _ => {}
+        }
+      }
+      // #420: the rich view shares the shell with the agent pane but not
+      // its verbs, so it resolves in its own context.
+      View::DetailOverlay
+        if matches!(
+          app.detail_overlay.kind,
+          crate::tui::state::detail_overlay::DetailKind::RichIssue
+            | crate::tui::state::detail_overlay::DetailKind::RichPr
+        ) =>
+      {
+        match app.resolve_modal(KeyContext::RichView, key) {
+          Some(ModalAction::RichViewClose) => app.close_detail_overlay(),
+          Some(ModalAction::RichViewNext) => app.detail_overlay.select_next(),
+          Some(ModalAction::RichViewPrev) => app.detail_overlay.select_prev(),
+          Some(ModalAction::RichViewOpen) => match app.rich_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            None => app.status = "this row has nothing to open".into(),
+          },
+          Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
           _ => {}
         }
       }
@@ -908,9 +967,11 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
       None => app.status = "nothing selected".into(),
       Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
       Some(OpenTarget::Shell { path, command }) => run_subshell(terminal, &command, &[], Some(&path), app, "shell")?,
+      // #515 review: the path goes through as an `OsStr`. `display()` is
+      // lossy, so a repo path carrying non-UTF-8 bytes handed the editor a
+      // DIFFERENT path than the one gwm resolved.
       Some(OpenTarget::Editor { path, command }) => {
-        let path_str = path.display().to_string();
-        run_subshell(terminal, &command, &[&path_str], None, app, "editor")?
+        run_subshell(terminal, &command, &[path.as_os_str()], None, app, "editor")?
       }
     },
     // #290: TerminalPty replaces OpenTerminalOverlay — open a native $SHELL
@@ -976,6 +1037,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     }
     Action::Create if !app.picker_mode => app.enter_create(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
+    // #484: `Space` marks the cursor row. Picker-gated — `gwm switch` picks
+    // exactly one path, so a mark set has nothing to act on there.
+    Action::ToggleSelect if !app.picker_mode => app.toggle_select(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
     // Issue #258: `gwm sync` of the selected worktree, off-thread.
     Action::Sync if !app.picker_mode => app.request_sync(),
@@ -984,7 +1048,18 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Push if !app.picker_mode => app.request_push(),
     // #290: `c` opens the branch-rename modal.
     Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
+    // #515: `N` opens the selected worktree's note in $EDITOR, through the
+    // same suspend-and-restore loop `o` uses in `mode = "editor"`. The
+    // marker is re-read for that one row on the way back — the editor may
+    // have created the note, or emptied it.
+    // #515: `N` opens the note in the TUI. It used to suspend the whole
+    // terminal to spawn `$EDITOR`, which is a heavier gesture than the
+    // three lines a note usually is; `Ctrl+e` inside the modal still gets
+    // there in one keystroke.
+    Action::EditNote if !app.picker_mode => app.open_note_editor(),
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
+    // #420: `I` opens the rich PR / issue view on the linked side.
+    Action::RichView if !app.picker_mode => app.enter_rich_view(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.
@@ -1174,16 +1249,24 @@ fn run_launcher(
 fn run_subshell(
   terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   cmd: &str,
-  args: &[&str],
+  args: &[&std::ffi::OsStr],
   cwd: Option<&std::path::Path>,
   app: &mut App,
   label: &str,
 ) -> Result<()> {
+  // Split before spawning (issue #515, Codex review PR #530): `cmd` comes
+  // from `editor_cmd` / `shell_cmd` or `$EDITOR` / `$SHELL`, which are shell
+  // lines, so `code --wait` is a program plus an argument rather than an
+  // executable whose name contains a space.
+  let argv = launch_argv(cmd);
+  let (program, leading) = argv.split_first().expect("launch_argv never returns empty");
+
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
   terminal.show_cursor()?;
 
-  let mut command = std::process::Command::new(cmd);
+  let mut command = std::process::Command::new(program);
+  command.args(leading);
   command.args(args);
   if let Some(dir) = cwd {
     command.current_dir(dir);
@@ -1202,6 +1285,40 @@ fn run_subshell(
     Err(e) => app.status = format!("failed to launch {} ({}): {}", label, cmd, e),
   }
   Ok(())
+}
+
+/// Split a configured launch command into argv.
+///
+/// `$EDITOR`, `$SHELL` and their `.gwm.toml` overrides are shell lines by
+/// convention — git, cargo and systemctl all word-split them — and this repo
+/// already reads `[review]` tools and hook `run =` lines the same way
+/// (`launcher.rs`, `doctor.rs`). Handing the whole string to `Command::new`
+/// looked for an executable literally named `code --wait`, so an editor
+/// configured with a flag could never launch (issue #515, Codex review on PR
+/// #530). A program path that genuinely contains a space is quoted, which the
+/// splitter honours.
+///
+/// A string that already **names a file** is not a shell line and is handed
+/// over whole. Word-splitting is POSIX and filenames are not: `shell_words`
+/// drops an unprotected backslash, so `EDITOR=C:\Tools\nvim.exe` — an
+/// absolute path `Command::new` launched fine before any splitting existed —
+/// came back as `C:Toolsnvim.exe` and stopped launching (Codex review, PR
+/// #530). One `is_file` before the splitter is what keeps that working. It
+/// cannot see a path that is not on *this* machine, nor one carrying flags;
+/// those are written quoted, and POSIX preserves a backslash inside double
+/// quotes unless it precedes `$`, `` ` ``, `"`, `\` or a newline.
+///
+/// Never empty: an unbalanced quote or a blank value falls back to the raw
+/// string, which keeps the previous behaviour and lets the spawn failure name
+/// what was actually configured.
+pub fn launch_argv(cmd: &str) -> Vec<String> {
+  if std::path::Path::new(cmd).is_file() {
+    return vec![cmd.to_string()];
+  }
+  match shell_words::split(cmd) {
+    Ok(argv) if !argv.is_empty() => argv,
+    _ => vec![cmd.to_string()],
+  }
 }
 
 /// Push the selected worktree's path into the system clipboard via

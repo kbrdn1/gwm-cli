@@ -222,6 +222,23 @@ fn pane_counter_formats_selected_of_visible() {
   assert_eq!(pane_counter(3, 12).as_deref(), Some(" 3 of 12 "));
 }
 
+#[test]
+fn list_pane_counter_appends_the_mark_count() {
+  // #484: only `d` reads the mark set, so the footer has to carry it or a
+  // cursor-row verb would look like it ignored the selection.
+  use gwm::tui::{delete_batch_title, list_pane_counter};
+  assert_eq!(
+    list_pane_counter(3, 12, 0).as_deref(),
+    Some(" 3 of 12 "),
+    "no mark, no change from the pre-#484 counter"
+  );
+  assert_eq!(list_pane_counter(3, 12, 2).as_deref(), Some(" 3 of 12 · 2 marked "));
+  assert_eq!(list_pane_counter(0, 0, 2), None, "nothing visible, no footer");
+
+  assert_eq!(delete_batch_title(1), "Delete Worktree");
+  assert_eq!(delete_batch_title(3), "Delete 3 Worktrees");
+}
+
 // ---------------------------------------------------------------------------
 // Confirm modal buttons (issue #217)
 // ---------------------------------------------------------------------------

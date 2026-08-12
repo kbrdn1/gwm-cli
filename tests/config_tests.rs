@@ -2495,6 +2495,128 @@ command = []
 }
 
 #[test]
+fn exec_profile_parses_a_container_block() {
+  // Issue #421. The block rides a profile, so the inline `gwm exec -- <cmd>`
+  // surface is untouched; `image` is the only required field.
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "rust:1.90"
+  runtime = "podman"
+  extra_args = ["-e", "CI=1"]
+"#,
+  )
+  .expect("container block parses");
+  let c = cfg.exec.profiles["test"]
+    .container
+    .as_ref()
+    .expect("container block present");
+  assert_eq!(c.image, "rust:1.90");
+  assert_eq!(c.runtime.as_deref(), Some("podman"));
+  assert_eq!(c.extra_args, vec!["-e", "CI=1"]);
+  assert!(
+    !c.selinux_relabel,
+    "relabelling is off unless asked: it writes to the host"
+  );
+  assert!(
+    cfg.exec.profiles["test"].container.is_some() && cfg.exec.jobs.is_none(),
+    "the block is nested under the profile, not a new top-level section"
+  );
+}
+
+#[test]
+fn exec_profile_container_defaults_to_absent() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+"#,
+  )
+  .expect("profile without a container parses");
+  assert!(
+    cfg.exec.profiles["test"].container.is_none(),
+    "no `[container]` ⇒ the command runs on the host"
+  );
+}
+
+#[test]
+fn exec_container_parses_the_selinux_relabel_flag() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "fedora:41"
+  selinux_relabel = true
+"#,
+  )
+  .expect("selinux_relabel parses");
+  assert!(cfg.exec.profiles["test"].container.as_ref().unwrap().selinux_relabel);
+}
+
+#[test]
+fn exec_container_rejects_unknown_fields() {
+  // The reference implementation's schema is wider (mounts, env, interactive,
+  // working_dir); gwm's is deliberately not, so a copy-pasted key must be
+  // refused rather than silently ignored.
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = "rust:1.90"
+  interactive = true
+"#,
+  )
+  .expect_err("unknown field must error");
+  assert!(
+    err.to_string().contains("interactive") || err.to_string().contains("unknown"),
+    "{err}"
+  );
+}
+
+#[test]
+fn exec_container_without_an_image_is_a_load_error() {
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  runtime = "docker"
+"#,
+  )
+  .expect_err("missing image must error");
+  assert!(
+    err.to_string().contains("image"),
+    "error names the missing field: {err}"
+  );
+}
+
+#[test]
+fn exec_container_with_an_empty_image_fails_validation() {
+  // `image = ""` parses but is semantically invalid — caught at config-load
+  // time so `gwm config validate` / `gwm doctor` reject what
+  // `gwm exec --profile` would.
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+  [exec.profiles.test.container]
+  image = ""
+"#,
+  )
+  .expect_err("empty image must fail validation");
+  assert!(err.to_string().contains("empty `image`"), "{err}");
+}
+
+#[test]
 fn clean_profile_with_an_escaping_dir_fails_validation() {
   // `dirs = [".."]` parses but escapes the worktree — caught at config-load
   // time, not only later in `gwm clean`.
@@ -2674,4 +2796,63 @@ fn a_repo_path_without_a_parent_resolves_only_the_path_token() {
 
   let out = expand_placeholders("{repo_path}|{repo_parent}", "r", None, None, None, Some(root)).unwrap();
   assert_eq!(out, "/|{repo_parent}");
+}
+
+/// Issue #531: the layered load must be able to work from bytes the caller
+/// already read, so a delete can hash, merge and gate one single snapshot of
+/// `.gwm.toml` instead of opening it once per question.
+#[test]
+fn the_layered_config_merges_the_repo_bytes_it_was_handed() {
+  let handed = br#"
+[worktree]
+branch_pattern = "handed/{desc}"
+"#;
+  let cfg = Config::load_layered_from_bytes(Some(handed), None).unwrap();
+  assert_eq!(cfg.worktree.branch_pattern, "handed/{desc}");
+}
+
+/// `None` repo bytes is "this repo has no `.gwm.toml`" — the global layer
+/// alone, exactly what an absent file produces through the path-based form.
+#[test]
+fn no_repo_bytes_leaves_the_global_layer_alone() {
+  let dir = TempDir::new().unwrap();
+  let global = dir.path().join("config.toml");
+  std::fs::write(&global, "[worktree]\nbranch_pattern = \"global/{desc}\"\n").unwrap();
+
+  let cfg = Config::load_layered_from_bytes(None, Some(&global)).unwrap();
+  assert_eq!(cfg.worktree.branch_pattern, "global/{desc}");
+}
+
+/// The handed bytes are still a repo layer, so they win over the global one
+/// key by key — same merge rule as the path-based form (#190).
+#[test]
+fn handed_repo_bytes_override_the_global_layer() {
+  let dir = TempDir::new().unwrap();
+  let global = dir.path().join("config.toml");
+  std::fs::write(
+    &global,
+    "[worktree]\nbranch_pattern = \"global/{desc}\"\nbase = \"develop\"\n",
+  )
+  .unwrap();
+
+  let cfg =
+    Config::load_layered_from_bytes(Some(b"[worktree]\nbranch_pattern = \"repo/{desc}\"\n"), Some(&global)).unwrap();
+  assert_eq!(cfg.worktree.branch_pattern, "repo/{desc}");
+  assert_eq!(
+    cfg.worktree.base, "develop",
+    "an untouched sibling key survives the merge"
+  );
+}
+
+/// The validators run on the handed bytes as they do on the file, so the
+/// snapshot form cannot become a way to smuggle a config the path-based form
+/// rejects.
+#[test]
+fn handed_repo_bytes_go_through_the_same_validators() {
+  let out = Config::load_layered_from_bytes(Some(b"[exec.profiles.bad]\ncommand = []\n"), None);
+  let err = out.expect_err("an empty exec profile command must be rejected");
+  assert!(
+    format!("{err}").contains("empty `command`"),
+    "the semantic validator has to run on handed bytes too, got: {err}"
+  );
 }

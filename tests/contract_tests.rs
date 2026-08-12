@@ -124,6 +124,7 @@ fn sample_worktree() -> JsonWorktree {
     issue: Some(317),
     pr: Some(318),
     agents: None,
+    note: None,
   }
 }
 
@@ -664,6 +665,7 @@ fn populated_status() -> Value {
     url: "https://example/317".into(),
     labels: vec!["enhancement".into()],
     updated_at: "2026-06-17T00:00:00Z".into(),
+    detail: Default::default(),
   });
   let pr = Some(PrStatus {
     number: 322,
@@ -675,6 +677,7 @@ fn populated_status() -> Value {
     checks_total: 4,
     ci: CiState::Running,
     checks: vec![],
+    detail: Default::default(),
   });
   build_status_json(
     "feat/#317-freeze-machine-contracts",
@@ -1027,5 +1030,87 @@ mod agent_sessions_field {
     let old: OldRow = serde_json::from_str(&payload).expect("old consumer must keep working");
     assert_eq!(old.name, "feat-317");
     assert_eq!(old.path, "/wt/feat-317");
+  }
+}
+
+// --- 9. Note field (issue #515) --------------------------------------------
+//
+// `note` is an ADDITIVE, experimental-tier field on the list row, taking the
+// same route `agents` did: present in `properties`, never in `required`,
+// omitted (not null) when the branch carries no note, ignored cleanly by a
+// pre-#515 consumer. SCHEMA_VERSION stays 1.
+
+mod note_field {
+  use super::*;
+
+  fn sample_worktree_with_note() -> JsonWorktree {
+    let mut w = sample_worktree();
+    w.note = Some("- [ ] check the ETXTBSY retry\n".into());
+    w
+  }
+
+  #[test]
+  fn note_is_documented_but_never_required() {
+    let schema = read_schema("worktree-list.schema.json");
+    let required = required_set(&schema, "/$defs/worktree/required");
+    let properties = object_keys(&schema, "/$defs/worktree/properties");
+    assert!(properties.contains("note"), "`note` must be a documented property");
+    assert!(
+      !required.contains("note"),
+      "`note` is additive/experimental — requiring it would break the additive policy"
+    );
+  }
+
+  #[test]
+  fn worktree_with_a_note_still_matches_the_schema() {
+    let schema = read_schema("worktree-list.schema.json");
+    let required = required_set(&schema, "/$defs/worktree/required");
+    let properties = object_keys(&schema, "/$defs/worktree/properties");
+    let serialized = serialized_keys(&sample_worktree_with_note());
+    assert_field_contract("worktree row with a note", &required, &serialized, &properties);
+  }
+
+  #[test]
+  fn note_is_a_string_carrying_the_markdown_verbatim() {
+    assert_type_baseline(
+      "worktree row with a note",
+      &sample_worktree_with_note(),
+      &[("note", "string")],
+    );
+    let v = serde_json::to_value(sample_worktree_with_note()).unwrap();
+    assert_eq!(
+      v["note"].as_str(),
+      Some("- [ ] check the ETXTBSY retry\n"),
+      "the note travels verbatim — a consumer rendering Markdown needs the newlines"
+    );
+  }
+
+  #[test]
+  fn note_is_omitted_not_null_when_absent() {
+    let v = serde_json::to_value(sample_worktree()).unwrap();
+    assert!(
+      !v.as_object().unwrap().contains_key("note"),
+      "a note-less row must omit `note` entirely (skip_serializing_if), not carry null"
+    );
+  }
+
+  #[test]
+  fn a_pre_515_consumer_parses_a_payload_carrying_a_note() {
+    #[derive(serde::Deserialize)]
+    struct OldRow {
+      name: String,
+      path: String,
+    }
+    let payload = serde_json::to_string(&sample_worktree_with_note()).unwrap();
+    let old: OldRow = serde_json::from_str(&payload).expect("old consumer must keep working");
+    assert_eq!(old.name, "feat-317");
+    assert_eq!(old.path, "/wt/feat-317");
+  }
+
+  #[test]
+  fn adding_the_note_field_did_not_bump_the_schema_version() {
+    // The additive policy in `contract.rs`: an optional field is
+    // backward-compatible and must NOT bump the shared version.
+    assert_eq!(contract::SCHEMA_VERSION, 1);
   }
 }

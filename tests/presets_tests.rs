@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 #[test]
 fn lookup_resolves_canonical_names() {
-  for name in ["generic", "laravel", "node", "rust", "go", "python-uv"] {
+  for name in ["generic", "laravel", "node", "rust", "go", "python-uv", "symfony"] {
     assert!(presets::lookup(name).is_some(), "missing preset {name}");
   }
 }

@@ -90,18 +90,20 @@ fn mismatched_second_key_falls_back_to_single_key_dispatch() {
 
 #[test]
 fn mismatched_second_key_with_no_fallback_clears_buffer() {
-  // `g` then `z` — neither a chord match nor a single-key binding.
+  // `g` then `m` — neither a chord match nor a single-key binding.
   // Returns None and clears the buffer; the event loop ignores it.
+  // (`m` rather than `z`: #484 moved `cycle_sidebar_layout` onto `z`.)
   let (_dir, mut app) = make_app();
   assert_eq!(app.dispatch_key(press('g')), None);
-  assert_eq!(app.dispatch_key(press('z')), None);
+  assert_eq!(app.dispatch_key(press('m')), None);
   assert!(app.pending_chord_is_empty());
 }
 
 #[test]
 fn unbound_key_returns_none_without_arming_buffer() {
   let (_dir, mut app) = make_app();
-  assert_eq!(app.dispatch_key(press('z')), None);
+  // `m` is the free key since #484 put `cycle_sidebar_layout` on `z`.
+  assert_eq!(app.dispatch_key(press('m')), None);
   assert!(app.pending_chord_is_empty());
 }
 
@@ -546,6 +548,8 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       KeyContext::ExecPicker => "Exec Profiles",
       KeyContext::Clean => "Clean Reclaim",
       KeyContext::CiChecks => "CI Checks",
+      KeyContext::RichView => "PR / Issue View",
+      KeyContext::Note => "Note Editor",
     }
   };
 

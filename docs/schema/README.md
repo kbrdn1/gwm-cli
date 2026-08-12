@@ -1,7 +1,7 @@
 # gwm machine contracts
 
 gwm exposes three **machine-readable** surfaces that tooling outside this
-repo depends on — editor plugins, status bars, CI scripts. As of 1.0 these
+repo depends on: editor plugins, status bars, CI scripts. As of 1.0 these
 are **frozen and versioned** (issue #317): a backward-incompatible change to
 a *stable* field is a conscious breaking decision, not an accident.
 
@@ -31,7 +31,7 @@ backward-incompatible change to a stable field:
 - changing its type or its documented meaning.
 
 Adding a new optional field is **backward-compatible** and does NOT bump the
-version — consumers MUST ignore unknown fields. To keep that promise true
+version, and consumers MUST ignore unknown fields. To keep that promise true
 even for consumers that strict-validate against these files, the object
 schemas use `additionalProperties: true` (the JSON Schema default): an output
 carrying a field added after a consumer pulled its schema copy still
@@ -40,7 +40,7 @@ re-tightened. (gwm's own CI still rejects an *undocumented* field via the
 `serialized ⊆ properties` parity test, so the producer side stays honest.)
 
 `.gwm.toml` is the mirror image: it is *input*, so it keeps
-`deny_unknown_fields` — an unknown section is a user typo to reject, not a
+`deny_unknown_fields`: an unknown section is a user typo to reject, not a
 forward-compatible addition to ignore.
 
 ### How a consumer detects drift
@@ -55,13 +55,13 @@ forward-compatible addition to ignore.
 - Each `*.schema.json` file also declares its `version` for offline
   validation tooling.
 
-## Tiers — stable vs experimental
+## Tiers: stable vs experimental
 
 Every field/section is one of:
 
-- **Stable** — frozen by a contract test. A rename/removal fails CI. All
+- **Stable**: frozen by a contract test. A rename/removal fails CI. All
   fields below not marked experimental are stable.
-- **Experimental** — may change without a version bump.
+- **Experimental**: may change without a version bump.
 
 ### JSON output (`worktree-list.schema.json`)
 
@@ -72,7 +72,8 @@ Stable: `name`, `id`, `path`, `branch`, `head`, `is_main`, `is_locked`,
 | Field | Tier | Note |
 |-------|------|------|
 | `repo` | **experimental** | present only in `--workspace` mode; rides the young workspace feature (#36). In `properties` but never `required`. |
-| `agents` | **experimental** | agent-session summary (#408): `{top, sessions[]}` of `{kind, freshness, last_activity, id}`. Additive — omitted entirely (never `null`) when no session matched. In `properties` but never `required`; its shape may still change in a minor while the feature settles. |
+| `agents` | **experimental** | agent-session summary (#408): `{top, sessions[]}` of `{kind, freshness, last_activity, id}`. Additive, so it is omitted entirely (never `null`) when no session matched. In `properties` but never `required`; its shape may still change in a minor while the feature settles. |
+| `note` | **experimental** | the worktree's note (#515), verbatim Markdown from `<main>/.git/gwm/notes/<branch>.md`. Additive, so it is omitted entirely (never `null`) when the branch carries no note. In `properties` but never `required`. |
 
 `doctor.schema.json` (`checks[]`, `severity`, `exit_code`) and
 `path.schema.json` (`name`, `path`, `branch`) are entirely **stable**.

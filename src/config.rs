@@ -147,6 +147,55 @@ pub struct ExecProfile {
   /// when this profile runs; the `--jobs` flag still wins over it.
   #[serde(default)]
   pub jobs: Option<u32>,
+  /// `[exec.profiles.<name>.container]` — run this profile's command inside
+  /// a container instead of on the host (issue #421). Absent ⇒ host, the
+  /// unchanged behaviour.
+  #[serde(default)]
+  pub container: Option<ContainerConfig>,
+}
+
+/// `[exec.profiles.<name>.container]` — wrap this profile's command in
+/// `docker run` / `podman run` (issue #421).
+///
+/// Attached to a **profile**, never to the inline `gwm exec -- <cmd>`: the
+/// user names the profile, so containerising is something they opted into.
+/// The inline surface stays byte-identical, which is what [`ExecConfig`]
+/// pledges.
+///
+/// The wrapper mirrors host paths (`-v <worktree>:<worktree>`) and mounts the
+/// main checkout's gitdir alongside, because a linked worktree's `.git` is a
+/// file holding an **absolute host path** — mount the worktree alone and no
+/// git command answers inside the container. See
+/// [`crate::exec::build_container_argv`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerConfig {
+  /// Image to run, e.g. `"rust:1.90"`. Required and non-empty — an empty
+  /// `image` is a config error, like an empty profile `command`.
+  pub image: String,
+  /// Container CLI to shell out to. Absent ⇒ auto-detected, `docker` first
+  /// then `podman` (gwm states its own order rather than inheriting one).
+  /// Any Docker-compatible CLI works (`nerdctl`, …) since gwm only builds an
+  /// argv for it.
+  #[serde(default)]
+  pub runtime: Option<String>,
+  /// Extra arguments spliced in **before the image**, forwarded to
+  /// `<runtime> run` verbatim: `["-e", "CI=1"]`, `["-v", "cache:/root/.cargo"]`,
+  /// `["--network", "none"]`. They come after gwm's own flags, so a repeated
+  /// flag (e.g. `-w`) overrides gwm's.
+  #[serde(default)]
+  pub extra_args: Vec<String>,
+  /// Suffix gwm's own bind mounts with `:z` (issue #421). Needed on an
+  /// SELinux-enforcing host (Fedora, RHEL, CentOS), where an unlabelled bind
+  /// mount leaves the container process with `EACCES` on the worktree and the
+  /// gitdir. Opt-in rather than detected, because relabelling **writes to the
+  /// host**: it applies a shared SELinux label recursively to the worktree and
+  /// to the main checkout's `.git`.
+  ///
+  /// `extra_args` cannot express this — it cannot reach the mounts gwm builds
+  /// itself — which is why it is a field.
+  #[serde(default)]
+  pub selinux_relabel: bool,
 }
 
 /// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).
@@ -431,13 +480,36 @@ pub struct LifecycleHooksConfig {
 }
 
 impl LifecycleHooksConfig {
+  /// Every configured step, paired with the name of the phase it belongs to.
+  ///
+  /// The destructuring is exhaustive on purpose: adding a phase to this
+  /// struct without listing it here is a compile error. That is what keeps a
+  /// consumer walking the hooks (`gwm doctor`) from silently skipping a new
+  /// surface, which is exactly how the `when` and PATH checks came to read
+  /// `[[bootstrap.command]]` only.
+  pub fn all_steps(&self) -> impl Iterator<Item = (&'static str, &HookStep)> {
+    let Self {
+      pre_create,
+      post_create,
+      pre_bootstrap,
+      post_bootstrap,
+      pre_remove,
+      post_remove,
+    } = self;
+    [
+      ("pre_create", pre_create),
+      ("post_create", post_create),
+      ("pre_bootstrap", pre_bootstrap),
+      ("post_bootstrap", post_bootstrap),
+      ("pre_remove", pre_remove),
+      ("post_remove", post_remove),
+    ]
+    .into_iter()
+    .flat_map(|(phase, steps)| steps.iter().map(move |step| (phase, step)))
+  }
+
   pub fn has_any(&self) -> bool {
-    !self.pre_create.is_empty()
-      || !self.post_create.is_empty()
-      || !self.pre_bootstrap.is_empty()
-      || !self.post_bootstrap.is_empty()
-      || !self.pre_remove.is_empty()
-      || !self.post_remove.is_empty()
+    self.all_steps().next().is_some()
   }
 }
 
@@ -1139,6 +1211,16 @@ fn read_config_value(path: &Path) -> Result<toml::Value> {
   Ok(val)
 }
 
+/// [`read_config_value`] for bytes a caller already read (issue #531). The
+/// UTF-8 check is explicit here because `read_to_string` does it on the file
+/// path and a snapshot must fail the same way rather than lossily.
+fn parse_config_bytes(bytes: &[u8]) -> Result<toml::Value> {
+  let raw = std::str::from_utf8(bytes)
+    .map_err(|e| crate::error::GwmError::Config(format!("{} is not valid UTF-8: {}", CONFIG_FILE, e)))?;
+  let val: toml::Value = toml::from_str(raw)?;
+  Ok(val)
+}
+
 /// Deep-merge `over` onto `base`: two tables merge key-by-key
 /// recursively (so disjoint sections from both files coexist and a
 /// nested table override keeps the untouched sibling keys); for every
@@ -1521,7 +1603,7 @@ impl Config {
   pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
     let cfg: ExecConfig = load_config_section(Some(repo_root), "exec")?;
     for (name, p) in &cfg.profiles {
-      crate::exec::validate_exec_profile_command(name, &p.command)?;
+      crate::exec::validate_exec_profile(name, p)?;
     }
     Ok(cfg)
   }
@@ -1584,16 +1666,38 @@ impl Config {
   /// the merge contract can be pinned by a test without touching the
   /// runner's real `$HOME` / `$XDG_CONFIG_HOME`.
   pub fn load_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
-    let cfg = Self::merge_layered(repo_root, global_path)?;
-    cfg.validate_branch_types()?;
-    cfg.validate_bootstrap_paths()?;
-    cfg.validate_bootstrap_guards()?;
-    cfg.validate_labels()?;
-    cfg.validate_aliases()?;
-    cfg.validate_tui_keys()?;
-    cfg.validate_theme()?;
-    cfg.validate_profiles()?;
-    Ok(cfg)
+    Self::merge_layered(repo_root, global_path)?.validated()
+  }
+
+  /// [`Self::load_layered`] for a caller that has already read the repo's
+  /// `.gwm.toml` and must not have it read again (issue #531).
+  ///
+  /// A delete asks the same file three questions — which hooks run, whether
+  /// the repo declares any remove hook at all, and whether the ledger
+  /// approved it — and each answer used to come from its own `open`. A
+  /// `.gwm.toml` rewritten between two of them had the trust gate rule on a
+  /// file that is not the one whose hooks then execute. One read, one
+  /// snapshot, three answers about the same bytes.
+  ///
+  /// `None` is "this repo has no `.gwm.toml`", the same answer an absent
+  /// file gives through [`Self::load_layered`].
+  pub fn load_layered_from_bytes(repo_bytes: Option<&[u8]>, global_path: Option<&Path>) -> Result<Self> {
+    Self::merge_layered_from_bytes(repo_bytes, global_path)?.validated()
+  }
+
+  /// The semantic validators, in one place, so both load forms run the same
+  /// set — a snapshot must never become a way in for a config the path form
+  /// rejects.
+  fn validated(self) -> Result<Self> {
+    self.validate_branch_types()?;
+    self.validate_bootstrap_paths()?;
+    self.validate_bootstrap_guards()?;
+    self.validate_labels()?;
+    self.validate_aliases()?;
+    self.validate_tui_keys()?;
+    self.validate_theme()?;
+    self.validate_profiles()?;
+    Ok(self)
   }
 
   /// Reject semantically invalid `[exec.profiles.*]` / `[clean.profiles.*]`
@@ -1604,7 +1708,7 @@ impl Config {
   /// resolvers share the same validators, so the two paths can't drift.
   pub(crate) fn validate_profiles(&self) -> Result<()> {
     for (name, p) in &self.exec.profiles {
-      crate::exec::validate_exec_profile_command(name, &p.command)?;
+      crate::exec::validate_exec_profile(name, p)?;
     }
     for (name, p) in &self.clean.profiles {
       crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
@@ -1623,14 +1727,29 @@ impl Config {
   /// (issue #219 review).
   pub(crate) fn merge_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
     let repo_path = repo_root.join(CONFIG_FILE);
-    let global_val = match global_path {
-      Some(p) if p.exists() => Some(read_config_value(p)?),
-      _ => None,
-    };
     let repo_val = if repo_path.exists() {
       Some(read_config_value(&repo_path)?)
     } else {
       None
+    };
+    Self::merge_values(repo_val, global_path)
+  }
+
+  /// [`Self::merge_layered`] from a snapshot of the repo layer's bytes
+  /// (issue #531). See [`Self::load_layered_from_bytes`].
+  pub(crate) fn merge_layered_from_bytes(repo_bytes: Option<&[u8]>, global_path: Option<&Path>) -> Result<Self> {
+    let repo_val = match repo_bytes {
+      Some(b) => Some(parse_config_bytes(b)?),
+      None => None,
+    };
+    Self::merge_values(repo_val, global_path)
+  }
+
+  /// Deep-merge an already-parsed repo layer over the global file.
+  fn merge_values(repo_val: Option<toml::Value>, global_path: Option<&Path>) -> Result<Self> {
+    let global_val = match global_path {
+      Some(p) if p.exists() => Some(read_config_value(p)?),
+      _ => None,
     };
 
     Ok(match (global_val, repo_val) {

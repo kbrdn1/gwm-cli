@@ -2021,3 +2021,376 @@ fn add_keeps_the_branch_when_the_checkouts_cannot_be_inspected() {
     "an unreadable admin directory must hold the rollback back, not wave it through"
   );
 }
+
+#[test]
+fn remove_verified_refuses_an_id_that_now_points_elsewhere() {
+  // Issue #484 / Codex review on PR #520 (P1). A worktree id is the
+  // `.git/worktrees/<id>` entry name, and git hands the same id back to
+  // whoever recreates a worktree with that basename. The TUI confirm
+  // overlay snapshots its targets when it opens and fires after a safety
+  // countdown, so removing by id alone could delete a worktree recreated
+  // under that id in the meantime, not the one the overlay named.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let first_root = TempDir::new().unwrap();
+  let first = first_root.path().join("feat-484-recycled");
+  worktree::add(&repo, "feat-484-recycled", &first, "feat/#484-first", false).unwrap();
+  // What the overlay would have captured.
+  let confirmed = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-484-recycled")
+    .unwrap();
+
+  // Someone removes it and recreates one under the same id, elsewhere.
+  worktree::remove(&repo, &confirmed.id, false).unwrap();
+  let second_root = TempDir::new().unwrap();
+  let second = second_root.path().join("feat-484-recycled");
+  worktree::add(&repo, "feat-484-recycled", &second, "feat/#484-second", false).unwrap();
+
+  let err = worktree::remove_verified(&repo, &confirmed.id, &confirmed.path, true)
+    .expect_err("the id no longer names the confirmed worktree");
+  let msg = err.to_string();
+  assert!(
+    msg.contains("changed since it was confirmed"),
+    "the error must say why nothing was removed: {msg}"
+  );
+  assert!(second.exists(), "the worktree the user never confirmed must survive");
+  assert!(
+    repo.find_branch("feat/#484-second", git2::BranchType::Local).is_ok(),
+    "and so must its branch, despite delete_branch"
+  );
+
+  // The matching case still removes.
+  let live = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-484-recycled")
+    .unwrap();
+  worktree::remove_verified(&repo, &live.id, &live.path, false).unwrap();
+  assert!(!second.exists(), "a target that still matches is removed");
+}
+
+// ---- notes (#515) ---------------------------------------------------------
+
+fn write_note(repo: &Repository, branch: &str, body: &str) {
+  let path = gwm::notes::prepare(repo, branch).unwrap().unwrap();
+  std::fs::write(path, body).unwrap();
+}
+
+#[test]
+fn list_flags_the_row_whose_branch_carries_a_note() {
+  // The marker is resolved at list time, once for the whole set, so the TUI
+  // render path never touches the filesystem (the property #343 established
+  // for the per-row git reads).
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let noted = wt_root.path().join("feat-1-noted");
+  let bare = wt_root.path().join("feat-2-bare");
+  worktree::add(&repo, "feat-1-noted", &noted, "feat/#1-noted", false).unwrap();
+  worktree::add(&repo, "feat-2-bare", &bare, "feat/#2-bare", false).unwrap();
+  write_note(&repo, "feat/#1-noted", "the ETXTBSY retry is expected\n");
+
+  let trees = worktree::list(&repo).unwrap();
+  let flag = |name: &str| trees.iter().find(|w| w.name == name).unwrap().has_note;
+
+  assert!(flag("feat-1-noted"), "the noted row must carry the marker");
+  assert!(!flag("feat-2-bare"), "a row without a note must not");
+}
+
+#[test]
+fn a_blank_note_does_not_flag_the_row() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let path = wt_root.path().join("feat-1-blank");
+  worktree::add(&repo, "feat-1-blank", &path, "feat/#1-blank", false).unwrap();
+  write_note(&repo, "feat/#1-blank", "\n");
+
+  let trees = worktree::list(&repo).unwrap();
+  assert!(!trees.iter().find(|w| w.name == "feat-1-blank").unwrap().has_note);
+}
+
+#[test]
+fn a_note_written_from_the_main_checkout_is_read_from_the_linked_worktree() {
+  // The store is resolved through `commondir`, not `path`: a handle opened
+  // on a linked worktree must find the same tree as one opened on the main
+  // checkout. Get this wrong and every linked worktree gets its own private
+  // notes directory under `.git/worktrees/<id>/`.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let path = wt_root.path().join("feat-1-shared");
+  worktree::add(&repo, "feat-1-shared", &path, "feat/#1-shared", false).unwrap();
+  write_note(&repo, "feat/#1-shared", "written from the main checkout\n");
+
+  let from_worktree = Repository::open(&path).unwrap();
+  assert_eq!(
+    gwm::notes::read(&from_worktree, "feat/#1-shared").as_deref(),
+    Some("written from the main checkout\n")
+  );
+}
+
+#[test]
+fn rename_worktree_moves_the_note_with_the_branch() {
+  // The note is keyed on the branch, so a rename that did not move the file
+  // would orphan it silently — #479 renames the local branch, the remote
+  // branch and the directory, and this is the fourth thing it owns.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  write_note(&repo, "feat/#1-old", "still relevant after the rename\n");
+
+  let new_path = wt_root.path().join("feat-1-new");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "feat/#1-new").unwrap();
+
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-old"),
+    None,
+    "the old key must be empty"
+  );
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-new").as_deref(),
+    Some("still relevant after the rename\n")
+  );
+  let trees = worktree::list(&repo).unwrap();
+  assert!(
+    trees.iter().find(|w| w.name == "feat-1-new").unwrap().has_note,
+    "the renamed row must still show the marker"
+  );
+}
+
+#[test]
+fn a_path_only_move_leaves_the_note_where_it_is() {
+  // Same branch, different directory (a changed `[worktree].base`): the key
+  // did not change, so there is nothing to move.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-here");
+  worktree::add(&repo, "feat-1-here", &old_path, "feat/#1-here", false).unwrap();
+  write_note(&repo, "feat/#1-here", "unchanged\n");
+
+  let new_path = wt_root.path().join("feat-1-there");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#1-here", &new_path, "feat/#1-here").unwrap();
+
+  assert_eq!(gwm::notes::read(&repo, "feat/#1-here").as_deref(), Some("unchanged\n"));
+}
+
+#[test]
+fn rename_worktree_refuses_when_a_note_already_sits_at_the_destination() {
+  // Preflight, not cleanup: a note under the new name is an orphan from a
+  // previous branch of that name, and moving onto it would destroy prose
+  // nothing can regenerate. Refused before any ref is touched, like the
+  // pre-existing target path above it, so nothing is left half-done.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  write_note(&repo, "feat/#1-old", "the note I am carrying over\n");
+  write_note(&repo, "feat/#1-new", "prose from a previous life of this name\n");
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "feat/#1-new").unwrap_err();
+
+  assert!(
+    err.to_string().contains("a note already exists"),
+    "the error must name the problem, got: {err}"
+  );
+  // Nothing moved: not the directory, not the branch, and neither note.
+  assert!(old_path.exists(), "the worktree directory must not have moved");
+  assert!(!new_path.exists());
+  assert!(repo.find_branch("feat/#1-old", git2::BranchType::Local).is_ok());
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-old").as_deref(),
+    Some("the note I am carrying over\n")
+  );
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-new").as_deref(),
+    Some("prose from a previous life of this name\n")
+  );
+}
+
+#[test]
+fn rename_worktree_refuses_a_target_name_that_cannot_back_the_note() {
+  // The mirror of the occupied-destination preflight. gwm's own name
+  // validation accepts a segment ending in `.md` (it only enforces git's
+  // rules plus the Windows ones), while the note store keeps that suffix off
+  // directory names. Without this check the rename reported success and the
+  // note stayed behind under the old branch, gone from the marker and from
+  // `gwm note show` (Codex review, PR #530, pass 3).
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  write_note(&repo, "feat/#1-old", "must not be orphaned by a rename\n");
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "docs.md/fix").unwrap_err();
+
+  assert!(
+    err.to_string().contains("cannot back a note file"),
+    "the error must say why, got: {err}"
+  );
+  assert!(old_path.exists(), "nothing may move before the refusal");
+  assert!(repo.find_branch("feat/#1-old", git2::BranchType::Local).is_ok());
+  assert_eq!(
+    gwm::notes::read(&repo, "feat/#1-old").as_deref(),
+    Some("must not be orphaned by a rename\n")
+  );
+}
+
+#[test]
+fn a_branch_without_a_note_renames_freely_to_such_a_name() {
+  // The refusal is scoped to what it protects: with no note to carry there
+  // is nothing to orphan, so the rename must not be blocked by a rule about
+  // notes.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-plain");
+  worktree::add(&repo, "feat-1-plain", &old_path, "feat/#1-plain", false).unwrap();
+
+  let new_path = wt_root.path().join("docs-md-fix");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#1-plain", &new_path, "docs.md/fix").unwrap();
+
+  assert!(repo.find_branch("docs.md/fix", git2::BranchType::Local).is_ok());
+}
+
+#[test]
+fn an_unreadable_source_note_is_still_a_note_worth_refusing_a_rename_for() {
+  // The preflight asked `notes::read`, which answers a display question and
+  // collapses "unreadable" into "absent". A note carrying invalid UTF-8 then
+  // slipped past a rename onto a name that backs no file, and was left under
+  // the old branch where the doctor's scan cannot see it either. Both sides
+  // of the preflight read through one byte-preserving predicate now (Codex
+  // review, PR #530, pass 4).
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+  let note = gwm::notes::prepare(&repo, "feat/#1-old").unwrap().unwrap();
+  std::fs::write(&note, [0xff, 0xfe, b'h', b'i']).unwrap();
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "docs.md/fix").unwrap_err();
+
+  assert!(err.to_string().contains("cannot back a note file"), "got: {err}");
+  assert_eq!(
+    std::fs::read(&note).unwrap(),
+    vec![0xff, 0xfe, b'h', b'i'],
+    "the bytes stay where they are, reachable under the old name"
+  );
+}
+
+/// Issue #531: the removal records itself at the point of no return, so a
+/// refusal leaves nothing behind.
+///
+/// The check that can still refuse sits on the handle the prune acts on, and
+/// it runs before the callback. An entry written earlier would describe a
+/// removal that never happened, and `gwm undo` cannot get past one: it saves
+/// the journal only after the resurrection succeeds (`cli.rs`), and the
+/// resurrection fails on a worktree that is still on disk, so the stale entry
+/// comes back every single time until someone edits `history.toml` by hand.
+#[test]
+fn a_refused_removal_records_nothing() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-531-a");
+  worktree::add(&repo, "feat-531-a", &target, "feat/#531-a", false).unwrap();
+
+  let mut recorded = false;
+  let err = worktree::remove_verified_recording(
+    &repo,
+    "feat-531-a",
+    &wt_root.path().join("somewhere-else"),
+    false,
+    |_| recorded = true,
+  )
+  .expect_err("a path that no longer matches must refuse");
+
+  assert!(!recorded, "a refused removal must not record anything");
+  assert!(format!("{err}").contains("changed since it was confirmed"));
+  assert!(target.exists(), "the worktree must survive its own refusal");
+}
+
+/// One observation of HEAD, handed to whoever records the removal and used by
+/// the deletion itself — the journal cannot name a branch other than the one
+/// that goes.
+#[test]
+fn the_recorded_branch_is_the_one_the_removal_deletes() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-531-b");
+  worktree::add(&repo, "feat-531-b", &target, "feat/#531-b", false).unwrap();
+  let expected = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-531-b")
+    .expect("the new worktree is listed")
+    .path;
+
+  let mut seen = None;
+  let mut oid_at_record = None;
+  worktree::remove_verified_recording(&repo, "feat-531-b", &expected, true, |head| {
+    seen = Some(head.clone());
+    // What the undo journal does at this instant. The callback fires after
+    // the prune and after the directory is gone, so the ref has to still
+    // resolve here or `gwm undo` loses the tip it would resurrect, and it is
+    // the last instant at which it can: the branch delete is next.
+    oid_at_record = head
+      .name()
+      .and_then(|b| repo.find_branch(b, git2::BranchType::Local).ok())
+      .and_then(|br| br.into_reference().target());
+  })
+  .unwrap();
+
+  assert_eq!(seen, Some(worktree::HeadBranch::Attached("feat/#531-b".into())));
+  assert!(
+    oid_at_record.is_some(),
+    "the branch tip must still resolve when the removal reports itself"
+  );
+  assert!(
+    repo.find_branch("feat/#531-b", git2::BranchType::Local).is_err(),
+    "the branch the callback was handed is the one that got deleted"
+  );
+}
+
+/// A detached HEAD is its own answer, not "could not read it": the removal
+/// deletes no branch, so the record must not name one either — `gwm undo`
+/// refuses a detached-HEAD entry outright rather than restoring the wrong
+/// branch.
+#[test]
+fn a_detached_head_is_recorded_as_such_and_deletes_no_branch() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-531-c");
+  worktree::add(&repo, "feat-531-c", &target, "feat/#531-c", false).unwrap();
+  let expected = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .find(|w| w.name == "feat-531-c")
+    .expect("the new worktree is listed")
+    .path;
+
+  let head = Repository::open(&target).unwrap().head().unwrap().target().unwrap();
+  Repository::open(&target).unwrap().set_head_detached(head).unwrap();
+
+  let mut seen = None;
+  worktree::remove_verified_recording(&repo, "feat-531-c", &expected, true, |h| seen = Some(h.clone())).unwrap();
+
+  assert_eq!(seen, Some(worktree::HeadBranch::Detached));
+  assert!(
+    repo.find_branch("feat/#531-c", git2::BranchType::Local).is_ok(),
+    "a detached removal deletes no branch, whatever --delete-branch says"
+  );
+}

@@ -172,6 +172,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
     View::Pty => draw_pty_overlay(f, app),
+    View::Note => draw_note_editor(f, app),
     // #325: exec profile picker renders as a small centred modal.
     View::ExecPicker => draw_exec_picker(f, app),
     // #325: clean reclaim report renders as a centred modal.
@@ -451,6 +452,19 @@ pub fn pane_counter(selected: usize, visible: usize) -> Option<String> {
   }
 }
 
+/// Worktrees-pane counter, with the mark count appended while rows are marked
+/// (issue #484). Only `d` reads the mark set: every other verb acts on the
+/// cursor row, so a live selection has to stay visible or `b` / `s` / `p`
+/// would silently look like they ignored it. `marked = 0` is the pre-#484
+/// counter, verbatim.
+pub fn list_pane_counter(selected: usize, visible: usize, marked: usize) -> Option<String> {
+  let base = pane_counter(selected, visible)?;
+  if marked == 0 {
+    return Some(base);
+  }
+  Some(format!("{}· {} marked ", base, marked))
+}
+
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Filter-aware: the visible rows are the filtered subset (issue #21). When
   // there is no active filter, this is the identity over `app.worktrees`.
@@ -491,10 +505,21 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let name_w = column_width(visible.iter().map(|w| w.name.as_str()), 18, 38);
   let branch_w = column_width(visible.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
   let status_w: u16 = 16;
+  let row_widths = RowWidths {
+    name: name_w,
+    branch: branch_w,
+    status: status_w,
+  };
 
   // Header cells, with an optional REPO column after the (caption-less) age
   // column in workspace mode.
-  let mut header_cells = vec![Cell::from("")];
+  // #484: the mark column leads, right under the cursor arrow. Caption-less,
+  // like the age and I/P columns.
+  let mut header_cells = if app.marked_count() > 0 {
+    vec![Cell::from(""), Cell::from("")]
+  } else {
+    vec![Cell::from("")]
+  };
   if is_workspace {
     header_cells.push(Cell::from("REPO"));
   }
@@ -502,7 +527,15 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // round D): a no-agent setup keeps the exact pre-#408 table instead of an
   // empty fixed column squeezing NAME/BRANCH/PATH on narrow terminals.
   let show_agent = app.any_agent_sessions();
+  // #515: the note column follows the same rule as AGENT and the mark
+  // column — it only exists once something is in it, so a user with no
+  // notes keeps the exact pre-#515 table instead of an empty column eating
+  // two cells on a narrow terminal. Caption-less: the marker is binary.
+  let show_note = visible.iter().any(|w| w.has_note);
   header_cells.push(Cell::from("I/P"));
+  if show_note {
+    header_cells.push(Cell::from(""));
+  }
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
   header_cells.push(Cell::from("STATUS"));
@@ -521,13 +554,25 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| agent_cell_label(app.agents_for(w), now))
     .collect();
 
+  // #484: the mark column only exists while something is marked, so a user
+  // who never presses `Space` keeps the exact pre-#484 table instead of an
+  // empty column eating two cells on a narrow terminal (same rule the AGENT
+  // column follows).
+  let marked_count = app.marked_count();
+  let marks: Vec<bool> = if marked_count > 0 {
+    visible.iter().map(|w| app.is_marked(&w.path)).collect()
+  } else {
+    Vec::new()
+  };
+
   let rows: Vec<Row> = visible
     .iter()
     .enumerate()
     .map(|(vi, w)| {
       let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
       let agent = show_agent.then_some(agent_cells[vi]);
-      build_row(w, repo, name_w, branch_w, status_w, agent, &theme)
+      let mark = marks.get(vi).copied();
+      build_row(w, mark, repo, row_widths, agent, show_note, &theme)
     })
     .collect();
 
@@ -544,14 +589,23 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   //   - `Fill(1)` for path: takes whatever's left, vanishes last.
   // Verified by standalone probe down to 40-cell terminals: col 0
   // stays at 4 cells across every size.
-  let mut widths = vec![Constraint::Length(4)];
+  let mut widths = if marked_count > 0 {
+    // #484: mark glyph + its trailing space.
+    vec![Constraint::Length(2), Constraint::Length(4)]
+  } else {
+    vec![Constraint::Length(4)]
+  };
   if is_workspace {
     // REPO column sits between age and the I/P marker; a hard length so the
     // solver doesn't starve it on narrow terminals.
     widths.push(Constraint::Length(repo_w));
   }
+  widths.push(Constraint::Length(3));
+  if show_note {
+    // #515: one cell for the note marker, hard-fixed like the I/P column.
+    widths.push(Constraint::Length(1));
+  }
   widths.extend([
-    Constraint::Length(3),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
@@ -578,7 +632,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Recent Commits footer. `list_state.selected()` is 0-based; render it
   // 1-based. Blank when nothing is visible so the footer disappears.
   let selected_1based = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
-  let counter = pane_counter(selected_1based, visible.len());
+  let counter = list_pane_counter(selected_1based, visible.len(), marked_count);
 
   let mut block = Block::default()
     .borders(Borders::ALL)
@@ -1853,21 +1907,68 @@ pub fn agent_cell_label(
   Some((top.kind.display(), freshness))
 }
 
+/// The mark cell for one row (issue #484). Plain `✓` in the danger role: the
+/// only verb that reads the mark set is the destructive one, so the column
+/// says up front what the batch is for. Unmarked rows keep the slot blank so
+/// the columns stay aligned.
+fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
+  if marked {
+    Cell::from("✓").style(Style::default().fg(theme.prunable).add_modifier(Modifier::BOLD))
+  } else {
+    Cell::from("")
+  }
+}
+
+/// The note marker (issue #515). Binary by design: this row carries a note
+/// or it does not — no preview, no length, no freshness colour, and no
+/// second meaning layered onto a glyph that already has one (`★`, `●` and
+/// `✓` are all spoken for). It paints with the neutral `name` role, the
+/// same one the empty I/P slots use, because presence is not a status.
+///
+/// A row without a note in a shown column renders an empty cell so the
+/// columns stay aligned — the rule [`mark_cell`] follows.
+fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
+  if has_note {
+    Cell::from("≡").style(Style::default().fg(theme.name))
+  } else {
+    Cell::from("")
+  }
+}
+
+/// The three width-constrained column budgets a row truncates against.
+/// Grouped rather than passed one by one so the mark column (#484) could join
+/// `build_row`'s signature without pushing it past the argument limit.
+#[derive(Debug, Clone, Copy)]
+struct RowWidths {
+  name: u16,
+  branch: u16,
+  status: u16,
+}
+
 /// Build one worktree table row. In workspace mode (issue #36) `repo` is
 /// `Some((name, width))` and a leading `REPO` cell is inserted after the age
 /// column, painted in the `accent` role; in single-repo mode it is `None` and
 /// the row keeps its historical shape.
 fn build_row(
   w: &WorktreeInfo,
+  // #484: `Some(is_marked)` while the mark column is shown (i.e. at least one
+  // row is marked anywhere in the list), `None` when it is absent entirely.
+  mark: Option<bool>,
   repo: Option<(&str, u16)>,
-  name_w: u16,
-  branch_w: u16,
-  status_w: u16,
+  widths: RowWidths,
   // Outer `Option` = is the AGENT column shown at all (round D:
   // conditional on any detected session); inner = this row's top agent.
   agent: Option<Option<(&'static str, crate::agent_sessions::Freshness)>>,
+  // #515: is the note column shown at all (any visible row carries one)?
+  // The row's own answer is `w.has_note`.
+  show_note: bool,
   theme: &Theme,
 ) -> Row<'static> {
+  let RowWidths {
+    name: name_w,
+    branch: branch_w,
+    status: status_w,
+  } = widths;
   let marker = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
@@ -1902,7 +2003,11 @@ fn build_row(
   let path_cell =
     Cell::from(crate::naming::sanitise_for_terminal(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
-  let mut cells = vec![age_cell];
+  let mut cells = Vec::with_capacity(8);
+  if let Some(marked) = mark {
+    cells.push(mark_cell(marked, theme));
+  }
+  cells.push(age_cell);
   if let Some((repo_name, repo_w)) = repo {
     cells.push(
       Cell::from(trunc(repo_name, repo_w as usize))
@@ -1910,6 +2015,9 @@ fn build_row(
     );
   }
   cells.push(Cell::from(marker));
+  if show_note {
+    cells.push(note_cell(w.has_note, theme));
+  }
   cells.push(name_cell);
   cells.push(branch_cell);
   cells.push(status_cell);
@@ -2069,6 +2177,13 @@ pub enum HintContext {
   /// PR's per-check rollup — j/k select, Enter opens the details URL,
   /// f filters, Esc closes.
   CiChecks,
+  /// Rich PR / issue view (issue #420): the same shell on the linked
+  /// PR's or issue's description, reviews and conversation — j/k select,
+  /// Enter opens the row's URL, f re-fetches, Esc closes.
+  RichView,
+  /// The in-TUI note editor (issue #515): every printable is text, so the
+  /// only verbs advertised are the two ways out.
+  Note,
 }
 
 impl HintContext {
@@ -2093,6 +2208,8 @@ impl HintContext {
       HintContext::Rename | HintContext::RenameFreeform => "rename",
       HintContext::Detail => "agents",
       HintContext::CiChecks => "checks",
+      HintContext::RichView => "pr/issue",
+      HintContext::Note => "note",
     }
   }
 
@@ -2112,6 +2229,8 @@ impl HintContext {
         // Worktree lifecycle.
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
+        // #484: the mark sits next to the verb it feeds.
+        Hint::Key(ToggleSelect, "mark"),
         Hint::Key(Bootstrap, "boot"),
         // Act on the selected worktree. #453 re-audit: exec and agent
         // sessions joined the family; clean / mux / macros stay
@@ -2120,6 +2239,10 @@ impl HintContext {
         Hint::Key(LazyGitFullscreen, "git"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
+        // #515: the note is written far more often than a review is
+        // launched, so it sits ahead of `review` / `yank` in the
+        // right-to-left truncation order rather than at the tail.
+        Hint::Key(EditNote, "note"),
         Hint::Key(ReviewFullscreen, "review"),
         Hint::Key(YankPath, "yank"),
         // Find / navigate panes.
@@ -2238,6 +2361,20 @@ impl HintContext {
         Hint::Modal(ModalAction::CiChecksFilter, "filter"),
         Hint::Modal(ModalAction::CiChecksRefresh, "refresh"),
         Hint::Modal(ModalAction::CiChecksClose, "close"),
+      ],
+      // #420: no filter verb — a rich view is prose, not a row set.
+      HintContext::RichView => &[
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::RichViewOpen, "open"),
+        Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
+        Hint::Modal(ModalAction::RichViewClose, "close"),
+      ],
+      // #515: no verbs beyond the exits — j/k are letters here, and the
+      // arrows are hard-coded for the same reason `Esc` is elsewhere.
+      HintContext::Note => &[
+        Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "save & close"),
       ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
@@ -2360,6 +2497,8 @@ impl HintContext {
       HintContext::Help => KeyContext::Help,
       HintContext::Detail => KeyContext::Detail,
       HintContext::CiChecks => KeyContext::CiChecks,
+      HintContext::RichView => KeyContext::RichView,
+      HintContext::Note => KeyContext::Note,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -2907,7 +3046,15 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
   } else {
     rows.push(entry(Action::Create, "new worktree"));
-    rows.push(entry(Action::DeleteConfirm, "delete selected"));
+    // #484: the mark set is what `d` acts on when it is non-empty.
+    rows.push(entry(
+      Action::ToggleSelect,
+      "mark / unmark this worktree for a bulk delete",
+    ));
+    rows.push(entry(
+      Action::DeleteConfirm,
+      "delete the marked worktrees (or this one)",
+    ));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
   rows.push(entry(
@@ -2961,6 +3108,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       Action::CiChecks,
       "list the linked PR's CI checks (also `c` with status focus)",
     ));
+    rows.push(entry(
+      Action::RichView,
+      "open the linked PR/issue: description, checks, reviews, comments",
+    ));
   }
   rows.push(entry(
     Action::Filter,
@@ -2972,6 +3123,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
     rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
     rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
+    rows.push(entry(Action::EditNote, "edit the selected worktree's note"));
     rows.push(entry(
       Action::ExitToWorktree,
       "quit TUI and print selected path to stdout",
@@ -3147,6 +3299,22 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("enter", "filter: open the highlighted check's URL"),
       fixed("Esc", "filter: back to the list"),
       modal_entry(ModalAction::CiChecksClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("PR / Issue View".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::RichViewNext, "next row"),
+      modal_entry(ModalAction::RichViewPrev, "previous row"),
+      modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
+      modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
+      modal_entry(ModalAction::RichViewClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Note Editor".to_string()),
+      HelpRow::Blank,
+      fixed("Left/Right/Up/Down", "move the cursor"),
+      fixed("Home/End", "start / end of line"),
+      fixed("PgUp/PgDn", "page through the note"),
+      modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
+      modal_entry(ModalAction::NoteClose, "save and close (empty the note to delete it)"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -4261,6 +4429,16 @@ pub fn delete_worktree_title() -> &'static str {
   "Delete Worktree"
 }
 
+/// Title of the confirm overlay for a batch of `count` targets (issue #484).
+/// A batch of one is the pre-#484 single delete, title included.
+pub fn delete_batch_title(count: usize) -> String {
+  if count > 1 {
+    format!("Delete {} Worktrees", count)
+  } else {
+    delete_worktree_title().to_string()
+  }
+}
+
 pub fn confirm_delete_branch_line(
   enabled: bool,
   key: &str,
@@ -4330,7 +4508,10 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
   let block = overlay_block(danger);
 
-  let Some(w) = app.selected() else {
+  // #484: the overlay is about the batch snapshotted when it opened, not
+  // about wherever the cursor sits now.
+  let targets = app.pending_delete();
+  if targets.is_empty() {
     let mut lines = overlay_title_lines(delete_worktree_title(), danger);
     lines.push(Line::from("nothing selected").centered());
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
@@ -4338,7 +4519,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
     return;
-  };
+  }
 
   // Width first (a fixed % of the terminal) so a long path / name can be
   // middle-ellipsized to one line instead of wrapping mid-path (#187
@@ -4349,35 +4530,61 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let label_w = "Delete Branch".chars().count();
   let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
-  let name = ellipsize_middle(&w.name, value_w);
-  let path = ellipsize_middle(&tilde_compress(&w.path.display().to_string()), value_w);
-
   // Title stays centred; details use an aligned label/value grid so the
   // destructive target is easier to scan (#220 visual follow-up).
-  let mut content: Vec<Line> = overlay_title_lines(delete_worktree_title(), danger);
-  content.push(confirm_detail_line(
-    "Worktree",
-    name,
-    label_w,
-    muted,
-    Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
-  ));
-  content.push(confirm_detail_line(
-    "Path",
-    path,
-    label_w,
-    muted,
-    Style::default().fg(muted),
-  ));
-  if let Some(b) = &w.branch {
-    let branch = ellipsize_middle(b, value_w);
+  let mut content: Vec<Line> = overlay_title_lines(&delete_batch_title(targets.len()), danger);
+  if targets.len() > 1 {
+    // A batch reports its size, not its members (#484): the user picked the
+    // rows deliberately and the list is already on screen behind the modal.
     content.push(confirm_detail_line(
-      "Branch",
-      branch,
+      "Worktrees",
+      format!("{} selected", targets.len()),
+      label_w,
+      muted,
+      Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
+    ));
+    let with_branch = targets
+      .iter()
+      .filter(|t| app.worktrees.iter().any(|w| w.path == t.path && w.branch.is_some()))
+      .count();
+    content.push(confirm_detail_line(
+      "Branches",
+      format!("{} of {} carry a branch", with_branch, targets.len()),
       label_w,
       muted,
       Style::default().fg(app.theme.branch),
     ));
+  } else {
+    // Resolve the row from the snapshot's path rather than from the cursor:
+    // a refresh landing during the countdown can have moved the cursor.
+    let target = &targets[0];
+    let row = app.worktrees.iter().find(|w| w.path == target.path);
+    let name = ellipsize_middle(row.map(|w| w.name.as_str()).unwrap_or(&target.id), value_w);
+    let path = ellipsize_middle(&tilde_compress(&target.path.display().to_string()), value_w);
+    content.push(confirm_detail_line(
+      "Worktree",
+      name,
+      label_w,
+      muted,
+      Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
+    ));
+    content.push(confirm_detail_line(
+      "Path",
+      path,
+      label_w,
+      muted,
+      Style::default().fg(muted),
+    ));
+    if let Some(b) = row.and_then(|w| w.branch.as_deref()) {
+      let branch = ellipsize_middle(b, value_w);
+      content.push(confirm_detail_line(
+        "Branch",
+        branch,
+        label_w,
+        muted,
+        Style::default().fg(app.theme.branch),
+      ));
+    }
   }
   content.push(Line::from(""));
   content.push(confirm_delete_branch_line(
@@ -4627,6 +4834,59 @@ fn draw_report(f: &mut Frame, app: &App) {
     )),
     layout[4],
   );
+}
+
+// ── Note editor (issue #515) ───────────────────────────────────────────────
+
+/// Render the in-TUI note editor: the branch in the title, the buffer in an
+/// 80% x 80% centred box, and the cursor placed on the terminal so the
+/// caret blinks where the next character lands.
+///
+/// The scroll is clamped **here**, with the height the layout actually gave,
+/// which is why [`crate::tui::state::note_editor::NoteEditor`] does not try
+/// to know its own viewport ahead of a resize. That same call teaches the
+/// editor what a page key should move by.
+fn draw_note_editor(f: &mut Frame, app: &mut App) {
+  let area = centered(80, 80, f.area());
+  f.render_widget(Clear, area);
+
+  let title = match app.note_editor.as_ref() {
+    Some(editor) => format!(" note · {} ", crate::naming::sanitise_for_terminal(&editor.branch)),
+    None => " note ".to_string(),
+  };
+  let block = overlay_block(app.theme.accent)
+    .title(title)
+    .title_alignment(ratatui::layout::Alignment::Center);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+
+  let Some(editor) = app.note_editor.as_mut() else {
+    return;
+  };
+  editor.clamp_scroll(inner.height as usize);
+
+  let visible: Vec<Line> = editor
+    .lines
+    .iter()
+    .skip(editor.scroll)
+    .take(inner.height as usize)
+    // Not wrapped: a wrapped line makes the screen row the cursor sits on
+    // stop matching its buffer line, and the caret would land somewhere
+    // else entirely. Long lines scroll out of view instead — `Ctrl+e` is
+    // the answer for prose that needs the width.
+    .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(app.theme.name))))
+    .collect();
+  f.render_widget(Paragraph::new(visible), inner);
+
+  // The caret. Columns are `char`s in the buffer and cells on screen, which
+  // is the same approximation the cursor itself makes (see the state module
+  // note): a wide CJK glyph puts the caret one cell left of the glyph it is
+  // about to push.
+  let row = editor.cursor_line.saturating_sub(editor.scroll) as u16;
+  if row < inner.height {
+    let col = (editor.cursor_col as u16).min(inner.width.saturating_sub(1));
+    f.set_cursor_position((inner.x + col, inner.y + row));
+  }
 }
 
 // ── PTY overlay (issue #35) ────────────────────────────────────────────────
@@ -5226,10 +5486,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   }
   // #436 validation feedback: the CI checks consumer advertises ITS verbs,
   // not the agents' attach / detach — the hint context follows the kind.
-  let hint_ctx = if ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
-    HintContext::CiChecks
-  } else {
-    HintContext::Detail
+  let hint_ctx = match ov.kind {
+    crate::tui::state::detail_overlay::DetailKind::CiChecks => HintContext::CiChecks,
+    crate::tui::state::detail_overlay::DetailKind::RichIssue
+    | crate::tui::state::detail_overlay::DetailKind::RichPr => HintContext::RichView,
+    crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
   };
   push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
   let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;

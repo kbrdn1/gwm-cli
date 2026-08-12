@@ -29,6 +29,7 @@ fn sample_issue(n: u64) -> IssueStatus {
     url: format!("https://example.test/issues/{}", n),
     labels: vec![],
     updated_at: "2026-01-01T00:00:00Z".into(),
+    detail: Default::default(),
   }
 }
 
@@ -43,6 +44,7 @@ fn sample_pr(n: u64) -> PrStatus {
     checks_total: 0,
     ci: CiState::None,
     checks: vec![],
+    detail: Default::default(),
   }
 }
 

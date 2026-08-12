@@ -81,8 +81,11 @@ pub enum KeyContext {
   Confirm,
   /// Keybindings / help overlay (scroll-only).
   Help,
-  /// Generic detail overlay (issue #408, scroll-only / close) — agent
-  /// sessions today, the rich PR/Issue view tomorrow.
+  /// Generic detail overlay (issue #408, scroll-only / close) — the agent
+  /// session pane. The rich PR/Issue view got its own context (#420): it
+  /// shares the shell but not the verbs (no attach / detach, and `Enter`
+  /// opens a URL rather than pinning a session), so folding them together
+  /// would have made rebinding one silently rebind the other.
   Detail,
   /// Command-logs overlay (issue #226, scroll-only + copy).
   CommandLogs,
@@ -109,6 +112,13 @@ pub enum KeyContext {
   /// CI checks overlay (issue #436) — the detail-overlay shell opened on
   /// the linked PR's per-check rollup list.
   CiChecks,
+  /// Rich PR / issue view (issue #420) — the same shell opened on the
+  /// linked PR's or issue's description, reviews and conversation.
+  RichView,
+  /// The in-TUI note editor (issue #515). An always-typing context: every
+  /// printable, `Enter` and `Backspace` are text, so the only bindable
+  /// verbs are the two ways out.
+  Note,
 }
 
 impl KeyContext {
@@ -133,6 +143,13 @@ impl KeyContext {
     }
     match (self, stroke.code) {
       (KeyContext::CommandPalette | KeyContext::LinkInputNumber | KeyContext::ConfigEdit, KC::Backspace) => true,
+      // Note (#515) reserves more than any other context, because it is the
+      // only multi-line one: `Enter` splits a line and `Delete` removes
+      // forwards, so both are text rather than verbs. Binding `close` to
+      // any of these would leave the editor with a key that types instead
+      // of closing — and `d` reaching the global keymap would open the
+      // delete confirm on the worktree the user is writing about.
+      (KeyContext::Note, KC::Backspace | KC::Enter | KC::Delete | KC::Char(_)) => true,
       // A shifted letter is an uppercase (kitty-style) — not palette
       // input, so it stays bindable.
       (KeyContext::CommandPalette, KC::Char(c)) if stroke.modifiers.contains(KM::SHIFT) => c.is_ascii_digit(),
@@ -163,6 +180,8 @@ impl KeyContext {
       KeyContext::ExecPicker => "exec",
       KeyContext::Clean => "clean",
       KeyContext::CiChecks => "ci_checks",
+      KeyContext::RichView => "rich_view",
+      KeyContext::Note => "note",
     }
   }
 
@@ -191,6 +210,8 @@ impl KeyContext {
       ExecPicker,
       Clean,
       CiChecks,
+      RichView,
+      Note,
     ]
   }
 }
@@ -350,6 +371,27 @@ define_modal_actions! {
     CiChecksOpen    => "open"        [ "Enter" ],
     CiChecksFilter  => "filter"      [ "/" ],
     CiChecksRefresh => "refresh"     [ "f" ],
+  }
+  // #420: the same list-view keys as the CI checks context above, minus
+  // the filter — a rich view is prose, not a searchable row set.
+  RichView {
+    RichViewClose   => "close"       [ "Esc", "q" ],
+    RichViewNext    => "select_next" [ "j", "Down" ],
+    RichViewPrev    => "select_prev" [ "k", "Up" ],
+    RichViewOpen    => "open"        [ "Enter" ],
+    RichViewRefresh => "refresh"     [ "f" ],
+  }
+  // #515: two verbs, because everything else is text. `Esc` writes and
+  // closes — there is no discard, the buffer is emptied instead (see
+  // `state::note_editor`). `Ctrl+e` hands the same file to `$EDITOR`,
+  // which is what `N` itself used to do.
+  //
+  // `Ctrl+e` is now spoken for. If line motions ever land here, the
+  // readline `Ctrl+a` / `Ctrl+e` pair cannot have it — pick another key
+  // rather than shadowing the way out to a real editor.
+  Note {
+    NoteClose      => "close"       [ "Esc" ],
+    NoteOpenEditor => "open_editor" [ "Ctrl+e" ],
   }
 }
 

@@ -27,8 +27,9 @@ use std::sync::LazyLock;
 // TUI and CLI keep resolving unchanged.
 pub use crate::forge::{cli_command_line as gh_command_line, repo_slug};
 pub use crate::forge::{
-  CheckOutcome, CiState, CreatedIssue, CreatedPr, IssueCreateRequest, IssueState, IssueStatus, PrCheck,
-  PrCreateRequest, PrHead, PrState, PrStatus,
+  CheckOutcome, CiState, CreatedIssue, CreatedPr, ForgeComment, ForgeReview, IssueCreateRequest, IssueDetail,
+  IssueState, IssueStatus, PrCheck, PrCreateRequest, PrDetail, PrHead, PrState, PrStatus, ReviewState, ReviewThread,
+  ReviewThreads,
 };
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
@@ -805,16 +806,40 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
 
 // ---- Issue / PR status ---------------------------------------------------
 
+/// Read `null` as the type's default instead of aborting the parse
+/// (Codex review #529). `#[serde(default)]` covers an **absent** key only:
+/// an explicit `"submittedAt": null` on a `String` is a hard error, and
+/// one such field takes the whole `gh` payload down with it, so the CI
+/// summary and the status pane go dark along with the rich view. Applied
+/// to every field of the issue / PR shapes, because "which of these can
+/// the forge null out" is not a question worth answering field by field.
+pub(crate) fn null_to_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+  D: serde::Deserializer<'de>,
+  T: Deserialize<'de> + Default,
+{
+  Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 struct RawIssue {
   number: u64,
   title: String,
   state: String,
   url: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   labels: Vec<RawLabel>,
-  #[serde(rename = "updatedAt", default)]
+  #[serde(rename = "updatedAt", default, deserialize_with = "null_to_default")]
   updated_at: String,
+  // Rich tier (issue #420). Every field is `default`ed: a summary-only
+  // payload — a stubbed `gh`, an older CLI that does not know a field —
+  // must degrade to the summary tier, not fail the whole parse.
+  #[serde(default, deserialize_with = "null_to_default")]
+  body: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  author: Option<RawActor>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  comments: Vec<RawComment>,
 }
 
 #[derive(Deserialize)]
@@ -822,18 +847,85 @@ struct RawLabel {
   name: String,
 }
 
+/// A GitHub actor. `Option` at the use site (not just `default`) so an
+/// explicit `"author": null` — a deleted account — reads as "no author"
+/// instead of erroring, the same guard the GitLab backend already carries.
+#[derive(Deserialize, Default)]
+struct RawActor {
+  #[serde(default, deserialize_with = "null_to_default")]
+  login: String,
+}
+
+#[derive(Deserialize)]
+struct RawComment {
+  #[serde(default, deserialize_with = "null_to_default")]
+  author: Option<RawActor>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  body: String,
+  #[serde(rename = "createdAt", default, deserialize_with = "null_to_default")]
+  created_at: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawReview {
+  #[serde(default, deserialize_with = "null_to_default")]
+  author: Option<RawActor>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  state: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  body: String,
+  #[serde(rename = "submittedAt", default, deserialize_with = "null_to_default")]
+  submitted_at: String,
+}
+
+/// `login`, or an empty string for a missing / deleted actor.
+fn actor_login(a: Option<RawActor>) -> String {
+  a.unwrap_or_default().login
+}
+
+fn map_comments(raw: Vec<RawComment>) -> Vec<ForgeComment> {
+  raw
+    .into_iter()
+    .map(|c| ForgeComment {
+      author: actor_login(c.author),
+      body: c.body,
+      created_at: c.created_at,
+      url: c.url,
+    })
+    .collect()
+}
+
 #[derive(Deserialize)]
 struct RawPr {
   number: u64,
   title: String,
   state: String,
-  #[serde(rename = "isDraft", default)]
+  #[serde(rename = "isDraft", default, deserialize_with = "null_to_default")]
   is_draft: bool,
   url: String,
-  #[serde(rename = "updatedAt", default)]
+  #[serde(rename = "updatedAt", default, deserialize_with = "null_to_default")]
   updated_at: String,
-  #[serde(rename = "statusCheckRollup", default)]
+  #[serde(rename = "statusCheckRollup", default, deserialize_with = "null_to_default")]
   status_check_rollup: Vec<RawCheck>,
+  // Rich tier (issue #420) — see `RawIssue` for why everything defaults.
+  #[serde(default, deserialize_with = "null_to_default")]
+  body: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  author: Option<RawActor>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  additions: u32,
+  #[serde(default, deserialize_with = "null_to_default")]
+  deletions: u32,
+  #[serde(rename = "baseRefName", default, deserialize_with = "null_to_default")]
+  base_ref_name: String,
+  #[serde(rename = "headRefName", default, deserialize_with = "null_to_default")]
+  head_ref_name: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  reviews: Vec<RawReview>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  comments: Vec<RawComment>,
 }
 
 /// One `statusCheckRollup` entry. GitHub returns two shapes here: a
@@ -842,29 +934,29 @@ struct RawPr {
 /// deserialize all three so both shapes classify correctly.
 #[derive(Deserialize)]
 struct RawCheck {
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   status: String,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   conclusion: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   state: String,
   // Per-check identity + link, kept for the CI checks overlay (issue #436).
   // `name` + `detailsUrl` on the `CheckRun` shape; `context` + `targetUrl`
   // on the legacy `StatusContext` shape.
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   name: String,
-  #[serde(rename = "detailsUrl", default)]
+  #[serde(rename = "detailsUrl", default, deserialize_with = "null_to_default")]
   details_url: Option<String>,
-  #[serde(default)]
+  #[serde(default, deserialize_with = "null_to_default")]
   context: String,
-  #[serde(rename = "targetUrl", default)]
+  #[serde(rename = "targetUrl", default, deserialize_with = "null_to_default")]
   target_url: Option<String>,
   // Run metadata (CheckRun shape), kept for the overlay's detail column.
-  #[serde(rename = "workflowName", default)]
+  #[serde(rename = "workflowName", default, deserialize_with = "null_to_default")]
   workflow_name: Option<String>,
-  #[serde(rename = "startedAt", default)]
+  #[serde(rename = "startedAt", default, deserialize_with = "null_to_default")]
   started_at: Option<String>,
-  #[serde(rename = "completedAt", default)]
+  #[serde(rename = "completedAt", default, deserialize_with = "null_to_default")]
   completed_at: Option<String>,
 }
 
@@ -885,6 +977,11 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
     url: raw.url,
     labels: raw.labels.into_iter().map(|l| l.name).collect(),
     updated_at: raw.updated_at,
+    detail: IssueDetail {
+      body: raw.body,
+      author: actor_login(raw.author),
+      comments: map_comments(raw.comments),
+    },
   })
 }
 
@@ -934,6 +1031,25 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     checks_total,
     ci,
     checks,
+    detail: PrDetail {
+      body: raw.body,
+      author: actor_login(raw.author),
+      additions: raw.additions,
+      deletions: raw.deletions,
+      base_ref: raw.base_ref_name,
+      head_ref: raw.head_ref_name,
+      reviews: raw
+        .reviews
+        .into_iter()
+        .map(|r| ForgeReview {
+          author: actor_login(r.author),
+          state: ReviewState::classify(&r.state),
+          body: r.body,
+          submitted_at: r.submitted_at,
+        })
+        .collect(),
+      comments: map_comments(raw.comments),
+    },
   })
 }
 
@@ -984,8 +1100,17 @@ fn derive_ci_state(checks: &[RawCheck]) -> CiState {
 
 // ---- gh CLI invocation ---------------------------------------------------
 
-const ISSUE_JSON_FIELDS: &str = "number,title,state,url,labels,updatedAt";
-const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusCheckRollup";
+// Summary tier + the rich tier the PR/issue view reads (issue #420). One
+// request, not two: `gh` returns the whole set in the same call, and a
+// second per-field tier would add a fourth failure mode to a fetch cache
+// that has already been raced three times (#138, #255, #458).
+//
+// Inline review comments (the ones anchored to a diff hunk) are absent on
+// purpose: `--json comments` returns conversation comments only, and the
+// review threads are reachable through GraphQL alone. Tracked separately.
+const ISSUE_JSON_FIELDS: &str = "number,title,state,url,labels,updatedAt,body,author,comments";
+const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusCheckRollup,\
+body,author,additions,deletions,baseRefName,headRefName,reviews,comments";
 
 /// Run `gh issue view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
@@ -1210,6 +1335,193 @@ pub fn pr_head_argv(slug: &str, number: u64) -> Vec<String> {
   argv.extend(repo_flag(slug));
   argv.extend(["--json".into(), PR_HEAD_JSON_FIELDS.into()]);
   argv
+}
+
+// ---- Inline review threads (issue #528) ---------------------------------
+//
+// A second transport. `gh pr view --json comments` returns the
+// conversation only; the comments anchored to a diff hunk, their
+// `path` / `line` / `diffHunk`, and the reply chains inside a thread are
+// reachable through GraphQL alone.
+
+/// The GraphQL document. One page of 50 threads and 20 comments each: a
+/// review running past either is unusual, and `totalCount` comes back in
+/// the same query so the cut is stated rather than hidden.
+///
+/// Every field here is read by the renderer, and
+/// [`pr_threads_argv`]'s test pins that list — a field dropped from the
+/// query is invisible to a parse test, which reads a fixture rather than
+/// `gh`.
+const PR_THREADS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){\
+repository(owner:$owner,name:$repo){pullRequest(number:$number){\
+reviewThreads(first:50){totalCount nodes{\
+isResolved isOutdated path line startLine \
+comments(first:20){totalCount nodes{author{login} body diffHunk createdAt url}}}}}}}";
+
+/// Split an `owner/repo` slug for the GraphQL variables.
+///
+/// `gh pr view` takes `--repo owner/repo` and, given nothing, resolves the
+/// repo from the working directory. A GraphQL document cannot do either:
+/// `$owner` and `$repo` are required, and the empty selector
+/// [`GitHubForge::repo_selector`] returns for an origin `gh` cannot be
+/// pinned to would have to be *guessed* back. Guessing it is the #458
+/// finding on a new transport — the request would resolve against
+/// whichever instance is ambient — so this refuses instead.
+fn split_owner_repo(slug: &str) -> Result<(&str, &str)> {
+  let mut parts = slug.split('/');
+  match (parts.next(), parts.next(), parts.next()) {
+    (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty() => Ok((owner, repo)),
+    _ => Err(GwmError::CommandFailed(format!(
+      "inline review comments need an owner/repo slug, got {slug:?}. \
+       gwm refuses to guess one for a GraphQL query."
+    ))),
+  }
+}
+
+/// Argv for `gh api graphql -f query=… -f owner=… -f repo=… -F number=…`.
+///
+/// `-f` for the two strings and `-F` only for the number: `-F` interprets
+/// its value (int / bool / null / `@file`), so a slug component that looks
+/// like a number would reach `$owner: String!` as an `Int` and a leading
+/// `@` would read a file.
+pub fn pr_threads_argv(slug: &str, number: u64) -> Result<Vec<String>> {
+  let (owner, repo) = split_owner_repo(slug)?;
+  Ok(vec![
+    "api".into(),
+    "graphql".into(),
+    "-f".into(),
+    format!("query={PR_THREADS_QUERY}"),
+    "-f".into(),
+    format!("owner={owner}"),
+    "-f".into(),
+    format!("repo={repo}"),
+    "-F".into(),
+    format!("number={number}"),
+  ])
+}
+
+#[derive(Deserialize)]
+struct RawThreadsEnvelope {
+  #[serde(default, deserialize_with = "null_to_default")]
+  data: RawThreadsData,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadsData {
+  #[serde(default, deserialize_with = "null_to_default")]
+  repository: RawThreadsRepository,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadsRepository {
+  #[serde(rename = "pullRequest", default, deserialize_with = "null_to_default")]
+  pull_request: RawThreadsPr,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadsPr {
+  #[serde(rename = "reviewThreads", default, deserialize_with = "null_to_default")]
+  review_threads: RawThreadConnection,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadConnection {
+  #[serde(rename = "totalCount", default, deserialize_with = "null_to_default")]
+  total_count: u32,
+  #[serde(default, deserialize_with = "null_to_default")]
+  nodes: Vec<RawThread>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThread {
+  #[serde(rename = "isResolved", default, deserialize_with = "null_to_default")]
+  is_resolved: bool,
+  #[serde(rename = "isOutdated", default, deserialize_with = "null_to_default")]
+  is_outdated: bool,
+  #[serde(default, deserialize_with = "null_to_default")]
+  path: String,
+  // Genuinely optional, not "nullable String": an outdated thread has no
+  // current line, and `startLine` is null on every single-line anchor.
+  #[serde(default)]
+  line: Option<u32>,
+  #[serde(rename = "startLine", default)]
+  start_line: Option<u32>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  comments: RawThreadCommentConnection,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadCommentConnection {
+  #[serde(rename = "totalCount", default, deserialize_with = "null_to_default")]
+  total_count: u32,
+  #[serde(default, deserialize_with = "null_to_default")]
+  nodes: Vec<RawThreadComment>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadComment {
+  #[serde(default)]
+  author: Option<RawAuthor>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  body: String,
+  #[serde(rename = "diffHunk", default, deserialize_with = "null_to_default")]
+  diff_hunk: String,
+  #[serde(rename = "createdAt", default, deserialize_with = "null_to_default")]
+  created_at: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  url: String,
+}
+
+/// Parse the response of [`PR_THREADS_QUERY`]. Pure + `pub` so its shape is
+/// testable without spawning `gh`.
+///
+/// Flattens GraphQL's `nodes` wrappers into the same shape the `--json`
+/// parser produces, so **one** renderer serves both transports.
+pub fn parse_pr_threads_json(s: &str) -> Result<ReviewThreads> {
+  let raw: RawThreadsEnvelope = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "pr review threads",
+    source: e,
+  })?;
+  let connection = raw.data.repository.pull_request.review_threads;
+  let threads = connection
+    .nodes
+    .into_iter()
+    .map(|t| {
+      // The hunk is a property of the thread's anchor, and GraphQL
+      // repeats it on every comment. Take it from the first, which is
+      // the one that established the anchor.
+      let diff_hunk = t
+        .comments
+        .nodes
+        .first()
+        .map(|c| c.diff_hunk.clone())
+        .unwrap_or_default();
+      ReviewThread {
+        path: t.path,
+        line: t.line,
+        start_line: t.start_line,
+        is_resolved: t.is_resolved,
+        is_outdated: t.is_outdated,
+        diff_hunk,
+        total_comments: t.comments.total_count,
+        comments: t
+          .comments
+          .nodes
+          .into_iter()
+          .map(|c| ForgeComment {
+            author: c.author.unwrap_or_default().login,
+            body: c.body,
+            created_at: c.created_at,
+            url: (!c.url.is_empty()).then_some(c.url),
+          })
+          .collect(),
+      }
+    })
+    .collect();
+  Ok(ReviewThreads::Threads {
+    threads,
+    total: connection.total_count,
+  })
 }
 
 /// Find the most recent PR opened from `branch` (head ref) on the given
@@ -1911,6 +2223,10 @@ impl Forge for GitHubForge {
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
     parse_pr_head_json(&self.run(pr_head_argv(self.repo_selector(), number))?)
+  }
+
+  fn fetch_pr_threads(&self, number: u64) -> Result<ReviewThreads> {
+    parse_pr_threads_json(&self.run(pr_threads_argv(self.repo_selector(), number)?)?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {

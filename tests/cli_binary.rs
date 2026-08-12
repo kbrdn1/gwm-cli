@@ -39,6 +39,9 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  review "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::is_match(r"\[alias(es)?: cd\]").unwrap())
+    // Issue #515: read a worktree's note from the CLI, so the note is not a
+    // TUI-only capability.
+    .stdout(predicate::str::contains("  note "))
     .stdout(predicate::str::contains("  bootstrap "))
     // Issue #24: fetch + rebase/merge a worktree onto its upstream.
     .stdout(predicate::str::contains("  sync "))
@@ -2045,7 +2048,8 @@ fn init_list_presets_enumerates_builtins() {
     .stdout(predicate::str::contains("laravel"))
     .stdout(predicate::str::contains("node"))
     .stdout(predicate::str::contains("rust"))
-    .stdout(predicate::str::contains("python-uv"));
+    .stdout(predicate::str::contains("python-uv"))
+    .stdout(predicate::str::contains("symfony"));
 }
 
 #[test]
@@ -2086,6 +2090,43 @@ fn init_preset_writes_stack_config() {
   let body = std::fs::read_to_string(&cfg_path).unwrap();
   assert!(body.contains("no-aws-rds"), "laravel preset missing the AWS-RDS guard");
   assert!(body.contains("vendor"), "laravel preset missing the vendor no-symlink");
+}
+
+#[test]
+fn init_preset_writes_symfony_config() {
+  // `--preset symfony` (issue #392) shares the composer story with laravel,
+  // so the markers that tell the two apart are the ones asserted here: the
+  // `.env.local` copy (Symfony commits `.env`, gitignores `.env.local`), the
+  // guard seeding from that committed `.env` rather than `.env.example`, and
+  // the `var/` no-symlink on top of `vendor/`.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "symfony"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(".gwm.toml"));
+
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(
+    body.contains("from = \".env.local\""),
+    "symfony preset missing the .env.local copy"
+  );
+  assert!(
+    body.contains("example_file = \".env\""),
+    "symfony preset must seed from the committed .env, not .env.example"
+  );
+  assert!(
+    body.contains("path = \"var\""),
+    "symfony preset missing the var/ no-symlink"
+  );
+  assert!(
+    body.contains("path = \"vendor\""),
+    "symfony preset missing the vendor/ no-symlink"
+  );
 }
 
 #[test]
@@ -3023,6 +3064,340 @@ fn remove_with_delete_branch_drops_branch() {
       .find_branch("feat/#11-drop-branch", git2::BranchType::Local)
       .is_err(),
     "--delete-branch must remove the local branch ref"
+  );
+}
+
+#[test]
+fn remove_takes_several_patterns_in_one_command() {
+  // #484: the TUI can now delete a batch, and the CLI is the non-interactive
+  // half of the same job. `xargs -n1 gwm remove` was the workaround.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("20", "bulk-one"), ("21", "bulk-two"), ("22", "bulk-three")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .args(["create", "feat", issue, slug])
+      .assert()
+      .success();
+  }
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "bulk-one", "bulk-three", "--delete-branch"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("bulk-one"))
+    .stdout(predicate::str::contains("bulk-three"));
+
+  assert!(!base.path().join("feat-20-bulk-one").exists());
+  assert!(!base.path().join("feat-22-bulk-three").exists());
+  assert!(
+    base.path().join("feat-21-bulk-two").exists(),
+    "an unnamed worktree must be left alone"
+  );
+  assert!(
+    repo.find_branch("feat/#21-bulk-two", git2::BranchType::Local).is_ok(),
+    "and so must its branch"
+  );
+}
+
+#[test]
+fn remove_resolves_every_pattern_before_touching_anything() {
+  // A typo in the middle of a batch must not leave half of it removed: the
+  // whole command fails with nothing touched. That is the guarantee the
+  // `xargs -n1` workaround could not offer.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "23", "survivor"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "survivor", "ghost"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
+
+  assert!(
+    base.path().join("feat-23-survivor").exists(),
+    "a batch with one unresolvable pattern must remove nothing"
+  );
+}
+
+#[test]
+fn remove_dry_run_prints_one_plan_per_pattern() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("24", "plan-one"), ("25", "plan-two")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .args(["create", "feat", issue, slug])
+      .assert()
+      .success();
+  }
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "plan-one", "plan-two", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-24-plan-one"))
+    .stdout(predicate::str::contains("feat-25-plan-two"));
+
+  assert!(
+    base.path().join("feat-24-plan-one").exists(),
+    "--dry-run touches nothing"
+  );
+  assert!(
+    base.path().join("feat-25-plan-two").exists(),
+    "--dry-run touches nothing"
+  );
+}
+
+#[test]
+fn remove_deduplicates_patterns_that_resolve_to_the_same_worktree() {
+  // `gwm remove foo foo` (or a name and its id) must not try to remove the
+  // same worktree twice — the second pass would fail on an already-gone row.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "26", "twice"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "twice", "twice"])
+    .assert()
+    .success();
+
+  assert!(!base.path().join("feat-26-twice").exists());
+}
+
+#[test]
+fn a_batch_removal_continues_past_a_failing_target() {
+  // #484: one hook-blocked row must not strand the rest of the cleanup. The
+  // pre_remove hook runs in the worktree being removed, so `.block` fails
+  // exactly one target of the two.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("27", "batch-ok"), ("28", "batch-blocked")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+  std::fs::write(base.path().join("feat-28-batch-blocked").join(".block"), "").unwrap();
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "refuse blocked"
+run = "test ! -f .block"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "batch-ok", "batch-blocked"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("batch-blocked"))
+    .stderr(predicate::str::contains("1 of 2 targets failed"));
+
+  assert!(
+    !base.path().join("feat-27-batch-ok").exists(),
+    "the target that could be removed must be gone"
+  );
+  assert!(
+    base.path().join("feat-28-batch-blocked").exists(),
+    "the blocked one must survive"
+  );
+
+  // The blocked target is reported once, not twice: the per-row line names it,
+  // the returned error is the tally.
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert_eq!(
+    stderr.matches("refuse blocked").count(),
+    1,
+    "one line per failure, no duplicate: {stderr}"
+  );
+}
+
+/// A path safe to embed in a shell command inside a lifecycle hook: the shell
+/// the hook runs through strips a Windows path's backslashes, and git accepts
+/// forward slashes everywhere. A no-op on Unix.
+fn shell_path(p: &std::path::Path) -> std::path::PathBuf {
+  std::path::PathBuf::from(p.to_string_lossy().replace('\\', "/"))
+}
+
+#[test]
+fn a_batch_refuses_a_target_whose_path_moved_since_it_was_resolved() {
+  // #484 / Codex review on PR #520 (P1): a batch resolves every pattern up
+  // front, so a hook on an earlier target has a window to move a later one.
+  // The id still resolves; the path the plan was about does not. Removing by
+  // id alone would destroy whatever now holds it.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("30", "moved-first"), ("31", "moved-second")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+  let second = base.path().join("feat-31-moved-second");
+  let relocated = base.path().join("feat-31-relocated");
+  // `when:` predicates resolve against the hook's cwd, which is the worktree
+  // being removed — so a marker file scopes the hook to the first target.
+  std::fs::write(base.path().join("feat-30-moved-first").join(".trigger"), "").unwrap();
+
+  // Removing the FIRST target moves the second one out from under the plan.
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "move the other target"
+when = "file_exists:.trigger"
+run = "git -C {repo} worktree move {second} {relocated}"
+"#,
+    base = toml_basic_string(base.path()),
+    // Forward slashes inside the `run =` command: the hook goes through a
+    // shell, which eats a Windows path's backslashes before git ever sees it
+    // (`C:UsersRUNNER~1…`). git accepts `/` on every platform.
+    repo = toml_basic_string(&shell_path(dir.path())),
+    second = toml_basic_string(&shell_path(&second)),
+    relocated = toml_basic_string(&shell_path(&relocated)),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "moved-first", "moved-second"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("changed since it was confirmed"));
+
+  assert!(
+    !base.path().join("feat-30-moved-first").exists(),
+    "the target that still matched its plan is removed"
+  );
+  assert!(
+    relocated.exists(),
+    "the one that moved is left alone rather than removed at its new path"
+  );
+
+  // Issue #521: the journal entry is written once the removal succeeded. It
+  // used to be written before the destructive call, so a refused target still
+  // showed up in `gwm history` as something `gwm undo` would replay — and
+  // replaying it would recreate a worktree that never went away.
+  let journal = std::fs::read_to_string(&history_file).unwrap_or_default();
+  assert!(
+    journal.contains("feat-30-moved-first"),
+    "the removal that happened is recorded: {journal}"
+  );
+  assert!(
+    !journal.contains("feat-31-moved-second"),
+    "the refused removal must not be recorded as undoable: {journal}"
+  );
+}
+
+#[test]
+fn a_failing_post_remove_hook_is_not_reported_as_a_failed_removal() {
+  // Codex review on PR #520 (P2): `remove_one` carries the post_remove hook,
+  // so an `on_fail = "abort"` hook returns an error on a worktree that IS
+  // gone. Calling that a failed removal tells a script the opposite of what
+  // happened on disk.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  for (issue, slug) in [("32", "post-a"), ("33", "post-b")] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(["create", "feat", issue, slug, "--no-bootstrap"])
+      .assert()
+      .success();
+  }
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.post_remove]]
+name = "always fails"
+run = "false"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "post-a", "post-b"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("2 of 2 targets failed"))
+    .stderr(predicate::str::contains("removals failed").not());
+
+  assert!(
+    !base.path().join("feat-32-post-a").exists() && !base.path().join("feat-33-post-b").exists(),
+    "both worktrees are gone — only the post hook failed"
   );
 }
 
@@ -7057,4 +7432,224 @@ fn bootstrap_gives_hooks_the_branch_of_the_worktree_it_targets() {
     .assert()
     .success()
     .stdout(predicate::str::contains(expected));
+}
+
+// ---------------------------------------------------------------------------
+// `gwm note show` (issue #515)
+// ---------------------------------------------------------------------------
+
+/// Write a note straight into the store, the way an `$EDITOR` would.
+fn write_note_file(repo_dir: &Path, branch: &str, body: &str) {
+  let path = repo_dir.join(".git/gwm/notes").join(format!("{branch}.md"));
+  fs::create_dir_all(path.parent().unwrap()).unwrap();
+  fs::write(path, body).unwrap();
+}
+
+#[test]
+fn note_show_prints_the_note_verbatim() {
+  let (dir, _repo) = init_repo();
+  // Trailing spaces and a blank line: the note is prose, and `show` is the
+  // machine surface, so it must not reflow or trim what the editor wrote.
+  let body = "- [ ] check ETXTBSY  \n\nthe flaky one, do not chase it\n";
+  write_note_file(dir.path(), "main", body);
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::eq(body));
+}
+
+#[test]
+fn note_show_exits_one_when_there_is_no_note() {
+  // The non-zero exit is the contract that makes `gwm note show >/dev/null`
+  // a usable presence test in a script.
+  let (dir, _repo) = init_repo();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .code(1)
+    .stdout(predicate::str::is_empty())
+    .stderr(predicate::str::contains("no note on main"));
+}
+
+#[test]
+fn note_show_treats_a_blank_note_as_no_note() {
+  // What `vi` leaves behind when the user saves an empty buffer. Presence is
+  // "non-blank", not "the file exists" — the same predicate the table
+  // marker reads through.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .code(1)
+    .stderr(predicate::str::contains("no note on main"));
+}
+
+#[test]
+fn note_show_resolves_a_slug_to_its_branch() {
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  let branch = git2::Repository::open(&wt)
+    .unwrap()
+    .head()
+    .unwrap()
+    .shorthand()
+    .unwrap()
+    .to_string();
+  write_note_file(dir.path(), &branch, "worktree-scoped\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show", "feat-1"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("worktree-scoped"));
+}
+
+#[test]
+fn note_show_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn list_json_carries_the_note() {
+  // The CLI list assembly is separate code from `json_api::worktrees` (the
+  // daemon's), so it needs its own guard or the two drift.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "- [ ] check the ETXTBSY retry\n");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert_eq!(
+    rows[0]["note"].as_str(),
+    Some("- [ ] check the ETXTBSY retry\n"),
+    "payload was: {rows}"
+  );
+}
+
+#[test]
+fn list_json_omits_note_when_there_is_none() {
+  let (dir, _repo) = init_repo();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert!(
+    rows[0].as_object().unwrap().get("note").is_none(),
+    "additive field: omitted, never null, so a pre-#515 consumer sees the old payload — got {rows}"
+  );
+}
+
+#[test]
+fn note_show_without_a_slug_reads_the_worktree_the_cwd_sits_in() {
+  // The trap this closes: `worktree::discover_repo` deliberately walks back
+  // to the MAIN checkout from inside a linked worktree, so its HEAD is the
+  // main checkout's branch, not the branch the user is standing on. Reading
+  // the branch off that handle would print `main`'s note (or none) from
+  // inside every worktree. The command opens the repo at the CWD instead.
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  let branch = git2::Repository::open(&wt)
+    .unwrap()
+    .head()
+    .unwrap()
+    .shorthand()
+    .unwrap()
+    .to_string();
+  write_note_file(dir.path(), &branch, "read me from inside the worktree\n");
+  // A different note on the main checkout's own branch, so resolving through
+  // the main repo would produce a wrong answer rather than an empty one.
+  write_note_file(dir.path(), "main", "the main checkout's note\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["note", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::eq("read me from inside the worktree\n"));
+}
+
+#[test]
+fn agents_json_carries_the_note_like_the_list_does() {
+  // `gwm agents --format=json` is documented as mirroring `gwm list
+  // --format=json`, and it assembles its rows itself, so the additive field
+  // needs its own guard or the two drift.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "mirrored onto the agents payload\n");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["agents", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert_eq!(
+    rows[0]["note"].as_str(),
+    Some("mirrored onto the agents payload\n"),
+    "payload was: {rows}"
+  );
+}
+
+#[test]
+fn note_show_resolves_the_main_checkout_by_name() {
+  // `worktree::find_fuzzy` filters the main worktree out, so naming it from
+  // inside a linked worktree answered "not found" for a note every other
+  // surface handles: the TUI's `N`, the no-slug path and the JSON row all
+  // carry the main row's note (Codex review, PR #530, pass 3).
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  write_note_file(dir.path(), "main", "the main checkout's note\n");
+  let main_name = dir.path().file_name().unwrap().to_string_lossy().to_string();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["note", "show", &main_name])
+    .assert()
+    .success()
+    .stdout(predicate::eq("the main checkout's note\n"));
 }

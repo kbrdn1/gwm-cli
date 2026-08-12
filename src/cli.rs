@@ -21,6 +21,7 @@ use crate::multiplexer::{
 use crate::naming::{BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
+use crate::removal;
 use crate::review;
 use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
@@ -143,8 +144,9 @@ pub enum Command {
   /// Write a .gwm.toml to the current repo, optionally from a stack preset.
   Init {
     /// Seed an opinionated .gwm.toml for a known stack (e.g. `laravel`,
-    /// `node`/`nuxt`, `rust`, `go`, `python-uv`). Omit for the generic
-    /// documented template. Run `gwm init --list-presets` to see them all.
+    /// `symfony`, `node`/`nuxt`, `rust`, `go`, `python-uv`). Omit for the
+    /// generic documented template. Run `gwm init --list-presets` to see
+    /// them all.
     #[arg(long, value_name = "NAME")]
     preset: Option<String>,
     /// List the built-in presets with one-line descriptions and exit
@@ -298,9 +300,14 @@ pub enum Command {
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
   },
-  /// Remove a worktree by fuzzy name match.
+  /// Remove one or more worktrees by fuzzy name match.
+  ///
+  /// Every pattern is resolved before anything is touched (issue #484), so an
+  /// unknown or ambiguous one fails the whole command with nothing removed.
+  /// Patterns resolving to the same worktree are removed once.
   Remove {
-    pattern: String,
+    #[arg(value_name = "PATTERN", required = true, num_args = 1..)]
+    patterns: Vec<String>,
     /// Also delete the branch.
     #[arg(long)]
     delete_branch: bool,
@@ -329,6 +336,11 @@ pub enum Command {
     /// the default `text` prints the bare path for shell consumption.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
+  },
+  /// Read the note attached to a worktree (issue #515).
+  Note {
+    #[command(subcommand)]
+    action: NoteAction,
   },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
@@ -757,6 +769,24 @@ pub enum Command {
   },
 }
 
+/// Subcommands of `gwm note` (issue #515).
+///
+/// Read-only on purpose: the note is written in `$EDITOR`, from the TUI's
+/// `N` or by opening the file directly — it is plain Markdown on disk, which
+/// is the whole point of storing it as a file rather than a git-config key.
+#[derive(Debug, Subcommand)]
+pub enum NoteAction {
+  /// Print a worktree's note on stdout, verbatim.
+  ///
+  /// Without a slug the note of the worktree the CWD sits in is printed.
+  /// Exits 1 when there is no note, so `gwm note show >/dev/null` is a
+  /// usable "does this worktree carry a note" test in a script.
+  Show {
+    /// Worktree name or fuzzy pattern; defaults to the current worktree.
+    slug: Option<String>,
+  },
+}
+
 /// Subcommands of `gwm theme` (issue #33).
 #[derive(Debug, Subcommand)]
 pub enum ThemeAction {
@@ -1086,13 +1116,16 @@ pub fn run(cli: Cli) -> Result<()> {
       skip_hooks,
     } => cmd_review(number, name, bootstrap, skip_hooks, mode),
     Command::Remove {
-      pattern,
+      patterns,
       delete_branch,
       dry_run,
       force,
       skip_hooks,
-    } => cmd_remove(pattern, delete_branch, dry_run, force, skip_hooks, mode),
+    } => cmd_remove(patterns, delete_branch, dry_run, force, skip_hooks, mode),
     Command::Path { pattern, format } => cmd_path(pattern, format),
+    Command::Note {
+      action: NoteAction::Show { slug },
+    } => cmd_note_show(slug),
     Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
     Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
     Command::Prune { dry_run } => cmd_prune(dry_run),
@@ -1163,13 +1196,13 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// aggregate code (non-zero if any worktree failed).
 fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let (argv, job_count) = exec_plan(&repo, profile.as_deref(), jobs, &command)?;
+  let plan = exec_plan(&repo, profile.as_deref(), jobs, &command)?;
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {
     println!("no worktrees to run in");
     return Ok(());
   }
-  let outcomes = exec_run(&targets, &argv, job_count, None)?;
+  let outcomes = exec_run(&targets, &plan, None)?;
   print_exec_rollup_and_exit(&outcomes)
 }
 
@@ -1196,13 +1229,12 @@ fn cmd_exec_workspace(
   // doesn't touch contributes nothing, so its `[exec]` / `--profile` must not
   // be resolved — an unrelated repo lacking the profile or with a bad `[exec]`
   // can't break a run scoped elsewhere (#326 review).
-  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, Vec<String>, usize)> = Vec::new();
+  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, ExecPlan)> = Vec::new();
   for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
     if targets.is_empty() {
       continue;
     }
-    let (argv, job_count) = exec_plan(repo, profile.as_deref(), jobs, &command)?;
-    plans.push((name, targets, argv, job_count));
+    plans.push((name, targets, exec_plan(repo, profile.as_deref(), jobs, &command)?));
   }
 
   if plans.is_empty() {
@@ -1218,11 +1250,21 @@ fn cmd_exec_workspace(
     return Ok(());
   }
 
+  // Build every repo's argv before ANY repo runs. `exec_run` already does this
+  // within a repo; upfront resolution is a workspace-wide contract (#326), so
+  // a worktree of the last repo that cannot be expressed as a container mount
+  // must not surface after the first repo has already run its command.
+  for (_, targets, plan) in &plans {
+    for w in targets.iter() {
+      plan.argv_for(&w.path)?;
+    }
+  }
+
   // Run sequentially per repo, aggregating the repo-tagged outcomes.
   let mut all = Vec::new();
-  for (name, targets, argv, job_count) in &plans {
+  for (name, targets, plan) in &plans {
     println!("\n══ {}", name);
-    all.extend(exec_run(targets, argv, *job_count, Some(name))?);
+    all.extend(exec_run(targets, plan, Some(name))?);
   }
   print_exec_rollup_and_exit(&all)
 }
@@ -1289,16 +1331,12 @@ fn open_workspace_repos(root: &Path) -> Result<Vec<(String, Repository)>> {
     .collect()
 }
 
-/// Resolve the argv to run and the parallelism for `gwm exec` against `repo`
-/// (config load + profile/inline resolution + jobs precedence). No side
-/// effects — shared by the single-repo and workspace paths so every repo can
-/// be resolved upfront. See the precedence/config-loading notes inline.
-fn exec_plan(
-  repo: &Repository,
-  profile: Option<&str>,
-  jobs: Option<u32>,
-  command: &[String],
-) -> Result<(Vec<String>, usize)> {
+/// Resolve the argv to run, the parallelism, and the container wrapper (if
+/// the named profile carries one) for `gwm exec` against `repo`: config load,
+/// profile/inline resolution, jobs precedence. No side effects — shared by
+/// the single-repo and workspace paths so every repo can be resolved upfront.
+/// See the precedence/config-loading notes inline.
+fn exec_plan(repo: &Repository, profile: Option<&str>, jobs: Option<u32>, command: &[String]) -> Result<ExecPlan> {
   // Read `[exec]` only as strictly as the invocation needs (issue #324):
   //   - `--profile` → full `load_exec_config` (resolve + validate every
   //     profile); needs a workdir to locate `.gwm.toml`.
@@ -1318,37 +1356,83 @@ fn exec_plan(
   };
   let argv = exec::resolve_exec_command(profile, command, &exec_cfg)?;
   let job_count = exec::resolve_jobs(jobs, profile, &exec_cfg);
-  Ok((argv, job_count))
+  // `[container]` rides the profile only (issue #421), so this is `None` for
+  // the inline `gwm exec -- <cmd>` whatever the config says. `commondir()` is
+  // `<main>/.git` for every worktree of the repo — the mount that keeps git
+  // answering inside the container.
+  let container = match exec::resolve_exec_container(profile, &exec_cfg)? {
+    Some(cfg) => Some(exec::ContainerPlan::resolve(cfg, repo.commondir(), |bin| {
+      which::which(bin).is_ok()
+    })?),
+    None => None,
+  };
+  Ok(ExecPlan {
+    argv,
+    job_count,
+    container,
+  })
 }
 
-/// Run `argv` across one repo's `targets`: sequential (live inherited stdio)
+/// One repo's resolved `gwm exec` plan: what to run, how wide, and whether it
+/// runs inside a container. Resolved upfront (before any command runs) so a
+/// config error surfaces before the first side effect.
+struct ExecPlan {
+  argv: Vec<String>,
+  job_count: usize,
+  container: Option<exec::ContainerPlan>,
+}
+
+impl ExecPlan {
+  /// The argv to run in `worktree` — the plain command, or the containerised
+  /// wrap (which mounts that worktree's own path, hence per-worktree). Errors
+  /// when that worktree cannot be expressed as a mount (a `:` in its path).
+  fn argv_for(&self, worktree: &Path) -> Result<Vec<String>> {
+    match &self.container {
+      Some(plan) => plan.wrap(worktree, &self.argv),
+      None => Ok(self.argv.clone()),
+    }
+  }
+
+  /// Suffix appended to the per-worktree header so a containerised run says
+  /// so: `━━ feat-1 (/path) [docker rust:1.90]`.
+  fn header_suffix(&self) -> String {
+    match &self.container {
+      Some(plan) => format!(" [{} {}]", plan.runtime, plan.config.image),
+      None => String::new(),
+    }
+  }
+}
+
+/// Run `plan` across one repo's `targets`: sequential (live inherited stdio)
 /// when `job_count <= 1`, else bounded-parallel with per-worktree captured
 /// blocks. `tag` (the workspace repo name) prefixes each outcome's display
 /// name with `<repo>/` for the aggregated rollup; the per-worktree header
 /// stays plain (it sits under the `══ <repo>` header). Returns the outcomes.
-fn exec_run(
-  targets: &[worktree::WorktreeInfo],
-  argv: &[String],
-  job_count: usize,
-  tag: Option<&str>,
-) -> Result<Vec<exec::ExecOutcome>> {
-  // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv, but
-  // split defensively rather than indexing — a panic would be user-facing.
-  let (program, args) = argv
-    .split_first()
-    .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
-  let args = args.to_vec();
+fn exec_run(targets: &[worktree::WorktreeInfo], plan: &ExecPlan, tag: Option<&str>) -> Result<Vec<exec::ExecOutcome>> {
   let display = |name: &str| match tag {
     Some(t) => format!("{t}/{name}"),
     None => name.to_string(),
   };
+  let suffix = plan.header_suffix();
+
+  // Build EVERY worktree's argv before running anything. Resolution is
+  // upfront by contract (#326): a worktree whose path cannot be expressed as
+  // a container mount must fail the whole fan-out, not after the first
+  // worktree already ran.
+  let argvs: Vec<Vec<String>> = targets.iter().map(|w| plan.argv_for(&w.path)).collect::<Result<_>>()?;
 
   let mut outcomes = Vec::with_capacity(targets.len());
-  if job_count <= 1 {
+  if plan.job_count <= 1 {
     // Sequential: inherit the parent's stdio so output streams live, in order.
-    for w in targets {
-      println!("\n━━ {} ({})", w.name, w.path.display());
-      let status = exec::exec_in_dir(&w.path, program, &args);
+    for (w, argv) in targets.iter().zip(&argvs) {
+      println!("\n━━ {} ({}){}", w.name, w.path.display(), suffix);
+      // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv,
+      // but split defensively rather than indexing — a panic would be
+      // user-facing.
+      let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
+      let status = exec::exec_in_dir(&w.path, program, args);
       outcomes.push(exec::ExecOutcome {
         name: display(&w.name),
         status,
@@ -1361,14 +1445,18 @@ fn exec_run(
     // (not via `String::from_utf8_lossy`) so binary / non-UTF-8 output is
     // re-emitted byte-for-byte, matching the sequential path's inherited stdio.
     use std::io::Write;
-    let items: Vec<(String, std::path::PathBuf)> = targets.iter().map(|w| (w.name.clone(), w.path.clone())).collect();
-    let results = exec::run_in_dirs_parallel(job_count, &items, program, &args);
+    let items: Vec<(String, std::path::PathBuf, Vec<String>)> = targets
+      .iter()
+      .zip(argvs)
+      .map(|(w, argv)| (w.name.clone(), w.path.clone(), argv))
+      .collect();
+    let results = exec::run_in_dirs_parallel(plan.job_count, &items);
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    for ((name, path), (outcome, output)) in items.iter().zip(results) {
+    for ((name, path, _), (outcome, output)) in items.iter().zip(results) {
       // Ignore write errors: a closed stdout (e.g. `| head`) shouldn't panic
       // the whole fan-out, and the rollup/exit code still report the result.
-      let _ = writeln!(lock, "\n━━ {} ({})", name, path.display());
+      let _ = writeln!(lock, "\n━━ {} ({}){}", name, path.display(), suffix);
       let _ = lock.write_all(&output);
       outcomes.push(exec::ExecOutcome {
         name: display(name),
@@ -1897,6 +1985,9 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
       // costs (Codex review round U) — only the human table does.
       if format == AgentsFormat::Json {
         json_api::attach_agents(&mut rows, &reals, &pins);
+        // #515: this payload is documented as mirroring `gwm list
+        // --format=json`, so it carries the same experimental `note` field.
+        json_api::attach_notes(&repo, &mut rows);
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
       }
@@ -2151,6 +2242,9 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     let pins = json_api::agent_pins_for_rows(&repo, &trees);
     let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
     json_api::attach_agents(&mut dto, &reals, &pins);
+    // #515: same shared pass as the daemon's `list`, so the two stay
+    // byte-identical.
+    json_api::attach_notes(&repo, &mut dto);
     if detect_pr {
       // When detection RAN for a row its result is authoritative — apply
       // it even when `None` (clears a stale persisted PR). When it did NOT
@@ -2384,6 +2478,17 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     // with each row's own repo pins overlaid (round I).
     let reals: Vec<PathBuf> = rows.iter().map(|r| r.info.path.clone()).collect();
     json_api::attach_agents(&mut worktree_rows, &reals, &agent_pins);
+    // #515: a note lives in its OWN repo's `.git`, so a workspace spanning
+    // several repos reads each row through its owning handle — the same
+    // per-row open the pins above need, for the same reason.
+    for (row, out) in rows.iter().zip(worktree_rows.iter_mut()) {
+      let Some(branch) = github::pinnable_branch(row.info.branch.as_deref()) else {
+        continue;
+      };
+      out.note = Repository::open(&row.repo_path)
+        .ok()
+        .and_then(|repo| crate::notes::read(&repo, branch));
+    }
     let dto: Vec<WorkspaceJsonWorktree> = rows
       .iter()
       .zip(worktree_rows)
@@ -2679,7 +2784,7 @@ fn cmd_create(
   // (Codex review on PR #474).
   let pre_ctx = match &wt_name {
     WorktreeName::Structured(spec) => HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, spec),
-    WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch)),
+    WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch), &config),
   };
   let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
   print_lifecycle_report(&report);
@@ -3093,7 +3198,7 @@ pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
 }
 
 fn cmd_remove(
-  pattern: String,
+  patterns: Vec<String>,
   delete_branch: bool,
   dry_run: bool,
   force: bool,
@@ -3102,7 +3207,20 @@ fn cmd_remove(
 ) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  let found = worktree::find_fuzzy(&repo, &pattern)?;
+
+  // Issue #484: resolve the whole batch first. A typo in the middle of a
+  // cleanup must not leave the first half removed and the rest untouched,
+  // which is exactly what `... | xargs -n1 gwm remove` did. Two patterns
+  // naming the same worktree collapse to one removal — the second pass would
+  // otherwise fail on an already-gone row.
+  let mut targets: Vec<worktree::WorktreeInfo> = Vec::with_capacity(patterns.len());
+  for pattern in &patterns {
+    let found = worktree::find_fuzzy(&repo, pattern)?;
+    if !targets.iter().any(|t| t.id == found.id) {
+      targets.push(found);
+    }
+  }
+
   if dry_run {
     // Issue #31: print the would-remove plan and exit. Resolution
     // already happened above — an ambiguous pattern surfaced via
@@ -3111,11 +3229,13 @@ fn cmd_remove(
     // contract" requirement. The journal hook MUST NOT fire here —
     // a preview that wrote to the journal would let the user "undo"
     // something that never happened.
-    worktree::remove_dry_run(&repo, &found.id)?;
-    print!(
-      "{}",
-      format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
-    );
+    for found in &targets {
+      worktree::remove_dry_run(&repo, &found.id)?;
+      print!(
+        "{}",
+        format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
+      );
+    }
     return Ok(());
   }
 
@@ -3127,58 +3247,92 @@ fn cmd_remove(
   if config.hooks.has_any() {
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
-  let pre_ctx = HookContext::for_worktree(&repo, &workdir, &found.path, &found.path, found.branch.as_deref());
-  let report = lifecycle::run_phase(&config, HookPhase::PreRemove, &pre_ctx, &skips, false)?;
-  print_lifecycle_report(&report);
 
-  // Issue #29: capture the branch OID via libgit2 BEFORE the
-  // destructive call so we can resurrect the branch on `gwm undo`.
-  // We swallow any journal IO failure with a stderr warning rather
-  // than blocking a destruction the user explicitly asked for —
-  // losing recoverability is unfortunate, but failing the remove
-  // because we can't write to `~/.local/share/gwm/history.toml` would
-  // be far more surprising. (Disk full, read-only FS, sandboxed
-  // CI runner without home dir, …)
-  let branch_oid = found.branch.as_deref().and_then(|b| {
-    repo
-      .find_branch(b, git2::BranchType::Local)
-      .ok()
-      .and_then(|br| br.into_reference().target())
-      .map(|o| o.to_string())
-  });
-  let repo_root = repo
-    .workdir()
-    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-    .unwrap_or_default();
-  let entry = OpEntry {
-    ts: chrono::Utc::now(),
-    kind: crate::history::OpKind::Remove,
-    worktree: found.name.clone(),
-    branch: found.branch.clone(),
-    branch_oid,
-    path: found.path.clone(),
-    deleted_branch: delete_branch,
-    repo_root,
-    undone: false,
-  };
-  if let Err(e) = history::record(entry) {
-    eprintln!(
-      "warning: failed to record undo journal entry: {} (continuing with the remove anyway)",
-      e
-    );
+  // One pattern is the pre-#484 command: propagate its error verbatim rather
+  // than wrapping it in batch prose. There is nothing to keep going for.
+  if let [only] = targets.as_slice() {
+    return remove_one(&repo, &workdir, &config, &skips, only, delete_branch);
   }
 
-  worktree::remove(&repo, &found.id, delete_branch)?;
-  println!("✓ removed {} ({})", found.name, found.path.display());
-  if delete_branch {
-    if let Some(b) = &found.branch {
-      println!("  branch {} deleted", b);
+  // A batch does not stop at the first error (#484), mirroring the TUI: a
+  // locked or hook-blocked row must not strand the rest of a cleanup the user
+  // explicitly asked for. Each failure is named as it happens, so a long batch
+  // reports live; the returned error is the tally, so nothing prints twice.
+  let mut failed = 0usize;
+  for found in &targets {
+    if let Err(e) = remove_one(&repo, &workdir, &config, &skips, found, delete_branch) {
+      eprintln!("error: {}: {}", found.name, e);
+      failed += 1;
     }
   }
-  let post_ctx = pre_ctx.with_cwd(&workdir);
-  let report = lifecycle::run_phase(&config, HookPhase::PostRemove, &post_ctx, &skips, false)?;
-  print_lifecycle_report(&report);
-  Ok(())
+  if failed == 0 {
+    Ok(())
+  } else {
+    // "targets", not "removals": `remove_one` also carries the post_remove
+    // hook, which can fail on a worktree that IS gone (`on_fail = "abort"`).
+    // Reporting that as a failed removal would tell a script the opposite of
+    // what happened on disk (Codex review on PR #520). The per-target line
+    // above names what actually failed.
+    Err(GwmError::Other(format!(
+      "{} of {} targets failed (see the errors above)",
+      failed,
+      targets.len()
+    )))
+  }
+}
+
+/// Remove one resolved worktree and print what happened.
+///
+/// The sequence itself — pre_remove hooks, undo-journal entry, destruction,
+/// post_remove hooks — lives in [`crate::removal`] since #521, so the TUI `d`
+/// runs the same one. What is left here is the rendering: the reports, the
+/// `✓ removed` line, and the journal warning on stderr.
+///
+/// `found.path` is the expected path because on this side `found` IS the
+/// resolve-time snapshot — every pattern is resolved before the first hook
+/// runs (#484), so a hook on an earlier target has a window to recreate a
+/// later one under the same id somewhere else.
+fn remove_one(
+  repo: &git2::Repository,
+  workdir: &Path,
+  config: &Config,
+  skips: &HookSkips,
+  found: &worktree::WorktreeInfo,
+  delete_branch: bool,
+) -> Result<()> {
+  let expected = found.path.clone();
+  match removal::remove_with_lifecycle(repo, workdir, config, skips, found, &expected, delete_branch) {
+    Ok(outcome) => {
+      print_removal_outcome(&outcome, found, delete_branch);
+      Ok(())
+    }
+    Err(failure) => {
+      print_removal_outcome(&failure.outcome, found, delete_branch);
+      Err(failure.error)
+    }
+  }
+}
+
+/// Render a removal in the order it happened, so a failure shows the steps
+/// that ran before it rather than only the error that stopped it.
+fn print_removal_outcome(outcome: &removal::RemovalOutcome, found: &worktree::WorktreeInfo, delete_branch: bool) {
+  print_lifecycle_report(&outcome.pre);
+  if outcome.removed {
+    println!("✓ removed {} ({})", found.name, found.path.display());
+    if delete_branch {
+      if let Some(b) = &found.branch {
+        println!("  branch {} deleted", b);
+      }
+    }
+  }
+  // A journal write that failed is a warning, never a failed removal: the
+  // worktree is gone either way, and refusing to report that because
+  // `~/.local/share/gwm/history.toml` is unwritable (disk full, read-only FS,
+  // a CI runner with no home dir) would be far more surprising.
+  if let Some(warning) = &outcome.journal_warning {
+    eprintln!("warning: {}", warning);
+  }
+  print_lifecycle_report(&outcome.post);
 }
 
 fn cmd_path(pattern: String, format: OutputFormat) -> Result<()> {
@@ -3192,6 +3346,49 @@ fn cmd_path(pattern: String, format: OutputFormat) -> Result<()> {
     }
   }
   Ok(())
+}
+
+/// `gwm note show [<slug>]` (issue #515).
+///
+/// Without a slug the CWD's own worktree is the target, resolved by opening
+/// the repo *there* rather than through `worktree::discover_repo`, which
+/// deliberately walks back to the main checkout — its HEAD is the main
+/// checkout's branch, not the branch the user is standing on.
+///
+/// Prints the note verbatim (no trailing newline added: the file is the
+/// payload) and exits 1 when there is none, so the command doubles as a
+/// scriptable presence test.
+fn cmd_note_show(slug: Option<String>) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let branch = match slug {
+    // `resolve_agents_worktree`, not `find_fuzzy`: the latter filters out the
+    // main worktree, which every other note surface handles (the TUI's `N`,
+    // the no-slug path, the JSON row). Naming the main checkout from inside a
+    // linked worktree would have answered "not found" for a note that plainly
+    // exists (Codex review, PR #530). It also brings `.` along, resolving the
+    // worktree the CWD sits in, the same token `gwm agents` takes.
+    Some(pattern) => resolve_agents_worktree(&worktree::list(&repo)?, &pattern)?.branch,
+    None => Repository::discover(std::env::current_dir()?)
+      .ok()
+      .and_then(|here| here.head().ok()?.shorthand().ok().map(str::to_string)),
+  };
+  // A detached row cannot carry a note — the rule `pinnable_branch` settled
+  // for the agent pin, restated here so the CLI says why instead of
+  // printing nothing.
+  let Some(branch) = github::pinnable_branch(branch.as_deref()) else {
+    eprintln!("no branch checked out (detached HEAD) — a note is keyed on the branch");
+    std::process::exit(1);
+  };
+  match crate::notes::read(&repo, branch) {
+    Some(note) => {
+      print!("{note}");
+      Ok(())
+    }
+    None => {
+      eprintln!("no note on {}", crate::naming::sanitise_for_terminal(branch));
+      std::process::exit(1);
+    }
+  }
 }
 
 fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode: TrustMode) -> Result<()> {
@@ -3229,6 +3426,7 @@ fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode:
     &worktree_path,
     &worktree_path,
     worktree_branch.as_deref(),
+    &config,
   );
   let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &hook_ctx, &skips, false)?;
   print_lifecycle_report(&report);

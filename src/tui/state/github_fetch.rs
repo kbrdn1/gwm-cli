@@ -52,6 +52,7 @@
 //! result is dropped (the navigation invariant: cache clear and spine
 //! generation-bump always move together).
 
+use crate::forge::ReviewThreads;
 use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use git2::Repository;
 use std::collections::HashMap;
@@ -85,6 +86,9 @@ const IDLE_ISSUE: GitHubFetchState<IssueStatus> = GitHubFetchState::Idle;
 /// PR-side counterpart to [`IDLE_ISSUE`].
 const IDLE_PR: GitHubFetchState<PrStatus> = GitHubFetchState::Idle;
 
+/// Inline-review-thread counterpart to [`IDLE_PR`] (issue #528).
+const IDLE_PR_THREADS: GitHubFetchState<ReviewThreads> = GitHubFetchState::Idle;
+
 /// Identity of a GitHub fetch. The `(target, number)` tuple is the
 /// dedupe key: `Issue(42)` and `Pr(42)` never collide (they hit
 /// different `gh` subcommands), and `Issue(42)` vs `Issue(43)` are
@@ -96,6 +100,11 @@ const IDLE_PR: GitHubFetchState<PrStatus> = GitHubFetchState::Idle;
 pub enum FetchKey {
   Issue(u64),
   Pr(u64),
+  /// The PR's inline review threads (issue #528). A separate key from
+  /// [`Self::Pr`] because it is a separate request on a separate
+  /// transport: `gwm status` fetches the PR and never wants these, and
+  /// the rich view wants these long after the PR itself landed.
+  PrThreads(u64),
 }
 
 /// GitHub fetch state slice of the TUI `App` (issue #128; threading on
@@ -122,6 +131,11 @@ pub struct GitHubFetch {
   issue_cache: HashMap<u64, GitHubFetchState<IssueStatus>>,
   /// PR-side counterpart to [`Self::issue_cache`].
   pr_cache: HashMap<u64, GitHubFetchState<PrStatus>>,
+  /// Per-PR-number cache of the inline review threads (issue #528).
+  /// Separate from [`Self::pr_cache`] rather than a field inside
+  /// `PrStatus`: the PR fetch would otherwise replace the whole entry
+  /// and silently drop threads that had already landed.
+  pr_threads_cache: HashMap<u64, GitHubFetchState<ReviewThreads>>,
 }
 
 impl Default for GitHubFetch {
@@ -142,6 +156,7 @@ impl GitHubFetch {
       forge: None,
       issue_cache: HashMap::new(),
       pr_cache: HashMap::new(),
+      pr_threads_cache: HashMap::new(),
     }
   }
 
@@ -205,8 +220,11 @@ impl GitHubFetch {
   /// the backend reading it, because `forge = "gitlab"` can flip over an
   /// unchanged remote and the caches are keyed by number alone, so
   /// cached issue #42 would otherwise be served as merge request !42
-  /// (Codex review #458).
-  fn forge_identity(&self) -> Option<String> {
+  /// (Codex review #458). Public since #420: the forge-linked overlays pin
+  /// their identity on it for the same reason, so an origin that moves
+  /// between two instances sharing a slug closes them instead of leaving
+  /// `Enter` on the old host's URL (Codex review #529).
+  pub fn forge_identity(&self) -> Option<String> {
     self
       .forge
       .as_ref()
@@ -230,6 +248,9 @@ impl GitHubFetch {
   pub fn invalidate(&mut self) {
     self.issue_cache.clear();
     self.pr_cache.clear();
+    // Threads are keyed on the PR they hang from, so they go stale for
+    // exactly the same reasons and at exactly the same moment.
+    self.pr_threads_cache.clear();
   }
 
   /// Stamp an auto-detected PR onto the resolved `link` when none is
@@ -273,6 +294,9 @@ impl GitHubFetch {
       FetchKey::Pr(n) => {
         self.pr_cache.insert(n, GitHubFetchState::Loading);
       }
+      FetchKey::PrThreads(n) => {
+        self.pr_threads_cache.insert(n, GitHubFetchState::Loading);
+      }
     }
   }
 
@@ -304,6 +328,19 @@ impl GitHubFetch {
   /// no late-result guard (the spine owns that since #255).
   pub fn complete_pr(&mut self, number: u64, result: std::result::Result<PrStatus, String>) {
     self.pr_cache.insert(number, into_state(result));
+  }
+
+  /// Stamp the terminal outcome of an inline-review-thread fetch (issue
+  /// #528), keyed by the PR number. Same contract as
+  /// [`Self::complete_pr`].
+  pub fn complete_pr_threads(&mut self, number: u64, result: std::result::Result<ReviewThreads, String>) {
+    self.pr_threads_cache.insert(number, into_state(result));
+  }
+
+  /// The cached inline-review-thread state for `number`; `Idle` for a
+  /// cold key (issue #528).
+  pub fn pr_threads_state(&self, number: u64) -> &GitHubFetchState<ReviewThreads> {
+    self.pr_threads_cache.get(&number).unwrap_or(&IDLE_PR_THREADS)
   }
 
   /// Stamp the issue fetch state from a fetch result. `Ok(s)` →
@@ -373,6 +410,10 @@ impl GitHubFetch {
       ),
       FetchKey::Pr(n) => matches!(
         self.pr_cache.get(&n),
+        Some(GitHubFetchState::Loaded(_)) | Some(GitHubFetchState::Error(_))
+      ),
+      FetchKey::PrThreads(n) => matches!(
+        self.pr_threads_cache.get(&n),
         Some(GitHubFetchState::Loaded(_)) | Some(GitHubFetchState::Error(_))
       ),
     }

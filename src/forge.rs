@@ -84,6 +84,97 @@ pub struct IssueStatus {
   pub url: String,
   pub labels: Vec<String>,
   pub updated_at: String,
+  /// Everything the rich view reads and the summary line does not
+  /// (issue #420). Grouped in its own struct so a backend that cannot
+  /// serve it fills one `Default::default()` instead of six fields, and
+  /// so "summary tier" vs "detail tier" is visible in the type.
+  pub detail: IssueDetail,
+}
+
+/// The rich slice of an issue (issue #420): the description, its author,
+/// and the conversation. Empty when the forge backend only serves the
+/// summary tier — never `Option`, because "no comments" and "comments not
+/// fetched" render identically and a second state would only be a way to
+/// get the two confused.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IssueDetail {
+  /// The issue description, raw markdown as the forge stores it.
+  pub body: String,
+  /// Author login (`kbrdn1`), not the display name — it is what every
+  /// other gwm surface shows and what a `gh`/`glab` filter takes.
+  pub author: String,
+  /// Conversation comments, in the order the forge returned them.
+  pub comments: Vec<ForgeComment>,
+}
+
+/// One comment on an issue or PR (issue #420). Serves both the
+/// conversation ([`IssueDetail::comments`], [`PrDetail::comments`]) and the
+/// inline review threads ([`ReviewThread::comments`], issue #528): the two
+/// carry the same four fields, and what distinguishes an inline comment is
+/// the thread it hangs from, not its own shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeComment {
+  /// Author login.
+  pub author: String,
+  /// Raw markdown body.
+  pub body: String,
+  /// RFC 3339 creation timestamp.
+  pub created_at: String,
+  /// Permalink to the comment, when the forge reports one.
+  pub url: Option<String>,
+}
+
+/// The verdict a review carries (issue #420).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+  Approved,
+  ChangesRequested,
+  Commented,
+  Dismissed,
+  Pending,
+  /// A state this build does not know. Same rule as
+  /// [`CheckOutcome::Unknown`]: named honestly rather than folded into
+  /// `Commented`, so a state added upstream can never be rendered as a
+  /// verdict gwm did not actually read.
+  Unknown,
+}
+
+impl ReviewState {
+  /// Classify a GitHub `PullRequestReviewState` value. Case-insensitive
+  /// because the REST and GraphQL surfaces disagree on casing.
+  pub fn classify(s: &str) -> Self {
+    match s.trim().to_ascii_uppercase().as_str() {
+      "APPROVED" => Self::Approved,
+      "CHANGES_REQUESTED" => Self::ChangesRequested,
+      "COMMENTED" => Self::Commented,
+      "DISMISSED" => Self::Dismissed,
+      "PENDING" => Self::Pending,
+      _ => Self::Unknown,
+    }
+  }
+
+  /// Short label for the rich view.
+  pub fn label(&self) -> &'static str {
+    match self {
+      Self::Approved => "approved",
+      Self::ChangesRequested => "changes requested",
+      Self::Commented => "commented",
+      Self::Dismissed => "dismissed",
+      Self::Pending => "pending",
+      Self::Unknown => "unknown",
+    }
+  }
+}
+
+/// One submitted review on a PR (issue #420).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeReview {
+  pub author: String,
+  pub state: ReviewState,
+  /// Raw markdown body — empty for a bare approval, which is common.
+  pub body: String,
+  /// RFC 3339 submission timestamp.
+  pub submitted_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +248,96 @@ pub struct PrStatus {
   pub ci: CiState,
   /// The classified per-check list, same order as the forge returned it.
   pub checks: Vec<PrCheck>,
+  /// The rich slice — see [`IssueDetail`] for why it is grouped.
+  pub detail: PrDetail,
+}
+
+/// The rich slice of a pull request / merge request (issue #420): the
+/// description, its author, the diff size, the branch pair, the submitted
+/// reviews and the conversation. Same "empty, never `Option`" contract as
+/// [`IssueDetail`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrDetail {
+  pub body: String,
+  pub author: String,
+  pub additions: u32,
+  pub deletions: u32,
+  /// The branch the PR merges into (`dev`).
+  pub base_ref: String,
+  /// The branch the PR comes from (`feat/#420-rich-pr-issue-view`).
+  pub head_ref: String,
+  pub reviews: Vec<ForgeReview>,
+  pub comments: Vec<ForgeComment>,
+}
+
+/// One inline review thread: a comment chain anchored to a diff hunk
+/// (issue #528). Distinct from [`PrDetail::comments`], which is the
+/// conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReviewThread {
+  /// File the thread is anchored to, forge-relative (`src/tui/app.rs`).
+  pub path: String,
+  /// Line the thread ends on, `None` when the forge reports none — which
+  /// is what an *outdated* thread looks like once the diff moved past it.
+  pub line: Option<u32>,
+  /// First line of a multi-line anchor. `None` on a single-line anchor,
+  /// which is the common case rather than the edge one.
+  pub start_line: Option<u32>,
+  pub is_resolved: bool,
+  /// The anchored lines no longer exist in the current diff.
+  pub is_outdated: bool,
+  /// The diff hunk the thread hangs from, as the forge renders it:
+  /// a `@@` header followed by `+` / `-` / context lines. The **last**
+  /// line is the anchored one.
+  pub diff_hunk: String,
+  /// The chain, oldest first. Capped by the request, hence
+  /// [`Self::total_comments`].
+  pub comments: Vec<ForgeComment>,
+  /// Comments the forge reports on this thread, which may exceed
+  /// `comments.len()` when the page cut the chain.
+  pub total_comments: u32,
+}
+
+/// What a backend can say about a PR's inline review threads (issue #528).
+///
+/// Three states, not two: "not fetched" lives in the caller's
+/// `GitHubFetchState`, but **"this forge has no path to them"** and
+/// **"the forge answered, there are none"** are both terminal and must
+/// render differently. A bare `Vec` collapses them into one, and the view
+/// would then tell a GitLab user their MR has no inline comments — which
+/// gwm does not know.
+///
+/// [`Forge::fetch_pr_threads`] deliberately has no default implementation,
+/// so a third backend has to answer the question rather than inherit an
+/// empty list that reads as "clean".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewThreads {
+  /// The backend cannot reach inline review comments. GitLab's live in
+  /// `/merge_requests/:iid/discussions` under a different shape and a
+  /// different request (issue #528 leaves that mapping out of scope).
+  Unsupported,
+  /// The forge answered. `total` is its own count, which exceeds
+  /// `threads.len()` when the request's page cut the list.
+  Threads { threads: Vec<ReviewThread>, total: u32 },
+}
+
+impl ReviewThreads {
+  /// The threads on this page. Empty for [`Self::Unsupported`] — callers
+  /// that need to tell the two apart match on the variant instead.
+  pub fn threads(&self) -> &[ReviewThread] {
+    match self {
+      Self::Unsupported => &[],
+      Self::Threads { threads, .. } => threads,
+    }
+  }
+
+  /// Threads the forge reports, page cap included. `0` when unsupported.
+  pub fn total(&self) -> u32 {
+    match self {
+      Self::Unsupported => 0,
+      Self::Threads { total, .. } => *total,
+    }
+  }
 }
 
 /// The slice of PR metadata `gwm review` needs to materialise a worktree:
@@ -599,6 +780,16 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus>;
   fn fetch_pr(&self, number: u64) -> Result<PrStatus>;
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead>;
+  /// Inline review comments, grouped into the threads they were posted in
+  /// (issue #528). A second transport, not a widening of
+  /// [`Self::fetch_pr`]: on GitHub these live behind GraphQL, and
+  /// `gwm status` — which calls `fetch_pr` on every invocation — has no
+  /// use for them.
+  ///
+  /// **No default implementation on purpose.** A backend with no path to
+  /// inline comments returns [`ReviewThreads::Unsupported`] explicitly, so
+  /// that "gwm cannot show these here" never renders as "there are none".
+  fn fetch_pr_threads(&self, number: u64) -> Result<ReviewThreads>;
   /// The most recent PR/MR whose head (source) branch is `branch`,
   /// regardless of state. `Ok(None)` when there is none.
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>>;

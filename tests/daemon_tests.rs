@@ -35,6 +35,7 @@ fn sample(name: &str) -> JsonWorktree {
     issue: None,
     pr: None,
     agents: None,
+    note: None,
   }
 }
 

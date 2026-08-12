@@ -199,3 +199,171 @@ fn list_workspace_names_format_lists_worktrees_per_repo() {
     .stdout(predicate::str::contains("alpha/alpha"))
     .stdout(predicate::str::contains("beta/beta"));
 }
+
+#[test]
+fn workspace_json_reads_each_note_from_its_own_repo(/* issue #515 */) {
+  // A note lives in the `.git` of the repo that owns the row, so the
+  // workspace listing is the only surface that has to open a handle PER ROW
+  // (the same per-row open the agent pins need). Two repos with a note each,
+  // both on a branch called `main`: read through one shared handle and both
+  // rows would carry the same text, which is the bug this pins.
+  let root = workspace_root();
+  for (repo, body) in [("alpha", "alpha's own note\n"), ("beta", "beta's own note\n")] {
+    let notes = root.path().join(repo).join(".git/gwm/notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("main.md"), body).unwrap();
+  }
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["list", "--format=json", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+  let note_of = |name: &str| {
+    rows
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|r| r["repo"] == name)
+      .unwrap_or_else(|| panic!("no row for {name} in {rows}"))["note"]
+      .as_str()
+      .map(str::to_string)
+  };
+
+  assert_eq!(note_of("alpha").as_deref(), Some("alpha's own note\n"));
+  assert_eq!(note_of("beta").as_deref(), Some("beta's own note\n"));
+}
+
+/// A containerised `[exec.profiles.ci]` whose `runtime` is `echo`, so the
+/// "container" run prints the argv gwm built instead of needing a daemon.
+/// `runtime` is explicit, which the resolver honours without a `PATH` probe.
+#[cfg(unix)]
+fn container_profile_toml() -> &'static str {
+  "[exec.profiles.ci]\ncommand = [\"marker\"]\n\n[exec.profiles.ci.container]\nimage = \"the-image\"\nruntime = \"echo\"\n"
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_workspace_mounts_each_repos_own_gitdir() {
+  // Issue #421 through the whole CLI path, workspace included: every repo
+  // resolves its own plan, so a worktree of `beta` must be handed `beta`'s
+  // gitdir. Crossing them would be worse than the bug this feature fixes —
+  // git would answer, against the wrong repository.
+  let root = workspace_root();
+  let worktrees = TempDir::new().unwrap();
+  for name in ["alpha", "beta"] {
+    let repo_path = root.path().join(name);
+    fs::write(repo_path.join(".gwm.toml"), container_profile_toml()).unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    repo
+      .worktree(&format!("{name}-wt"), &worktrees.path().join(name), None)
+      .unwrap();
+  }
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let out = cmd
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ci"])
+    .assert()
+    .success();
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+  // `echo` printed the argv, one line per worktree, under its repo header.
+  for name in ["alpha", "beta"] {
+    let other = if name == "alpha" { "beta" } else { "alpha" };
+    let line = stdout
+      .lines()
+      .find(|l| l.starts_with("run --rm") && l.contains(&format!("/{name}/.git")))
+      .unwrap_or_else(|| panic!("no run line carrying {name}'s gitdir in:\n{stdout}"));
+    assert!(
+      !line.contains(&format!("/{other}/.git")),
+      "{name}'s run must not mount {other}'s gitdir: {line}"
+    );
+    assert!(
+      line.ends_with("the-image marker"),
+      "the image and command close it: {line}"
+    );
+  }
+  // And the header names the run so a containerised fan-out is never silent.
+  assert!(
+    stdout.contains("[echo the-image]"),
+    "the per-worktree header announces the container: {stdout}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_refuses_an_unmountable_worktree_before_running_any_other() {
+  // Resolution is upfront by contract (#326): a worktree whose path cannot be
+  // expressed as a `-v source:destination` mount must fail the whole fan-out,
+  // not after an earlier worktree already ran. The marker file is the proof —
+  // if the first worktree ran, it exists.
+  let root = workspace_root();
+  let worktrees = TempDir::new().unwrap();
+  let repo_path = root.path().join("alpha");
+  fs::write(repo_path.join(".gwm.toml"), container_profile_toml()).unwrap();
+  let repo = Repository::open(&repo_path).unwrap();
+  // `aaa` sorts before `zz:z`, so it is the one that would run first.
+  repo.worktree("aaa", &worktrees.path().join("aaa"), None).unwrap();
+  repo.worktree("zzz", &worktrees.path().join("zz:z"), None).unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let out = cmd
+    .current_dir(&repo_path)
+    .args(["exec", "--profile", "ci"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert!(
+    stderr.contains("zz:z") || stderr.contains(':'),
+    "the error names the path it cannot mount:\n{stderr}"
+  );
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(
+    !stdout.contains("run --rm"),
+    "no worktree ran before the refusal:\n{stdout}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_workspace_refuses_an_unmountable_worktree_before_any_repo_runs() {
+  // Upfront resolution is a WORKSPACE-wide contract (#326), not a per-repo
+  // one: a worktree of the last repo that cannot be expressed as a container
+  // mount must surface before the first repo has run its command.
+  let root = workspace_root();
+  let worktrees = TempDir::new().unwrap();
+  for name in ["alpha", "beta"] {
+    let repo_path = root.path().join(name);
+    fs::write(repo_path.join(".gwm.toml"), container_profile_toml()).unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    // `beta` (second in discovery order) is the one holding the bad path.
+    let dir = if name == "beta" {
+      worktrees.path().join("od:d")
+    } else {
+      worktrees.path().join(name)
+    };
+    repo.worktree(&format!("{name}-wt"), &dir, None).unwrap();
+  }
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let out = cmd
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ci"])
+    .assert()
+    .failure();
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(
+    !stdout.contains("run --rm"),
+    "no repo ran before the refusal:\n{stdout}"
+  );
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert!(stderr.contains("od:d"), "the error names the path:\n{stderr}");
+}
