@@ -1459,19 +1459,6 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
       88,
     ),
     (
-      "report",
-      Box::new(|| {
-        let (d, mut a) = make_app();
-        a.report = Some(BootstrapReport {
-          steps: vec![StepResult::ok("copy env file"), StepResult::skipped("npm i", "no pkg")],
-        });
-        a.view = View::Report;
-        (d, a)
-      }),
-      64,
-      160,
-    ),
-    (
       "open-menu",
       Box::new(|| {
         let (d, mut a) = make_app();
@@ -1520,11 +1507,26 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
       72,
       88,
     ),
-    // Full-bleed surfaces: the log transcript and the note editor are text
-    // canvases, so they keep spending a percentage of the frame rather than
-    // capping. The bootstrap report above is one too (it renders hook stdout)
-    // and is pinned at its uncapped 160. Pinned here anyway — an exemption
-    // nobody measures is how a matrix goes green while missing a surface.
+    // Text canvases: the bootstrap report, the log transcript and the note
+    // editor render arbitrary external text, so they keep spending a bare
+    // percentage of the frame rather than going through `modal_width`. They
+    // have NO floor — the report's 64 at 80 columns is `80 * 80 / 100`, which
+    // merely happens to land on the same number the bounded surfaces are
+    // floored at. Pinned here anyway: an exemption nobody measures is how a
+    // matrix goes green while missing a surface.
+    (
+      "report",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.report = Some(BootstrapReport {
+          steps: vec![StepResult::ok("copy env file"), StepResult::skipped("npm i", "no pkg")],
+        });
+        a.view = View::Report;
+        (d, a)
+      }),
+      64,
+      160,
+    ),
     (
       "command-logs",
       Box::new(|| {
@@ -1577,8 +1579,10 @@ fn the_background_paints_no_rounded_corner() {
 fn every_modal_resolves_to_its_pinned_width_at_the_80_column_floor() {
   // The docs advertise the TUI at 80 columns. Pre-#550 the confirm modal was
   // 49 columns wide there and its hint row read `Enter activa`; help was 48
-  // and its rows lost their tail behind the scrollbar. Each modal now has a
-  // floor, so 80 columns is a size the surfaces were actually sized for.
+  // and its rows lost their tail behind the scrollbar. Every *bounded* modal
+  // now has a floor, so 80 columns is a size those surfaces were actually
+  // sized for. The three text canvases have none: their entries below are the
+  // plain percentage, pinned so a change to it still has to be declared.
   for (name, setup, want_at_80, _) in sizing_matrix() {
     assert_eq!(
       modal_width_at(setup.as_ref(), 80, 24),
