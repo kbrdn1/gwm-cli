@@ -20,12 +20,19 @@
 //! explicit `… N more` row — a silently truncated view reads as a complete
 //! one.
 //!
-//! **What is not here.** Inline review comments (the ones anchored to a
-//! diff hunk) are reachable through GraphQL only; `--json comments` returns
-//! conversation comments. Tracked as a follow-up.
+//! **The inline review threads are a second transport.** The comments
+//! anchored to a diff hunk are reachable through GraphQL only
+//! (`--json comments` returns the conversation), so they arrive on their
+//! own request, with their own latency and their own failure mode, and
+//! [`rich_pr_rows`] takes their fetch state rather than a list (issue
+//! #528). Their diff hunks are **truncated, never wrapped**: see
+//! [`hunk_rows`].
 
 use super::detail_overlay::{DetailRole, DetailRow};
-use crate::forge::{ForgeComment, ForgeReview, IssueStatus, PrState, PrStatus, ReviewState};
+use super::github_fetch::GitHubFetchState;
+use crate::forge::{
+  ForgeComment, ForgeReview, IssueStatus, PrState, PrStatus, ReviewState, ReviewThread, ReviewThreads,
+};
 use crate::naming::{sanitise_block_for_terminal, sanitise_for_terminal};
 
 /// Width reserved for the label column. Every label this module emits fits
@@ -46,9 +53,25 @@ const COMMENT_MAX_LINES: usize = 12;
 /// Comments rendered before the list itself is cut.
 const MAX_COMMENTS: usize = 20;
 
+/// Inline review threads rendered before the list is cut (issue #528).
+const MAX_THREADS: usize = 10;
+
+/// Comments rendered per thread. A thread is a discussion; past this the
+/// permalink on its header row is the better way in.
+const MAX_THREAD_COMMENTS: usize = 5;
+
+/// Diff-hunk lines kept, counted **from the end**: the forge puts the
+/// anchored line last, so a long hunk drops its head, never its tail.
+const HUNK_MAX_LINES: usize = 6;
+
 /// Rows for a pull / merge request. `width` is the modal's inner width in
 /// columns, label column included.
-pub fn rich_pr_rows(pr: &PrStatus, width: usize) -> Vec<DetailRow> {
+///
+/// `threads` is the inline-review-comment fetch (issue #528), which is a
+/// **separate** transport from the PR itself and therefore has its own
+/// state: it is still in flight when this view first opens, and on a
+/// backend that cannot answer it never resolves to a list at all.
+pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, width: usize) -> Vec<DetailRow> {
   let mut rows = Vec::new();
   let d = &pr.detail;
 
@@ -94,6 +117,7 @@ pub fn rich_pr_rows(pr: &PrStatus, width: usize) -> Vec<DetailRow> {
   let budget = wrap_budget(width);
   body_section(&mut rows, "description", &d.body, budget, BODY_MAX_LINES);
   reviews_section(&mut rows, &d.reviews, budget);
+  threads_section(&mut rows, threads, budget);
   comments_section(&mut rows, &d.comments, budget);
   rows
 }
@@ -269,6 +293,151 @@ fn comments_section(rows: &mut Vec<DetailRow>, comments: &[ForgeComment], budget
   }
   if let Some(dropped) = comments.len().checked_sub(MAX_COMMENTS).filter(|n| *n > 0) {
     more(rows, format!("… {dropped} more comments"));
+  }
+}
+
+/// Inline review threads (issue #528) — the comments anchored to a diff
+/// hunk, as opposed to [`comments_section`]'s conversation.
+///
+/// Every state gets a row of its own. The section is the one place in this
+/// view whose data comes from a second, slower request, so "still loading"
+/// and "this backend has no path to these" are states the reader sees
+/// rather than infers from an absence.
+fn threads_section(rows: &mut Vec<DetailRow>, state: &GitHubFetchState<ReviewThreads>, budget: usize) {
+  let loaded = match state {
+    // Nobody asked for the fetch. No heading: a section that claims
+    // nothing is better than one that claims zero.
+    GitHubFetchState::Idle => return,
+    GitHubFetchState::Loading => {
+      heading(rows, "inline comments".into());
+      more(rows, "  loading…".into());
+      return;
+    }
+    GitHubFetchState::Error(e) => {
+      heading(rows, "inline comments".into());
+      rows.push(DetailRow {
+        label: String::new(),
+        value: truncate(&format!("  {}", sanitise_for_terminal(e)), budget),
+        role: DetailRole::Failure,
+        meta: None,
+        extra: None,
+      });
+      return;
+    }
+    GitHubFetchState::Loaded(l) => l,
+  };
+
+  let ReviewThreads::Threads { threads, total } = loaded else {
+    heading(rows, "inline comments".into());
+    // Deliberately not "none": gwm has not looked, and cannot here.
+    more(rows, "  not available for this forge (GitHub only)".into());
+    return;
+  };
+
+  if threads.is_empty() {
+    heading(rows, "inline comments".into());
+    more(rows, "  no inline comments".into());
+    return;
+  }
+
+  heading(rows, format!("inline comments ({total})"));
+  for t in threads.iter().take(MAX_THREADS) {
+    thread_rows(rows, t, budget);
+  }
+  let dropped = (*total as usize).saturating_sub(threads.len().min(MAX_THREADS));
+  if dropped > 0 {
+    more(rows, format!("… {dropped} more threads"));
+  }
+}
+
+/// One thread: its anchor, the hunk it hangs from, then the chain.
+fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
+  let path = sanitise_for_terminal(&t.path);
+  // `start_line == line` is what a single-line anchor looks like when the
+  // forge fills both, and `7-7` is noise.
+  let anchor = match (t.start_line, t.line) {
+    (Some(s), Some(l)) if s != l => format!("{path}:{s}-{l}"),
+    (_, Some(l)) => format!("{path}:{l}"),
+    (Some(s), None) => format!("{path}:{s}"),
+    // An outdated thread can lose its line entirely; the file still
+    // locates it.
+    (None, None) => path,
+  };
+  let mut header = format!("  {anchor}");
+  if t.is_resolved {
+    header.push_str(" · resolved");
+  }
+  if t.is_outdated {
+    header.push_str(" · outdated");
+  }
+  rows.push(DetailRow {
+    label: String::new(),
+    value: truncate(&header, budget),
+    role: if t.is_resolved || t.is_outdated {
+      DetailRole::Muted
+    } else {
+      DetailRole::Normal
+    },
+    meta: None,
+    extra: None,
+  });
+
+  hunk_rows(rows, &t.diff_hunk, budget);
+
+  for c in t.comments.iter().take(MAX_THREAD_COMMENTS) {
+    rows.push(DetailRow {
+      label: String::new(),
+      value: truncate(
+        &format!("    {} · {}", sanitise_for_terminal(&c.author), day(&c.created_at)),
+        budget,
+      ),
+      role: DetailRole::Normal,
+      // The permalink to this very comment, so Enter opens the thread the
+      // caps elided.
+      meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
+      extra: None,
+    });
+    push_body(
+      rows,
+      &c.body,
+      budget.saturating_sub(2).max(8),
+      COMMENT_MAX_LINES,
+      "      ",
+    );
+  }
+  let shown = t.comments.len().min(MAX_THREAD_COMMENTS);
+  let dropped = (t.total_comments as usize).saturating_sub(shown);
+  if dropped > 0 {
+    more(rows, format!("    … {dropped} more comments"));
+  }
+}
+
+/// The diff hunk, one row per line.
+///
+/// **Truncated, never wrapped.** [`wrap_line`] splits on whitespace, so a
+/// wrapped `+` line's continuation rows carry no sigil and read as
+/// context — in a diff the leading `+` / `-` / space *is* the meaning, and
+/// a line that silently changes side is worse than one that is visibly
+/// cut. Prose can afford the reflow; this cannot.
+fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
+  if hunk.trim().is_empty() {
+    return;
+  }
+  // Remote text, same boundary as every body here (#502).
+  let clean = sanitise_block_for_terminal(hunk).replace('\t', "    ");
+  let lines: Vec<&str> = clean.lines().collect();
+  let start = lines.len().saturating_sub(HUNK_MAX_LINES);
+  if start > 0 {
+    more(rows, format!("    … {start} earlier hunk lines"));
+  }
+  for line in &lines[start..] {
+    rows.push(DetailRow {
+      label: String::new(),
+      value: truncate(&format!("    {line}"), budget),
+      role: DetailRole::Muted,
+      meta: None,
+      extra: None,
+    });
   }
 }
 

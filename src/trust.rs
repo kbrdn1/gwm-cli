@@ -234,11 +234,29 @@ pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option
 pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOutcome> {
   let cfg_path = workdir.join(CONFIG_FILE);
   let bytes = match fs::read(&cfg_path) {
-    Ok(b) => b,
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TrustOutcome::Proceed),
+    Ok(b) => Some(b),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
     Err(e) => return Err(e.into()),
   };
-  let sha = hash_config(&bytes);
+  evaluate_bytes(&cfg_path, bytes.as_deref(), origin, mode)
+}
+
+/// [`evaluate`] on bytes the caller already read (issue #531).
+///
+/// The decision has to be about the very bytes that get merged into the
+/// config whose hooks then run. Re-opening `.gwm.toml` here made the gate and
+/// the execution two observations of a file another process can rewrite in
+/// between, so a config could be approved as harmless and executed as
+/// something else. `None` is "no `.gwm.toml`", which is nothing to execute.
+///
+/// `cfg_path` is carried only to name the file in the prompt and the refusal;
+/// nothing reads it.
+pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode: TrustMode) -> Result<TrustOutcome> {
+  let Some(bytes) = bytes else {
+    return Ok(TrustOutcome::Proceed);
+  };
+  let cfg_path = cfg_path.to_path_buf();
+  let sha = hash_config(bytes);
 
   if mode == TrustMode::Deny {
     let short_sha: String = sha.chars().take(12).collect();
@@ -252,7 +270,7 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
 
   // Empty surface short-circuit (defence-in-depth fallthrough on
   // parse error — a broken parser must not open a bypass).
-  if let Ok(body_str) = std::str::from_utf8(&bytes) {
+  if let Ok(body_str) = std::str::from_utf8(bytes) {
     if let Ok(cfg) = toml::from_str::<Config>(body_str) {
       let bs = &cfg.bootstrap;
       if bs.copy.is_empty()
@@ -281,7 +299,7 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
 
   Ok(TrustOutcome::Prompt {
     cfg_path,
-    body: bytes,
+    body: bytes.to_vec(),
     sha,
     origin: origin.to_string(),
     ledger,
@@ -303,17 +321,38 @@ pub const APPROVE_VIA_TRUST_ADD: &str = "run `gwm trust add` from a CLI in anoth
 /// A `Prompt` outcome becomes a refusal here — the alternate screen has
 /// nowhere to ask — with `approve_hint` naming the command that grants it.
 pub fn evaluate_silent(workdir: &Path, origin: &str, mode: TrustMode, approve_hint: &str) -> Result<Option<String>> {
-  match evaluate(workdir, origin, mode)? {
-    TrustOutcome::Proceed => Ok(None),
-    TrustOutcome::Refuse { message } => Ok(Some(message)),
+  Ok(refusal_for(evaluate(workdir, origin, mode)?, approve_hint))
+}
+
+/// [`evaluate_silent`] on bytes the caller already read — see
+/// [`evaluate_bytes`] for why a delete has to gate the snapshot it merged
+/// rather than whatever the file says by now (issue #531).
+pub fn evaluate_silent_bytes(
+  cfg_path: &Path,
+  bytes: Option<&[u8]>,
+  origin: &str,
+  mode: TrustMode,
+  approve_hint: &str,
+) -> Result<Option<String>> {
+  Ok(refusal_for(
+    evaluate_bytes(cfg_path, bytes, origin, mode)?,
+    approve_hint,
+  ))
+}
+
+/// Turn an outcome into what a caller that cannot prompt shows the user.
+fn refusal_for(outcome: TrustOutcome, approve_hint: &str) -> Option<String> {
+  match outcome {
+    TrustOutcome::Proceed => None,
+    TrustOutcome::Refuse { message } => Some(message),
     TrustOutcome::Prompt { cfg_path, sha, .. } => {
       let short_sha: String = sha.chars().take(12).collect();
-      Ok(Some(format!(
+      Some(format!(
         ".gwm.toml at {} not in trust ledger (hash {}) — {}",
         cfg_path.display(),
         short_sha,
         approve_hint
-      )))
+      ))
     }
   }
 }

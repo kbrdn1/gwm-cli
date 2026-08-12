@@ -12712,3 +12712,275 @@ fn a_detached_row_says_so_rather_than_opening_an_editor_on_nothing() {
     app.status
   );
 }
+
+// --- inline review comments wiring (issue #528) ---------------------------
+
+fn one_thread() -> gwm::forge::ReviewThreads {
+  gwm::forge::ReviewThreads::Threads {
+    threads: vec![gwm::forge::ReviewThread {
+      path: "src/tui/app.rs".into(),
+      line: Some(11),
+      start_line: Some(7),
+      is_resolved: false,
+      is_outdated: false,
+      diff_hunk: "@@ -4,10 +4,11 @@\n-old\n+new".into(),
+      total_comments: 1,
+      comments: vec![gwm::forge::ForgeComment {
+        author: "coderabbitai".into(),
+        body: "This drops the guard.".into(),
+        created_at: "2026-08-04T13:40:21Z".into(),
+        url: Some("https://example.test/pull/61#discussion_r1".into()),
+      }],
+    }],
+    total: 1,
+  }
+}
+
+fn overlay_text(app: &gwm::tui::App) -> String {
+  app
+    .detail_overlay
+    .rows
+    .iter()
+    .map(|r| r.value.clone())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+#[test]
+fn landed_threads_reach_an_already_open_rich_view() {
+  // Same invariant as the PR itself: while the view is open it renders
+  // the freshest version of what it is showing. A second transport that
+  // resolves *after* the view opened is the common case here, not an
+  // edge one — the view is what triggers the request.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(
+    !overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "precondition: the threads have not landed yet"
+  );
+
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "the landing never reached the open view:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_thread_result_for_another_pr_is_not_shown() {
+  // The cache is keyed by number for the reason #138 already paid for.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  app.apply_pr_threads_fetch_result(62, Ok(one_thread()));
+
+  assert!(
+    !overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "PR 62's threads rendered under PR 61"
+  );
+}
+
+#[test]
+fn a_failed_thread_fetch_is_shown_not_swallowed() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  app.apply_pr_threads_fetch_result(61, Err("gh: HTTP 403".into()));
+
+  assert!(
+    overlay_text(&app).contains("gh: HTTP 403"),
+    "in:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_link_refresh_drops_cached_threads_with_everything_else() {
+  // Threads live in their own cache, so the invalidation that clears the
+  // PR must clear them too — otherwise a refreshed PR renders next to the
+  // previous run's inline comments.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "precondition"
+  );
+
+  app.refresh_link();
+
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Idle),
+    "stale threads survived the invalidation"
+  );
+}
+
+#[test]
+fn the_issue_view_never_grows_a_threads_section() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+
+  app.enter_rich_view();
+
+  assert!(!overlay_text(&app).to_lowercase().contains("inline comments"));
+}
+
+/// A `gh` stand-in that answers the review-threads GraphQL query, the PR
+/// re-probe (`pr list`) and the two `view` calls a refresh makes. Written
+/// once because the two tests below need the same surface.
+#[cfg(unix)]
+fn fake_gh_with_threads(dir: &std::path::Path) -> PathBuf {
+  use std::os::unix::fs::PermissionsExt;
+  let path = dir.join("fake-gh-threads");
+  std::fs::write(
+    &path,
+    r##"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
+  # `\\n` so printf emits a literal backslash-n: a raw newline inside a JSON
+  # string is a control character and takes the whole parse down.
+  printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":1,"nodes":[{"isResolved":false,"isOutdated":false,"path":"src/tui/app.rs","line":11,"startLine":7,"comments":{"totalCount":1,"nodes":[{"author":{"login":"coderabbitai"},"body":"This drops the guard.","diffHunk":"@@ -4,10 +4,11 @@\\n+new","createdAt":"2026-08-04T13:40:21Z","url":"https://example.test/pull/61#discussion_r1"}]}}]}}}}}'
+elif [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[{"number":61}]'
+elif [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '{"number":61,"title":"pr 61","state":"OPEN","isDraft":false,"url":"https://example.test/pull/61","updatedAt":"2026-06-09T00:00:00Z","statusCheckRollup":[]}'
+elif [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  printf '{"number":42,"title":"issue 42","state":"OPEN","url":"https://example.test/issues/42","labels":[],"updatedAt":"2026-06-09T00:00:00Z"}'
+else
+  exit 2
+fi
+"##,
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&path).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&path, perms).unwrap();
+  path
+}
+
+/// Drain until the threads worker for `n` has landed, or give up. Mirrors
+/// the polling the bulk-refresh test uses: whether a task is still in
+/// `running` at an arbitrary instant is a timing detail (issue #425), so
+/// the assertion is on the result, never on `is_loading`.
+#[cfg(unix)]
+fn settle_threads(app: &mut gwm::tui::App, n: u64) {
+  for _ in 0..200 {
+    app.drain_task_results();
+    if !app.tasks.is_loading(gwm::tui::TaskKind::GithubPrThreads(n)) {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  app.drain_task_results();
+}
+
+#[cfg(unix)]
+#[test]
+fn opening_the_view_requests_the_threads_and_renders_what_lands() {
+  // The one test that exercises the SPAWN path end to end: the request is
+  // fired by `enter_rich_view`, runs through the real worker, and lands via
+  // the drain rather than the `apply_*` seam. Everything else about the
+  // threads goes through the seam, which would leave the whole spawn +
+  // drain path green-but-unrun.
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  let fake_gh = fake_gh_with_threads(dir.path());
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` and restored below. The
+  // backend captures this path on the main thread when it is built.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  app.refresh_link(); // resolves the forge now that `origin` exists
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  settle_threads(&mut app, 61);
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "the view never asked, or the answer never landed:\n{}",
+    overlay_text(&app)
+  );
+  assert!(
+    overlay_text(&app).contains("This drops the guard."),
+    "the chain did not survive the round trip"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn refreshing_the_view_asks_for_the_threads_again() {
+  // `refresh_github_status` invalidates all three caches, so without a
+  // re-spawn `f` would blank the section until the view was reopened. The
+  // guard that re-spawns is also gated on the view still being open, which
+  // `close_detail_overlay` does not express through `kind` alone.
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  let fake_gh = fake_gh_with_threads(dir.path());
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: as above.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  settle_threads(&mut app, 61);
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "precondition: the first fetch landed"
+  );
+
+  app.rich_view_refresh();
+  settle_threads(&mut app, 61);
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  // Asserted on the CACHE, not on the rows. `refresh_github_status` does
+  // not rebuild the overlay (a landing does), so the previous run's rows
+  // are still on screen either way — an assertion on them stays green with
+  // the re-spawn deleted, which is exactly the vacant guard this test would
+  // otherwise be. `Idle` is what the invalidation leaves behind when
+  // nothing asks again.
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "`f` dropped the cached threads and never asked again: {:?}",
+    app.pr_threads_fetch_state(61)
+  );
+  assert!(
+    overlay_text(&app).contains("src/tui/app.rs:7-11"),
+    "and the section still renders them:\n{}",
+    overlay_text(&app)
+  );
+}

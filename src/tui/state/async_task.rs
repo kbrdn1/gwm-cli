@@ -67,6 +67,11 @@ pub enum TaskKind {
   /// PR-side counterpart to [`Self::GithubIssue`] (`gh pr view`). Keyed by
   /// PR number; never collides with an issue of the same number.
   GithubPr(u64),
+  /// Off-thread fetch of a PR's inline review threads (issue #528) — a
+  /// GraphQL request, separate from [`Self::GithubPr`] because it is a
+  /// separate transport with its own latency and its own failure mode.
+  /// Keyed by PR number, same per-key generation contract.
+  GithubPrThreads(u64),
   /// Off-thread `gwm sync` of the selected worktree (issue #258): fetch +
   /// rebase/merge its branch onto upstream. A single global op like
   /// [`Self::RefreshWorktrees`] — one sync in flight at a time, so a second
@@ -134,6 +139,7 @@ impl TaskKind {
       TaskKind::CreateWorktree => "creating worktree…",
       TaskKind::RefreshWorktrees => "refreshing worktrees…",
       TaskKind::GithubIssue(_) | TaskKind::GithubPr(_) => "fetching GitHub status…",
+      TaskKind::GithubPrThreads(_) => "fetching inline comments…",
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
       TaskKind::DeleteWorktree => "deleting worktree…",
@@ -152,7 +158,10 @@ impl TaskKind {
   /// without naming the (now-stale) issue/PR numbers it no longer holds
   /// (issue #255).
   pub fn is_github(self) -> bool {
-    matches!(self, TaskKind::GithubIssue(_) | TaskKind::GithubPr(_))
+    matches!(
+      self,
+      TaskKind::GithubIssue(_) | TaskKind::GithubPr(_) | TaskKind::GithubPrThreads(_)
+    )
   }
 
   /// `true` for workers that can leave repository / worktree state
@@ -326,6 +335,10 @@ pub enum TaskMsg {
   GithubIssue(u64, u64, std::result::Result<IssueStatus, String>),
   /// PR-side counterpart to [`Self::GithubIssue`] (`gh pr view`).
   GithubPr(u64, u64, std::result::Result<PrStatus, String>),
+  /// An inline-review-thread result (issue #528): the worker's
+  /// `generation`, the PR `number`, and the parsed threads (or a
+  /// stringified error).
+  GithubPrThreads(u64, u64, std::result::Result<crate::forge::ReviewThreads, String>),
   /// A `gwm sync` result (issue #258): the worker's `generation`, the synced
   /// worktree's display `name` (for the status line), and the [`SyncReport`]
   /// (or a stringified error — dirty tree, no upstream, conflicts).

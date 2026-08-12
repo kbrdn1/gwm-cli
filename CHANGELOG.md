@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Inline review comments in the rich PR view**
+  ([#528](https://github.com/kbrdn1/gwm-cli/issues/528)). The comments
+  anchored to a diff hunk now render in the `I` view, under the reviews: one
+  section per thread, showing its anchor (`src/tui/app.rs:7-11`, marked
+  `resolved` / `outdated` when it applies), the diff hunk it hangs from, and
+  the reply chain in order. These are reachable through GraphQL alone
+  (`gh pr view --json comments` returns the conversation), so they travel on
+  a **second** request, fired when the view opens rather than alongside every
+  PR fetch: `gwm status` calls the same fetch on every invocation and has no
+  use for them. Hunk lines are truncated instead of wrapped, since a wrapped
+  `+` line's continuation would carry no sigil and read as context, and a
+  long hunk drops its head rather than its tail because the anchored line is
+  the last one. Every cap states its count from the forge's own totals, and
+  each comment header keeps its permalink so `Enter` opens the full thread.
+  On a GitLab remote the section is present and says the backend cannot
+  reach these, which is a different fact from "there are none": GitLab
+  carries them as discussion notes with `position` data, under a different
+  request and a different shape, deliberately out of scope here.
+
 - **Rich PR / issue view in the TUI**
   ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)). `I` opens the linked
   PR (or the linked issue when there is no PR) on its description, author,
@@ -27,9 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-fetches, and the whole verb set is rebindable under
   `[tui.keys.modal.rich_view]`. On GitLab the view renders the summary tier
   plus the description, author and branch pair; approvals, notes and the diff
-  size need separate API calls and are not fetched. Inline review comments
-  (the ones anchored to a diff hunk) are GitHub GraphQL only and are not part
-  of this change.
+  size need separate API calls and are not fetched.
+
 - **Container execution on `gwm exec` profiles**
   ([#421](https://github.com/kbrdn1/gwm-cli/issues/421)). A
   `[exec.profiles.<name>.container]` block wraps that profile's command in
@@ -177,12 +195,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all `post_create` runs nothing on a delete and is never asked. Hook output
   lands on the Command Logs transcript (`3`) as it does everywhere else.
 - **A refused removal is no longer recorded as undoable**
-  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521)). `gwm remove` wrote
-  its journal entry before the destructive call, so a target that then got
-  refused (its path moved since it was resolved, git declining the removal)
-  still showed up in `gwm history` as something `gwm undo` would replay. The
-  branch OID is still captured beforehand, which is what the entry needs; only
-  the write moved after the removal succeeds.
+  ([#521](https://github.com/kbrdn1/gwm-cli/issues/521),
+  [#531](https://github.com/kbrdn1/gwm-cli/issues/531)). `gwm remove` wrote its
+  journal entry before the destructive call, so a target that then got refused
+  (its path moved since it was resolved, git declining the removal) still
+  showed up in `gwm history` as something `gwm undo` would replay. That is not
+  a cosmetic leftover: `gwm undo` saves the journal only once the resurrection
+  succeeds, and the resurrection fails on a worktree that is still on disk, so
+  the stale entry came back on every retry and no later removal in that repo
+  could be undone until `history.toml` was edited by hand. The removal now
+  records itself at its point of no return, with the worktree gone and the
+  branch not yet, which is both after everything that can still refuse and
+  before the one step that destroys something unrecoverable: a refusal writes
+  nothing, and a partial failure still leaves the branch OID `gwm undo` needs.
+- **The delete reads `.gwm.toml` once**
+  ([#531](https://github.com/kbrdn1/gwm-cli/issues/531)). A TUI delete asked
+  the same file four separate times: for the config whose hooks run, for the
+  repo layer that says whether it runs any, for the bytes the trust ledger
+  rules on, and again to parse the branch for `{type}` / `{issue}` / `{desc}`.
+  A `.gwm.toml` rewritten between two of those could be approved as one thing
+  and executed as another. All four now answer from one snapshot. Same for the
+  branch a removal deletes and the branch it records: one read of HEAD, so a
+  checkout landing mid-removal can no longer have `gwm undo` restore a ref that
+  was never deleted while the deleted one stays lost.
 - **`cycle_sidebar_layout` moved from `Space` to `z`**
   ([#484](https://github.com/kbrdn1/gwm-cli/issues/484)), to make room for the
   row mark. Space-to-mark is the convention in lazygit, k9s and fzf, so the

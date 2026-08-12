@@ -37,7 +37,7 @@
 use crate::error::{GwmError, Result};
 use crate::forge::{
   self, CheckOutcome, CreatedIssue, CreatedPr, Forge, ForgeKind, IssueCreateRequest, IssueState, IssueStatus, PrCheck,
-  PrCreateRequest, PrHead, PrState, PrStatus,
+  PrCreateRequest, PrHead, PrState, PrStatus, ReviewThreads,
 };
 use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{self, MilestoneSpec, MilestoneState, RemoteMilestone};
@@ -1441,6 +1441,16 @@ impl Forge for GitLabForge {
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
     parse_mr_head_json(&self.run_argv_object(mr_view_argv(self.repo_selector(), number))?)
+  }
+
+  /// GitLab carries inline comments as *discussion notes* with `position`
+  /// data, under `/merge_requests/:iid/discussions` — a different shape
+  /// behind a different request, which issue #528 deliberately leaves out
+  /// of scope. Answered explicitly rather than as an empty list, so the
+  /// view can say "gwm cannot show these here" instead of the false
+  /// "this MR has none".
+  fn fetch_pr_threads(&self, _number: u64) -> Result<ReviewThreads> {
+    Ok(ReviewThreads::Unsupported)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {

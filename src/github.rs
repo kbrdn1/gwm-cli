@@ -28,7 +28,8 @@ use std::sync::LazyLock;
 pub use crate::forge::{cli_command_line as gh_command_line, repo_slug};
 pub use crate::forge::{
   CheckOutcome, CiState, CreatedIssue, CreatedPr, ForgeComment, ForgeReview, IssueCreateRequest, IssueDetail,
-  IssueState, IssueStatus, PrCheck, PrCreateRequest, PrDetail, PrHead, PrState, PrStatus, ReviewState,
+  IssueState, IssueStatus, PrCheck, PrCreateRequest, PrDetail, PrHead, PrState, PrStatus, ReviewState, ReviewThread,
+  ReviewThreads,
 };
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
@@ -1336,6 +1337,193 @@ pub fn pr_head_argv(slug: &str, number: u64) -> Vec<String> {
   argv
 }
 
+// ---- Inline review threads (issue #528) ---------------------------------
+//
+// A second transport. `gh pr view --json comments` returns the
+// conversation only; the comments anchored to a diff hunk, their
+// `path` / `line` / `diffHunk`, and the reply chains inside a thread are
+// reachable through GraphQL alone.
+
+/// The GraphQL document. One page of 50 threads and 20 comments each: a
+/// review running past either is unusual, and `totalCount` comes back in
+/// the same query so the cut is stated rather than hidden.
+///
+/// Every field here is read by the renderer, and
+/// [`pr_threads_argv`]'s test pins that list — a field dropped from the
+/// query is invisible to a parse test, which reads a fixture rather than
+/// `gh`.
+const PR_THREADS_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){\
+repository(owner:$owner,name:$repo){pullRequest(number:$number){\
+reviewThreads(first:50){totalCount nodes{\
+isResolved isOutdated path line startLine \
+comments(first:20){totalCount nodes{author{login} body diffHunk createdAt url}}}}}}}";
+
+/// Split an `owner/repo` slug for the GraphQL variables.
+///
+/// `gh pr view` takes `--repo owner/repo` and, given nothing, resolves the
+/// repo from the working directory. A GraphQL document cannot do either:
+/// `$owner` and `$repo` are required, and the empty selector
+/// [`GitHubForge::repo_selector`] returns for an origin `gh` cannot be
+/// pinned to would have to be *guessed* back. Guessing it is the #458
+/// finding on a new transport — the request would resolve against
+/// whichever instance is ambient — so this refuses instead.
+fn split_owner_repo(slug: &str) -> Result<(&str, &str)> {
+  let mut parts = slug.split('/');
+  match (parts.next(), parts.next(), parts.next()) {
+    (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty() => Ok((owner, repo)),
+    _ => Err(GwmError::CommandFailed(format!(
+      "inline review comments need an owner/repo slug, got {slug:?}. \
+       gwm refuses to guess one for a GraphQL query."
+    ))),
+  }
+}
+
+/// Argv for `gh api graphql -f query=… -f owner=… -f repo=… -F number=…`.
+///
+/// `-f` for the two strings and `-F` only for the number: `-F` interprets
+/// its value (int / bool / null / `@file`), so a slug component that looks
+/// like a number would reach `$owner: String!` as an `Int` and a leading
+/// `@` would read a file.
+pub fn pr_threads_argv(slug: &str, number: u64) -> Result<Vec<String>> {
+  let (owner, repo) = split_owner_repo(slug)?;
+  Ok(vec![
+    "api".into(),
+    "graphql".into(),
+    "-f".into(),
+    format!("query={PR_THREADS_QUERY}"),
+    "-f".into(),
+    format!("owner={owner}"),
+    "-f".into(),
+    format!("repo={repo}"),
+    "-F".into(),
+    format!("number={number}"),
+  ])
+}
+
+#[derive(Deserialize)]
+struct RawThreadsEnvelope {
+  #[serde(default, deserialize_with = "null_to_default")]
+  data: RawThreadsData,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadsData {
+  #[serde(default, deserialize_with = "null_to_default")]
+  repository: RawThreadsRepository,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadsRepository {
+  #[serde(rename = "pullRequest", default, deserialize_with = "null_to_default")]
+  pull_request: RawThreadsPr,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadsPr {
+  #[serde(rename = "reviewThreads", default, deserialize_with = "null_to_default")]
+  review_threads: RawThreadConnection,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadConnection {
+  #[serde(rename = "totalCount", default, deserialize_with = "null_to_default")]
+  total_count: u32,
+  #[serde(default, deserialize_with = "null_to_default")]
+  nodes: Vec<RawThread>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThread {
+  #[serde(rename = "isResolved", default, deserialize_with = "null_to_default")]
+  is_resolved: bool,
+  #[serde(rename = "isOutdated", default, deserialize_with = "null_to_default")]
+  is_outdated: bool,
+  #[serde(default, deserialize_with = "null_to_default")]
+  path: String,
+  // Genuinely optional, not "nullable String": an outdated thread has no
+  // current line, and `startLine` is null on every single-line anchor.
+  #[serde(default)]
+  line: Option<u32>,
+  #[serde(rename = "startLine", default)]
+  start_line: Option<u32>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  comments: RawThreadCommentConnection,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadCommentConnection {
+  #[serde(rename = "totalCount", default, deserialize_with = "null_to_default")]
+  total_count: u32,
+  #[serde(default, deserialize_with = "null_to_default")]
+  nodes: Vec<RawThreadComment>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawThreadComment {
+  #[serde(default)]
+  author: Option<RawAuthor>,
+  #[serde(default, deserialize_with = "null_to_default")]
+  body: String,
+  #[serde(rename = "diffHunk", default, deserialize_with = "null_to_default")]
+  diff_hunk: String,
+  #[serde(rename = "createdAt", default, deserialize_with = "null_to_default")]
+  created_at: String,
+  #[serde(default, deserialize_with = "null_to_default")]
+  url: String,
+}
+
+/// Parse the response of [`PR_THREADS_QUERY`]. Pure + `pub` so its shape is
+/// testable without spawning `gh`.
+///
+/// Flattens GraphQL's `nodes` wrappers into the same shape the `--json`
+/// parser produces, so **one** renderer serves both transports.
+pub fn parse_pr_threads_json(s: &str) -> Result<ReviewThreads> {
+  let raw: RawThreadsEnvelope = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "pr review threads",
+    source: e,
+  })?;
+  let connection = raw.data.repository.pull_request.review_threads;
+  let threads = connection
+    .nodes
+    .into_iter()
+    .map(|t| {
+      // The hunk is a property of the thread's anchor, and GraphQL
+      // repeats it on every comment. Take it from the first, which is
+      // the one that established the anchor.
+      let diff_hunk = t
+        .comments
+        .nodes
+        .first()
+        .map(|c| c.diff_hunk.clone())
+        .unwrap_or_default();
+      ReviewThread {
+        path: t.path,
+        line: t.line,
+        start_line: t.start_line,
+        is_resolved: t.is_resolved,
+        is_outdated: t.is_outdated,
+        diff_hunk,
+        total_comments: t.comments.total_count,
+        comments: t
+          .comments
+          .nodes
+          .into_iter()
+          .map(|c| ForgeComment {
+            author: c.author.unwrap_or_default().login,
+            body: c.body,
+            created_at: c.created_at,
+            url: (!c.url.is_empty()).then_some(c.url),
+          })
+          .collect(),
+      }
+    })
+    .collect();
+  Ok(ReviewThreads::Threads {
+    threads,
+    total: connection.total_count,
+  })
+}
+
 /// Find the most recent PR opened from `branch` (head ref) on the given
 /// repo, regardless of state. Returns `Ok(Some(N))` if at least one PR
 /// exists (open, draft, closed, or merged — `gh pr list --state all`),
@@ -2035,6 +2223,10 @@ impl Forge for GitHubForge {
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
     parse_pr_head_json(&self.run(pr_head_argv(self.repo_selector(), number))?)
+  }
+
+  fn fetch_pr_threads(&self, number: u64) -> Result<ReviewThreads> {
+    parse_pr_threads_json(&self.run(pr_threads_argv(self.repo_selector(), number)?)?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {

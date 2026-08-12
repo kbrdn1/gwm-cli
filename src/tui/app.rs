@@ -1903,6 +1903,14 @@ impl App {
           applied = true;
           github_applied = true;
         }
+        TaskMsg::GithubPrThreads(generation, number, result) => {
+          if !self.tasks.complete(TaskKind::GithubPrThreads(number), generation) {
+            continue;
+          }
+          self.land_pr_threads(number, result);
+          applied = true;
+          github_applied = true;
+        }
         TaskMsg::Sync(generation, name, result) => {
           if !self.tasks.complete(TaskKind::Sync, generation) {
             // Late result — a newer sync (or an invalidate) superseded it.
@@ -3223,6 +3231,10 @@ impl App {
     if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
       let source = RichSource::Pr(pr.clone());
       let title = format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title);
+      let number = pr.number;
+      // Before the rows are built, so the section opens as "loading"
+      // instead of appearing out of nowhere one landing later.
+      self.spawn_github_pr_threads(number);
       self.open_rich_overlay(source, title, width);
       return;
     }
@@ -3246,7 +3258,7 @@ impl App {
     let (kind, rows, target, number) = match &source {
       RichSource::Pr(pr) => (
         crate::tui::state::detail_overlay::DetailKind::RichPr,
-        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -3315,7 +3327,9 @@ impl App {
     }
     let width = self.rich_view_width();
     let rows = match &self.rich_overlay_source {
-      Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(pr, width),
+      Some(RichSource::Pr(pr)) => {
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width)
+      }
       Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
       None => return,
     };
@@ -3339,6 +3353,21 @@ impl App {
       return;
     }
     self.refresh_github_status();
+    // The invalidation above dropped the cached threads as well, so the
+    // section would otherwise stay empty until the view was reopened.
+    //
+    // Gated on the VIEW too, not just the overlay kind: the refresh can
+    // close the overlay (`close_forge_overlay_if_link_disagrees`, when the
+    // re-probe moved the PR), and `close_detail_overlay` leaves `kind`
+    // holding its last value. A kind-only guard would then fire a GraphQL
+    // request for a view that is no longer on screen.
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::RichPr
+    {
+      if let Some(n) = self.github.link.pr {
+        self.spawn_github_pr_threads(n);
+      }
+    }
   }
 
   /// Contextual KEY routing (issue #436) — same mechanism that turns
@@ -6151,6 +6180,26 @@ impl App {
     true
   }
 
+  /// Inline-review-thread counterpart to [`Self::spawn_github_pr`] (issue
+  /// #528). Not part of the bulk prefetch: this is a second request per
+  /// PR, and the only surface that reads it is the rich view, so it is
+  /// spawned when that view opens rather than alongside every PR fetch.
+  fn spawn_github_pr_threads(&mut self, n: u64) -> bool {
+    let key = FetchKey::PrThreads(n);
+    // Checked here rather than in `spawn_github_fetch`, which bails out
+    // silently: marking `Loading` for a request that is never made leaves
+    // the section spinning forever.
+    if self.github.forge.is_none() || self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubPrThreads(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, String::new(), generation);
+    true
+  }
+
   /// Spawn one background `gh` shell-out for `key` tagged with `generation`
   /// and wire its result back over the shared task channel (issue #255,
   /// migrated from #217's dedicated channel). Deliberately a thin shell: it
@@ -6172,6 +6221,9 @@ impl App {
       let msg = match key {
         FetchKey::Issue(n) => TaskMsg::GithubIssue(generation, n, forge.fetch_issue(n).map_err(|e| e.to_string())),
         FetchKey::Pr(n) => TaskMsg::GithubPr(generation, n, forge.fetch_pr(n).map_err(|e| e.to_string())),
+        FetchKey::PrThreads(n) => {
+          TaskMsg::GithubPrThreads(generation, n, forge.fetch_pr_threads(n).map_err(|e| e.to_string()))
+        }
       };
       let _ = tx.send(msg);
     });
@@ -6241,6 +6293,44 @@ impl App {
       self.sync_rich_overlay(RichSource::Pr(status.clone()));
     }
     self.github.apply_pr_result(r);
+  }
+
+  /// Test seam for the inline-review-thread fetch (issue #528), the
+  /// counterpart of [`Self::apply_pr_fetch_result`]. Routes through the
+  /// same [`Self::land_pr_threads`] the drain uses, so the two cannot
+  /// desync.
+  pub fn apply_pr_threads_fetch_result(
+    &mut self,
+    number: u64,
+    r: std::result::Result<crate::forge::ReviewThreads, String>,
+  ) {
+    self.land_pr_threads(number, r);
+  }
+
+  /// The cached inline-review-thread state for `number` (issue #528).
+  pub fn pr_threads_fetch_state(&self, number: u64) -> &GitHubFetchState<crate::forge::ReviewThreads> {
+    self.github.pr_threads_state(number)
+  }
+
+  /// Stamp a landed thread fetch and, when the rich view is showing that
+  /// very PR, re-run its invariant so the section stops saying "loading".
+  ///
+  /// Called from **both** landing paths — the drain and the test seam —
+  /// for the reason the CI counterpart spells out below: a landing wired
+  /// only into the seam leaves the running TUI without the refresh. The
+  /// threads are a second transport, so this is the third path where that
+  /// pairing has to hold.
+  fn land_pr_threads(&mut self, number: u64, r: std::result::Result<crate::forge::ReviewThreads, String>) {
+    self.github.complete_pr_threads(number, r);
+    // Re-render through the one invariant rather than touching the rows
+    // here: the view renders the side the LINK prefers, and these threads
+    // belong to it only when the linked PR is the one that landed.
+    if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+      if pr.number == number {
+        let pr = pr.clone();
+        self.sync_rich_overlay(RichSource::Pr(pr));
+      }
+    }
   }
 
   /// Rebuild the open CI checks overlay from a landed PR fetch (validation
@@ -6339,7 +6429,7 @@ impl App {
     let width = self.rich_view_width();
     let (rows, target, number) = match &source {
       RichSource::Pr(pr) => (
-        crate::tui::state::rich_view::rich_pr_rows(pr, width),
+        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -6646,15 +6736,20 @@ impl RepoBatch {
   /// `None` precisely to avoid it (#194).
   fn open(workdir: &Path, global_path: Option<&Path>, trust_mode: crate::trust::TrustMode) -> Result<Self> {
     let repo = worktree::discover_repo(Some(workdir))?;
-    let config = Config::load_layered(workdir, global_path)?;
-    // Read back to back with the one above, before the `worktree::list` below,
-    // which walks every worktree's git status and is the expensive part. The
-    // two reads still are not atomic — `trust::evaluate` opens the file a
-    // third time to hash it — but a `.gwm.toml` rewritten between them can no
-    // longer land in a window measured in hundreds of milliseconds (Codex
-    // review on PR #526). Closing it fully means handing `evaluate` bytes
-    // already read, which is a change to the trust surface, not to this one.
-    let repo_only = Config::load_layered(workdir, None)?;
+    // One read of `.gwm.toml`, three answers (issue #531): the config whose
+    // hooks run, the repo layer that says whether this operation runs any,
+    // and the bytes the ledger rules on. Three separate opens meant a file
+    // rewritten in between could be approved as one thing and executed as
+    // another; they are now the same snapshot by construction, so no window
+    // is left to narrow.
+    let cfg_path = workdir.join(crate::config::CONFIG_FILE);
+    let repo_bytes = match std::fs::read(&cfg_path) {
+      Ok(b) => Some(b),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+      Err(e) => return Err(e.into()),
+    };
+    let config = Config::load_layered_from_bytes(repo_bytes.as_deref(), global_path)?;
+    let repo_only = Config::load_layered_from_bytes(repo_bytes.as_deref(), None)?;
     let worktrees = worktree::list(&repo)?;
     // Gate on the phases this operation actually runs, asked of the file the
     // trust decision is about. Two narrowings, both load-bearing:
@@ -6671,7 +6766,13 @@ impl RepoBatch {
       lifecycle::has_steps(&repo_only, HookPhase::PreRemove) || lifecycle::has_steps(&repo_only, HookPhase::PostRemove);
     let trust_refusal = if runs_hooks {
       let origin = crate::trust::origin_key_for_repo(&repo, workdir);
-      crate::trust::evaluate_silent(workdir, &origin, trust_mode, crate::trust::APPROVE_VIA_TRUST_ADD)?
+      crate::trust::evaluate_silent_bytes(
+        &cfg_path,
+        repo_bytes.as_deref(),
+        &origin,
+        trust_mode,
+        crate::trust::APPROVE_VIA_TRUST_ADD,
+      )?
     } else {
       None
     };

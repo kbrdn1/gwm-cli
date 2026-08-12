@@ -2784,7 +2784,7 @@ fn cmd_create(
   // (Codex review on PR #474).
   let pre_ctx = match &wt_name {
     WorktreeName::Structured(spec) => HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, spec),
-    WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch)),
+    WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch), &config),
   };
   let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
   print_lifecycle_report(&report);
@@ -3426,6 +3426,7 @@ fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode:
     &worktree_path,
     &worktree_path,
     worktree_branch.as_deref(),
+    &config,
   );
   let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &hook_ctx, &skips, false)?;
   print_lifecycle_report(&report);
