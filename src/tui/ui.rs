@@ -33,6 +33,7 @@ use ratatui::{
   Frame,
 };
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 
 /// Per-section content of the worktree details sidebar. Rendered by
 /// [`draw_sidebar`] into separate rounded-border blocks (no outer
@@ -691,17 +692,35 @@ pub fn compact_header_line(
   };
   let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(accentuate).collect();
 
-  let title_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+  // Measured in terminal CELLS, not chars: a CJK glyph or an emoji in a
+  // filter query counts one char and draws two columns, and padding
+  // computed against the undercount pushed the right-aligned counter off
+  // the pane (Codex review, PR #546). `Span::width` is the same measure
+  // ratatui uses when it draws.
+  let span_w = |s: &Span<'static>| s.width();
+  let title_w: usize = spans.iter().map(span_w).sum();
   // Truncate the title when it alone overflows. Cutting from the tail
-  // keeps the leading chord — the actionable half — visible longest.
+  // keeps the leading chord — the actionable half — visible longest. A
+  // wide glyph that would straddle the budget is dropped whole rather
+  // than half-drawn.
   if title_w > width {
     let mut left = width;
     for s in spans.iter_mut() {
-      let w = s.content.chars().count();
+      let w = span_w(s);
       if w <= left {
         left -= w;
       } else {
-        *s = Span::styled(s.content.chars().take(left).collect::<String>(), s.style);
+        let mut kept = String::new();
+        let mut used = 0usize;
+        for ch in s.content.chars() {
+          let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+          if used + cw > left {
+            break;
+          }
+          kept.push(ch);
+          used += cw;
+        }
+        *s = Span::styled(kept, s.style);
         left = 0;
       }
     }
@@ -709,7 +728,7 @@ pub fn compact_header_line(
     return Line::from(spans);
   }
 
-  let counter_w = |c: &Line<'static>| -> usize { c.spans.iter().map(|s| s.content.chars().count()).sum() };
+  let counter_w = |c: &Line<'static>| -> usize { c.spans.iter().map(span_w).sum() };
   let counter = counter.filter(|c| title_w + counter_w(c) <= width);
   let pad = width - title_w - counter.as_ref().map(counter_w).unwrap_or(0);
   if pad > 0 {
@@ -1385,7 +1404,13 @@ fn render_section(
   if let Some(f) = footer {
     block = block.title_bottom(f.right_aligned());
   }
-  let paragraph = Paragraph::new(padded).block(block).scroll((scroll, 0));
+  // `body_style` applies here too, not only on the compact path above:
+  // `dim_unfocused` is about focus, not about how the pane is framed
+  // (Codex review, PR #546 — the bordered sidebar was never dimmed).
+  let paragraph = Paragraph::new(padded)
+    .block(block)
+    .style(chrome.body_style())
+    .scroll((scroll, 0));
   f.render_widget(paragraph, area);
 }
 

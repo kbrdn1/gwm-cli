@@ -911,6 +911,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "tui-term",
+ "unicode-width",
  "which",
  "widestring",
  "windows-sys",

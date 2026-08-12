@@ -828,25 +828,54 @@ fn dim_unfocused_is_off_by_default_in_both_layouts() {
 }
 
 #[test]
-fn dim_unfocused_applies_to_the_bordered_layout_too() {
-  // The signal is about focus, not about how a pane is framed — a
-  // bordered user who turns the option on gets the same behaviour.
+fn dim_unfocused_dims_the_unfocused_pane_in_both_layouts() {
+  // The signal is about focus, not about how a pane is framed.
+  //
+  // The first version of this guard only asked whether *any* cell was
+  // dimmed. It passed while the bordered sidebar was not dimmed at all:
+  // the table applies the style in both layouts, so one dimmed cell
+  // always existed and the missing half went unseen (Codex review, PR
+  // #546). It now names the surface it checks, on both sides of the
+  // focus, in both layouts — four assertions that cannot all hold unless
+  // the style reaches every render path.
   let dir = repo_with_commits(4);
-  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
-  app.config.tui.layout = TuiLayout::Bordered;
-  app.config.tui.dim_unfocused = true;
-  app.sidebar.focused = true;
-  let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-  warm_sidebar(&mut app);
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let dim_at = |terminal: &Terminal<TestBackend>, needle: &str| -> bool {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    for y in area.y..area.y + area.height {
+      let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+      if let Some(i) = line.find(needle) {
+        let col = line[..i].chars().count() as u16;
+        return buffer[(area.x + col, y)]
+          .modifier
+          .contains(ratatui::style::Modifier::DIM);
+      }
+    }
+    panic!("{needle:?} never rendered");
+  };
 
-  let buffer = terminal.backend().buffer();
-  assert!(
-    buffer
-      .content()
-      .iter()
-      .any(|c| c.modifier.contains(ratatui::style::Modifier::DIM)),
-    "the unfocused list body must be dimmed in the bordered layout too"
-  );
+  for layout in [TuiLayout::Compact, TuiLayout::Bordered] {
+    for sidebar_focused in [true, false] {
+      let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+      app.config.tui.layout = layout;
+      app.config.tui.dim_unfocused = true;
+      app.sidebar.focused = sidebar_focused;
+      let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+      warm_sidebar(&mut app);
+      terminal.draw(|f| draw(f, &mut app)).unwrap();
+      terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+      // `BRANCH` is a list column header; `Branch  ` a sidebar body row.
+      assert_eq!(
+        dim_at(&terminal, "BRANCH"),
+        sidebar_focused,
+        "{layout:?}, sidebar_focused={sidebar_focused}: the list body must be dimmed exactly when it lacks focus"
+      );
+      assert_eq!(
+        dim_at(&terminal, "Branch  "),
+        !sidebar_focused,
+        "{layout:?}, sidebar_focused={sidebar_focused}: the sidebar body must be dimmed exactly when it lacks focus"
+      );
+    }
+  }
 }

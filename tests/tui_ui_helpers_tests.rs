@@ -1190,3 +1190,38 @@ fn overlay_modal_width_is_wider_but_clamped() {
   assert!(overlay_modal_width(40) <= 40);
   assert!(overlay_modal_width(50) >= 45, "narrow terminals still get a usable box");
 }
+
+#[test]
+fn compact_header_line_measures_in_terminal_cells_not_chars() {
+  // Codex review, PR #546: the header was padded with `chars().count()`,
+  // which counts one for a wide character that ratatui draws in two
+  // cells. A filter query containing CJK or an emoji therefore produced a
+  // line wider than the pane — the right-aligned counter fell off the
+  // edge — because the padding was computed against an undercount.
+  //
+  // `Line::width()` is the same measure ratatui uses when it draws, so
+  // asserting on it is asserting on what lands in the buffer.
+  let title = ratatui::text::Line::from(" [1] WORKTREES /界 ");
+  let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Color::Cyan);
+  assert_eq!(
+    line.width(),
+    40,
+    "the header must span exactly the pane width in cells, got {}: {:?}",
+    line.width(),
+    title_text(&line)
+  );
+}
+
+#[test]
+fn compact_header_line_truncates_wide_glyphs_by_cell_budget() {
+  // Same measure on the narrow path: a title of wide glyphs alone must be
+  // cut to the cell budget, never past it. Cutting by char count would
+  // leave a line twice as wide as the pane.
+  let title = ratatui::text::Line::from("界界界界界界界界");
+  let line = compact_header_line(title, None, 9, Color::Cyan);
+  assert!(
+    line.width() <= 9,
+    "must never exceed the pane width in cells, got {}",
+    line.width()
+  );
+}
