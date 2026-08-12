@@ -161,9 +161,19 @@ printf '{"id":"%s","thread_name":"Emit Retry-After on every 429"}\n' \
 
 # Pin both. The table's AGENT column reads detection, the sidebar Agents
 # pane reads pins only — the demo shows both, so both are needed.
+#
+# Non-fatal on purpose. `gwm agents attach` refuses an id detection has not
+# seen, so it is the one step here that can fail for an environmental reason,
+# and under `set -e` that would abort the script before the untrusted
+# `payments-svc` fixture below — costing `trust-ledger.tape` its subject over
+# a missing pin. Warn loudly instead: the pane degrades, the rest survives.
 cd "$REPO"
-gwm agents attach feat-42 "$CLAUDE_SID" >/dev/null
-gwm agents attach fix-57 "$CODEX_SID" >/dev/null
+pin() {
+  gwm agents attach "$1" "$2" >/dev/null \
+    || echo "warning: could not pin $2 to $1 — the sidebar Agents pane will be empty" >&2
+}
+pin feat-42 "$CLAUDE_SID"
+pin fix-57 "$CODEX_SID"
 
 # ── untrusted fixture for the TOFU trust-ledger capture ────────────────────
 # A second repo we deliberately never add to the trust ledger, with a juicy
