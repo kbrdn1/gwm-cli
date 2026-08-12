@@ -4,23 +4,23 @@ description: Manage git worktrees across any repository with the `gwm` Rust bina
 allowed-tools: Bash, Read, Edit, Write
 ---
 
-# gwm — git worktree manager (Rust CLI + TUI)
+# gwm: git worktree manager (Rust CLI + TUI)
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.7.1`** (machine contracts frozen since 1.0.0 — MSRV 1.95).
+Source: https://github.com/kbrdn1/gwm-cli, latest stable **`1.7.1`** (machine contracts frozen since 1.0.0, MSRV 1.95).
 
 **Unreleased on `dev`: multi-row selection + bulk delete (#484).** `Space` marks the highlighted worktree in the TUI and `d` deletes every marked row in one batch, behind one confirm that reports `N selected` rather than listing them, with `D` arming the branch deletion for the whole batch. Nothing marked means `d` is the single-row delete it has always been, and only `d` reads the mark set: every other verb keeps acting on the cursor row, which the pane footer makes visible by carrying the count. Marks are keyed by path, cleared by the filter and the manual `f`, and only pruned (never cleared) by the background auto-refresh. `cycle_sidebar_layout` moved off `Space` to `z` to make room; both old defaults are one `[tui.keys]` line away. The non-interactive half is `gwm remove a b c`, which resolves every pattern before touching anything, so an unknown or ambiguous one fails the whole command with nothing removed.
 
-**Unreleased on `dev`: per-worktree notes (#515).** `N` opens the selected worktree's note in an editable modal (`Esc` writes and closes; `Ctrl+e` hands the same file to `$EDITOR` — `editor_cmd`, then `$EDITOR`, then `vi`, the handoff `o` uses in `mode = "editor"`), and the table carries a binary `≡` marker on the rows that have one. Notes are plain Markdown at `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable with gwm shut down, never committed, and they survive `gwm remove`, which is why they live in the main checkout rather than in the worktree. `gwm note show [slug]` prints one and exits 1 when there is none; the `--format=json` rows carry it in an additive `note` field. The note is keyed on the branch, so a detached row cannot carry one (and says so), a rename moves the file, and `gwm doctor` reports a note whose branch is gone (not `gwm clean`, whose `--yes` only ever removes directories git already ignores). Presence means non-blank, since `vi` over an empty buffer writes one byte. `N` was unbound before, so a `.gwm.toml` binding a chord starting with `N` is now a prefix conflict refused at load time.
+**Unreleased on `dev`: per-worktree notes (#515).** `N` opens the selected worktree's note in an editable modal (`Esc` writes and closes; `Ctrl+e` hands the same file to `$EDITOR`: `editor_cmd`, then `$EDITOR`, then `vi`, the handoff `o` uses in `mode = "editor"`), and the table carries a binary `≡` marker on the rows that have one. Notes are plain Markdown at `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable with gwm shut down, never committed, and they survive `gwm remove`, which is why they live in the main checkout rather than in the worktree. `gwm note show [slug]` prints one and exits 1 when there is none; the `--format=json` rows carry it in an additive `note` field. The note is keyed on the branch, so a detached row cannot carry one (and says so), a rename moves the file, and `gwm doctor` reports a note whose branch is gone (not `gwm clean`, whose `--yes` only ever removes directories git already ignores). Presence means non-blank, since `vi` over an empty buffer writes one byte. `N` was unbound before, so a `.gwm.toml` binding a chord starting with `N` is now a prefix conflict refused at load time.
 
 **Security, 1.6.0 (GHSA-fffq-vg6f-gxqm, high).** Every version up to and including 1.5.0 expanded lifecycle-hook placeholders into `sh -c` unescaped, so a branch name carrying `;` / `|` / `$` / backticks (all legal in a git ref, and a branch can arrive from someone else's push) ran arbitrary commands as the user, with no trust prompt in the path: the TOFU gate covers the repo's hooks, never the branch name flowing into them. Values are shell-escaped on expansion in 1.6.0, and hooks also get their context as `GWM_*` environment variables, which need no quoting at all. No backport: upgrade.
 
 **Free-form naming, shipped in 1.6.0 (#416 / #418).** `gwm create --name spike-redis` skips the `<type> <issue> <desc>` triple; the name becomes the branch verbatim, so `branch_pattern` / `path_pattern` do not apply and branch-name-derived features (issue auto-linking, gitmoji) stay inactive on it, with `gwm link` as the way back. The TUI create and rename forms present the fields the repo's own patterns ask for, in pattern order, instead of the canonical triple, and move between the structured and free-form shapes in both directions.
 
-**Multi-forge, shipped in 1.5.0 (#419).** Issue / PR lookups go through a `Forge` trait with two backends — GitHub via `gh`, GitLab via `glab`. `forge = "github" | "gitlab"` in `.gwm.toml` names the backend; `[forge_hosts]` in the **user-level** config authorises a self-hosted host; `gwm trust add` is the per-repo alternative. Worktrees, bootstrap, branch naming and link storage are forge-neutral — only the network layer knows which forge is in play. See [Forge selection](#forge-selection-github--gitlab).
+**Multi-forge, shipped in 1.5.0 (#419).** Issue / PR lookups go through a `Forge` trait with two backends: GitHub via `gh`, GitLab via `glab`. `forge = "github" | "gitlab"` in `.gwm.toml` names the backend; `[forge_hosts]` in the **user-level** config authorises a self-hosted host; `gwm trust add` is the per-repo alternative. Worktrees, bootstrap, branch naming and link storage are forge-neutral: only the network layer knows which forge is in play. See [Forge selection](#forge-selection-github--gitlab).
 
-Shipped since 1.0.0: **per-worktree notes** (`N`, #515), the **rich PR / issue view** (`I`, #420 + its inline review comments #528), **container execution** on an `exec` profile (#421), **multi-row selection** with a batch delete (`Space` + `d`, #484), the **`symfony` preset** (#392), and a TUI delete that finally runs the remove hooks and records the undo journal (#521 / #531), all in 1.7.0; **free-form naming** in 1.6.0 (#416 / #418, above) alongside its security fix; **multi-forge** in 1.5.0 (#419, above); the **help overlay** (`?`, complete by construction — every `Action` must appear, #453) and a trio of TUI polish items in 1.4.0; **agent session detection** in 1.3.0 (#408) — per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts, no process scanning, surfaced as `gwm agents [attach|detach]`, a conditional AGENT column, an `a` overlay, a pinned-only Agents sidebar pane and multi-pins in branch config (`gwm-agent-pin`); plus the **Windows daemon** over a named pipe (#439). 1.0.0 shipped: `gwm exec` / `gwm clean` (#313), `gwm review <PR#>` (#308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` (#37), multi-repo `--workspace` (#36), embedded PTY overlays (#35), a rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree pane and a current-PR CI indicator (#300 / #299).
+Shipped since 1.0.0: **per-worktree notes** (`N`, #515), the **rich PR / issue view** (`I`, #420 + its inline review comments #528), **container execution** on an `exec` profile (#421), **multi-row selection** with a batch delete (`Space` + `d`, #484), the **`symfony` preset** (#392), and a TUI delete that finally runs the remove hooks and records the undo journal (#521 / #531), all in 1.7.0; **free-form naming** in 1.6.0 (#416 / #418, above) alongside its security fix; **multi-forge** in 1.5.0 (#419, above); the **help overlay** (`?`, complete by construction: every `Action` must appear, #453) and a trio of TUI polish items in 1.4.0; **agent session detection** in 1.3.0 (#408): per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts, no process scanning, surfaced as `gwm agents [attach|detach]`, a conditional AGENT column, an `a` overlay, a pinned-only Agents sidebar pane and multi-pins in branch config (`gwm-agent-pin`); plus the **Windows daemon** over a named pipe (#439). 1.0.0 shipped: `gwm exec` / `gwm clean` (#313), `gwm review <PR#>` (#308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` (#37), multi-repo `--workspace` (#36), embedded PTY overlays (#35), a rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree pane and a current-PR CI indicator (#300 / #299).
 
 ## When to use this skill
 
@@ -73,7 +73,7 @@ cargo install --path .         # → ~/.cargo/bin/gwm
 gwm --version
 ```
 
-No Rust toolchain at hand? `cargo binstall gwm-cli` pulls the prebuilt binary from the matching GitHub Release (via `[package.metadata.binstall]`) and drops it in `~/.cargo/bin/` without compiling `git2`/vendored-libgit2 from source — much faster on first install.
+No Rust toolchain at hand? `cargo binstall gwm-cli` pulls the prebuilt binary from the matching GitHub Release (via `[package.metadata.binstall]`) and drops it in `~/.cargo/bin/` without compiling `git2`/vendored-libgit2 from source: much faster on first install.
 
 Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): https://github.com/kbrdn1/gwm-cli/releases. A Homebrew formula ships under `packaging/homebrew/` and a Nix `flake.nix` is at the repo root.
 
@@ -82,13 +82,13 @@ Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): ht
 | Variable | Effect |
 |:---------|:-------|
 | `GWM_GH` / `GWM_GLAB` | Override the forge CLI binary (path or name). Read once, on the thread that resolves the forge, so the TUI's background fetch never races env mutation. |
-| `GWM_ALLOW_BOOTSTRAP=1` | Same as `--allow-bootstrap`: skip the TOFU prompt. Also satisfies the forge host gate — same ledger, same decision. |
+| `GWM_ALLOW_BOOTSTRAP=1` | Same as `--allow-bootstrap`: skip the TOFU prompt. Also satisfies the forge host gate ; same ledger, same decision. |
 | `GWM_TRUST_LEDGER` | Path to the trust ledger (default `~/.config/gwm/trust.toml`). |
 | `GWM_NO_GLOBAL_CONFIG=1` | Ignore the user-level `~/.config/gwm/config.toml`; repo-only config. |
 | `GWM_HISTORY_FILE` | Path to the destructive-op journal backing `gwm history` / `gwm undo`. |
 | `GWM_AGENTS_HOME` | Override the home scanned for agent session artefacts (test seam). |
 
-Two **global** flags apply before or after any subcommand: `--allow-bootstrap` (skip the TOFU prompt — for CI and other non-interactive runs) and `--deny-bootstrap` (refuse bootstrap even when the ledger says trusted — for a first look at an unfamiliar repo). `--workspace <DIR>` is global too.
+Two **global** flags apply before or after any subcommand: `--allow-bootstrap` (skip the TOFU prompt: for CI and other non-interactive runs) and `--deny-bootstrap` (refuse bootstrap even when the ledger says trusted: for a first look at an unfamiliar repo). `--workspace <DIR>` is global too.
 
 ## Default conventions
 
@@ -225,7 +225,7 @@ Invoke-Expression (& gwm shell-init powershell | Out-String)
 
 ### Forge selection (GitHub / GitLab)
 
-Two backends implement the same `Forge` trait: **GitHub** via `gh`, **GitLab** via `glab` (which says *MR* where GitHub says *PR*). Everything else — worktrees, bootstrap, branch naming, the `branch.<n>.gwm-*` link storage — is forge-neutral.
+Two backends implement the same `Forge` trait: **GitHub** via `gh`, **GitLab** via `glab` (which says *MR* where GitHub says *PR*). Everything else, worktrees, bootstrap, branch naming, the `branch.<n>.gwm-*` link storage: is forge-neutral.
 
 **Which backend.** Inferred from the `origin` host for the vendors' own domains (`github.com`, `ghe.com`, `gitlab.com`). A self-hosted instance lives on an arbitrary domain and cannot be detected from a URL, so name it:
 
@@ -236,7 +236,7 @@ forge = "gitlab"     # or "github"
 
 The key always wins over inference, in both directions.
 
-**Which hosts may be called.** A separate question, with a separate answer — `forge` names the backend, it does not authorise a host. On a host gwm does not recognise, authorisation comes from one of:
+**Which hosts may be called.** A separate question, with a separate answer: `forge` names the backend, it does not authorise a host. On a host gwm does not recognise, authorisation comes from one of:
 
 ```toml
 # ~/.config/gwm/config.toml — YOUR file, never shipped with a repo
@@ -249,11 +249,11 @@ The key always wins over inference, in both directions.
 gwm trust add        # …or approve this one repo's .gwm.toml, in the repo, once
 ```
 
-Per host (not one blanket key) so a mixed fleet — self-hosted GitLab *and* GitHub Enterprise — is describable in one config. Host matching is case-insensitive, and keyed on the host **without** the port.
+Per host (not one blanket key) so a mixed fleet: self-hosted GitLab *and* GitHub Enterprise: is describable in one config. Host matching is case-insensitive, and keyed on the host **without** the port.
 
 Why the split: `gh` and `glab` forward whatever token is in the environment to whatever host they are pointed at, with no scoping of their own. Reading a bare `forge` key as authorisation meant one global setting authorised every host in existence, including one an attacker put in a clone's `origin`. The refusal message prints the exact `[forge_hosts]` key to add.
 
-`GWM_ALLOW_BOOTSTRAP=1` satisfies this gate too — same ledger, same file, same decision.
+`GWM_ALLOW_BOOTSTRAP=1` satisfies this gate too: same ledger, same file, same decision.
 
 ### Forge linking (`link` / `unlink` / `open` / `status`)
 
@@ -261,17 +261,17 @@ Links live in **per-branch git config**:
 
 - `branch.<name>.gwm-issue` ← `gwm link issue <N>`
 - `branch.<name>.gwm-pr`    ← `gwm link pr <N>`
-- `branch.<name>.gwm-base`  ← _written by `gwm create`_ — anchors the `[review].{base}` resolution chain so the parent ref survives even when the branch has no upstream yet. Not user-facing; surfaces only via the `R: review` launcher.
+- `branch.<name>.gwm-base`  ← _written by `gwm create`_: anchors the `[review].{base}` resolution chain so the parent ref survives even when the branch has no upstream yet. Not user-facing; surfaces only via the `R: review` launcher.
 
 Local, per-branch, survives worktree moves. Issue numbers are auto-detected from the `<type>/#<N>-<slug>` convention when no explicit override is set; PR numbers are **not** auto-detected and must be linked explicitly.
 
 `gwm status` shells out to the resolved backend (`gh issue view` / `gh pr view`, or `glab issue view` / `glab mr view`) to fetch state, title, labels, and the CI rollup. GitLab hangs one `head_pipeline` off an MR rather than GitHub's per-check array, so the MR collapses to a single synthetic check. Without the backend CLI on `$PATH`, it prints only the local link. `--json` emits a stable schema for scripting.
 
-The backend a link was written under is recorded per branch; flipping `forge` drops the other backend's numbers rather than resolving issue #42 as merge request !42 on the other forge — a real page, the wrong one.
+The backend a link was written under is recorded per branch; flipping `forge` drops the other backend's numbers rather than resolving issue #42 as merge request !42 on the other forge: a real page, the wrong one.
 
 ### Multiplexer hand-off (`tmux` / `zellij`)
 
-- `gwm tmux <pat>` requires `$TMUX` to be set (i.e. you are already inside a tmux session) — otherwise it exits non-zero with a clear error rather than spawning a stray server. `--split` opens a horizontal split of the current pane instead of a new window.
+- `gwm tmux <pat>` requires `$TMUX` to be set (i.e. you are already inside a tmux session): otherwise it exits non-zero with a clear error rather than spawning a stray server. `--split` opens a horizontal split of the current pane instead of a new window.
 - `gwm zellij <pat>` requires `$ZELLIJ`. `--cwd` on `zellij action new-tab` needs zellij ≥ 0.40. `--split` opens a new pane in the current tab instead of a new tab.
 
 ## Status column
@@ -288,7 +288,7 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 | `↑N ↓M`            | both                                                             | yellow       |
 | `● dirty ↑N`       | combined indicators                                              | yellow       |
 | `locked`           | linked worktree is locked (git2 reports it)                      | magenta      |
-| `prunable`         | working tree dir is missing — run `gwm prune`                    | red          |
+| `prunable`         | working tree dir is missing ; run `gwm prune`                    | red          |
 | `unknown`          | status couldn't be computed (detached HEAD, IO error, etc.)      | dark gray    |
 
 ## TUI key map
@@ -316,16 +316,16 @@ context.
 | `p` / `P`       | pull / push the selected worktree's branch                                  |
 | `s` / `f`       | sync (fetch + rebase) / refresh the worktree list                           |
 | `c` / `e`       | edit-worktree / exit-to-worktree (sets the picker's cd target)             |
-| `l` / `L`       | lazygit — PTY overlay / fullscreen `[git_tui]` (#35)                        |
-| `r` / `R`       | `[review]` launcher — PTY overlay / fullscreen (#35 / #75)                  |
-| `o` / `O`       | terminal (`$SHELL`) — PTY overlay / fullscreen honouring `[tui.open]` (#35) |
+| `l` / `L`       | lazygit ; PTY overlay / fullscreen `[git_tui]` (#35)                        |
+| `r` / `R`       | `[review]` launcher ; PTY overlay / fullscreen (#35 / #75)                  |
+| `o` / `O`       | terminal (`$SHELL`) ; PTY overlay / fullscreen honouring `[tui.open]` (#35) |
 | `t`             | open the worktree in a tmux/zellij pane (mux)                              |
 | `h` / `H`       | run `[tui.macro1]` / `[tui.macro2]` (#290)                                  |
 | `y` / `w` / `Y` | yank branch name / worktree name / absolute path to the clipboard           |
 | `i` / `B`       | link prompt (issue/PR) / browse-links menu (open linked issue·PR in browser)|
-| `a`             | agent sessions overlay (#408) — `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
-| `I`             | rich PR / issue view (#420) — description, author, branch pair, diff size, CI rollup, submitted reviews, conversation, and the comments anchored to a diff hunk (#528, a second GraphQL request fired when the view opens). `Enter` opens the selected row's URL, `f` re-fetches. On GitLab: summary, description, author and branch pair only |
-| `x`             | exec profile picker (#325) — pick a `[exec.profiles.<name>]` and run it in a PTY. A profile carrying a `[container]` block runs inside `docker run` / `podman run` with `-i -t` (#421) |
+| `a`             | agent sessions overlay (#408) ; `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
+| `I`             | rich PR / issue view (#420) ; description, author, branch pair, diff size, CI rollup, submitted reviews, conversation, and the comments anchored to a diff hunk (#528, a second GraphQL request fired when the view opens). `Enter` opens the selected row's URL, `f` re-fetches. On GitLab: summary, description, author and branch pair only |
+| `x`             | exec profile picker (#325) ; pick a `[exec.profiles.<name>]` and run it in a PTY. A profile carrying a `[container]` block runs inside `docker run` / `podman run` with `-i -t` (#421) |
 | `F`             | refresh GitHub issue/PR status via `gh` (off-thread; statusbar spinner)     |
 | `V` / `v`       | toggle the sidebar / flip its position left ↔ right                         |
 | `S` / `z`       | sidebar Details mode (commits ↔ stashes) / cycle layout (auto→side→stacked; `Space` before #484) |
@@ -347,7 +347,7 @@ category tabs (Theme / Worktree / TUI / Keys / All) with a per-layer selector
 
 ## Details sidebar
 
-When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `z` cycles `auto → side-by-side → stacked → auto` (`Space` before #484, `V` before #290); `v` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically — no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
+When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `z` cycles `auto → side-by-side → stacked → auto` (`Space` before #484, `V` before #290); `v` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically: no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
 
 ```
 ╭─ Worktree ──────────────────────╮      ●  status dot tracks the linked PR / issue
@@ -377,15 +377,15 @@ When the sidebar is open (default ON, toggle with `v`), it shows a details panel
                                             Bottom-right footer: `<bottom> of <total>`.
 ```
 
-Worktree block: name (bold) prefixed by the `●` dot · `branch · short-head` (branch coloured by `BranchStatus` — worst-state wins: dirty=red, ahead/behind=yellow, unpublished=magenta, synced=green, unknown=darkgray) · `Created: <age>` with freshness colour (green < 7d, yellow < 30d, darkgray ≥ 30d; `-` when undeterminable, e.g. trunk / detached HEAD) · status + flag badges (only the relevant ones — false flags stay invisible: `★ main`, `🔒 locked`, `⚠ prunable`) · tilde-compressed path.
+Worktree block: name (bold) prefixed by the `●` dot · `branch · short-head` (branch coloured by `BranchStatus`, worst-state wins: dirty=red, ahead/behind=yellow, unpublished=magenta, synced=green, unknown=darkgray) · `Created: <age>` with freshness colour (green < 7d, yellow < 30d, darkgray ≥ 30d; `-` when undeterminable, e.g. trunk / detached HEAD) · status + flag badges (only the relevant ones: false flags stay invisible: `★ main`, `🔒 locked`, `⚠ prunable`) · tilde-compressed path.
 
 GitHub fetch state machine per worktree: `Idle → Loading → Loaded(T) | Error(String)`. Manual refresh = `F` (the legacy `R` was rebound to `R: review` in #75).
 
-An `Agents` block (issue #408) sits between Issue / PR and Working Tree when at least one session is **pinned** to the selected worktree — one line per pinned session (agent · freshness · last activity · name), collapsed entirely otherwise; the full detected list lives in the `a` overlay. The main table grows a conditional `AGENT` column (top session per worktree) only when a session is detected.
+An `Agents` block (issue #408) sits between Issue / PR and Working Tree when at least one session is **pinned** to the selected worktree: one line per pinned session (agent · freshness · last activity · name), collapsed entirely otherwise; the full detected list lives in the `a` overlay. The main table grows a conditional `AGENT` column (top session per worktree) only when a session is detected.
 
-`Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the Recent Commits block when the sidebar is focused — the small blocks above stay pinned. The focused panel's border turns cyan.
+`Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the Recent Commits block when the sidebar is focused: the small blocks above stay pinned. The focused panel's border turns cyan.
 
-## Terminal open: `o` (PTY overlay) / `O` (fullscreen) — issues #73 / #35
+## Terminal open: `o` (PTY overlay) / `O` (fullscreen): issues #73 / #35
 
 Since the keymap redesign, `o` opens an **embedded PTY terminal overlay** inside
 the TUI (no alt-screen swap; `Esc` closes), while `O` is the **fullscreen**
@@ -394,7 +394,7 @@ fullscreen modes:
 
 | `mode = ` | Behaviour                                                                                  |
 |:----------|:-------------------------------------------------------------------------------------------|
-| `"shell"` _(default)_ | Suspend the TUI and spawn `$SHELL` with `cwd = <worktree>` — lazygit-style. Exiting the shell restores the TUI. |
+| `"shell"` _(default)_ | Suspend the TUI and spawn `$SHELL` with `cwd = <worktree>` ; lazygit-style. Exiting the shell restores the TUI. |
 | `"editor"` | Suspend the TUI and run `$EDITOR <worktree-path>`.                                        |
 | `"finder"` | Hand off to the OS file manager (`open` / `xdg-open` / `explorer`).                       |
 
@@ -407,7 +407,7 @@ editor_cmd = "hx"        # override $EDITOR when set ("" = read $EDITOR)
 
 `shell_cmd` and `editor_cmd` win over the env var when non-empty. An unknown `mode` is a hard config-load error.
 
-## Yank: `y` branch · `w` worktree name · `Y` path — issues #73 / #290
+## Yank: `y` branch · `w` worktree name · `Y` path: issues #73 / #290
 
 The yank keys copy to the system clipboard: `y` = the branch name, `w` = the
 worktree (dir) name, `Y` = the selected worktree's absolute path. Probe order
@@ -419,18 +419,18 @@ worktree (dir) name, `Y` = the selected worktree's absolute path. Probe order
 | Linux      | `wl-copy`, `xclip -selection clipboard`, `xsel --clipboard --input`                |
 | Windows    | `clip`                                                                             |
 
-Missing tool surfaces a status-bar hint, never a panic. No config knob — the probe list is built per-platform.
+Missing tool surfaces a status-bar hint, never a panic. No config knob: the probe list is built per-platform.
 
-## Configurable launchers (`l`/`L` git_tui · `r`/`R` review) — issues #75 / #35
+## Configurable launchers (`l`/`L` git_tui · `r`/`R` review): issues #75 / #35
 
-Two configurable launchers share the same mini-API: take a `command` template from `.gwm.toml`, substitute placeholders, split with `shell-words`, and exec it with `cwd = <selected-worktree>`. Each has a **PTY-overlay** binding (lowercase — runs inside the TUI, no alt-screen swap, `Esc` closes) and a **fullscreen** binding (uppercase — suspends the TUI):
+Two configurable launchers share the same mini-API: take a `command` template from `.gwm.toml`, substitute placeholders, split with `shell-words`, and exec it with `cwd = <selected-worktree>`. Each has a **PTY-overlay** binding (lowercase: runs inside the TUI, no alt-screen swap, `Esc` closes) and a **fullscreen** binding (uppercase: suspends the TUI):
 
 | Keys (PTY / full) | Section     | Default                       | Placeholders                          | Default `fullscreen` |
 |:------------------|:------------|:------------------------------|:--------------------------------------|:---------------------|
 | `l` / `L`         | `[git_tui]` | `lazygit -p {path}`           | `{path}`                              | `true`               |
 | `r` / `R`         | `[review]`  | _(inert until configured)_    | `{base} {head} {path} {diff}`         | `false`              |
 
-`fullscreen = true` suspends the gwm TUI for a TUI-style takeover (same recipe as the pre-issue-#75 `l` → lazygit flow); `fullscreen = false` runs the command **synchronously in-place** — gwm stays in the alt-screen, `Command::output()` blocks the TUI until the child exits, and the first line of stderr lands on the status bar. Fine for quick print-only tools (`claude --print`, `gh pr view --web`); pick `fullscreen = true` for anything long-running so the TUI is properly suspended and restored. The `{diff}` placeholder is **lazy** — gwm only shells out to `git diff {base}..{head}` (into a tempfile) when the template references it.
+`fullscreen = true` suspends the gwm TUI for a TUI-style takeover (same recipe as the pre-issue-#75 `l` → lazygit flow); `fullscreen = false` runs the command **synchronously in-place**: gwm stays in the alt-screen, `Command::output()` blocks the TUI until the child exits, and the first line of stderr lands on the status bar. Fine for quick print-only tools (`claude --print`, `gh pr view --web`); pick `fullscreen = true` for anything long-running so the TUI is properly suspended and restored. The `{diff}` placeholder is **lazy**: gwm only shells out to `git diff {base}..{head}` (into a tempfile) when the template references it.
 
 ### `[review]` base resolution chain (for `{base}`)
 
@@ -473,7 +473,7 @@ fullscreen = false
 
 ### `gwm doctor` integration
 
-A configured `[review]` / `[git_tui]` binary that is not on `$PATH` surfaces as **Warning** (exit code `1`), never **Failed** (exit code `2`) — both launchers are opt-in, so a CI pre-commit hook gated on `gwm doctor` keeps passing when the only red flag is a missing local-only tool.
+A configured `[review]` / `[git_tui]` binary that is not on `$PATH` surfaces as **Warning** (exit code `1`), never **Failed** (exit code `2`): both launchers are opt-in, so a CI pre-commit hook gated on `gwm doctor` keeps passing when the only red flag is a missing local-only tool.
 
 ## `.gwm.toml` schema
 
@@ -794,8 +794,8 @@ gwm doctor && git push           # blocks the push on any warning/failure
 
 The repo ships an opt-in hook at `.githooks/pre-commit` that combines two gates:
 
-1. **Env-dependent test pre-validation** — if any staged `tests/*.rs` file references ambient state (`assert_cmd`, `std::env::var`, `which::which`, `dirs::`, `Command::cargo_bin`), the suite is re-run under a stripped `PATH="$(dirname cargo):/usr/bin:/bin"` to catch tests that pass in a rich dev shell but fail on minimal CI.
-2. **Local `gwm doctor`** — if staged files touch `.gwm.toml`, the bootstrap / doctor modules, the example config, or their tests, `gwm doctor` runs. Exit `0` is silent, `1` is advisory (commit proceeds), `2` blocks the commit. Unknown exits fail open.
+1. **Env-dependent test pre-validation**: if any staged `tests/*.rs` file references ambient state (`assert_cmd`, `std::env::var`, `which::which`, `dirs::`, `Command::cargo_bin`), the suite is re-run under a stripped `PATH="$(dirname cargo):/usr/bin:/bin"` to catch tests that pass in a rich dev shell but fail on minimal CI.
+2. **Local `gwm doctor`**: if staged files touch `.gwm.toml`, the bootstrap / doctor modules, the example config, or their tests, `gwm doctor` runs. Exit `0` is silent, `1` is advisory (commit proceeds), `2` blocks the commit. Unknown exits fail open.
 
 Enable per-clone:
 
@@ -849,7 +849,7 @@ src/
                          #   async_task, command_logs, config_panel, pty_overlay — one slice per overlay
 ```
 
-Tests under `tests/` mirror this layout — 85 integration test files, one (or more) per module: e.g. `bootstrap_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `daemon_tests.rs`/`daemon_integration.rs`, `json_api_tests.rs`, `review_tests.rs`/`review_integration.rs`, `statusline_tests.rs`, `workspace_tests.rs`, `presets_tests.rs`, `exec_tests.rs`, `clean_tests.rs`, `worktree_integration.rs`, plus the `tui_*` state-machine suites and `tests/common/` helpers. **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
+Tests under `tests/` mirror this layout: 85 integration test files, one (or more) per module: e.g. `bootstrap_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `daemon_tests.rs`/`daemon_integration.rs`, `json_api_tests.rs`, `review_tests.rs`/`review_integration.rs`, `statusline_tests.rs`, `workspace_tests.rs`, `presets_tests.rs`, `exec_tests.rs`, `clean_tests.rs`, `worktree_integration.rs`, plus the `tui_*` state-machine suites and `tests/common/` helpers. **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
 
 ## Differences vs. the bash + gwq stack
 
@@ -869,25 +869,25 @@ Tests under `tests/` mirror this layout — 85 integration test files, one (or m
 
 ## Troubleshooting
 
-**`error: not inside a git repository`** — run `gwm` from inside a repo or pass a path explicitly.
+**`error: not inside a git repository`**: run `gwm` from inside a repo or pass a path explicitly.
 
-**`gwm create` fails with "branch ... already exists"** — the branch was created in a previous run that didn't finish. `git branch -D <branch>` or pick another issue number, then retry.
+**`gwm create` fails with "branch ... already exists"**: the branch was created in a previous run that didn't finish. `git branch -D <branch>` or pick another issue number, then retry.
 
-**`gwm remove` reports "pattern '...' is ambiguous"** — multiple worktrees match the substring. Pass a more specific pattern or the exact dir name from `gwm list`.
+**`gwm remove` reports "pattern '...' is ambiguous"**: multiple worktrees match the substring. Pass a more specific pattern or the exact dir name from `gwm list`.
 
-**Bootstrap step shows ✗ on a `.env` copy with guard match + no example_file** — either set `example_file` in the guard, or change `on_match` to `"abort"` and rely on `.env.example`. Either way, the source `.env` is never copied past a guard match.
+**Bootstrap step shows ✗ on a `.env` copy with guard match + no example_file**: either set `example_file` in the guard, or change `on_match` to `"abort"` and rely on `.env.example`. Either way, the source `.env` is never copied past a guard match.
 
-**TUI shows `(prunable)` next to a worktree** — its working dir was deleted out-of-band. Run `gwm prune` (or hit `r` in the TUI after manual cleanup).
+**TUI shows `(prunable)` next to a worktree**: its working dir was deleted out-of-band. Run `gwm prune` (or hit `r` in the TUI after manual cleanup).
 
-**`gwm doctor` exits `2` complaining about an orphan branch** — the branch matches `<type>/#<N>-<slug>` but isn't reachable from any trunk in `[doctor] trunks`. Either delete the branch, merge it, or add its merge target to `trunks`.
+**`gwm doctor` exits `2` complaining about an orphan branch**: the branch matches `<type>/#<N>-<slug>` but isn't reachable from any trunk in `[doctor] trunks`. Either delete the branch, merge it, or add its merge target to `trunks`.
 
-**`gwm tmux` says `not inside a tmux session`** — `$TMUX` is unset. Start tmux first; gwm refuses to spawn a stray server.
+**`gwm tmux` says `not inside a tmux session`**: `$TMUX` is unset. Start tmux first; gwm refuses to spawn a stray server.
 
-**`gwm zellij` errors on `--cwd`** — your zellij is older than 0.40. Upgrade, or fall back to opening the path manually.
+**`gwm zellij` errors on `--cwd`**: your zellij is older than 0.40. Upgrade, or fall back to opening the path manually.
 
-**`gwm status` shows only the local link, no live data** — the backend CLI isn't on `$PATH`. Install `gh` (+ `gh auth login`) for GitHub, `glab` (+ `glab auth login`) for GitLab.
+**`gwm status` shows only the local link, no live data**: the backend CLI isn't on `$PATH`. Install `gh` (+ `gh auth login`) for GitHub, `glab` (+ `glab auth login`) for GitLab.
 
-**`origin host '…' is not one gwm recognises`** — a self-hosted forge on a domain gwm cannot read a forge from. gwm refuses rather than guessing, because guessing would send an authenticated call — and whatever token is in your environment — to whatever host the remote names. The message prints the exact key to add:
+**`origin host '…' is not one gwm recognises`**: a self-hosted forge on a domain gwm cannot read a forge from. gwm refuses rather than guessing, because guessing would send an authenticated call: and whatever token is in your environment: to whatever host the remote names. The message prints the exact key to add:
 
 ```toml
 # ~/.config/gwm/config.toml
@@ -897,28 +897,28 @@ Tests under `tests/` mirror this layout — 85 integration test files, one (or m
 
 Or name the backend in the repo's `.gwm.toml` and run `gwm trust add` there.
 
-**`this repo's .gwm.toml points gwm at '…' and the repo is not in the trust ledger`** — the repo names a backend for an unrecognised host, which only counts once you have approved that repo: `gwm trust add`. Editing `.gwm.toml` afterwards changes its hash and revokes the approval, by design. `gwm trust list` shows what you approved.
+**`this repo's .gwm.toml points gwm at '…' and the repo is not in the trust ledger`**: the repo names a backend for an unrecognised host, which only counts once you have approved that repo: `gwm trust add`. Editing `.gwm.toml` afterwards changes its hash and revokes the approval, by design. `gwm trust list` shows what you approved.
 
-**`cargo install --path .` fails to build libgit2** — install a C toolchain (`xcode-select --install` on macOS, `build-essential` on Debian/Ubuntu). The `git2` crate uses `vendored-libgit2` so it builds from source.
+**`cargo install --path .` fails to build libgit2**: install a C toolchain (`xcode-select --install` on macOS, `build-essential` on Debian/Ubuntu). The `git2` crate uses `vendored-libgit2` so it builds from source.
 
-**`.env` was copied even though it points to prod** — the guard's regex didn't match. Test it with `echo $YOUR_HOST | grep -E '<pattern>'`. Regex syntax is Rust `regex` crate (PCRE-like, no lookaround).
+**`.env` was copied even though it points to prod**: the guard's regex didn't match. Test it with `echo $YOUR_HOST | grep -E '<pattern>'`. Regex syntax is Rust `regex` crate (PCRE-like, no lookaround).
 
-**`gcd` says command not found** — the shell-init wrapper isn't sourced. Re-run `eval "$(gwm shell-init <shell>)"` in your current shell and add it to your shell's rc file.
+**`gcd` says command not found**: the shell-init wrapper isn't sourced. Re-run `eval "$(gwm shell-init <shell>)"` in your current shell and add it to your shell's rc file.
 
-**Pressing `r` / `R` in the TUI does nothing / shows a status hint** — `[review]` is opt-in. Either no `[review]` section exists in `.gwm.toml`, the resolved binary isn't on `$PATH` (`gwm doctor` flags it as Warning), or `skip_when_no_changes = true` (default) found 0 commits between `{base}..{head}`. Add a `[review] tool = "lumen"` (or another preset) to enable it. (`r` = PTY overlay, `R` = fullscreen.)
+**Pressing `r` / `R` in the TUI does nothing / shows a status hint**: `[review]` is opt-in. Either no `[review]` section exists in `.gwm.toml`, the resolved binary isn't on `$PATH` (`gwm doctor` flags it as Warning), or `skip_when_no_changes = true` (default) found 0 commits between `{base}..{head}`. Add a `[review] tool = "lumen"` (or another preset) to enable it. (`r` = PTY overlay, `R` = fullscreen.)
 
-**`R: review` resolves the wrong `{base}`** — the chain is upstream → `branch.<n>.gwm-base` → `[review].default_base` → `"dev"` → `"main"`. Pin it explicitly with `[review] default_base = "<branch>"` or set the per-branch override with `git config branch.<name>.gwm-base <ref>`.
+**`R: review` resolves the wrong `{base}`**: the chain is upstream → `branch.<n>.gwm-base` → `[review].default_base` → `"dev"` → `"main"`. Pin it explicitly with `[review] default_base = "<branch>"` or set the per-branch override with `git config branch.<name>.gwm-base <ref>`.
 
-**`l` launches lazygit when the repo wants gitui (or vice versa)** — `[git_tui]` defaults to `lazygit -p {path}`. Override:
+**`l` launches lazygit when the repo wants gitui (or vice versa)**: `[git_tui]` defaults to `lazygit -p {path}`. Override:
 ```toml
 [git_tui]
 command = "gitui -d {path}"
 fullscreen = true
 ```
 
-**Pressing `o` opens a shell when you want the file manager (or vice versa)** — `[tui.open] mode = "shell"` is the new default since issue #73. Set `mode = "finder"` for the pre-#73 OS file manager hand-off, or `mode = "editor"` to spawn `$EDITOR <path>`.
+**Pressing `o` opens a shell when you want the file manager (or vice versa)**: `[tui.open] mode = "shell"` is the new default since issue #73. Set `mode = "finder"` for the pre-#73 OS file manager hand-off, or `mode = "editor"` to spawn `$EDITOR <path>`.
 
-**Pressing `y` does nothing / status bar says "no clipboard tool found"** — install a per-OS clipboard helper: `pbcopy` (macOS, built-in), `wl-copy` (Wayland), `xclip` / `xsel` (X11), `clip` (Windows, built-in). The probe list is platform-fixed; first hit on `$PATH` wins.
+**Pressing `y` does nothing / status bar says "no clipboard tool found"**: install a per-OS clipboard helper: `pbcopy` (macOS, built-in), `wl-copy` (Wayland), `xclip` / `xsel` (X11), `clip` (Windows, built-in). The probe list is platform-fixed; first hit on `$PATH` wins.
 
 ## Quick reference card
 
@@ -960,6 +960,6 @@ gwm trust add                # approve this repo's .gwm.toml (forge host gate + 
 ## Related
 
 - Repo: https://github.com/kbrdn1/gwm-cli
-- Bash predecessor: `tools/worktree-manager.sh` (skill: `worktree-wrapper`) — `gwm` is the multi-repo replacement.
-- Naming convention: `CONTRIBUTING.md` (per repo) — matches `gwm` defaults.
+- Bash predecessor: `tools/worktree-manager.sh` (skill: `worktree-wrapper`), replaced by `gwm` across repos.
+- Naming convention: `CONTRIBUTING.md` (per repo): matches `gwm` defaults.
 - Project rules for contributors / AI agents: `CLAUDE.md` (TDD mandatory, `gwm doctor` before PRs touching `.gwm.toml` / bootstrap schema / doctor).
