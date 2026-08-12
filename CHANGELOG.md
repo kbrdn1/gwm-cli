@@ -17,10 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branched on `term_width <= 80` to spend a bigger percentage on a small
   terminal. Width was therefore **not monotonic**: dragging a pane past 80
   columns made the link prompt 16 columns *narrower* and the exec / clean /
-  detail overlay 22. Two others sized on a bare percentage with no ceiling, so
-  the bootstrap report reached 160 columns on a 200-column terminal for a step
-  list around 30 characters long, and the delete confirmation 124 for a
-  four-row detail grid.
+  detail overlay 22. Four others sized on a bare percentage with no ceiling, so
+  on a 200-column terminal the delete confirmation reached 124 columns for a
+  four-row detail grid, and the help, config and command-palette overlays 120.
 
   Every bounded overlay now resolves its width through a single
   `modal_width(term_width, pct, min, max)`: its own knobs, one rule. Never
