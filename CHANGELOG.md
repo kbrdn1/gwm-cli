@@ -10,43 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Docs: an `Agent sessions` page, and captures for five text-only pages**
-  ([#524](https://github.com/kbrdn1/gwm-cli/issues/524)). The agent session
-  pane is what the repo description leads on and it had no page of its own:
-  `tui/agent-sessions` now covers the four backends, the freshness rules and
-  the three surfaces, with a capture of the `a` overlay. Four more pages get
-  the visual their prose cannot carry: `cli/reference` (`gwm list`,
-  `gwm agents`), `configuration/gwm-toml` (the Settings panel resolving the
-  same schema), `tui/launchers` (lazygit in the PTY overlay) and
-  `tui/open-dispatch` (a shell in the PTY overlay). Both locales, six new
-  `.tape` scripts in the `generate.sh` loop, and a seeded agent fixture read
-  through the `GWM_AGENTS_HOME` seam so no real session is ever captured.
-- **Tests: `docs_assets_tests`** guards the three ways a doc capture breaks
-  after review: a reference that resolves to nothing, a French mirror that
-  drifts from its English page, and two captures sharing a basename, which
-  the docs sync rejects by throwing.
-
-### Docs
-
-- Re-recorded `docs/_capture/demo.gif` so it shows the agent surfaces
-  (#523). The demo fixture now seeds a Claude Code and a Codex session
-  through gwm's own `GWM_AGENTS_HOME` seam, so the table renders its
-  `AGENT` column in frame 0 and the tape opens the `a` overlay. The
-  fixture also backdates `branch.<b>.gwm-created-at`, so the `AGE`
-  column reads like a week of work instead of showing five worktrees
-  seconds old. `docs/_capture/README.md` documents the agents fixture
-  and states that regeneration is a maintainer task while the tapes
-  hardcode the demo path.
-- Fixed the demo tape typing its worktree note onto
-  `docs-71-openapi-examples` — the text is about the rate limiter, so it
-  belongs to `fix-57-rate-limit-headers`.
-
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.7.1`](changelogs/1.7.1.md), 2026-08-12
 - [`1.7.0`](changelogs/1.7.0.md), 2026-08-12
 - [`1.6.1`](changelogs/1.6.1.md), 2026-08-04
 - [`1.6.0`](changelogs/1.6.0.md), 2026-08-03
