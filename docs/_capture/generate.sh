@@ -49,6 +49,23 @@ if [[ -f "$CAP/theme.tape" ]]; then
   git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
 fi
 
+# ── compact layout: inject `[tui] compact`, then capture (issue #545) ──────
+# Same injection dance as the theme gallery above, for the same reason: the
+# mode is a config key, so the only way to capture it is to write it into the
+# demo repo and hide the edit from git status while the shot is taken.
+if [[ -f "$CAP/compact.tape" ]]; then
+  echo "▸ compact layout"
+  cp "$DEMO/.gwm.toml" "$CAP/.tmp/gwm.toml.bak"
+  git -C "$DEMO" update-index --assume-unchanged .gwm.toml
+  # Pin the preset too: this capture's subject is a background role, so it
+  # must not inherit whatever theme the capture machine has in its global
+  # config. The tape's terminal background is matched to this palette.
+  { cat "$CAP/.tmp/gwm.toml.bak"; printf '\n[tui]\ncompact = true\n\n[theme]\npreset = "claude-dark"\n'; } > "$DEMO/.gwm.toml"
+  vhs "$CAP/compact.tape" >/dev/null 2>&1 || echo "  ✗ vhs failed on compact.tape"
+  cp "$CAP/.tmp/gwm.toml.bak" "$DEMO/.gwm.toml"
+  git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
+fi
+
 # ── shrink PNGs for the repo (lossless) ────────────────────────────────────
 if command -v oxipng >/dev/null 2>&1; then
   echo "▸ optimising PNGs"

@@ -31,3 +31,11 @@ The v0.8.0 polish pass tightened the TUI's frame. All colours follow the resolve
 - **Statusline**: a single line. Key hints render as reverse-video badge chips (the key painted with the theme accent, then a short label); the status message (action log) is pinned flush-right with absolute priority. Under width pressure the hint list truncates with an `…` marker while the log stays visible.
 - **Header**, a single borderless row: the version is a reverse-video chip, the repo name is bold, and the working directory is dimmed and tilde-compressed. The `picker` flag is its own reverse-video chip. Drop order under width pressure is path → repo name → version chip (the version survives last).
 - **Modals** all share one frame: a rounded border with a bold themed title, theme colours, and a box sized to its content rather than a fixed percentage of the screen.
+
+### compact layout
+
+`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) drops the box rules from the worktrees pane and the sidebar sections and delimits each with a filled one-line header instead. The keybinding leads the header, the counter moves to the right of that same line, and the worktrees pane sizes itself to its row count rather than reserving its share of the split.
+
+![gwm TUI in compact mode: filled section headers, no box rules](./_assets/compact.png)
+
+Off by default — compare with the bordered capture at the top of this page. Modals keep their frame either way. Configuration and the `section_bg` theme role are documented under [`.gwm.toml`](/configuration/gwm-toml#compact-layout).

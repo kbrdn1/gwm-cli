@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Compact TUI layout** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)):
+  `[tui] compact = true` drops the box rules from the worktrees pane and the
+  sidebar sections and delimits each with a filled one-line header instead —
+  two rows and two columns back per section. The keybinding leads the header
+  (`1 WORKTREES`, `F ISSUE / PR`), the counter moves to the right of that same
+  line rather than into a bottom rule, and the worktrees pane sizes itself to
+  its row count instead of reserving its share of the stacked split. Focus
+  moves from the border colour to the header text. Off by default; overlays
+  and modals keep their frame. New `section_bg` theme role carries the header
+  fill — an indexed colour rather than a translucent white, so the mode stays
+  readable on a terminal without truecolor.
+
 ## Past releases
 
 In reverse chronological order:
