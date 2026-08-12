@@ -1469,7 +1469,7 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
         (d, a)
       }),
       64,
-      96,
+      160,
     ),
     (
       "open-menu",
@@ -1522,8 +1522,9 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
     ),
     // Full-bleed surfaces: the log transcript and the note editor are text
     // canvases, so they keep spending a percentage of the frame rather than
-    // capping. Pinned here anyway — an exemption nobody measures is how a
-    // matrix goes green while missing a surface.
+    // capping. The bootstrap report above is one too (it renders hook stdout)
+    // and is pinned at its uncapped 160. Pinned here anyway — an exemption
+    // nobody measures is how a matrix goes green while missing a surface.
     (
       "command-logs",
       Box::new(|| {
@@ -1588,10 +1589,12 @@ fn every_modal_resolves_to_its_pinned_width_at_the_80_column_floor() {
 }
 
 #[test]
-fn no_modal_stretches_without_bound_on_an_ultra_wide_terminal() {
-  // Pre-#550 the report modal was 160 columns wide at 200 (for a step list
-  // ~30 characters long) and the confirm modal 124 (for a four-row detail
-  // grid), because both sized on a bare percentage with no ceiling.
+fn every_modal_resolves_to_its_pinned_width_on_an_ultra_wide_terminal() {
+  // Pre-#550 the confirm modal was 124 columns wide at 200 for a four-row
+  // detail grid, and help / config / palette 120, because they sized on a
+  // bare percentage with no ceiling. The three text canvases (report,
+  // command-log transcript, note editor) still do, deliberately, and are
+  // pinned at that width rather than exempted from the matrix.
   for (name, setup, _, want_at_200) in sizing_matrix() {
     assert_eq!(
       modal_width_at(setup.as_ref(), 200, 80),
@@ -1678,5 +1681,35 @@ fn the_confirm_modal_ellipsizes_to_the_width_its_frame_actually_gets() {
   assert!(
     path_row.contains("TAIL-MARKER"),
     "the path's tail must survive: the budget has to be the frame's own width — row:\n{path_row}"
+  );
+}
+
+#[test]
+fn the_bootstrap_report_shows_a_long_hook_line_on_a_wide_terminal() {
+  // #550, Codex review (P2). The report displays arbitrary external text:
+  // hook stdout, error messages, paths. `render_section` hard-clips by
+  // design (one logical row = one visual row, no wrap, no horizontal
+  // scroll), so whatever does not fit the frame is simply unreachable.
+  //
+  // Capping the report at 96 columns therefore made a hook's error message
+  // 64 cells shorter at 200 columns than it had been. Nothing had reported
+  // that its 80 % width was a problem; the cap was taste, not a fix, so it
+  // is gone and the report sits with the other text canvases.
+  let (_dir, mut app) = make_app();
+  let detail = format!(
+    "error[E0432]: unresolved import `{}` at the end",
+    "very::long::module::path".repeat(3)
+  );
+  assert!(detail.chars().count() > 96, "the fixture must exceed the old cap");
+  app.report = Some(BootstrapReport {
+    steps: vec![StepResult::skipped("cargo build", &detail)],
+  });
+  app.view = View::Report;
+
+  let rows = modal_rows(&render_at(&mut app, 200, 40));
+  assert!(
+    rows.iter().any(|r| r.contains("at the end")),
+    "the tail of a long hook line must stay reachable on a wide terminal — modal rows:\n{}",
+    rows.join("\n")
   );
 }

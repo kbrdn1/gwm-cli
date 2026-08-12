@@ -5186,7 +5186,19 @@ fn draw_report(f: &mut Frame, app: &App) {
   // into the top rule.
   let height =
     (logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
-  let area = centered_content(80, 64, 96, height, term);
+  // A text canvas, so a bare percentage rather than the bounded
+  // [`modal_width`] policy (issue #550) — the same call the PTY overlay, the
+  // command-log transcript and the note editor make, and for the same
+  // reason: what it displays is arbitrary external text (hook stdout, error
+  // messages, paths), and `render_section` hard-clips by design (one logical
+  // row = one visual row, no wrap, no horizontal scroll), so every column
+  // the frame gives up is a column of a hook's error nobody can reach.
+  //
+  // #550 briefly capped it at 96 columns because 160 looked wasteful for a
+  // list of short step labels. That is the best case, not the one that
+  // matters: the worst case is a compiler error, and the cap cut 64 cells
+  // off it at 200 columns. No defect ever motivated the cap.
+  let area = centered_abs(term.width.saturating_mul(80) / 100, height, term);
   let block = overlay_block_titled("Bootstrap Report", accent);
   let inner = block.inner(area);
   let layout = Layout::default()

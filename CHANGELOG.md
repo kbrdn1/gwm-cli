@@ -30,8 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   49 columns wide there and its hint row read `Enter activa`, cut mid-word with
   no ellipsis and the `n cancel` hint entirely off screen.
 
-  The PTY overlay, the command-log transcript and the note editor keep spending
-  a percentage of the frame: they are text canvases, and the width is content.
+  The PTY overlay, the command-log transcript, the note editor and the
+  bootstrap report keep spending a percentage of the frame: they are text
+  canvases, and the width is content. `render_section` hard-clips by design
+  (one logical row, one visual row), so on those surfaces every column the
+  frame gives up is a column of a hook's error nobody can reach.
 
 - **The TUI is compact by default** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)).
   Panes and sidebar sections no longer draw box rules; each is delimited by a
