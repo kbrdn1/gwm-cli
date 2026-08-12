@@ -325,7 +325,7 @@ visible. `LifecycleHooksConfig::all_steps()` now enumerates the six phases
 through an exhaustive destructuring, so the next consumer cannot quietly read
 half the config.
 
-### 4. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
+### 4. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420) ✅)
 
 Read a pull request or issue in full without leaving the TUI: description,
 individual checks, reviews, conversation, and inline review comments. Modelled
@@ -351,7 +351,7 @@ every invocation) from paying for a query it never reads. GitLab answers that
 it cannot reach them rather than answering an empty list, since the two are
 different facts.
 
-### 5. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515))
+### 5. Per-worktree notes ([#515](https://github.com/kbrdn1/gwm-cli/issues/515) ✅)
 
 gwm holds everything about a worktree except the part only its author can write:
 where they were. It knows the branch, the linked issue, the diff against base and
@@ -439,7 +439,7 @@ needed nothing, contrary to what the issue title suggests. A gwm alias is argv
 substitution towards a subcommand, not a custom command, so `t = "exec --profile
 ci"` inherits the container through the profile it expands to.
 
-### 7. Comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422))
+### 7. Comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422) ✅)
 
 gwm against gwq and lazyworktree. Content rather than product work, but it is
 what decides whether any of the above is seen. gwq is the incumbent by star
@@ -450,16 +450,25 @@ writing once the features it compares are the ones shipping. That now includes c
 execution (#421), which is why it moved behind that rather than behind the
 notes.
 
-**The issue needs rewriting before it is picked up.** It was filed against an
-older read of the field: there was no container column in it, and the
-lazyworktree half has not been re-read since. Both have to be redone against
-what the two projects are now, otherwise the page ships a comparison of what
-they were.
+Shipped at [`/comparison`](docs/8.comparison.md), English and French. The
+issue's premise had to be thrown out first, which is exactly what the warning
+above anticipated: it listed agent sessions, container execution, GitLab and
+per-worktree metadata as lazyworktree's lead, and by the time the page was
+written gwm had all four. Re-measured against the two projects as they are
+(READMEs and `go.mod` manifests, 2026-08-12) they are **parity**, not a gap,
+and the page says so. Two things came out of the re-read that the issue did
+not have: neither competitor carries a git binding in its manifest, so the
+libgit2 point is a verified difference rather than a claim, and the star gap
+has narrowed from 30-vs-270-vs-456 to 126-vs-281-vs-461. What genuinely stays
+ahead is narrower and named: lazyworktree's rich worktree metadata (colour,
+icon, tags), its per-worktree `.wt` hook files, and seven more months of
+people finding its corners.
 
 ### 8. Documentation in German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/522))
 
 Five locales instead of two, immediately before the cut and after the comparison
-page. The audience data does not ask for this: of the 122 stargazers, 83 declare
+page. The audience data does not ask for this: of the 122 stargazers counted on
+2026-08-04 (126 on 2026-08-12), 83 declare
 a location and no non-English bloc reaches 10%. It is a forward bet, and each
 language carries a different one. German is the largest non-English bloc already
 present. Spanish is not visible in the current stargazers at all, which is the
@@ -503,7 +512,7 @@ republish is visual, which is why the first two items below are images.
 - [#523](https://github.com/kbrdn1/gwm-cli/issues/523): **re-record the demo GIF**. Frame 0 is an empty terminal, and on GitHub, on X and in a Terminal Trove listing the first frame is the thumbnail. It also renders `gwm 1.0.1` in the version badge, six minor versions behind, and it predates the agent session pane, which is now the line the repository description leads on
 - [#524](https://github.com/kbrdn1/gwm-cli/issues/524): **visual coverage of the docs**: 26 of the 41 English pages carry no image, including the whole CLI section and `configuration/gwm-toml.md`, the longest page in the tree and the one that answers the long-tail queries the site exists to capture. The agent session pane has neither a page nor a capture
 - [#525](https://github.com/kbrdn1/gwm-cli/issues/525): **feed the relays**, before the launch rather than after, since they are what amplified the project last time: `awesome-ratatui` first because that is the circle that produced the traffic, then Terminal Trove and the ratatui showcase, then the generic awesome lists. Bing Webmaster Tools is the remaining indexing gap, and it also feeds DuckDuckGo; Google Search Console is done
-- The comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422)) sits in the numbered line above as its last product step rather than here, and the translations ([#522](https://github.com/kbrdn1/gwm-cli/issues/522)) follow it
+- The comparison page ([#422](https://github.com/kbrdn1/gwm-cli/issues/422) ✅) sits in the numbered line above as its last product step rather than here, and the translations ([#522](https://github.com/kbrdn1/gwm-cli/issues/522)) follow it
 - [#516](https://github.com/kbrdn1/gwm-cli/issues/516) ✅: the em dash is retired across `docs/`: 1586 occurrences in 78 of the 79 pages, English and French, replaced by whatever connector the dash was standing in for (a colon where it introduced a list or an explanation, a full stop where it joined two independent clauses, a comma or parentheses around an aside). Fenced code blocks are untouched, so 60 survive there. 45 headings changed shape and none was the target of an internal link, checked by resolving the tree's 194 internal anchors against the heading slugs of both the before and after trees. Merged in [#518](https://github.com/kbrdn1/gwm-cli/pull/518)
 - [#423](https://github.com/kbrdn1/gwm-cli/issues/423) ✅: the documentation is published at **<https://gwm.kbrdn.dev>** and keeps itself there. A merge into `main` touching `docs/`, `changelogs/` or `Cargo.toml` posts a `repository_dispatch` to `kbrdn1/kbrdn-docs`, which reruns the conversion, commits whatever drifted and redeploys. The in-repo tree stays the source of truth: the site is generated from it, never edited on the other side
 

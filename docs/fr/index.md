@@ -37,6 +37,7 @@ CLI Rust + TUI ratatui pour gérer les worktrees git entre projets.
 | [Intégrations](/fr/integrations)                   | vous branchez gwm avec `gh`, `lazygit`, Homebrew, Nix ou `gwm doctor` en CI   |
 | [Développement](/fr/development)                   | vous contribuez : organisation des tests, conventions, dev shell             |
 | [Roadmap](/fr/roadmap)                             | vous voulez savoir ce qui arrive ensuite                                      |
+| [Comparaison](/fr/comparison)                      | vous pesez gwm face à lazyworktree ou gwq                                     |
 
 ## le tour en 30 secondes
 
