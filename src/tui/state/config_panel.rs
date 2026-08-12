@@ -249,8 +249,19 @@ impl SettingsLayer {
 /// How a [`SettingField`] is edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
-  /// Cycle through a fixed set of values (Space / Enter advances).
+  /// Cycle through a fixed set of values (Space / Enter advances),
+  /// written to TOML as a **string**.
   Choice,
+  /// Cycle through `false` / `true`, written to TOML as a **bare
+  /// boolean** (issue #545).
+  ///
+  /// It is a separate kind from [`Self::Choice`] purely because of how
+  /// the value is spelled on disk: quoting it produces
+  /// `dim_unfocused = "true"`, which serde refuses as a string where a
+  /// bool belongs, so the write fails and the setting never changes
+  /// (Codex review, PR #546). Everything else — cycling, rendering —
+  /// behaves like a choice.
+  Bool,
   /// A numeric (`u32`) value edited character-by-character in a buffer.
   Uint,
   /// A free-text value edited character-by-character in a buffer.
@@ -359,11 +370,11 @@ impl SettingField {
     match self {
       SettingField::ThemePreset
       | SettingField::Layout
-      | SettingField::DimUnfocused
       | SettingField::SidebarPosition
       | SettingField::SidebarOrientation
       | SettingField::Clipboard
       | SettingField::OpenMode => FieldKind::Choice,
+      SettingField::DimUnfocused => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern

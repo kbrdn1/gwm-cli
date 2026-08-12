@@ -620,7 +620,11 @@ fn the_tui_tab_reaches_the_layout_settings() {
     );
     assert_eq!(
       field.kind(),
-      FieldKind::Choice,
+      if field == SettingField::DimUnfocused {
+        FieldKind::Bool
+      } else {
+        FieldKind::Choice
+      },
       "{field:?} cycles through a fixed set rather than being typed"
     );
     assert!(

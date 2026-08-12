@@ -2962,7 +2962,7 @@ pub fn config_nav_footer_hints(
   } else {
     let label = if tab == SettingsTab::Keys {
       "rebind"
-    } else if selected_kind == Some(FieldKind::Choice) {
+    } else if matches!(selected_kind, Some(FieldKind::Choice | FieldKind::Bool)) {
       "cycle"
     } else {
       "edit"

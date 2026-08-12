@@ -13093,3 +13093,59 @@ fn activating_layout_from_the_panel_switches_the_live_layout() {
   app.activate_selected_setting();
   assert_eq!(app.config.tui.layout, TuiLayout::Compact);
 }
+
+#[test]
+fn every_panel_choice_survives_the_write_it_triggers() {
+  // Codex review, PR #546: `dim_unfocused` was classed `FieldKind::Choice`,
+  // which routes the write through `set_string_at` and produced
+  // `dim_unfocused = "true"` — a string where serde wants a bool. The load
+  // then failed and the setting never changed.
+  //
+  // The existing round-trip guard could not catch it: it hand-lists four
+  // fields while claiming to cover "every Choice field", so a fifth was
+  // invisible to it. This one enumerates from the panel itself — every
+  // tab, every field it offers — and exercises the real write path
+  // (`activate_selected_setting`) rather than simulating the TOML, so it
+  // covers how the value is spelled as well as what it says.
+  use gwm::tui::{FieldKind, SettingsTab};
+
+  for tab in SettingsTab::ALL {
+    for (index, field) in tab.fields().iter().enumerate() {
+      if matches!(field.kind(), FieldKind::Text | FieldKind::Uint) {
+        continue; // typed, not cycled — a different write path
+      }
+      let (_dir, mut app) = make_app();
+      app.enter_config_panel();
+      app.config_panel.tab = tab;
+      app.config_panel.selected = index;
+
+      // Cycle through every choice the field offers, back to the start.
+      // Asserting the *value moved* rather than just that the file still
+      // loads: a write that fails leaves the config untouched, so a
+      // load-only check passes while the setting silently never changes —
+      // which is exactly the failure mode under test.
+      for step in 0..field.choices().len() {
+        let before = field.current(&app.config);
+        app.activate_selected_setting();
+        let file = _dir.path().join(gwm::config::CONFIG_FILE);
+        let reloaded = gwm::config::Config::load_layered(_dir.path(), None);
+        assert!(
+          reloaded.is_ok(),
+          "{}: the panel wrote a value the config cannot load back: {:?}\nfile:\n{}",
+          field.key_path(),
+          reloaded.err(),
+          std::fs::read_to_string(&file).unwrap_or_default()
+        );
+        let after = field.current(&app.config);
+        assert_ne!(
+          before,
+          after,
+          "{} step {step}: activating must move the value, got {before:?} again — status: {:?}\nfile:\n{}",
+          field.key_path(),
+          app.status,
+          std::fs::read_to_string(&file).unwrap_or_default()
+        );
+      }
+    }
+  }
+}

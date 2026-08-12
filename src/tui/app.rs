@@ -3884,7 +3884,7 @@ impl App {
       return;
     };
     match field.kind() {
-      FieldKind::Choice => {
+      FieldKind::Choice | FieldKind::Bool => {
         if let Some(next) = field.next_choice(&self.config) {
           self.apply_setting(field, &next);
         }
@@ -3947,7 +3947,11 @@ impl App {
     // TOML string, so a value like `123` / `true` in a shell command or
     // worktree pattern is preserved as text rather than coerced (review P2).
     let write = match field.kind() {
-      FieldKind::Uint => crate::config_cli::set_value_at(&path, field.key_path(), value),
+      // `Bool` joins `Uint` on the bare-value path: quoting it would
+      // write `dim_unfocused = "true"`, which serde refuses as a string
+      // where a bool belongs — the write fails and the setting never
+      // changes (Codex review, PR #546).
+      FieldKind::Uint | FieldKind::Bool => crate::config_cli::set_value_at(&path, field.key_path(), value),
       FieldKind::Choice | FieldKind::Text => crate::config_cli::set_string_at(&path, field.key_path(), value),
     };
     if let Err(e) = write {
