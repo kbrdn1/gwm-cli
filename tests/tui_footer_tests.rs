@@ -304,6 +304,21 @@ fn worktrees_and_status_hints_advertise_the_settings_panel_key() {
 }
 
 #[test]
+fn worktrees_hints_advertise_the_note_key() {
+  // Issue #515: `N` acts on the selected worktree the way `x` / `a` /
+  // `r` do, so it belongs in the same statusbar family. Shipped without
+  // it, the note is reachable only by reading `?` or the docs, which is
+  // exactly the discoverability the which-key exists to provide.
+  use gwm::tui::keymap::Keymap;
+  let km = Keymap::defaults();
+  let resolved = HintContext::Worktrees.resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults());
+  assert!(
+    resolved.iter().any(|(k, l)| k == "N" && l == "note"),
+    "the worktrees context must advertise the `N note` hint: {resolved:?}"
+  );
+}
+
+#[test]
 fn status_hints_resolve_user_rebindings() {
   // Issue #217 review (P2): the statusbar must show the *live* binding, not
   // the hard-coded default — the keymap actions are rebindable. `fetch` is
@@ -345,7 +360,7 @@ fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
     labels,
     vec![
       "new", "del", "mark", "boot", // lifecycle
-      "open", "git", "exec", "agents", "review", "yank", // act on the selected worktree
+      "open", "git", "exec", "agents", "note", "review", "yank", // act on the selected worktree
       "filter", "status", "logs", "settings", // find / navigate
       "help", "quit", // global
     ],
