@@ -3833,7 +3833,7 @@ pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Them
 }
 
 fn draw_help(f: &mut Frame, app: &mut App) {
-  let area = centered(60, 60, f.area());
+  let area = centered_viewport(60, 64, 96, 60, f.area());
   // Use the underlying pane context, not the view-priority `hint_context`
   // (which would be `Help` while this overlay is up) — `?` documents the
   // pane you opened it from, and the picker gating depends on it.
@@ -4236,7 +4236,7 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
 /// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
 /// `config_panel.max_scroll` against the live body viewport.
 fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered(60, 60, f.area());
+  let area = centered_viewport(60, 64, 96, 60, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
@@ -4517,7 +4517,7 @@ fn draw_create(f: &mut Frame, app: &App) {
     clean,
   );
   let term = f.area();
-  let outer = centered_box(70, 72, 1, term);
+  let outer = centered_content(70, 56, 72, 1, term);
   let inner_w = block.inner(outer).width as usize;
 
   // Width of the background-filled value field: the inner width minus the
@@ -4567,7 +4567,7 @@ fn draw_create(f: &mut Frame, app: &App) {
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
-  let area = centered_box(70, 72, height, term);
+  let area = centered_content(70, 56, 72, height, term);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -4736,25 +4736,43 @@ pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, m
   Line::from(vec![Span::raw("  "), Span::styled(button, idle)])
 }
 
-/// Modal width for the Link prompt. Pure so the visual budget remains pinned
-/// without a terminal renderer in `tests/tui_ui_helpers_tests.rs`.
-pub fn link_prompt_modal_width(term_width: u16) -> u16 {
-  let width = if term_width <= 80 {
-    term_width.saturating_mul(80) / 100
-  } else {
-    term_width.saturating_mul(60) / 100
-  };
-  width.min(72).min(term_width)
+/// **The** modal width policy (issue #550): `pct` % of the terminal, never
+/// below `min_cols`, never above `max_cols`, always leaving two columns of
+/// margin on each side.
+///
+/// Every bounded overlay resolves its width through here, with its own knobs —
+/// the surfaces genuinely want different widths (a clean report uses the room,
+/// a link prompt does not), but they no longer want different *rules*. Two
+/// properties the ad-hoc sizings did not have, both pinned in
+/// `tests/tui_ui_helpers_tests.rs`:
+///
+/// - **Monotonic.** The old helpers branched on `term_width <= 80` to spend a
+///   bigger percentage on a small terminal, so crossing 80 columns made the
+///   modal *narrower*: the link prompt lost 16 columns and the exec/clean
+///   overlay 22, live, while dragging a pane edge. A floor buys the same
+///   "small terminals still get a usable box" without the seam.
+/// - **Bounded.** A bare percentage stretches forever; the report modal was
+///   160 columns wide at 200 for a step list ~30 characters long.
+///
+/// The `min` against the frame comes last so the floor can never push a modal
+/// past the edge on a terminal narrower than `min_cols`.
+pub fn modal_width(term_width: u16, pct: u16, min_cols: u16, max_cols: u16) -> u16 {
+  let ideal = term_width.saturating_mul(pct) / 100;
+  ideal.clamp(min_cols, max_cols).min(term_width.saturating_sub(4).max(1))
 }
 
-/// Modal width for the exec / clean overlays (issue #334 polish). A bit wider
-/// than the link-prompt modal so the full-width clean report (icon + dir name
-/// pinned left, size pinned right) uses the horizontal space — but capped so
-/// the name↔size gap never stretches absurdly on an ultra-wide terminal.
-/// ~62 % of the width (90 % when ≤ 80 cols), clamped to `[48, 88]`.
+/// Modal width for the Link / Open prompts: wide enough for an issue or PR
+/// summary, capped so it stays a prompt rather than a page.
+pub fn link_prompt_modal_width(term_width: u16) -> u16 {
+  modal_width(term_width, 60, 64, 72)
+}
+
+/// Modal width for the exec / clean / detail overlays (issue #334 polish).
+/// Wider than the link-prompt modal so the full-width clean report (icon + dir
+/// name pinned left, size pinned right) uses the horizontal space — but capped
+/// so the name↔size gap never stretches absurdly on an ultra-wide terminal.
 pub fn overlay_modal_width(term_width: u16) -> u16 {
-  let pct = if term_width <= 80 { 90 } else { 62 };
-  (term_width.saturating_mul(pct) / 100).clamp(48, 88).min(term_width)
+  modal_width(term_width, 62, 72, 88)
 }
 
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
@@ -4872,7 +4890,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     let block = overlay_block_titled(delete_worktree_title(), danger);
     let lines: Vec<Line<'static>> = vec![Line::from("nothing selected").centered()];
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-    let area = centered_h(40, height, f.area());
+    let area = centered_content(40, 40, 64, height, f.area());
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
     return;
@@ -4960,7 +4978,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // shared interior padding — no more fixed 44%-tall box that dwarfed its
   // few lines (#187 review).
   let height = content.len() as u16 + 4 + 2 /* border */ + 2 /* padding */;
-  let area = centered_h(62, height, term);
+  let area = centered_content(62, 64, 88, height, term);
   f.render_widget(Clear, area);
 
   // Five stacked regions inside the padded frame: the title + description,
@@ -5159,7 +5177,7 @@ fn draw_report(f: &mut Frame, app: &App) {
   // into the top rule.
   let height =
     (logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
-  let area = centered_h(80, height, term);
+  let area = centered_content(80, 64, 96, height, term);
   let block = overlay_block_titled("Bootstrap Report", accent);
   let inner = block.inner(area);
   let layout = Layout::default()
@@ -5280,6 +5298,26 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   }
 }
 
+/// The `pct_y` % slice of `area`'s height, the way a ratatui percentage layout
+/// rounds it. Shared by [`centered`] and [`centered_viewport`] so the two
+/// families agree on what "60 % tall" means to the row.
+fn viewport_height(pct_y: u16, area: Rect) -> u16 {
+  Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Percentage((100 - pct_y) / 2),
+      Constraint::Percentage(pct_y),
+      Constraint::Percentage((100 - pct_y) / 2),
+    ])
+    .split(area)[1]
+    .height
+}
+
+/// A **full-bleed** surface: a percentage of both axes, unbounded. Reserved for
+/// the three text canvases that genuinely spend whatever width the terminal
+/// has — the PTY overlay, the command-log transcript and the note editor. Every
+/// other overlay goes through [`centered_viewport`] or [`modal_width`], which
+/// bound the width (issue #550).
 fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
   let v = Layout::default()
     .direction(Direction::Vertical)
@@ -5299,6 +5337,15 @@ fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     .split(v[1])[1]
 }
 
+/// A scrolling overlay: the height is a viewport (a percentage of the frame —
+/// these surfaces own a scroll cursor, so they do not size to their content),
+/// the width goes through the [`modal_width`] policy so it keeps a floor and a
+/// ceiling. Used by the help, config and command-palette overlays.
+fn centered_viewport(pct_x: u16, min_x: u16, max_x: u16, pct_y: u16, area: Rect) -> Rect {
+  let height = viewport_height(pct_y, area);
+  centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
+}
+
 /// Center a box of an **absolute** `width`/`height` (in cells) inside `area`,
 /// clamping each dimension to the area so an oversized modal cannot overflow
 /// the frame. Shared by the open-menu and link-prompt modals (issue #243) and
@@ -5311,27 +5358,16 @@ pub fn centered_abs(width: u16, height: u16, area: Rect) -> Rect {
   Rect { x, y, width, height }
 }
 
-/// Centre a box of `width_pct`% width and a fixed `height` (rows) in
-/// `area`. Unlike [`centered`], the height is absolute so an overlay can
-/// size itself to its content rather than a fixed percentage of the
-/// screen (#187 — the confirm modal was far taller than its few lines).
-/// Delegates the centering arithmetic to [`centered_abs`].
-fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
-  let width = area.width.saturating_mul(width_pct) / 100;
-  centered_abs(width, height, area)
-}
-
-/// Like [`centered_h`] but also caps the width at `max_width` columns so a
-/// form modal does not stretch edge-to-edge on a wide terminal (issue #217
-/// — the create overlay's input surfaces spanned the whole screen).
-fn centered_box(width_pct: u16, max_width: u16, height: u16, area: Rect) -> Rect {
-  let height = height.min(area.height);
-  let width = (area.width.saturating_mul(width_pct) / 100)
-    .min(max_width)
-    .min(area.width);
-  let x = area.x + area.width.saturating_sub(width) / 2;
-  let y = area.y + area.height.saturating_sub(height) / 2;
-  Rect { x, y, width, height }
+/// A content-sized overlay: the height is absolute so the modal fits its own
+/// lines rather than a percentage of the screen (#187 — the confirm modal was
+/// far taller than its few lines), the width goes through the [`modal_width`]
+/// policy.
+///
+/// This replaces the two helpers that used to do the same job with different
+/// rules (issue #550): `centered_h`, a bare percentage with no ceiling, and
+/// `centered_box`, a percentage with a ceiling but no floor.
+fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect) -> Rect {
+  centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 
 /// A modal overlay frame: a rounded border in `color` with interior
@@ -6053,7 +6089,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 
   let block = overlay_block_titled("Rename Worktree", clean);
   let term = f.area();
-  let outer = centered_box(70, 72, 1, term);
+  let outer = centered_content(70, 56, 72, 1, term);
   let inner_w = block.inner(outer).width as usize;
   let label_w = 5usize;
   let gutter = 2 + label_w + 2;
@@ -6114,7 +6150,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
-  let area = centered_box(70, 72, height, term);
+  let area = centered_content(70, 56, 72, height, term);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -6169,7 +6205,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 }
 
 fn draw_command_palette(f: &mut Frame, app: &App) {
-  let area = centered(60, 50, f.area());
+  let area = centered_viewport(60, 64, 96, 50, f.area());
   f.render_widget(Clear, area);
 
   let accent = app.theme.accent;

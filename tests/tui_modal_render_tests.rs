@@ -1331,3 +1331,315 @@ fn modal_frames_are_not_taller_than_their_content() {
     rows.join("\n")
   );
 }
+
+// ---------------------------------------------------------------------------
+// Responsive sizing matrix (issue #550)
+// ---------------------------------------------------------------------------
+
+/// The modal's rect, located by the rounded corners its frame draws
+/// (`overlay_block` uses `BorderType::Rounded`). Returns `(x, y, w, h)`.
+///
+/// The oracle is only sound while the surfaces *behind* a modal draw no
+/// rounded corner of their own — `the_background_paints_no_rounded_corner`
+/// below is what keeps that honest.
+fn modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
+  let area = *buf.area();
+  let mut top_left = None;
+  'outer: for y in 0..area.height {
+    for x in 0..area.width {
+      if buf[(x, y)].symbol() == "╭" {
+        top_left = Some((x, y));
+        break 'outer;
+      }
+    }
+  }
+  let (x0, y0) = top_left?;
+  let x1 = (x0 + 1..area.width)
+    .find(|&x| buf[(x, y0)].symbol() == "╮")
+    .unwrap_or(x0);
+  let y1 = (y0 + 1..area.height)
+    .find(|&y| buf[(x0, y)].symbol() == "╰")
+    .unwrap_or(y0);
+  Some((x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// The rendered rows *inside* the modal frame. Needles asserted against the
+/// whole buffer can be satisfied by the statusbar or the worktree table behind
+/// the modal; these rows can only come from the modal itself.
+fn modal_rows(buf: &Buffer) -> Vec<String> {
+  let Some((x, y, w, h)) = modal_rect(buf) else {
+    return Vec::new();
+  };
+  (y..(y + h).min(buf.area().height))
+    .map(|row| {
+      (x..(x + w).min(buf.area().width))
+        .map(|col| buf[(col, row)].symbol())
+        .collect()
+    })
+    .collect()
+}
+
+fn modal_width_at(setup: &dyn Fn() -> (tempfile::TempDir, App), w: u16, h: u16) -> u16 {
+  let (_dir, mut app) = setup();
+  let buf = render_at(&mut app, w, h);
+  modal_rect(&buf)
+    .unwrap_or_else(|| panic!("no modal rendered at {w}x{h} — rows:\n{}", row_strings(&buf).join("\n")))
+    .2
+}
+
+type ModalSetup = Box<dyn Fn() -> (tempfile::TempDir, App)>;
+
+/// Every modal, with the width it must resolve to at the advertised 80-column
+/// floor and on an ultra-wide terminal. Exact values, deliberately: this is a
+/// characterisation matrix, so a refactor that moves a number has to say so.
+fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
+  vec![
+    (
+      "help",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_help();
+        (d, a)
+      }) as ModalSetup,
+      64,
+      96,
+    ),
+    (
+      "config-panel",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_config_panel();
+        (d, a)
+      }),
+      64,
+      96,
+    ),
+    (
+      "command-palette",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.open_command_palette();
+        (d, a)
+      }),
+      64,
+      96,
+    ),
+    (
+      "create",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_create();
+        (d, a)
+      }),
+      56,
+      72,
+    ),
+    (
+      "edit/rename",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-rename"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.enter_edit_worktree();
+        (d, a)
+      }),
+      56,
+      72,
+    ),
+    (
+      "confirm",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-one"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.enter_confirm_delete();
+        (d, a)
+      }),
+      64,
+      88,
+    ),
+    (
+      "report",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.report = Some(BootstrapReport {
+          steps: vec![StepResult::ok("copy env file"), StepResult::skipped("npm i", "no pkg")],
+        });
+        a.view = View::Report;
+        (d, a)
+      }),
+      64,
+      96,
+    ),
+    (
+      "open-menu",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_open_menu();
+        (d, a)
+      }),
+      64,
+      72,
+    ),
+    (
+      "link-prompt",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_link_prompt();
+        (d, a)
+      }),
+      64,
+      72,
+    ),
+    (
+      "exec-picker",
+      Box::new(|| {
+        let (d, _) = init_repo();
+        std::fs::write(
+          d.path().join(".gwm.toml"),
+          "[exec.profiles.build]\ncommand = [\"cargo\", \"build\"]\n",
+        )
+        .unwrap();
+        let mut a = App::new_at_layered(Some(d.path()), None).unwrap();
+        a.sidebar.open = false;
+        a.enter_exec_picker();
+        (d, a)
+      }),
+      72,
+      88,
+    ),
+    (
+      "detail/agents",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-agents"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.open_agent_overlay();
+        (d, a)
+      }),
+      72,
+      88,
+    ),
+    // Full-bleed surfaces: the log transcript and the note editor are text
+    // canvases, so they keep spending a percentage of the frame rather than
+    // capping. Pinned here anyway — an exemption nobody measures is how a
+    // matrix goes green while missing a surface.
+    (
+      "command-logs",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.view = View::CommandLogs;
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
+      "note-editor",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-note"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.open_note_editor();
+        (d, a)
+      }),
+      64,
+      160,
+    ),
+  ]
+}
+
+#[test]
+fn the_background_paints_no_rounded_corner() {
+  // The matrix below finds each modal by its rounded top-left corner. That
+  // only works while nothing behind the modal draws one — if the worktree
+  // table or the sidebar ever grows a rounded frame, every measurement below
+  // silently starts describing the wrong rect. Prove the oracle, then use it.
+  for sidebar_open in [false, true] {
+    let (_dir, mut app) = make_app();
+    app.sidebar.open = sidebar_open;
+    let buf = render_at(&mut app, 120, 40);
+    let corners = (0..buf.area().height)
+      .flat_map(|y| (0..buf.area().width).map(move |x| (x, y)))
+      .filter(|&(x, y)| buf[(x, y)].symbol() == "╭")
+      .count();
+    assert_eq!(
+      corners,
+      0,
+      "View::List (sidebar open = {sidebar_open}) must paint no rounded corner, found {corners} — rows:\n{}",
+      row_strings(&buf).join("\n")
+    );
+  }
+}
+
+#[test]
+fn every_modal_resolves_to_its_pinned_width_at_the_80_column_floor() {
+  // The docs advertise the TUI at 80 columns. Pre-#550 the confirm modal was
+  // 49 columns wide there and its hint row read `Enter activa`; help was 48
+  // and its rows lost their tail behind the scrollbar. Each modal now has a
+  // floor, so 80 columns is a size the surfaces were actually sized for.
+  for (name, setup, want_at_80, _) in sizing_matrix() {
+    assert_eq!(
+      modal_width_at(setup.as_ref(), 80, 24),
+      want_at_80,
+      "{name}: width at the 80-column floor"
+    );
+  }
+}
+
+#[test]
+fn no_modal_stretches_without_bound_on_an_ultra_wide_terminal() {
+  // Pre-#550 the report modal was 160 columns wide at 200 (for a step list
+  // ~30 characters long) and the confirm modal 124 (for a four-row detail
+  // grid), because both sized on a bare percentage with no ceiling.
+  for (name, setup, _, want_at_200) in sizing_matrix() {
+    assert_eq!(
+      modal_width_at(setup.as_ref(), 200, 80),
+      want_at_200,
+      "{name}: width on a 200-column terminal"
+    );
+  }
+}
+
+#[test]
+fn no_modal_gets_narrower_as_the_terminal_gets_wider() {
+  // The render-level companion to
+  // `a_modal_never_shrinks_when_the_terminal_grows` in
+  // tests/tui_ui_helpers_tests.rs: the helpers being monotonic is worth
+  // nothing if a call site reintroduces the seam. Sampled across the
+  // 80-column boundary where the old branch lived.
+  const WIDTHS: [u16; 8] = [60, 79, 80, 81, 90, 100, 140, 200];
+  for (name, setup, _, _) in sizing_matrix() {
+    let mut previous = 0u16;
+    for w in WIDTHS {
+      let got = modal_width_at(setup.as_ref(), w, 40);
+      assert!(
+        got >= previous,
+        "{name}: widening the terminal to {w} cols shrank the modal from {previous} to {got}"
+      );
+      previous = got;
+    }
+  }
+}
+
+#[test]
+fn the_confirm_hint_row_is_not_cut_mid_word_at_80_columns() {
+  // The concrete symptom the floor fixes: at 49 columns the confirm modal's
+  // hint row was clipped by ratatui to `Enter activa` — no ellipsis, just a
+  // half-word. The last hint the row advertises must survive intact.
+  let (_dir, mut app) = make_app();
+  app.worktrees.push(deletable_worktree("feat-550-hint"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+
+  let buf = render_at(&mut app, 80, 24);
+  // Scanned INSIDE the modal rect, not over the whole buffer: the bottom
+  // statusbar advertises `Enter activate` too, so a whole-buffer search stays
+  // green with the modal's own hint row cut in half.
+  let rows = modal_rows(&buf);
+  assert!(
+    rows.iter().any(|r| r.contains("Enter activate")),
+    "the confirm hint row must render its last hint in full at 80 columns — modal rows:\n{}",
+    rows.join("\n")
+  );
+}

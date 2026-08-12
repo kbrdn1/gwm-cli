@@ -1192,6 +1192,83 @@ fn overlay_modal_width_is_wider_but_clamped() {
 }
 
 #[test]
+fn a_modal_never_shrinks_when_the_terminal_grows() {
+  // #550. Both helpers used to branch on `term_width <= 80` to spend a bigger
+  // percentage on a small terminal, which made width NON-MONOTONIC: dragging
+  // a pane from 80 to 81 columns collapsed the link prompt by 16 columns and
+  // the exec/clean/detail overlay by 22. A modal may stop growing; it must
+  // never get narrower because the terminal got wider.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  for w in 20u16..300 {
+    for (name, f) in [
+      ("link_prompt_modal_width", link_prompt_modal_width as fn(u16) -> u16),
+      ("overlay_modal_width", overlay_modal_width as fn(u16) -> u16),
+    ] {
+      let (here, next) = (f(w), f(w + 1));
+      assert!(
+        next >= here,
+        "{name}: growing the terminal from {w} to {} cols shrank the modal from {here} to {next} cols",
+        w + 1
+      );
+    }
+  }
+}
+
+#[test]
+fn the_width_policy_is_monotonic_and_bounded_for_any_knobs() {
+  // The two wrappers above only exercise two of the eight knob sets in use.
+  // The property belongs to the policy, not to its callers: whatever
+  // (pct, min, max) a future overlay picks, its width must never shrink as the
+  // terminal grows, never break its ceiling, and never reach the frame edge.
+  use gwm::tui::modal_width;
+  for (pct, min_cols, max_cols) in [
+    (40, 40, 64),
+    (60, 64, 72),
+    (60, 64, 96),
+    (62, 64, 88),
+    (70, 56, 72),
+    (80, 64, 96),
+  ] {
+    let mut previous = 0u16;
+    for w in 20u16..=300 {
+      let got = modal_width(w, pct, min_cols, max_cols);
+      assert!(
+        got >= previous,
+        "({pct}%, [{min_cols}, {max_cols}]): {w} cols gave {got}, narrower than the {previous} before it"
+      );
+      assert!(
+        got <= max_cols,
+        "({pct}%, [{min_cols}, {max_cols}]): {w} cols broke the ceiling with {got}"
+      );
+      assert!(
+        got <= w.saturating_sub(4),
+        "({pct}%, [{min_cols}, {max_cols}]): {w} cols gave {got}, under 2 columns of margin per side"
+      );
+      previous = got;
+    }
+  }
+}
+
+#[test]
+fn a_modal_always_leaves_a_margin_inside_the_frame() {
+  // #550: the floor that kills the seam above must not let a modal grow into
+  // the frame edge on a narrow terminal — the border would hug column 0.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  for w in 20u16..=300 {
+    for (name, f) in [
+      ("link_prompt_modal_width", link_prompt_modal_width as fn(u16) -> u16),
+      ("overlay_modal_width", overlay_modal_width as fn(u16) -> u16),
+    ] {
+      let got = f(w);
+      assert!(
+        got <= w.saturating_sub(4),
+        "{name}: at {w} cols the modal is {got} wide, leaving under 2 columns of margin per side"
+      );
+    }
+  }
+}
+
+#[test]
 fn compact_header_line_measures_in_terminal_cells_not_chars() {
   // Codex review, PR #546: the header was padded with `chars().count()`,
   // which counts one for a wide character that ratatui draws in two
