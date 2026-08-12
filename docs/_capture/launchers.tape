@@ -27,5 +27,11 @@ Sleep 3s
 Down@500ms 4
 Sleep 1500ms
 Type "l"
-Sleep 4s
+# Nothing is sent between here and the shot on purpose. lazygit greets a NEW
+# version with a full-screen "Breaking Changes" modal that covers this whole
+# capture, and there is no keystroke that dismisses it and is harmless when it
+# is absent: `Escape` falls through to gwm and closes the overlay, `Enter`
+# falls through to lazygit's file panel. Open lazygit once by hand after
+# upgrading it, then regenerate.
+Sleep 5s
 Screenshot docs/2.tui/_assets/launchers.png

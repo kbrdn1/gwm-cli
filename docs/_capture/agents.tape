@@ -6,6 +6,9 @@ Output docs/_capture/.tmp/agents.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
 Set FontSize 15
+# 1500 like the other TUI tapes. Widening the terminal does not help the one
+# imperfection here (the pinned row's trailing `pinned` marker truncates to
+# `pi…`): the overlay sizes itself, not to the terminal.
 Set Width 1500
 Set Height 860
 Set Padding 22

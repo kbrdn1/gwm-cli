@@ -13,6 +13,9 @@ set -euo pipefail
 
 ROOT="${GWM_DEMO_ROOT:-$HOME/gwm-demo}"
 REPO="$ROOT/acme-api"
+# Resolved here, before the `cd`s below: `$0` and `BASH_SOURCE` are relative to
+# the caller's working directory, which this script changes several times.
+CAPTURE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export GIT_AUTHOR_NAME="Robin Vale"
 export GIT_AUTHOR_EMAIL="robin@acme.dev"
@@ -118,6 +121,20 @@ git add Cargo.deps
 # docs/#71 → clean, no local commits (fresh branch)
 cd "$(wt docs-71-openapi-examples)" >/dev/null
 
+# ── backdate the branch ages ──────────────────────────────────────────────
+# The AGE column reads `branch.<b>.gwm-created-at`, which `gwm create` stamps
+# with the wall clock — so a capture taken right after this script shows five
+# worktrees all seconds old, which reads as staged rather than as a week of
+# work. Offsets are relative to now, so the spread stays stable whenever the
+# recording happens (issue #523; this is the "relative times drift" wart the
+# header comment flags, closed for the four fixture worktrees).
+now=$(date +%s)
+age() { git -C "$REPO" config "branch.$1.gwm-created-at" "$((now - $2))"; }
+age 'feat/#42-payment-webhooks'   $((9 * 86400))
+age 'fix/#57-rate-limit-headers'  $((4 * 86400))
+age 'chore/#63-bump-axum'         $((2 * 86400))
+age 'docs/#71-openapi-examples'   $((5 * 3600))
+
 # ── fabricated agent sessions (issue #523) ────────────────────────────────
 # The repo's pitch is "shows which AI agent is working where", so the demo
 # fixture has to carry agent artefacts. `GWM_AGENTS_HOME` is gwm's own
@@ -146,7 +163,7 @@ printf '{"id":"%s","thread_name":"Emit Retry-After on every 429"}\n' \
   "$CODEX_SID" > "$AGENTS_HOME/.codex/session_index.jsonl"
 
 # Pin both. The table's AGENT column reads detection, the sidebar Agents
-# pane reads pins only, and the demo shows both, so both are needed.
+# pane reads pins only — the demo shows both, so both are needed.
 cd "$REPO"
 gwm agents attach feat-42 "$CLAUDE_SID" >/dev/null
 gwm agents attach fix-57 "$CODEX_SID" >/dev/null
@@ -168,7 +185,7 @@ printf '%s\n' '{"type":"user","message":{"content":"Draft the OpenAPI examples f
 # Freshness is a function of mtime, so it decays: without this the fixture
 # reads all-idle a few minutes after setup. `refresh-agents.sh` is the single
 # place that owns the ages, and every agent tape re-runs it before capturing.
-bash "$(dirname "${BASH_SOURCE[0]}")/refresh-agents.sh"
+bash "$CAPTURE_DIR/refresh-agents.sh"
 
 # ── untrusted fixture for the TOFU trust-ledger capture ────────────────────
 # A second repo we deliberately never add to the trust ledger, with a juicy
