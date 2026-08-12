@@ -79,6 +79,26 @@ impl ResolvedSidebarLayout {
   }
 }
 
+/// Height the stacked table pane should actually claim (issue #545).
+///
+/// The percentage split reserves the table's share whatever the row
+/// count, which is what makes a five-worktree screen read half empty:
+/// the pane holds a column of blank rows while the sidebar below it
+/// scrolls. In compact mode the pane instead asks for what it draws —
+/// `rows + 1` (the column header) `+ chrome` — and the sidebar absorbs
+/// what it gives back.
+///
+/// `quota` (the percentage share) stays the ceiling: a long list must
+/// not push the sidebar off the screen, so the pane grows to its share
+/// and then scrolls, exactly as before.
+///
+/// Applies to the stacked layout only. Side-by-side splits horizontally,
+/// so a shorter table would leave a hole rather than hand rows to
+/// anything.
+pub fn stacked_table_height(quota: u16, rows: u16, chrome: u16) -> u16 {
+  rows.saturating_add(1).saturating_add(chrome).min(quota)
+}
+
 /// Which content the sidebar previews (issue #34).
 ///
 /// Toggled with the `s` key in the list view, dispatched through

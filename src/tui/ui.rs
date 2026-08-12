@@ -304,8 +304,8 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
   use super::state::sidebar::ResolvedSidebarLayout as Resolved;
 
   let layout = app.sidebar.resolve_layout(area.width);
-  let (table_pct, sidebar_pct) = match layout.split_percentages() {
-    Some((t, s)) => (Constraint::Percentage(t), Constraint::Percentage(s)),
+  let (table_share, table_pct, sidebar_pct) = match layout.split_percentages() {
+    Some((t, s)) => (t, Constraint::Percentage(t), Constraint::Percentage(s)),
     None => {
       // Sidebar not rendered → no scrollable surface → no max scroll to track.
       app.sidebar.max_scroll = 0;
@@ -338,9 +338,24 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       // Table on top, sidebar below — the default layout (issue #217) and the
       // narrow-terminal fallback. The left/right position does not apply to a
       // vertical stack.
+      //
+      // Compact mode sizes the pane to its rows instead of to its share
+      // (issue #545), so a short list stops reserving a column of blank
+      // rows above a scrolling sidebar. The share stays the ceiling.
+      let table_constraint = if app.config.tui.compact {
+        let quota = area.height.saturating_mul(table_share) / 100;
+        let rows = app.filtered_indices().len() as u16;
+        Constraint::Length(super::state::sidebar::stacked_table_height(
+          quota,
+          rows,
+          Chrome::COMPACT_ROWS,
+        ))
+      } else {
+        table_pct
+      };
       let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([table_pct, sidebar_pct])
+        .constraints([table_constraint, sidebar_pct])
         .split(area);
       draw_list(f, split[0], app);
       draw_sidebar(f, split[1], app);
@@ -408,6 +423,11 @@ pub struct Chrome {
 }
 
 impl Chrome {
+  /// Rows a compact frame costs — the single header line. Named so the
+  /// layout can budget for it without building a `Chrome` just to read
+  /// a constant off it.
+  pub const COMPACT_ROWS: u16 = 1;
+
   /// Chrome for a surface that stays boxed whatever `[tui] compact`
   /// says — the modals, where a rule separates the panel from the
   /// content it floats over.
@@ -431,7 +451,7 @@ impl Chrome {
   /// header line.
   pub fn rows(self) -> u16 {
     if self.compact {
-      1
+      Self::COMPACT_ROWS
     } else {
       2
     }

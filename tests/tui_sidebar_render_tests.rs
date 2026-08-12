@@ -448,3 +448,52 @@ fn compact_mode_scrolls_recent_commits_to_the_end() {
     "at max_scroll the oldest commit must be on screen: {text}"
   );
 }
+
+/// Row index of the first line whose rendered text contains `needle`,
+/// or `None`. Row-level rather than whole-buffer, so a test can assert
+/// *where* a marker landed and not merely that it exists.
+fn row_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<u16> {
+  let buffer = terminal.backend().buffer();
+  let area = buffer.area;
+  (area.y..area.y + area.height).find(|&y| {
+    let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+    line.contains(needle)
+  })
+}
+
+#[test]
+fn compact_mode_gives_a_short_lists_blank_rows_to_the_sidebar() {
+  // Issue #545, the "half empty demo" complaint: the stacked table pane
+  // reserved 42% of the height whatever the row count, so a repo with a
+  // handful of worktrees showed a column of blank rows above a sidebar
+  // that was scrolling.
+  //
+  // Measured as *where the sidebar starts*: with one worktree the pane
+  // draws three rows (header fill, column header, the row itself), so the
+  // Status header must land near the top rather than at the 42% mark.
+  // Counting sidebar content instead would pass on the chrome saving
+  // alone and never see the pane sizing.
+  let dir = repo_with_commits(4);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  assert_eq!(
+    app.sidebar.resolve_layout(120),
+    gwm::tui::state::sidebar::ResolvedSidebarLayout::Stacked,
+    "this test measures the stacked layout"
+  );
+  assert_eq!(app.worktrees.len(), 1, "fixture is a single-worktree repo");
+  app.config.tui.compact = true;
+
+  let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let status_row = row_of(&terminal, "2 STATUS").expect("the compact Status header must render");
+  // The pane's 42% share of a 40-row terminal is ~16 rows; sized to its
+  // single row it spends 3. Anything past the share means the pane is
+  // still reserving space it does not draw.
+  assert!(
+    status_row < 10,
+    "the sidebar must start right under a one-row table, got row {status_row}"
+  );
+}

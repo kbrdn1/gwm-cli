@@ -1473,6 +1473,31 @@ fn section_heights_give_everything_to_commits_when_alone() {
 }
 
 #[test]
+fn stacked_table_pane_asks_for_what_it_draws() {
+  // Issue #545: the pane reserved its percentage share whatever the row
+  // count, so a five-worktree screen showed a column of blank rows above
+  // a scrolling sidebar. It now asks for `rows + header + chrome` and the
+  // sidebar takes back the rest.
+  use gwm::tui::state::sidebar::stacked_table_height;
+  // 5 worktrees, compact chrome, a 16-row quota: 5 + 1 header + 1 header
+  // fill = 7, well under the quota, so 9 rows go to the sidebar.
+  assert_eq!(stacked_table_height(16, 5, 1), 7);
+  // Same list bordered: two rules instead of one filled header.
+  assert_eq!(stacked_table_height(16, 5, 2), 8);
+}
+
+#[test]
+fn stacked_table_pane_never_grows_past_its_quota() {
+  // A long list must not push the sidebar off the screen: the share stays
+  // the ceiling and the pane scrolls beyond it, exactly as before.
+  use gwm::tui::state::sidebar::stacked_table_height;
+  assert_eq!(stacked_table_height(16, 200, 1), 16);
+  // Degenerate quota (a terminal too short to split) hands back the quota,
+  // never a larger value the layout could not honour.
+  assert_eq!(stacked_table_height(0, 5, 1), 0);
+}
+
+#[test]
 fn section_heights_hand_the_saved_rows_back_in_compact_mode() {
   // Issue #545: compact mode replaces the two box rules with a single
   // filled header, so a section's chrome costs 1 row instead of 2. The
