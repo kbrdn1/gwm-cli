@@ -13,6 +13,10 @@ cd "$(git rev-parse --show-toplevel)"
 CAP=docs/_capture
 DEMO="${GWM_DEMO_ROOT:-$HOME/gwm-demo}/acme-api"
 mkdir -p "$CAP/.tmp"
+# vhs writes a Screenshot where it is told and does NOT create the parent, so
+# a section whose first capture this is would fail with the error swallowed by
+# `run()`.
+mkdir -p docs/2.tui/_assets docs/3.cli/_assets docs/4.configuration/_assets
 
 if [[ "${GWM_KEEP_DEMO:-}" != "1" ]]; then
   echo "▸ rebuilding demo repo"
@@ -24,6 +28,7 @@ run() { echo "▸ $1"; vhs "$CAP/$1" >/dev/null 2>&1 || { echo "  ✗ vhs failed
 # ── still + animated captures that use the default (grey) theme ────────────
 for t in hero sidebar side-by-side narrow  palette keymap keybindings \
          doctor trust-ledger bootstrap \
+         agents cli-list cli-agents config-panel launchers open-dispatch \
          filter countdown first-worktree shell-init; do
   [[ -f "$CAP/$t.tape" ]] && run "$t.tape"
 done

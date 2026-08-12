@@ -25,12 +25,26 @@ Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
   varied git states (clean, clean+ahead, staged, dirty+ahead). It also builds
   `~/gwm-demo/payments-svc`, an intentionally *untrusted* fixture used only for
   the TOFU trust-prompt capture. Dates are pinned so the graph is byte-stable.
+  It finally seeds **agent sessions** under `~/gwm-demo/agents-home`: Claude
+  Code and Codex artefacts on three of the worktrees, two of them pinned. They
+  live inside the demo root and are read through gwm's own `GWM_AGENTS_HOME`
+  seam, so the operator's real `~/.claude` and `~/.codex` are never written to
+  and never captured. The tapes that show an agent surface export the variable;
+  every other tape keeps the empty-store look.
 - **`<name>.tape`**: one capture each. Still PNGs use vhs's `Screenshot`
   command (the tape's `Output …/.tmp/<name>.gif` is a throwaway vhs requires);
   animated captures `Output` their `.gif` directly.
 - **`theme.tape`** is generic: `generate.sh` injects each `[theme] preset` into
   the demo config (hidden from git via `--assume-unchanged`) and moves the
   result to `theme-<preset>.png`.
+- **`refresh-agents.sh`** re-stamps the seeded agent artefacts. Session
+  freshness is a pure function of artefact mtime (`active` under 300 s, `idle`
+  past it), so a fixture built ten minutes ago renders every agent row grey and
+  the agent captures would document a state the code never shows. The script
+  owns the ages in one place: everything reads `active`, except the two
+  sessions the captures deliberately show as `idle`. `setup-demo.sh` calls it
+  once, and `agents.tape` / `cli-agents.tape` call it again right before
+  capturing.
 - **`generate.sh`** orchestrates the above and drops each asset into the correct
   `docs/<section>/_assets/` directory.
 

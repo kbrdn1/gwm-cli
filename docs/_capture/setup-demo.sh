@@ -118,6 +118,58 @@ git add Cargo.deps
 # docs/#71 → clean, no local commits (fresh branch)
 cd "$(wt docs-71-openapi-examples)" >/dev/null
 
+# ── fabricated agent sessions (issue #523) ────────────────────────────────
+# The repo's pitch is "shows which AI agent is working where", so the demo
+# fixture has to carry agent artefacts. `GWM_AGENTS_HOME` is gwm's own
+# artefact-root seam, so they live INSIDE $ROOT: the real ~/.claude and
+# ~/.codex are never written to, and the `rm -rf "$ROOT"` above cleans them.
+AGENTS_HOME="$ROOT/agents-home"
+export GWM_AGENTS_HOME="$AGENTS_HOME"
+CLAUDE_SID=2f8c1a94-7d0e-4b52-9c31-6ae08f5db417
+CODEX_SID=0199f2b6-4c7a-7331-8d15-2be9c04af8e1
+
+# Claude Code: one `.jsonl` per session under the slugged worktree path
+# (every non-alphanumeric byte becomes `-`); the first user message is the
+# session name gwm displays.
+claude_slug=$(printf '%s' "$(wt feat-42-payment-webhooks)" | sed 's/[^A-Za-z0-9]/-/g')
+mkdir -p "$AGENTS_HOME/.claude/projects/$claude_slug"
+printf '%s\n' '{"type":"user","message":{"content":"Add idempotency keys to the Stripe webhook handler"}}' \
+  > "$AGENTS_HOME/.claude/projects/$claude_slug/$CLAUDE_SID.jsonl"
+
+# Codex: a rollout under today's day-dir, worktree carried by the
+# `session_meta` first line; the thread name comes from session_index.jsonl.
+codex_day="$AGENTS_HOME/.codex/sessions/$(date -u +%Y/%m/%d)"
+mkdir -p "$codex_day"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' \
+  "$CODEX_SID" "$(wt fix-57-rate-limit-headers)" > "$codex_day/rollout-$CODEX_SID.jsonl"
+printf '{"id":"%s","thread_name":"Emit Retry-After on every 429"}\n' \
+  "$CODEX_SID" > "$AGENTS_HOME/.codex/session_index.jsonl"
+
+# Pin both. The table's AGENT column reads detection, the sidebar Agents
+# pane reads pins only, and the demo shows both, so both are needed.
+cd "$REPO"
+gwm agents attach feat-42 "$CLAUDE_SID" >/dev/null
+gwm agents attach fix-57 "$CODEX_SID" >/dev/null
+
+# ── more sessions, for the agent-surface captures (issue #524) ─────────────
+# The overlay and `gwm agents` are only worth a screenshot with more than one
+# session on one worktree and more than one worktree covered: an unpinned
+# session next to a pinned one (the overlay is where unpinned ones live), an
+# idle row next to an active one, and a third worktree in the CLI listing.
+UNPINNED_SID=019f6b95-c1e4-7a3d-9f02-4b18ac775e30   # claude → feat-42, idle, unpinned
+DOCS_SID=019f6a04-88b1-7e52-a3d9-16c40b9e2277       # claude → docs-71, idle
+printf '%s\n' '{"type":"user","message":{"content":"Verify the Stripe signature before the handler runs"}}' \
+  > "$AGENTS_HOME/.claude/projects/$claude_slug/$UNPINNED_SID.jsonl"
+docs_slug=$(printf '%s' "$(wt docs-71-openapi-examples)" | sed 's/[^A-Za-z0-9]/-/g')
+mkdir -p "$AGENTS_HOME/.claude/projects/$docs_slug"
+printf '%s\n' '{"type":"user","message":{"content":"Draft the OpenAPI examples for the payments endpoints"}}' \
+  > "$AGENTS_HOME/.claude/projects/$docs_slug/$DOCS_SID.jsonl"
+
+# Freshness is a function of mtime, so it decays: without this the fixture
+# reads all-idle a few minutes after setup. `refresh-agents.sh` is the single
+# place that owns the ages, and every agent tape re-runs it before capturing.
+bash "$(dirname "${BASH_SOURCE[0]}")/refresh-agents.sh"
+
 # ── untrusted fixture for the TOFU trust-ledger capture ────────────────────
 # A second repo we deliberately never add to the trust ledger, with a juicy
 # bootstrap surface so the first-run "Trust this .gwm.toml?" prompt has content.
