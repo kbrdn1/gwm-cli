@@ -10,19 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The TUI is compact by default** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)).
+  Panes and sidebar sections no longer draw box rules; each is delimited by a
+  filled one-line header instead, which buys back two rows and two columns per
+  section. The title keeps its bracketed keybinding and goes uppercase
+  (`[1] WORKTREES`, `ISSUE / PR [F]`), the counter moves to the right of that
+  same line rather than into a bottom rule, a muted rule marks the boundary
+  between the two panes, and the worktrees pane sizes itself to its row count
+  instead of reserving its share of the stacked split. Focus reads on the
+  header — the active pane takes the `focus` role and the `selection_bg` fill,
+  and the inactive pane's body is dimmed.
+
+  `[tui] layout = "bordered"` restores the previous lazygit-style boxes. That
+  mode is left untouched by the compact refinements (no dimming, no separator
+  rule) so it stays a faithful restore rather than a third look. Overlays and
+  modals keep their border under either value.
+
 ### Added
 
-- **Compact TUI layout** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)):
-  `[tui] compact = true` drops the box rules from the worktrees pane and the
-  sidebar sections and delimits each with a filled one-line header instead —
-  two rows and two columns back per section. The keybinding leads the header
-  (`1 WORKTREES`, `F ISSUE / PR`), the counter moves to the right of that same
-  line rather than into a bottom rule, and the worktrees pane sizes itself to
-  its row count instead of reserving its share of the stacked split. Focus
-  moves from the border colour to the header text. Off by default; overlays
-  and modals keep their frame. New `section_bg` theme role carries the header
-  fill — an indexed colour rather than a translucent white, so the mode stays
-  readable on a terminal without truecolor.
+- **`section_bg` theme role** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)):
+  the compact header fill. An indexed colour rather than a translucent white,
+  so the mode stays readable on a terminal without truecolor; each preset takes
+  the tone its own palette reserves for chrome bands, and keeps it distinct
+  from `selection_bg` — which is also what separates a focused header from an
+  unfocused one.
 
 ## Past releases
 

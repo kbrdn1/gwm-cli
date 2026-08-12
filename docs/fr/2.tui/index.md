@@ -32,10 +32,12 @@ La passe de polish v0.8.0 a resserré le cadre de la TUI. Toutes les couleurs su
 - **Header**, une seule ligne sans bordure : la version est une puce en vidéo inversée, le nom du dépôt est en gras, et le répertoire de travail est atténué et compressé avec un tilde. Le drapeau `picker` est sa propre puce en vidéo inversée. L'ordre d'abandon sous contrainte de largeur est chemin → nom du dépôt → puce de version (la version survit en dernier).
 - **Modals** : chaque surcouche partage un même cadre, avec une bordure arrondie, un titre en gras thématisé, les couleurs du thème, et une boîte dimensionnée à son contenu plutôt qu'à un pourcentage fixe de l'écran.
 
-### disposition compacte
+### layout
 
-`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) retire les filets du panneau des worktrees et des sections de la sidebar, et délimite chacun par un en-tête d'une ligne en aplat. Le titre garde son raccourci entre crochets et passe en majuscules, le compteur passe à droite de cette même ligne, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split. Le focus se lit sur l'en-tête : le panneau actif prend l'aplat `selection_bg`, les autres `section_bg`.
+`[tui] layout` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) choisit comment les panneaux et les sections de la sidebar sont encadrés. **`"compact"` est le défaut** : aucun filet, un en-tête d'une ligne en aplat par section. Le titre garde son raccourci entre crochets et passe en majuscules, le compteur se place à droite de cette même ligne, un filet `muted` marque la frontière entre les deux panneaux, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split. Le focus se lit sur l'en-tête : le panneau actif prend l'aplat `selection_bg`, et le corps de l'autre est atténué.
 
-![TUI gwm en mode compact : en-têtes de section en aplat, aucun filet](../../2.tui/_assets/compact.png)
+La capture en haut de cette page le montre, comme toutes les autres captures de cette documentation.
 
-Off par défaut — à comparer avec la capture bordée en haut de cette page. Les modales gardent leur cadre dans les deux cas. La configuration et le rôle de thème `section_bg` sont documentés sous [`.gwm.toml`](/fr/configuration/gwm-toml#disposition-compacte).
+`layout = "bordered"` restaure la disposition de gwm jusqu'à la 1.7, les boîtes façon lazygit :
+
+![TUI gwm en mode bordé : filets façon lazygit autour de chaque section](../../2.tui/_assets/bordered.png) Les modales gardent leur cadre dans les deux cas. La configuration et le rôle de thème `section_bg` sont documentés sous [`.gwm.toml`](/fr/configuration/gwm-toml#layout).

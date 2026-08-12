@@ -49,27 +49,28 @@ if [[ -f "$CAP/theme.tape" ]]; then
   git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
 fi
 
-# ── compact layout: inject `[tui] compact`, then capture (issue #545) ──────
-# Same injection dance as the theme gallery above, for the same reason: the
-# mode is a config key, so the only way to capture it is to write it into the
-# demo repo and hide the edit from git status while the shot is taken.
-if [[ -f "$CAP/compact.tape" ]]; then
-  echo "▸ compact layout"
+# ── bordered layout: inject the opt-out, then capture (issue #545) ─────────
+# Compact is the default, so every capture above already shows it. This one
+# documents the opt-out. Same injection dance as the theme gallery: the mode is
+# a config key, so the only way to capture it is to write it into the demo repo
+# and hide the edit from git status while the shot is taken.
+if [[ -f "$CAP/bordered.tape" ]]; then
+  echo "▸ bordered layout"
   cp "$DEMO/.gwm.toml" "$CAP/.tmp/gwm.toml.bak"
   git -C "$DEMO" update-index --assume-unchanged .gwm.toml
-  # Pin the preset too: this capture's subject is a background role, so it
-  # must not inherit whatever theme the capture machine has in its global
-  # config. The tape's terminal background is matched to this palette.
-  { cat "$CAP/.tmp/gwm.toml.bak"; printf '\n[tui]\ncompact = true\n\n[theme]\npreset = "claude-dark"\n'; } > "$DEMO/.gwm.toml"
-  # Capture the status rather than swallowing it: the restore below must
-  # run whatever happens (the demo repo would keep a `[tui] compact` block
-  # and an `assume-unchanged` flag otherwise), but a failed vhs still has
-  # to fail the script — `|| echo` would let it print "✓ captures
-  # regenerated" over a missing or stale PNG (Codex review, PR #546).
-  vhs "$CAP/compact.tape" >/dev/null 2>&1; rc=$?
+  # Pin the preset too: compact paints a background role, so the pair of
+  # captures must not inherit whatever theme the capture machine has in its
+  # global config. Both tapes' terminal background is matched to this palette.
+  { cat "$CAP/.tmp/gwm.toml.bak"; printf '\n[tui]\nlayout = "bordered"\n\n[theme]\npreset = "claude-dark"\n'; } > "$DEMO/.gwm.toml"
+  # Capture the status rather than swallowing it: the restore below must run
+  # whatever happens (the demo repo would keep a `[tui] layout` block and an
+  # `assume-unchanged` flag otherwise), but a failed vhs still has to fail the
+  # script — `|| echo` would let it print "✓ captures regenerated" over a
+  # missing or stale PNG (Codex review, PR #546).
+  vhs "$CAP/bordered.tape" >/dev/null 2>&1; rc=$?
   cp "$CAP/.tmp/gwm.toml.bak" "$DEMO/.gwm.toml"
   git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
-  [[ $rc -ne 0 ]] && { echo "  ✗ vhs failed on compact.tape"; exit $rc; }
+  [[ $rc -ne 0 ]] && { echo "  ✗ vhs failed on bordered.tape"; exit $rc; }
 fi
 
 # ── shrink PNGs for the repo (lossless) ────────────────────────────────────

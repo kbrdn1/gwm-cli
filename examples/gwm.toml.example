@@ -279,28 +279,33 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # sidebar_position    = "left"
 # sidebar_orientation = "side-by-side"
 
-# --- TUI compact layout (issue #545) -----------------------------------------
-# `compact` — drop the box rules around the worktrees pane and the sidebar
-# sections, and delimit each with a filled one-line header instead. Buys back
-# two rows and two columns per section: the title keeps its bracketed
-# keybinding and goes uppercase (`[1] WORKTREES`, `ISSUE / PR [F]`), the
-# counter moves to the right of that same line rather than into a bottom rule,
-# and the worktrees pane sizes itself to its row count instead of reserving its
-# full share of the stacked split.
+# --- TUI layout (issue #545) -------------------------------------------------
+# How panes and sidebar sections are framed:
+#   "compact"   (DEFAULT) no box rules; each section is delimited by a filled
+#               one-line header. Buys back two rows and two columns per
+#               section: the title keeps its bracketed keybinding and goes
+#               uppercase (`[1] WORKTREES`, `ISSUE / PR [F]`), the counter sits
+#               at the right of that same line instead of in a bottom rule, a
+#               muted rule marks the boundary between the two panes, and the
+#               worktrees pane sizes itself to its row count rather than
+#               reserving its full share of the stacked split.
+#   "bordered"  the lazygit-style boxes — gwm's layout up to 1.7. Left
+#               deliberately untouched by the compact refinements (no dimming,
+#               no separator rule) so it stays a faithful restore.
 #
-# Focus moves with it, where the border colour used to say it: the active
-# pane's header wears the `focus` role and the `selection_bg` fill, the others
-# `muted` over `section_bg`.
-#
-# Off by default — it changes what every screenshot in the docs looks like.
-# Overlays and modals keep their borders either way.
+# Focus reads on the header in compact mode, where the border colour used to
+# say it: the active pane's header wears the `focus` role and the
+# `selection_bg` fill, the others `muted` over `section_bg`, and the inactive
+# pane's body is dimmed.
 #
 # The header fill is the `section_bg` theme role (`gwm theme show` lists it
 # with the rest), an indexed colour rather than a translucent white so it
 # survives a terminal without truecolor.
 #
+# Overlays and modals keep their border under either value.
+#
 # [tui]
-# compact = true
+# layout = "bordered"
 
 # --- TUI clipboard (issue #367) ----------------------------------------------
 # How yanked text (path / branch / worktree name / command logs) reaches the

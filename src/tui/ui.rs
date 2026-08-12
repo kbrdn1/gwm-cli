@@ -322,7 +322,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
   // header — so nothing says where one focusable pane ends and the other
   // begins. The bordered layout does not need it: its box rules already
   // do. Zero-width in the bordered mode so the split is unchanged there.
-  let separator = if app.config.tui.compact { 1 } else { 0 };
+  let separator = if app.config.tui.layout.is_compact() { 1 } else { 0 };
 
   match layout {
     Resolved::Hidden => unreachable!("Hidden returns None from split_percentages, handled above"),
@@ -362,7 +362,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       // default flex, so the rows the pane gave back would reach nobody
       // (Codex review, PR #546). Pinned by
       // `compact_mode_lets_the_sidebar_absorb_the_whole_split`.
-      let (table_constraint, sidebar_constraint) = if app.config.tui.compact {
+      let (table_constraint, sidebar_constraint) = if app.config.tui.layout.is_compact() {
         let quota = area.height.saturating_mul(table_share) / 100;
         let rows = app.filtered_indices().len() as u16;
         let table = super::state::sidebar::stacked_table_height(quota, rows, Chrome::COMPACT_ROWS);
@@ -469,6 +469,8 @@ pub struct Chrome {
   /// differ, so the two header states are distinct by construction on
   /// every preset — no third background role to keep in tune.
   pub fill: Color,
+  /// `true` when this pane holds focus. Drives [`Self::body_style`].
+  pub focused: bool,
 }
 
 impl Chrome {
@@ -485,6 +487,7 @@ impl Chrome {
       compact: false,
       accent,
       fill: Color::Reset,
+      focused: true,
     }
   }
 
@@ -493,6 +496,27 @@ impl Chrome {
       compact,
       accent: panel_border_color(focused, theme),
       fill: if focused { theme.selection_bg } else { theme.section_bg },
+      focused,
+    }
+  }
+
+  /// Base style for a pane's *content* rows.
+  ///
+  /// Compact dims the inactive pane (validation feedback on PR #546):
+  /// with no border to grey out, two panes of equally bright content
+  /// read as equally live. `DIM` rather than repainting in `muted`
+  /// because the body's colours are semantic — a dirty branch, a staged
+  /// file — and flattening them to grey would cost more information than
+  /// the focus signal is worth. Terminals that ignore `DIM` simply keep
+  /// the pre-#545 look, where the header still carries the signal.
+  ///
+  /// `Bordered` is left alone on purpose: it exists to reproduce gwm's
+  /// layout up to 1.7, and its rules already say which pane is active.
+  pub fn body_style(self) -> Style {
+    if self.compact && !self.focused {
+      Style::default().add_modifier(Modifier::DIM)
+    } else {
+      Style::default()
     }
   }
 
@@ -875,7 +899,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   widths.push(Constraint::Fill(1));
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
-  let chrome = Chrome::resolve(app.config.tui.compact, list_has_focus, &app.theme);
+  let chrome = Chrome::resolve(app.config.tui.layout.is_compact(), list_has_focus, &app.theme);
 
   let title = worktrees_pane_title(
     app.filter.query(),
@@ -895,6 +919,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let mut table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
+    .style(chrome.body_style())
     .row_highlight_style(Style::default().bg(theme.selection_bg).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
@@ -936,7 +961,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
-  let chrome = Chrome::resolve(app.config.tui.compact, app.sidebar.focused, &app.theme);
+  let chrome = Chrome::resolve(app.config.tui.layout.is_compact(), app.sidebar.focused, &app.theme);
   // `Theme` is `Copy`; snapshot it so the cached section builder can read
   // roles while `app.sidebar.cache` is mutably borrowed below.
   let theme = app.theme;
@@ -1334,7 +1359,10 @@ fn render_section(
       height: area.height.saturating_sub(1),
       ..area
     };
-    f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), body_area);
+    f.render_widget(
+      Paragraph::new(padded).style(chrome.body_style()).scroll((scroll, 0)),
+      body_area,
+    );
     return;
   }
   let mut block = Block::default()

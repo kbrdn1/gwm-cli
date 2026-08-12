@@ -32,10 +32,12 @@ The v0.8.0 polish pass tightened the TUI's frame. All colours follow the resolve
 - **Header**, a single borderless row: the version is a reverse-video chip, the repo name is bold, and the working directory is dimmed and tilde-compressed. The `picker` flag is its own reverse-video chip. Drop order under width pressure is path → repo name → version chip (the version survives last).
 - **Modals** all share one frame: a rounded border with a bold themed title, theme colours, and a box sized to its content rather than a fixed percentage of the screen.
 
-### compact layout
+### layout
 
-`[tui] compact = true` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) drops the box rules from the worktrees pane and the sidebar sections and delimits each with a filled one-line header instead. The title keeps its bracketed keybinding and goes uppercase, the counter moves to the right of that same line, and the worktrees pane sizes itself to its row count rather than reserving its share of the split. Focus reads on the header: the active pane takes the `selection_bg` fill, the others `section_bg`.
+`[tui] layout` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) chooses how panes and sidebar sections are framed. **`"compact"` is the default**: no box rules, one filled header line per section. The title keeps its bracketed keybinding and goes uppercase, the counter sits at the right of that same line, a `muted` rule marks the boundary between the two panes, and the worktrees pane sizes itself to its row count rather than reserving its share of the split. Focus reads on the header — the active pane takes the `selection_bg` fill while the other's body is dimmed.
 
-![gwm TUI in compact mode: filled section headers, no box rules](./_assets/compact.png)
+The capture at the top of this page shows it, as does every other capture in these docs.
 
-Off by default — compare with the bordered capture at the top of this page. Modals keep their frame either way. Configuration and the `section_bg` theme role are documented under [`.gwm.toml`](/configuration/gwm-toml#compact-layout).
+`layout = "bordered"` restores gwm's layout up to 1.7, the lazygit-style boxes:
+
+![gwm TUI in bordered mode: lazygit-style box rules around every section](./_assets/bordered.png) Modals keep their frame under either value. Configuration and the `section_bg` theme role are documented under [`.gwm.toml`](/configuration/gwm-toml#layout).

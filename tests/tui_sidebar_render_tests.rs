@@ -10,6 +10,7 @@
 //! known commit subject — content + order, not a brittle full-ANSI
 //! snapshot.
 
+use gwm::config::TuiLayout;
 use gwm::tui::{build_sidebar_payload, draw, App};
 use ratatui::{backend::TestBackend, Terminal};
 use std::path::Path;
@@ -190,24 +191,44 @@ fn working_tree_section_renders_colored_status_counts_footer() {
   for i in 0..11 {
     std::fs::write(dir.path().join(format!("dirty-{i}.txt")), "dirty").unwrap();
   }
-  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
-  let backend = TestBackend::new(120, 40);
-  let mut terminal = Terminal::new(backend).unwrap();
-  warm_sidebar(&mut app);
+  // Checked in both layouts (issue #545): compact moves this footer out
+  // of the bottom rule and onto the right of the header line, so the
+  // counts have to survive the move — including their per-category
+  // colours, which the header fill must not flatten.
+  for (layout, title) in [
+    (TuiLayout::Bordered, "Working Tree"),
+    (TuiLayout::Compact, "WORKING TREE"),
+  ] {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.layout = layout;
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    warm_sidebar(&mut app);
 
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
 
-  let text = buffer_text(&terminal);
-  assert!(
-    text.contains("Working Tree"),
-    "sidebar must render the Working Tree pane: {text}"
-  );
-  assert!(
-    text.contains(gwm::tui::WT_CREATED_ICON),
-    "footer must render the created (diff-added) nerdfont glyph: {text}"
-  );
-  assert!(text.contains("11"), "footer must render the created-file count: {text}");
+    let text = buffer_text(&terminal);
+    assert!(
+      text.contains(title),
+      "{layout:?}: sidebar must render the Working Tree pane: {text}"
+    );
+    assert!(
+      text.contains(gwm::tui::WT_CREATED_ICON),
+      "{layout:?}: footer must render the created (diff-added) nerdfont glyph: {text}"
+    );
+    assert!(
+      text.contains("11"),
+      "{layout:?}: footer must render the created-file count: {text}"
+    );
+    // The count keeps the `untracked` role rather than inheriting the
+    // header's accent — the fill carries focus, not category.
+    assert_eq!(
+      fg_of(&terminal, gwm::tui::WT_CREATED_ICON),
+      Some(gwm::tui::theme::Theme::default().untracked),
+      "{layout:?}: the created glyph keeps its category colour"
+    );
+  }
 }
 
 #[test]
@@ -357,7 +378,11 @@ fn box_corner_count(terminal: &Terminal<TestBackend>) -> usize {
 /// the areas the solver granted), exactly like the Diff test above.
 fn draw_list_view(dir: &Path, compact: bool) -> Terminal<TestBackend> {
   let mut app = App::new_at_layered(Some(dir), None).unwrap();
-  app.config.tui.compact = compact;
+  app.config.tui.layout = if compact {
+    TuiLayout::Compact
+  } else {
+    TuiLayout::Bordered
+  };
   let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
   warm_sidebar(&mut app);
   terminal.draw(|f| draw(f, &mut app)).unwrap();
@@ -464,7 +489,7 @@ fn compact_mode_scrolls_recent_commits_to_the_end() {
   // the pure solver (`section_heights_*` in tui_app_tests).
   let dir = repo_with_commits(40);
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
-  app.config.tui.compact = true;
+  app.config.tui.layout = TuiLayout::Compact;
   let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
   warm_sidebar(&mut app);
   terminal.draw(|f| draw(f, &mut app)).unwrap();
@@ -517,7 +542,7 @@ fn compact_mode_gives_a_short_lists_blank_rows_to_the_sidebar() {
     "this test measures the stacked layout"
   );
   assert_eq!(app.worktrees.len(), 1, "fixture is a single-worktree repo");
-  app.config.tui.compact = true;
+  app.config.tui.layout = TuiLayout::Compact;
 
   let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
   warm_sidebar(&mut app);
@@ -561,7 +586,7 @@ fn compact_headers_carry_the_focus_signal_the_borders_used_to() {
   let theme = gwm::tui::theme::Theme::default();
   let headers_when = |sidebar_focused: bool| {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
-    app.config.tui.compact = true;
+    app.config.tui.layout = TuiLayout::Compact;
     app.sidebar.focused = sidebar_focused;
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     warm_sidebar(&mut app);
@@ -596,7 +621,11 @@ fn compact_mode_lets_the_sidebar_absorb_the_whole_split() {
   let dir = repo_with_commits(40);
   let painted_last_body_row = |compact: bool| {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
-    app.config.tui.compact = compact;
+    app.config.tui.layout = if compact {
+      TuiLayout::Compact
+    } else {
+      TuiLayout::Bordered
+    };
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     warm_sidebar(&mut app);
     terminal.draw(|f| draw(f, &mut app)).unwrap();
@@ -646,7 +675,7 @@ fn compact_header_fill_follows_the_focus_too() {
   let theme = gwm::tui::theme::Theme::default();
   let fills_when = |sidebar_focused: bool| {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
-    app.config.tui.compact = true;
+    app.config.tui.layout = TuiLayout::Compact;
     app.sidebar.focused = sidebar_focused;
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     warm_sidebar(&mut app);
@@ -665,4 +694,130 @@ fn compact_header_fill_follows_the_focus_too() {
   let (worktrees, status) = fills_when(false);
   assert_eq!(worktrees, theme.selection_bg, "the fill follows focus to the list");
   assert_eq!(status, theme.section_bg, "and leaves the sidebar quiet");
+}
+
+#[test]
+fn compact_side_by_side_puts_the_sidebar_on_the_asked_side() {
+  // Validation feedback on PR #546: `[tui] sidebar_position` stopped
+  // working in compact mode. The separator turned the two-constraint
+  // split into three, and the areas are picked by index — an off-by-one
+  // there silently swaps the panes or hands one a zero-width rect.
+  //
+  // No render test covered the side-by-side layout at all before this,
+  // which is exactly why the regression shipped.
+  use gwm::config::SidebarPosition;
+  use gwm::tui::state::sidebar::SidebarOrientation;
+
+  let dir = repo_with_commits(4);
+  let render = |compact: bool, position: SidebarPosition| {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.layout = if compact {
+      TuiLayout::Compact
+    } else {
+      TuiLayout::Bordered
+    };
+    app.sidebar.orientation = SidebarOrientation::SideBySide;
+    app.sidebar.position = position;
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal
+  };
+
+  // Column at which the Status header starts tells which side the sidebar
+  // landed on.
+  let status_col = |terminal: &Terminal<TestBackend>, needle: &str| -> u16 {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    for y in area.y..area.y + area.height {
+      let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+      if let Some(i) = line.find(needle) {
+        return line[..i].chars().count() as u16;
+      }
+    }
+    panic!("{needle:?} never rendered");
+  };
+
+  for compact in [false, true] {
+    let needle = if compact { "[2] STATUS" } else { "[2] Status" };
+    let right = status_col(&render(compact, SidebarPosition::Right), needle);
+    let left = status_col(&render(compact, SidebarPosition::Left), needle);
+    assert!(
+      right > 60,
+      "compact={compact}: sidebar on the right must start past the middle, got column {right}"
+    );
+    assert!(
+      left < 10,
+      "compact={compact}: sidebar on the left must start near column 0, got column {left}"
+    );
+  }
+}
+
+#[test]
+fn compact_dims_the_body_of_the_pane_without_focus() {
+  // Validation feedback on PR #546: with no border to grey out, two
+  // panes of equally bright content read as equally live. The inactive
+  // pane's body is dimmed — `DIM`, not repainted in `muted`, because the
+  // body's colours are semantic (a dirty branch, a staged file) and
+  // flattening them would cost more than the focus signal is worth.
+  let dir = repo_with_commits(4);
+  let dimmed_when = |sidebar_focused: bool| {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.layout = TuiLayout::Compact;
+    app.sidebar.focused = sidebar_focused;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    // A body row of each pane: the `Branch` line belongs to the sidebar,
+    // the `BRANCH` column header to the list.
+    let dim_at = |needle: &str| -> bool {
+      for y in area.y..area.y + area.height {
+        let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+        if let Some(i) = line.find(needle) {
+          let col = line[..i].chars().count() as u16;
+          return buffer[(area.x + col, y)]
+            .modifier
+            .contains(ratatui::style::Modifier::DIM);
+        }
+      }
+      panic!("{needle:?} never rendered");
+    };
+    (dim_at("BRANCH"), dim_at("Branch  "))
+  };
+
+  let (list_dim, sidebar_dim) = dimmed_when(true);
+  assert!(list_dim, "the unfocused list body must be dimmed");
+  assert!(!sidebar_dim, "the focused sidebar body must not be");
+
+  let (list_dim, sidebar_dim) = dimmed_when(false);
+  assert!(!list_dim, "focus moved to the list, its body is bright again");
+  assert!(sidebar_dim, "and the sidebar body is dimmed");
+}
+
+#[test]
+fn bordered_layout_never_dims_a_body() {
+  // `bordered` exists to reproduce gwm's layout up to 1.7. Its rules
+  // already say which pane is active, so nothing there changes — a
+  // regression that dimmed it would silently alter the legacy look.
+  let dir = repo_with_commits(4);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.config.tui.layout = TuiLayout::Bordered;
+  app.sidebar.focused = true;
+  let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let buffer = terminal.backend().buffer();
+  assert!(
+    !buffer
+      .content()
+      .iter()
+      .any(|c| c.modifier.contains(ratatui::style::Modifier::DIM)),
+    "the bordered layout must not dim anything"
+  );
 }
