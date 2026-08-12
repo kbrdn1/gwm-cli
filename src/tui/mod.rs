@@ -184,8 +184,10 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
 /// diff against stale content. `Terminal::resize` does precisely that pair for a
 /// `Fullscreen` viewport (`clear_region(All)` + back-buffer reset) and never
 /// touches the cursor, and gwm only ever builds a fullscreen terminal
-/// (`enter_terminal` above). `backend.size()` is an ioctl, not a round-trip, so
-/// nothing left under the `?` can time out.
+/// (`enter_terminal` above). Nothing left under the `?` can time out either:
+/// `backend.size()` is a `TIOCGWINSZ` ioctl (falling back to a `tput` spawn),
+/// never a request the terminal has to answer — and `Terminal::draw` already
+/// calls it on every frame through `autoresize`.
 pub fn clear_without_cursor_query<B: ratatui::backend::Backend>(
   terminal: &mut Terminal<B>,
 ) -> std::result::Result<(), B::Error> {
