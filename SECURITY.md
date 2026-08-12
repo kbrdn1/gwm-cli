@@ -7,8 +7,8 @@ on the latest minor line; older lines are not backported.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.6.x   | :white_check_mark: |
-| < 1.6   | :x:                |
+| 1.7.x   | :white_check_mark: |
+| < 1.7   | :x:                |
 
 Every version up to and including 1.5.0 carries
 [GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm)
@@ -39,7 +39,7 @@ This is a solo-maintained project, so responses are best-effort:
 - **Acknowledgement** within 7 days of your report.
 - **Assessment** of severity and affected versions, shared with you as it
   progresses.
-- **Fix and disclosure** coordinated with you — a patched release and, where
+- **Fix and disclosure** coordinated with you: a patched release and, where
   warranted, a [RustSec](https://rustsec.org/) advisory. Please give the
   maintainer a reasonable window to ship a fix before any public disclosure.
 
@@ -48,7 +48,7 @@ This is a solo-maintained project, so responses are best-effort:
 `gwm` is a local-first CLI/TUI for managing git worktrees. The most relevant
 threat surfaces are:
 
-- The bootstrap step (file copies, command hooks, `.env` guards) — see the
+- The bootstrap step (file copies, command hooks, `.env` guards): see the
   trust gate and `gwm doctor`.
 - The `gwm daemon` JSON-RPC unix socket and its consumers.
 - `gwm review`, which fetches untrusted PR refs into a worktree (bootstrap is
