@@ -61,9 +61,15 @@ if [[ -f "$CAP/compact.tape" ]]; then
   # must not inherit whatever theme the capture machine has in its global
   # config. The tape's terminal background is matched to this palette.
   { cat "$CAP/.tmp/gwm.toml.bak"; printf '\n[tui]\ncompact = true\n\n[theme]\npreset = "claude-dark"\n'; } > "$DEMO/.gwm.toml"
-  vhs "$CAP/compact.tape" >/dev/null 2>&1 || echo "  ✗ vhs failed on compact.tape"
+  # Capture the status rather than swallowing it: the restore below must
+  # run whatever happens (the demo repo would keep a `[tui] compact` block
+  # and an `assume-unchanged` flag otherwise), but a failed vhs still has
+  # to fail the script — `|| echo` would let it print "✓ captures
+  # regenerated" over a missing or stale PNG (Codex review, PR #546).
+  vhs "$CAP/compact.tape" >/dev/null 2>&1; rc=$?
   cp "$CAP/.tmp/gwm.toml.bak" "$DEMO/.gwm.toml"
   git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
+  [[ $rc -ne 0 ]] && { echo "  ✗ vhs failed on compact.tape"; exit $rc; }
 fi
 
 # ── shrink PNGs for the repo (lossless) ────────────────────────────────────
