@@ -20,8 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same line rather than into a bottom rule, a muted rule marks the boundary
   between the two panes, and the worktrees pane sizes itself to its row count
   instead of reserving its share of the stacked split. Focus reads on the
-  header — the active pane takes the `focus` role and the `selection_bg` fill,
-  and the inactive pane's body is dimmed.
+  header — the active pane takes the `focus` role and the `selection_bg` fill.
+  Modal titles moved into the top rule as part of the same pass
+  ([#549](https://github.com/kbrdn1/gwm-cli/issues/549)), two rows back per
+  overlay.
 
   `[tui] layout = "bordered"` restores the previous lazygit-style boxes. That
   mode is left untouched by the compact refinements (no dimming, no separator
@@ -30,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[tui] dim_unfocused`** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)):
+  dims the body of whichever pane does not hold focus, in either layout. Off by
+  default — it trades contrast for a stronger focus cue, and the inactive
+  pane's content is still readable information. Uses the terminal's `DIM`
+  attribute, so semantic colours survive.
 - **`section_bg` theme role** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)):
   the compact header fill. An indexed colour rather than a translucent white,
   so the mode stays readable on a terminal without truecolor; each preset takes

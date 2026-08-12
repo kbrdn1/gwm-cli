@@ -34,7 +34,7 @@ La passe de polish v0.8.0 a resserré le cadre de la TUI. Toutes les couleurs su
 
 ### layout
 
-`[tui] layout` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) choisit comment les panneaux et les sections de la sidebar sont encadrés. **`"compact"` est le défaut** : aucun filet, un en-tête d'une ligne en aplat par section. Le titre garde son raccourci entre crochets et passe en majuscules, le compteur se place à droite de cette même ligne, un filet `muted` marque la frontière entre les deux panneaux, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split. Le focus se lit sur l'en-tête : le panneau actif prend l'aplat `selection_bg`, et le corps de l'autre est atténué.
+`[tui] layout` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) choisit comment les panneaux et les sections de la sidebar sont encadrés. **`"compact"` est le défaut** : aucun filet, un en-tête d'une ligne en aplat par section. Le titre garde son raccourci entre crochets et passe en majuscules, le compteur se place à droite de cette même ligne, un filet `muted` marque la frontière entre les deux panneaux, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split. Le focus se lit sur l'en-tête : le panneau actif prend l'aplat `selection_bg`. `[tui] dim_unfocused` atténue en plus le corps du panneau inactif, dans les deux dispositions — off par défaut.
 
 La capture en haut de cette page le montre, comme toutes les autres captures de cette documentation.
 

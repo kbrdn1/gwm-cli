@@ -847,6 +847,20 @@ pub struct TuiConfig {
   /// floating over content is exactly where a rule earns its keep.
   #[serde(default)]
   pub layout: TuiLayout,
+
+  /// Dim the body of whichever pane does *not* hold focus (issue #545).
+  ///
+  /// Default `false`. It is a real trade-off rather than a strict
+  /// improvement: the inactive pane's content is still information you
+  /// may be reading, and dimming it costs contrast on a surface that is
+  /// often a screenshot. Users who navigate between the two panes
+  /// constantly get a stronger "where am I" signal by turning it on.
+  ///
+  /// Applies to both layouts. `compact` already moves the focus signal
+  /// onto the section headers; this stacks on top of it rather than
+  /// replacing it.
+  #[serde(default)]
+  pub dim_unfocused: bool,
 }
 
 /// How the TUI frames its panes and sidebar sections (issue #545).
@@ -903,6 +917,7 @@ impl Default for TuiConfig {
       macro1: None,
       macro2: None,
       layout: TuiLayout::Compact,
+      dim_unfocused: false,
     }
   }
 }

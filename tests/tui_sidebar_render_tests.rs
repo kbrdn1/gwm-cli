@@ -755,16 +755,18 @@ fn compact_side_by_side_puts_the_sidebar_on_the_asked_side() {
 }
 
 #[test]
-fn compact_dims_the_body_of_the_pane_without_focus() {
-  // Validation feedback on PR #546: with no border to grey out, two
-  // panes of equally bright content read as equally live. The inactive
-  // pane's body is dimmed — `DIM`, not repainted in `muted`, because the
-  // body's colours are semantic (a dirty branch, a staged file) and
-  // flattening them would cost more than the focus signal is worth.
+fn dim_unfocused_dims_the_body_of_the_pane_without_focus() {
+  // Validation feedback on PR #546, twice over: first that an inactive
+  // pane of equally bright content reads as equally live, then that the
+  // dimming is a matter of taste and must be opt-in. `DIM`, not a repaint
+  // in `muted`, because the body's colours are semantic (a dirty branch,
+  // a staged file) and flattening them would cost more than the focus
+  // signal is worth.
   let dir = repo_with_commits(4);
   let dimmed_when = |sidebar_focused: bool| {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
     app.config.tui.layout = TuiLayout::Compact;
+    app.config.tui.dim_unfocused = true;
     app.sidebar.focused = sidebar_focused;
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     warm_sidebar(&mut app);
@@ -799,13 +801,40 @@ fn compact_dims_the_body_of_the_pane_without_focus() {
 }
 
 #[test]
-fn bordered_layout_never_dims_a_body() {
-  // `bordered` exists to reproduce gwm's layout up to 1.7. Its rules
-  // already say which pane is active, so nothing there changes — a
-  // regression that dimmed it would silently alter the legacy look.
+fn dim_unfocused_is_off_by_default_in_both_layouts() {
+  // The dimming is a trade-off, not a strict improvement: the inactive
+  // pane's content is still readable information, and dimming costs
+  // contrast on a surface that is often a screenshot. So it ships off,
+  // and a config that never mentions it renders exactly as it did.
+  let dir = repo_with_commits(4);
+  for layout in [TuiLayout::Compact, TuiLayout::Bordered] {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.layout = layout;
+    app.sidebar.focused = true;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    assert!(
+      !buffer
+        .content()
+        .iter()
+        .any(|c| c.modifier.contains(ratatui::style::Modifier::DIM)),
+      "{layout:?}: nothing may be dimmed with dim_unfocused off"
+    );
+  }
+}
+
+#[test]
+fn dim_unfocused_applies_to_the_bordered_layout_too() {
+  // The signal is about focus, not about how a pane is framed — a
+  // bordered user who turns the option on gets the same behaviour.
   let dir = repo_with_commits(4);
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
   app.config.tui.layout = TuiLayout::Bordered;
+  app.config.tui.dim_unfocused = true;
   app.sidebar.focused = true;
   let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
   warm_sidebar(&mut app);
@@ -814,10 +843,10 @@ fn bordered_layout_never_dims_a_body() {
 
   let buffer = terminal.backend().buffer();
   assert!(
-    !buffer
+    buffer
       .content()
       .iter()
       .any(|c| c.modifier.contains(ratatui::style::Modifier::DIM)),
-    "the bordered layout must not dim anything"
+    "the unfocused list body must be dimmed in the bordered layout too"
   );
 }

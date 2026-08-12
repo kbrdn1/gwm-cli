@@ -471,6 +471,8 @@ pub struct Chrome {
   pub fill: Color,
   /// `true` when this pane holds focus. Drives [`Self::body_style`].
   pub focused: bool,
+  /// `[tui] dim_unfocused` — whether the inactive pane's body is dimmed.
+  pub dim_unfocused: bool,
 }
 
 impl Chrome {
@@ -488,32 +490,32 @@ impl Chrome {
       accent,
       fill: Color::Reset,
       focused: true,
+      dim_unfocused: false,
     }
   }
 
-  pub fn resolve(compact: bool, focused: bool, theme: &super::theme::Theme) -> Self {
+  pub fn resolve(compact: bool, focused: bool, dim_unfocused: bool, theme: &super::theme::Theme) -> Self {
     Self {
       compact,
       accent: panel_border_color(focused, theme),
       fill: if focused { theme.selection_bg } else { theme.section_bg },
       focused,
+      dim_unfocused,
     }
   }
 
   /// Base style for a pane's *content* rows.
   ///
-  /// Compact dims the inactive pane (validation feedback on PR #546):
-  /// with no border to grey out, two panes of equally bright content
-  /// read as equally live. `DIM` rather than repainting in `muted`
-  /// because the body's colours are semantic — a dirty branch, a staged
-  /// file — and flattening them to grey would cost more information than
-  /// the focus signal is worth. Terminals that ignore `DIM` simply keep
-  /// the pre-#545 look, where the header still carries the signal.
+  /// Off unless `[tui] dim_unfocused` is set, and then in **both**
+  /// layouts: the signal is about focus, not about how a pane is framed.
   ///
-  /// `Bordered` is left alone on purpose: it exists to reproduce gwm's
-  /// layout up to 1.7, and its rules already say which pane is active.
+  /// `DIM` rather than repainting in `muted` because the body's colours
+  /// are semantic — a dirty branch, a staged file — and flattening them
+  /// to grey would cost more information than the focus signal is worth.
+  /// Terminals that ignore `DIM` simply keep the undimmed look, where
+  /// the header (compact) or the border (bordered) still carries it.
   pub fn body_style(self) -> Style {
-    if self.compact && !self.focused {
+    if self.dim_unfocused && !self.focused {
       Style::default().add_modifier(Modifier::DIM)
     } else {
       Style::default()
@@ -899,7 +901,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   widths.push(Constraint::Fill(1));
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
-  let chrome = Chrome::resolve(app.config.tui.layout.is_compact(), list_has_focus, &app.theme);
+  let chrome = Chrome::resolve(
+    app.config.tui.layout.is_compact(),
+    list_has_focus,
+    app.config.tui.dim_unfocused,
+    &app.theme,
+  );
 
   let title = worktrees_pane_title(
     app.filter.query(),
@@ -961,7 +968,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
-  let chrome = Chrome::resolve(app.config.tui.layout.is_compact(), app.sidebar.focused, &app.theme);
+  let chrome = Chrome::resolve(
+    app.config.tui.layout.is_compact(),
+    app.sidebar.focused,
+    app.config.tui.dim_unfocused,
+    &app.theme,
+  );
   // `Theme` is `Copy`; snapshot it so the cached section builder can read
   // roles while `app.sidebar.cache` is mutably borrowed below.
   let theme = app.theme;
@@ -3806,7 +3818,6 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
   let accent = app.theme.accent;
 
-  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
   // Subtitle reads in a distinct accent hue (the theme's branch colour) +
   // italic, so the context name is clearly a different colour from both the
   // bold title and the muted key labels (issue #217 follow-up).
@@ -3830,10 +3841,15 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // modal. Title/subtitle are the leading rows; everything else is body.
   let mut header_lines: Vec<Line<'static>> = Vec::new();
   let mut body_lines: Vec<Line<'static>> = Vec::new();
+  // `HelpRow::Title` no longer renders as a row: since #549 it rides the
+  // modal's top rule, so it is captured here rather than pushed. The
+  // subtitle stays a header row — it is live context (the active view),
+  // not the modal's name.
+  let mut modal_title = String::new();
   for row in rows {
     match row {
-      // Title + subtitle are centred (issue #217) and pinned in the header.
-      HelpRow::Title(t) => header_lines.push(Line::from(Span::styled(t, heading_style)).centered()),
+      HelpRow::Title(t) => modal_title = t,
+      // The subtitle is centred (issue #217) and pinned in the header.
       HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
       // Section headers stay left-aligned so they anchor their groups
       // lazygit-style.
@@ -3848,7 +3864,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     }
   }
 
-  let block = overlay_block(accent);
+  let block = overlay_block_titled(&modal_title, accent);
   let inner_area = block.inner(area);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
@@ -3898,22 +3914,17 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let err_color = app.theme.prunable;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
-  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
 
-  // Fixed header (title) / scrollable body / fixed footer hint (issue #279) —
+  // Scrollable body / fixed footer hint (issue #279) —
   // the title and the close hint stay pinned while the transcript scrolls.
-  let block = overlay_block(accent);
+  let block = overlay_block_titled("Command Logs", accent);
   let inner = block.inner(area);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
 
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-
-  f.render_widget(
-    Paragraph::new(Line::from(Span::styled("Command Logs", heading_style)).centered()),
-    header_area,
-  );
+  // The title rides the top rule since #549, so the fixed header row it
+  // used to occupy is gone and the transcript starts one row higher.
+  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
   // A full-width `-` rule, padded by a blank line above and below, separates
   // adjacent log entries (issue #279 follow-up).
@@ -4204,7 +4215,6 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
-  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
   // Subtitle reads in the branch hue + italic, mirroring the Keybindings
   // overlay's context subtitle.
   let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
@@ -4216,7 +4226,9 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // Header: title + the active edit layer as a subtitle + a blank spacer +
   // the tab strip (all fixed). The layer-switch key lives in the footer
   // hints, so the subtitle stays a plain context label.
-  let title = Line::from(Span::styled("Settings", heading_style)).centered();
+  // The "Settings" title rides the top rule since #549; the layer subtitle
+  // stays in the header, where it is a live context label rather than the
+  // panel's name.
   let subtitle = Line::from(Span::styled(app.config_panel.layer.label(), subtitle_style)).centered();
   let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
   for (i, t) in SettingsTab::ALL.iter().enumerate() {
@@ -4226,7 +4238,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     let style = if *t == tab { chip_style(accent) } else { muted_style };
     tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
   }
-  let header_lines = vec![title, subtitle, Line::from(String::new()), Line::from(tab_spans)];
+  let header_lines = vec![subtitle, Line::from(String::new()), Line::from(tab_spans)];
 
   // Body depends on the active tab. Every tab with a selection reports the line
   // index of the selected row so the renderer can scroll it into view.
@@ -4272,7 +4284,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
-  let block = overlay_block(accent);
+  let block = overlay_block_titled("Settings", accent);
   let inner = block.inner(area);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
@@ -5172,12 +5184,12 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.note_editor.as_ref() {
-    Some(editor) => format!(" note · {} ", crate::naming::sanitise_for_terminal(&editor.branch)),
-    None => " note ".to_string(),
+    Some(editor) => format!("note · {}", crate::naming::sanitise_for_terminal(&editor.branch)),
+    None => "note".to_string(),
   };
-  let block = overlay_block(app.theme.accent)
-    .title(title)
-    .title_alignment(ratatui::layout::Alignment::Center);
+  // Already rode the top rule before #549; routed through the shared
+  // helper so it picks up the same bold accent as every other modal.
+  let block = overlay_block_titled(&title, app.theme.accent);
   let inner = block.inner(area);
   f.render_widget(block, area);
 
@@ -5223,17 +5235,17 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.pty_overlay.as_ref().map(|p| (p.kind, p.finished)) {
-    Some((PtyKind::LazyGit, _)) => " LazyGit ",
-    Some((PtyKind::Terminal, _)) => " Terminal ",
-    Some((PtyKind::Review, _)) => " Review ",
-    Some((PtyKind::Exec, false)) => " Exec ",
+    Some((PtyKind::LazyGit, _)) => "LazyGit",
+    Some((PtyKind::Terminal, _)) => "Terminal",
+    Some((PtyKind::Review, _)) => "Review",
+    Some((PtyKind::Exec, false)) => "Exec",
     // #325: once the one-shot command exits, the title invites dismissal.
-    Some((PtyKind::Exec, true)) => " Exec · done — press any key ",
-    None => " Overlay ",
+    Some((PtyKind::Exec, true)) => "Exec · done — press any key",
+    None => "Overlay",
   };
-  let block = overlay_block(app.theme.accent)
-    .title(title)
-    .title_alignment(ratatui::layout::Alignment::Center);
+  // Already rode the top rule before #549; routed through the shared
+  // helper so it picks up the same bold accent as every other modal.
+  let block = overlay_block_titled(title, app.theme.accent);
   let inner = block.inner(area);
   f.render_widget(block, area);
 
@@ -6128,20 +6140,19 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   f.render_widget(Clear, area);
 
   let accent = app.theme.accent;
-  let outer = overlay_block(accent);
+  let outer = overlay_block_titled("Command Palette", accent);
   let inner = outer.inner(area);
   f.render_widget(outer, area);
 
-  // Input-first layout (issue #262): a detached centred title, a blank
-  // spacer, the `:` input field (background-filled, mirroring the New
-  // Worktree modal's `field_input_line`), a spacer, the matches list (flex),
-  // a hint gap, and the statusbar-style hint. The input moved to the top so
-  // the modal reads input-then-results like the create form.
+  // Input-first layout (issue #262): the `:` input field
+  // (background-filled, mirroring the New Worktree modal's
+  // `field_input_line`), a spacer, the matches list (flex), a hint gap, and
+  // the statusbar-style hint. The input is at the top so the modal reads
+  // input-then-results like the create form. The title and its spacer left
+  // this layout in #549 — the title rides the top rule now.
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
-      Constraint::Length(1), // title
-      Constraint::Length(1), // spacer
       Constraint::Length(1), // input field
       Constraint::Length(1), // spacer
       Constraint::Min(3),    // matches
@@ -6149,17 +6160,6 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint
     ])
     .split(inner);
-
-  f.render_widget(
-    Paragraph::new(
-      Line::from(Span::styled(
-        "Command Palette",
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-      ))
-      .centered(),
-    ),
-    layout[0],
-  );
 
   // The `:` input field, styled like the create modal's fields: a `:` label
   // then a background-filled value box. The palette input is always focused
@@ -6177,7 +6177,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       app.theme.muted,
       app.theme.selection_bg,
     )),
-    layout[2],
+    layout[0],
   );
 
   let entries = app.palette.matches();
@@ -6206,7 +6206,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       Style::default().fg(app.theme.prunable),
     )));
   }
-  f.render_widget(Paragraph::new(lines), layout[4]);
+  f.render_widget(Paragraph::new(lines), layout[2]);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::CommandPalette,
@@ -6214,7 +6214,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       &app.modal_keymap,
       &app.theme,
     )),
-    layout[6],
+    layout[4],
   );
 }
 

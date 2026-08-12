@@ -295,8 +295,17 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # Focus reads on the header in compact mode, where the border colour used to
 # say it: the active pane's header wears the `focus` role and the
-# `selection_bg` fill, the others `muted` over `section_bg`, and the inactive
-# pane's body is dimmed.
+# `selection_bg` fill, the others `muted` over `section_bg`.
+#
+# `dim_unfocused` additionally dims the BODY of whichever pane does not hold
+# focus, in either layout. Off by default: it trades contrast for a stronger
+# "where am I" cue, and the inactive pane's content is still readable
+# information. Uses the terminal's DIM attribute, so semantic colours survive
+# (a dirty branch stays yellow); a terminal that ignores DIM renders as if the
+# option were off.
+#
+#   [tui]
+#   dim_unfocused = true
 #
 # The header fill is the `section_bg` theme role (`gwm theme show` lists it
 # with the rest), an indexed colour rather than a translucent white so it
