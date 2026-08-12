@@ -19,15 +19,21 @@ Set Theme { "name": "gwm-grey", "background": "#2b2b2b", "foreground": "#d6d6d6"
 Hide
 Type `export PS1="$ " GWM_ALLOW_BOOTSTRAP=1 GWM_AGENTS_HOME="$HOME/gwm-demo/agents-home"`
 Enter
-Type "cd /Users/kbrdn1/gwm-demo/acme-api"
-Enter
-Type "gwm remove feat-91-rate-limit-alerts --force --delete-branch >/dev/null 2>&1; git branch -D 'feat/#91-rate-limit-alerts' 'feat/#88-rate-limit-alerts' >/dev/null 2>&1; git worktree prune >/dev/null 2>&1; rm -rf .git/gwm/notes; clear"
-Enter
 # The fabricated agent artefacts age between `setup-demo.sh` and this
 # recording, and past ACTIVE_WINDOW (5 min) they render "idle" grey. The
 # freshness colour is half of what the AGENT column says, so refresh the
 # mtimes here rather than depending on how recently the fixture was built.
-Type `find "$GWM_AGENTS_HOME" -name '*.jsonl' -exec touch {} + 2>/dev/null; clear`
+#
+# Through refresh-agents.sh rather than a blanket `touch`: since #524 the
+# fixture also holds two sessions the other captures deliberately show as
+# *idle*, and touching everything would turn them green. The script owns those
+# ages, and its default is the same "everything active" this recording wants.
+# Before the `cd` below, since the path is relative to the repo root.
+Type "bash docs/_capture/refresh-agents.sh"
+Enter
+Type "cd /Users/kbrdn1/gwm-demo/acme-api"
+Enter
+Type "gwm remove feat-91-rate-limit-alerts --force --delete-branch >/dev/null 2>&1; git branch -D 'feat/#91-rate-limit-alerts' 'feat/#88-rate-limit-alerts' >/dev/null 2>&1; git worktree prune >/dev/null 2>&1; rm -rf .git/gwm/notes; clear"
 Enter
 Type "gwm"
 Enter

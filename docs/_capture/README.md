@@ -57,21 +57,30 @@ tracked separately — until then, treat regeneration as a maintainer task.
 - **the agents fixture** (inside `setup-demo.sh`): a fabricated agent store at
   `$GWM_DEMO_ROOT/agents-home`, wired in through `GWM_AGENTS_HOME` — gwm's own
   artefact-root seam — so captures can show the `AGENT` column and the Agents
-  pane without ever writing to the real `~/.claude` or `~/.codex`. One Claude
-  Code session on `feat/#42`, one Codex session on `fix/#57`, both pinned.
-  Detection and pins are seeded separately on purpose: the table's `AGENT`
-  column reads the detection snapshot, the sidebar Agents pane reads the pins
-  only. Note `gwm agents attach` refuses a session id detection has not seen,
-  so `GWM_AGENTS_HOME` must be exported when the pins are written.
-  A tape that wants these sessions to read *active* rather than *idle* must
-  refresh their mtimes in its hidden block: the artefacts age out of
-  `ACTIVE_WINDOW` (5 minutes) between a fixture rebuild and a recording.
+  pane without ever writing to the real `~/.claude` or `~/.codex`. Four Claude
+  Code and Codex sessions across three worktrees, two of them pinned: `feat/#42`
+  carries a pinned active session next to an unpinned idle one, which is what
+  makes the `a` overlay worth a screenshot. Detection and pins are seeded
+  separately on purpose: the table's `AGENT` column reads the detection
+  snapshot, the sidebar Agents pane reads the pins only. Note `gwm agents
+  attach` refuses a session id detection has not seen, so `GWM_AGENTS_HOME`
+  must be exported when the pins are written. Session freshness decays (see
+  `refresh-agents.sh` below), so a tape showing an agent surface re-stamps the
+  artefacts in its hidden block rather than trusting the fixture's age.
 - **`<name>.tape`**: one capture each. Still PNGs use vhs's `Screenshot`
   command (the tape's `Output …/.tmp/<name>.gif` is a throwaway vhs requires);
   animated captures `Output` their `.gif` directly.
 - **`theme.tape`** is generic: `generate.sh` injects each `[theme] preset` into
   the demo config (hidden from git via `--assume-unchanged`) and moves the
   result to `theme-<preset>.png`.
+- **`refresh-agents.sh`** re-stamps the seeded agent artefacts. Session
+  freshness is a pure function of artefact mtime (`active` under 300 s, `idle`
+  past it), so a fixture built ten minutes ago renders every agent row grey and
+  the agent captures would document a state the code never shows. The script
+  owns the ages in one place: everything reads `active`, except the two
+  sessions the captures deliberately show as `idle`. `setup-demo.sh` calls it
+  once, and `agents.tape` / `cli-agents.tape` call it again right before
+  capturing.
 - **`generate.sh`** orchestrates the above and drops each asset into the correct
   `docs/<section>/_assets/` directory.
 

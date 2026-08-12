@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Docs: an `Agent sessions` page, and captures for five text-only pages**
+  ([#524](https://github.com/kbrdn1/gwm-cli/issues/524)). The agent session
+  pane is what the repo description leads on and it had no page of its own:
+  `tui/agent-sessions` now covers the four backends, the freshness rules and
+  the three surfaces, with a capture of the `a` overlay. Four more pages get
+  the visual their prose cannot carry: `cli/reference` (`gwm list`,
+  `gwm agents`), `configuration/gwm-toml` (the Settings panel resolving the
+  same schema), `tui/launchers` (lazygit in the PTY overlay) and
+  `tui/open-dispatch` (a shell in the PTY overlay). Both locales, six new
+  `.tape` scripts in the `generate.sh` loop, and a seeded agent fixture read
+  through the `GWM_AGENTS_HOME` seam so no real session is ever captured.
+- **Tests: `docs_assets_tests`** guards the three ways a doc capture breaks
+  after review: a reference that resolves to nothing, a French mirror that
+  drifts from its English page, and two captures sharing a basename, which
+  the docs sync rejects by throwing.
+
 ### Docs
 
 - Re-recorded `docs/_capture/demo.gif` so it shows the agent surfaces

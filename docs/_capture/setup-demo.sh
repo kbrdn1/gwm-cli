@@ -13,6 +13,9 @@ set -euo pipefail
 
 ROOT="${GWM_DEMO_ROOT:-$HOME/gwm-demo}"
 REPO="$ROOT/acme-api"
+# Resolved here, before the `cd`s below: `$0` and `BASH_SOURCE` are relative to
+# the caller's working directory, which this script changes several times.
+CAPTURE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export GIT_AUTHOR_NAME="Robin Vale"
 export GIT_AUTHOR_EMAIL="robin@acme.dev"
@@ -174,6 +177,32 @@ pin() {
 }
 pin feat-42 "$CLAUDE_SID"
 pin fix-57 "$CODEX_SID"
+
+# ── more sessions, for the agent-surface captures (issue #524) ─────────────
+# The overlay and `gwm agents` are only worth a screenshot with more than one
+# session on one worktree and more than one worktree covered: an unpinned
+# session next to a pinned one (the overlay is where unpinned ones live), an
+# idle row next to an active one, and a third worktree in the CLI listing.
+UNPINNED_SID=019f6b95-c1e4-7a3d-9f02-4b18ac775e30   # claude → feat-42, idle, unpinned
+DOCS_SID=019f6a04-88b1-7e52-a3d9-16c40b9e2277       # claude → docs-71, idle
+printf '%s\n' '{"type":"user","message":{"content":"Verify the Stripe signature before the handler runs"}}' \
+  > "$AGENTS_HOME/.claude/projects/$claude_slug/$UNPINNED_SID.jsonl"
+docs_slug=$(printf '%s' "$(wt docs-71-openapi-examples)" | sed 's/[^A-Za-z0-9]/-/g')
+mkdir -p "$AGENTS_HOME/.claude/projects/$docs_slug"
+printf '%s\n' '{"type":"user","message":{"content":"Draft the OpenAPI examples for the payments endpoints"}}' \
+  > "$AGENTS_HOME/.claude/projects/$docs_slug/$DOCS_SID.jsonl"
+
+# Freshness is a function of mtime, so it decays: without this the fixture
+# reads all-idle a few minutes after setup. `refresh-agents.sh` is the single
+# place that owns the ages, and every agent tape re-runs it before capturing.
+#
+# Deliberately non-fatal. The script exits non-zero when one of its globs
+# matches nothing, and under `set -e` that would abort this one BEFORE the
+# untrusted payments-svc fixture below, so a stale session id here would cost
+# the trust-ledger capture its subject. A wrong age costs one capture; it must
+# not cost an unrelated one its fixture.
+bash "$CAPTURE_DIR/refresh-agents.sh" ||
+  echo "warning: could not stamp the agent artefact ages - the agent captures will read idle" >&2
 
 # ── untrusted fixture for the TOFU trust-ledger capture ────────────────────
 # A second repo we deliberately never add to the trust ledger, with a juicy

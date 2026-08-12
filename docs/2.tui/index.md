@@ -20,6 +20,7 @@ Bare `gwm` (no arguments) opens the ratatui interface on the current repo. From 
 - **[Exec / clean overlays](/tui/keybindings#exec-picker-overlay-x)**: `x` picks an `[exec.profiles]` profile and runs it in a PTY overlay; `X` previews and reclaims build artifacts (same git-ignored safety gate as `gwm clean --yes`, behind a confirm countdown).
 - **[Themes](/tui/themes)**: role-based `[theme]` colours and the built-in presets (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`).
 - **[Keymap & command palette](/tui/keymap-and-palette)**: remap any binding via `[tui.keys]` (with chord support), or fire an action by name from the `:` palette.
+- **[Agent sessions](/tui/agent-sessions)**: which AI agent (Claude Code, Codex, opencode, Mistral Vibe) is working in which worktree, read from each tool's on-disk artefacts and shown in the `AGENT` column, the sidebar and the `a` overlay.
 
 `n` (new worktree) and `b` (re-bootstrap) are gated by the [TOFU trust ledger](/configuration/trust-ledger): an untrusted `.gwm.toml` lands a refuse message in the status bar rather than running bootstrap. The picker variant (`gwm switch`, alias `gwm s`) reuses the same TUI but disables create / delete / bootstrap, then prints the chosen worktree's path on stdout, meant to be `eval`d by the `gcd` shell wrapper.
 
