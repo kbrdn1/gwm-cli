@@ -1216,18 +1216,20 @@ fn a_modal_never_shrinks_when_the_terminal_grows() {
 
 #[test]
 fn the_width_policy_is_monotonic_and_bounded_for_any_knobs() {
-  // The two wrappers above only exercise two of the eight knob sets in use.
-  // The property belongs to the policy, not to its callers: whatever
-  // (pct, min, max) a future overlay picks, its width must never shrink as the
-  // terminal grows, never break its ceiling, and never reach the frame edge.
+  // Every one of the seven distinct knob sets in use, the two the wrappers
+  // above cover included. The property belongs to the policy, not to its
+  // callers: whatever (pct, min, max) a future overlay picks, its width must
+  // never shrink as the terminal grows, never break its ceiling, and never
+  // reach the frame edge.
   use gwm::tui::modal_width;
   for (pct, min_cols, max_cols) in [
-    (40, 40, 64),
-    (60, 64, 72),
-    (60, 64, 96),
-    (62, 64, 88),
-    (70, 56, 72),
-    (80, 64, 96),
+    (40, 40, 64), // confirm, nothing-selected fallback
+    (60, 64, 72), // open-menu / link prompt
+    (60, 64, 96), // help, config, command palette
+    (62, 64, 88), // confirm, destructive summary
+    (62, 72, 88), // exec picker, clean, detail
+    (70, 56, 72), // create, rename
+    (80, 64, 96), // bootstrap report
   ] {
     let mut previous = 0u16;
     for w in 20u16..=300 {
