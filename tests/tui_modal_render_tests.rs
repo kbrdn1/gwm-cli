@@ -1643,3 +1643,40 @@ fn the_confirm_hint_row_is_not_cut_mid_word_at_80_columns() {
     rows.join("\n")
   );
 }
+
+#[test]
+fn the_confirm_modal_ellipsizes_to_the_width_its_frame_actually_gets() {
+  // #550, Codex review (P2). The confirm modal computed its ellipsis budget
+  // from `term.width * 62 / 100` by hand: a second copy of the sizing rule.
+  // Harmless while the frame was the same bare percentage, but once the
+  // policy gained an 88-column ceiling the two drifted, and at 200 columns
+  // the text was sized for 124 columns inside an 88-column frame.
+  // `ellipsize_middle` then left the string untouched and ratatui clipped it
+  // at the border, cutting off the very tail a middle-ellipsis exists to
+  // keep. One rule written twice is what let it drift, so the budget now
+  // comes from the frame itself.
+  let (_dir, mut app) = make_app();
+  let mut long = deletable_worktree("feat-550-long");
+  long.path =
+    PathBuf::from("/tmp/gwm-test/a-deliberately-long-worktree-directory-name/nested/deeper/still-deeper/TAIL-MARKER");
+  app.worktrees.push(long);
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+
+  let rows = modal_rows(&render_at(&mut app, 200, 40));
+  let path_row = rows.iter().find(|r| r.contains("Path")).unwrap_or_else(|| {
+    panic!(
+      "the confirm modal must render its Path row — modal rows:\n{}",
+      rows.join("\n")
+    )
+  });
+  assert!(
+    path_row.contains('…'),
+    "a path this long must be middle-ellipsized, not left for ratatui to clip — modal rows:\n{}",
+    rows.join("\n")
+  );
+  assert!(
+    path_row.contains("TAIL-MARKER"),
+    "the path's tail must survive: the budget has to be the frame's own width — row:\n{path_row}"
+  );
+}

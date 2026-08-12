@@ -4896,18 +4896,27 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     return;
   }
 
-  // Width first (a fixed % of the terminal) so a long path / name can be
-  // middle-ellipsized to one line instead of wrapping mid-path (#187
-  // review). `text_w` is the room inside the border + padding.
+  // Title stays centred; details use an aligned label/value grid so the
+  // destructive target is easier to scan (#220 visual follow-up).
   let term = f.area();
-  let outer_w = term.width.saturating_mul(62) / 100;
-  let text_w = outer_w.saturating_sub(6) as usize;
+  let block = overlay_block_titled(&delete_batch_title(targets.len()), danger);
+
+  // Width first so a long path / name can be middle-ellipsized to one line
+  // instead of wrapping mid-path (#187 review). Measured on a throwaway
+  // one-row frame from the *same* `centered_content` call the real frame
+  // below uses (the idiom `draw_create` already follows), so the ellipsis
+  // budget cannot drift from the width the block ends up with.
+  //
+  // It used to recompute `term.width * 62 / 100` by hand: one rule written
+  // twice. Harmless while the frame was that same bare percentage, but the
+  // moment the width policy gained an 88-column ceiling (#550) the two
+  // disagreed — at 200 columns the text was sized for 124 columns inside an
+  // 88-column frame, so nothing was ellipsized and the path wrapped across
+  // three rows, breaking the very alignment #187 built this grid for.
+  let text_w = block.inner(centered_content(62, 64, 88, 1, term)).width as usize;
   let label_w = "Delete Branch".chars().count();
   let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
-  // Title stays centred; details use an aligned label/value grid so the
-  // destructive target is easier to scan (#220 visual follow-up).
-  let block = overlay_block_titled(&delete_batch_title(targets.len()), danger);
   let mut content: Vec<Line> = Vec::new();
   if targets.len() > 1 {
     // A batch reports its size, not its members (#484): the user picked the
