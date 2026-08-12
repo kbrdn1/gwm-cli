@@ -132,6 +132,9 @@ daemon = []
 clap = { version = "4.5", features = ["derive", "color"] }
 clap_complete = "4.5"
 ratatui = "0.30"
+# Terminal cell widths for the compact header (#545). Already in the tree via
+# ratatui; taken directly so the header can budget a wide glyph per char.
+unicode-width = "0.2"
 # `osc52` pulls crossterm's `clipboard` module (`CopyToClipboard`) and, with it,
 # base64 — the encoder OSC52 needs. Using the framing crossterm already ships,
 # and which its own tests pin, beats hand-rolling the sequence here (#367).

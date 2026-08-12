@@ -1401,7 +1401,7 @@ fn section_heights_fit_naturally_with_commits_absorbing_slack() {
   // remaining space — the exact behaviour the old `Min(3)` constraint
   // produced, now pinned through the pure solver.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(60, 3, 10, 20), (5, 12, 43));
+  assert_eq!(split_section_heights(60, 2, 3, 10, 20), (5, 12, 43));
 }
 
 #[test]
@@ -1417,7 +1417,7 @@ fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
   // commits=50 (natural 52, floor 5): base 20, surplus 1 → give =
   // 1*len/86 = (0, 0, 0), residue 1 → commits. Sum == available exactly.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 7, 6));
+  assert_eq!(split_section_heights(21, 2, 6, 30, 50), (8, 7, 6));
 }
 
 #[test]
@@ -1428,7 +1428,7 @@ fn section_heights_never_clamp_the_agents_pane() {
   // agent_pane_lines). A non-scrollable section keeps its natural height
   // even when the column overflows; only the scrollable sections clamp.
   use gwm::tui::state::sidebar::split_section_heights;
-  let (agents, wt, commits) = split_section_heights(21, 4, 30, 50);
+  let (agents, wt, commits) = split_section_heights(21, 2, 4, 30, 50);
   assert_eq!(agents, 6, "agents must keep natural height (4 rows + borders)");
   assert_eq!((agents, wt, commits), (6, 8, 7));
 }
@@ -1439,8 +1439,8 @@ fn section_heights_keep_empty_sections_collapsed() {
   // when no session, Working Tree at 0 when the tree is clean. The
   // collapsed section never eats a 5-line floor.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(40, 0, 5, 10), (0, 7, 33));
-  assert_eq!(split_section_heights(30, 2, 0, 8), (4, 0, 26));
+  assert_eq!(split_section_heights(40, 2, 0, 5, 10), (0, 7, 33));
+  assert_eq!(split_section_heights(30, 2, 2, 0, 8), (4, 0, 26));
 }
 
 #[test]
@@ -1449,7 +1449,7 @@ fn section_heights_degrade_commits_first_on_tiny_terminal() {
   // Commits served first (the historical always-visible section), then
   // Working Tree, then Agents. Sum must never exceed the available height.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(8, 6, 30, 50), (0, 3, 5));
+  assert_eq!(split_section_heights(8, 2, 6, 30, 50), (0, 3, 5));
 }
 
 #[test]
@@ -1461,7 +1461,7 @@ fn section_heights_survive_empty_commits_under_overflow() {
   // old `Min(3)` rendered an empty bordered panel at 3 lines anyway), so
   // the invariant holds and the split stays additive.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(8, 0, 5, 0), (0, 5, 3));
+  assert_eq!(split_section_heights(8, 2, 0, 5, 0), (0, 5, 3));
 }
 
 #[test]
@@ -1469,7 +1469,71 @@ fn section_heights_give_everything_to_commits_when_alone() {
   // No agents, clean tree, empty history: Recent Commits keeps the whole
   // column, matching the pre-#438 rendering of an empty bottom panel.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(20, 0, 0, 0), (0, 0, 20));
+  assert_eq!(split_section_heights(20, 2, 0, 0, 0), (0, 0, 20));
+}
+
+#[test]
+fn stacked_table_pane_asks_for_what_it_draws() {
+  // Issue #545: the pane reserved its percentage share whatever the row
+  // count, so a five-worktree screen showed a column of blank rows above
+  // a scrolling sidebar. It now asks for `rows + header + chrome` and the
+  // sidebar takes back the rest.
+  use gwm::tui::state::sidebar::stacked_table_height;
+  // 5 worktrees, compact chrome, a 16-row quota: 5 + 1 header + 1 header
+  // fill = 7, well under the quota, so 9 rows go to the sidebar.
+  assert_eq!(stacked_table_height(16, 5, 1), 7);
+  // Same list bordered: two rules instead of one filled header.
+  assert_eq!(stacked_table_height(16, 5, 2), 8);
+}
+
+#[test]
+fn stacked_table_pane_never_grows_past_its_quota() {
+  // A long list must not push the sidebar off the screen: the share stays
+  // the ceiling and the pane scrolls beyond it, exactly as before.
+  use gwm::tui::state::sidebar::stacked_table_height;
+  assert_eq!(stacked_table_height(16, 200, 1), 16);
+  // Degenerate quota (a terminal too short to split) hands back the quota,
+  // never a larger value the layout could not honour.
+  assert_eq!(stacked_table_height(0, 5, 1), 0);
+}
+
+#[test]
+fn section_heights_hand_the_saved_rows_back_in_compact_mode() {
+  // Issue #545: compact mode replaces the two box rules with a single
+  // filled header, so a section's chrome costs 1 row instead of 2. The
+  // whole point of the mode is that those rows come back as content —
+  // pinned here against the bordered baseline of
+  // `section_heights_fit_naturally_with_commits_absorbing_slack`, same
+  // inputs, chrome = 1.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let bordered = split_section_heights(60, 2, 3, 10, 20);
+  let compact = split_section_heights(60, 1, 3, 10, 20);
+  assert_eq!(bordered, (5, 12, 43), "bordered baseline unchanged");
+  assert_eq!(
+    compact,
+    (4, 11, 45),
+    "each section sheds a chrome row, commits absorbs them"
+  );
+  // The column is fully used either way — a compact section must not
+  // leave a blank row where its bottom rule used to be.
+  assert_eq!(compact.0 + compact.1 + compact.2, 60);
+}
+
+#[test]
+fn section_heights_scale_their_floors_with_the_chrome() {
+  // The overflow floors are "chrome + N content rows", not the literals
+  // 7 / 5: in compact mode a 7-row floor would hand Working Tree six
+  // content rows where the bordered mode gives five, silently making the
+  // denser layout *taller*. Same inputs as
+  // `section_heights_guarantee_floor_and_share_proportionally_on_overflow`.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let (agents, wt, commits) = split_section_heights(21, 1, 6, 30, 50);
+  assert_eq!(
+    (agents, wt, commits),
+    (7, 7, 7),
+    "floors follow the chrome (wt 1+5, commits 1+3)"
+  );
+  assert_eq!(agents + wt + commits, 21, "the split stays additive");
 }
 
 #[test]
@@ -8659,7 +8723,15 @@ fn activate_choice_setting_persists_project_layer_and_applies_live() {
   let (dir, mut app) = make_app();
   app.enter_config_panel();
   app.config_panel.tab = SettingsTab::Tui;
-  app.config_panel.selected = 0; // sidebar position
+  // Looked up rather than hard-coded: the tab's order is a design call
+  // and moved when #545 put `layout` at the top. An index literal made
+  // this test fail for a reason that had nothing to do with what it
+  // checks.
+  app.config_panel.selected = SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == gwm::tui::SettingField::SidebarPosition)
+    .expect("the TUI tab must offer sidebar position");
   assert_eq!(app.config.tui.sidebar_position, SidebarPosition::Right);
 
   // Cycle the choice: right → left, written to the project `.gwm.toml` and
@@ -10713,7 +10785,7 @@ mod agent_pane {
   #[test]
   fn pane_title_advertises_the_overlay_key() {
     let km = gwm::tui::keymap::Keymap::defaults();
-    let title = agents_pane_title(&km);
+    let title = agents_pane_title(&km, false);
     assert!(title.contains("Agents"), "got {title}");
     assert!(title.contains('a'), "resolved overlay key expected: {title}");
   }
@@ -12983,4 +13055,97 @@ fn refreshing_the_view_asks_for_the_threads_again() {
     "and the section still renders them:\n{}",
     overlay_text(&app)
   );
+}
+
+#[test]
+fn activating_layout_from_the_panel_switches_the_live_layout() {
+  // Codex review, PR #546: the panel is documented as the editable
+  // schema, so `bordered` — the opt-out of the layout #545 made the
+  // default — must be reachable from it and take effect without a
+  // relaunch.
+  //
+  // No `apply_*` step is needed for this one, and that is the point of
+  // reading `config.tui.layout` at render time rather than mirroring it
+  // onto `App`: reloading the config *is* applying it. The assertion
+  // below is what proves that, so a future refactor that caches the
+  // layout on `App` fails here until it wires its own apply.
+  use gwm::config::TuiLayout;
+  use gwm::tui::SettingsTab;
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == gwm::tui::SettingField::Layout)
+    .expect("the TUI tab must offer the layout field");
+  assert_eq!(app.config.tui.layout, TuiLayout::Compact, "default is compact");
+
+  app.activate_selected_setting();
+  assert_eq!(
+    app.config.tui.layout,
+    TuiLayout::Bordered,
+    "cycling the choice must reach the live config"
+  );
+
+  // And back, so the cycle is a cycle rather than a one-way door.
+  app.activate_selected_setting();
+  assert_eq!(app.config.tui.layout, TuiLayout::Compact);
+}
+
+#[test]
+fn every_panel_choice_survives_the_write_it_triggers() {
+  // Codex review, PR #546: `dim_unfocused` was classed `FieldKind::Choice`,
+  // which routes the write through `set_string_at` and produced
+  // `dim_unfocused = "true"` — a string where serde wants a bool. The load
+  // then failed and the setting never changed.
+  //
+  // The existing round-trip guard could not catch it: it hand-lists four
+  // fields while claiming to cover "every Choice field", so a fifth was
+  // invisible to it. This one enumerates from the panel itself — every
+  // tab, every field it offers — and exercises the real write path
+  // (`activate_selected_setting`) rather than simulating the TOML, so it
+  // covers how the value is spelled as well as what it says.
+  use gwm::tui::{FieldKind, SettingsTab};
+
+  for tab in SettingsTab::ALL {
+    for (index, field) in tab.fields().iter().enumerate() {
+      if matches!(field.kind(), FieldKind::Text | FieldKind::Uint) {
+        continue; // typed, not cycled — a different write path
+      }
+      let (_dir, mut app) = make_app();
+      app.enter_config_panel();
+      app.config_panel.tab = tab;
+      app.config_panel.selected = index;
+
+      // Cycle through every choice the field offers, back to the start.
+      // Asserting the *value moved* rather than just that the file still
+      // loads: a write that fails leaves the config untouched, so a
+      // load-only check passes while the setting silently never changes —
+      // which is exactly the failure mode under test.
+      for step in 0..field.choices().len() {
+        let before = field.current(&app.config);
+        app.activate_selected_setting();
+        let file = _dir.path().join(gwm::config::CONFIG_FILE);
+        let reloaded = gwm::config::Config::load_layered(_dir.path(), None);
+        assert!(
+          reloaded.is_ok(),
+          "{}: the panel wrote a value the config cannot load back: {:?}\nfile:\n{}",
+          field.key_path(),
+          reloaded.err(),
+          std::fs::read_to_string(&file).unwrap_or_default()
+        );
+        let after = field.current(&app.config);
+        assert_ne!(
+          before,
+          after,
+          "{} step {step}: activating must move the value, got {before:?} again — status: {:?}\nfile:\n{}",
+          field.key_path(),
+          app.status,
+          std::fs::read_to_string(&file).unwrap_or_default()
+        );
+      }
+    }
+  }
 }

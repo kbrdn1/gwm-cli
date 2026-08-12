@@ -79,6 +79,26 @@ impl ResolvedSidebarLayout {
   }
 }
 
+/// Height the stacked table pane should actually claim (issue #545).
+///
+/// The percentage split reserves the table's share whatever the row
+/// count, which is what makes a five-worktree screen read half empty:
+/// the pane holds a column of blank rows while the sidebar below it
+/// scrolls. In compact mode the pane instead asks for what it draws —
+/// `rows + 1` (the column header) `+ chrome` — and the sidebar absorbs
+/// what it gives back.
+///
+/// `quota` (the percentage share) stays the ceiling: a long list must
+/// not push the sidebar off the screen, so the pane grows to its share
+/// and then scrolls, exactly as before.
+///
+/// Applies to the stacked layout only. Side-by-side splits horizontally,
+/// so a shorter table would leave a hole rather than hand rows to
+/// anything.
+pub fn stacked_table_height(quota: u16, rows: u16, chrome: u16) -> u16 {
+  rows.saturating_add(1).saturating_add(chrome).min(quota)
+}
+
 /// Which content the sidebar previews (issue #34).
 ///
 /// Toggled with the `s` key in the list view, dispatched through
@@ -110,19 +130,26 @@ impl SidebarMode {
 
 /// Split the sidebar height left over for the three variable sections —
 /// Agents / Working Tree / Recent Commits — into per-section block
-/// heights, borders included (issue #438). Pure and ratatui-free so the
+/// heights, chrome included (issue #438). Pure and ratatui-free so the
 /// policy is unit-testable without a backend, like [`SidebarState::resolve_layout`].
 ///
-/// - When every natural height (`content + 2` borders) fits, each section
+/// `chrome` is what a section's frame costs in rows: `2` for the bordered
+/// default (top + bottom rule), `1` for compact mode, where a single
+/// filled header line replaces the box (issue #545). Every height below
+/// is expressed as "chrome + N content rows" rather than a literal, so
+/// the compact layout actually hands those rows back to content instead
+/// of inheriting floors sized for a border it no longer draws.
+///
+/// - When every natural height (`content + chrome`) fits, each section
 ///   keeps it and Recent Commits absorbs the slack — the exact behaviour
 ///   the old `Min(3)` constraint produced.
 /// - On overflow, every **visible** scrollable section (Working Tree,
-///   Recent Commits) is guaranteed `min(natural, 5)` lines (border + at
-///   least 3 content rows) and the surplus is distributed proportionally
-///   to content size, capped at the natural height; the integer-division
-///   residue cascades to Recent Commits, then Working Tree, then Agents.
-///   The total need exceeds the surplus by construction, so the residue
-///   is always absorbed.
+///   Recent Commits) is guaranteed `min(natural, chrome + 3)` lines (the
+///   frame plus at least 3 content rows) and the surplus is distributed
+///   proportionally to content size, capped at the natural height; the
+///   integer-division residue cascades to Recent Commits, then Working
+///   Tree, then Agents. The total need exceeds the surplus by
+///   construction, so the residue is always absorbed.
 /// - The Agents pane has **no scroll**, so clamping it below its content
 ///   would permanently hide the trailing `+N more` row — it keeps its
 ///   natural height outright (Codex review, PR #454). Safe: the pane is
@@ -131,31 +158,41 @@ impl SidebarMode {
 /// - A section with no content stays collapsed at 0 (Agents with no
 ///   session, Working Tree on a clean tree) and never eats a floor.
 ///   Recent Commits is never collapsed: an empty history still renders
-///   its bordered panel, floored at the historical `Min(3)`.
+///   its panel, floored at the historical `Min(3)` equivalent
+///   (`chrome + 1`).
 /// - Below the floors' sum (tiny terminal) sections are served in the
 ///   order commits → working tree → agents with whatever remains.
-pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commits_len: u16) -> (u16, u16, u16) {
-  let natural = |len: u16| if len == 0 { 0 } else { len.saturating_add(2) };
+pub fn split_section_heights(
+  available: u16,
+  chrome: u16,
+  agents_len: u16,
+  wt_len: u16,
+  commits_len: u16,
+) -> (u16, u16, u16) {
+  let natural = |len: u16| if len == 0 { 0 } else { len.saturating_add(chrome) };
   let natural_a = natural(agents_len);
   let natural_w = natural(wt_len);
-  // Commits is never collapsed and its natural height is floored at 3 —
-  // the old `Min(3)` rendered an empty bordered panel at 3 lines anyway.
-  // Raising the *natural* height (not just the floor) keeps the
-  // `floor <= natural` invariant the sharing math below relies on
-  // (Codex review, PR #454: an empty history with `floor_c = 3` made
-  // `nat - floor` underflow).
-  let natural_c = commits_len.saturating_add(2).max(3);
+  // Commits is never collapsed and its natural height is floored at one
+  // content row — the old `Min(3)` rendered an empty bordered panel at 3
+  // lines anyway, which is exactly `chrome + 1` there. Raising the
+  // *natural* height (not just the floor) keeps the `floor <= natural`
+  // invariant the sharing math below relies on (Codex review, PR #454: an
+  // empty history with `floor_c = 3` made `nat - floor` underflow).
+  let natural_c = commits_len.saturating_add(chrome).max(chrome.saturating_add(1));
 
   if natural_a as u32 + natural_w as u32 + natural_c as u32 <= available as u32 {
     return (natural_a, natural_w, available - natural_a - natural_w);
   }
 
   let floor_a = natural_a;
-  // Working Tree gets a taller floor than Recent Commits (7 = border +
-  // 5 content rows): validation feedback on PR #455 — the shared 5-line
-  // floor read too small for a file tree in the field.
-  let floor_w = natural_w.min(7);
-  let floor_c = natural_c.min(5);
+  // Working Tree gets a taller floor than Recent Commits (chrome + 5
+  // content rows, i.e. the historical 7 while bordered): validation
+  // feedback on PR #455 — the shared 5-line floor read too small for a
+  // file tree in the field. Expressed against `chrome` so compact mode
+  // guarantees the same five rows of *content*, not five rows minus a
+  // border it never draws.
+  let floor_w = natural_w.min(chrome.saturating_add(5));
+  let floor_c = natural_c.min(chrome.saturating_add(3));
 
   let base = floor_a + floor_w + floor_c;
   if base > available {

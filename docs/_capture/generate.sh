@@ -36,17 +36,57 @@ done
 # ── theme gallery: inject each preset into the demo config, then capture ───
 # `--assume-unchanged` hides the temporary [theme] edit from git status so the
 # trunk worktree still reads "clean" — matching every other capture.
+#
+# The restore runs on EXIT, not on the happy path: `set -e` plus a `mv` of a
+# screenshot vhs never produced would otherwise abandon the demo repo with an
+# injected [theme] block and the assume-unchanged bit still set — which is
+# exactly what a concurrent run of this script produced once. Nothing here
+# guards against two copies running at the same time; don't.
+restore_demo_config() {
+  [[ -f "$CAP/.tmp/gwm.toml.bak" ]] || return 0
+  cp "$CAP/.tmp/gwm.toml.bak" "$DEMO/.gwm.toml"
+  git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
+}
 if [[ -f "$CAP/theme.tape" ]]; then
   cp "$DEMO/.gwm.toml" "$CAP/.tmp/gwm.toml.bak"
   git -C "$DEMO" update-index --assume-unchanged .gwm.toml
+  trap restore_demo_config EXIT
   for preset in catppuccin gruvbox tokyo-night claude-dark; do
     echo "▸ theme: $preset"
     { cat "$CAP/.tmp/gwm.toml.bak"; printf '\n[theme]\npreset = "%s"\n' "$preset"; } > "$DEMO/.gwm.toml"
-    vhs "$CAP/theme.tape" >/dev/null 2>&1
+    if ! vhs "$CAP/theme.tape" >/dev/null 2>&1 || [[ ! -f "$CAP/.tmp/theme.png" ]]; then
+      echo "  ✗ vhs failed on theme.tape ($preset)"
+      exit 1
+    fi
     mv "$CAP/.tmp/theme.png" "docs/2.tui/_assets/theme-$preset.png"
   done
-  cp "$CAP/.tmp/gwm.toml.bak" "$DEMO/.gwm.toml"
-  git -C "$DEMO" update-index --no-assume-unchanged .gwm.toml
+  restore_demo_config
+  trap - EXIT
+fi
+
+# ── bordered layout: inject the opt-out, then capture (issue #545) ─────────
+# Compact is the default, so every capture above already shows it. This one
+# documents the opt-out. Same injection dance as the theme gallery: the mode is
+# a config key, so the only way to capture it is to write it into the demo repo
+# and hide the edit from git status while the shot is taken.
+if [[ -f "$CAP/bordered.tape" ]]; then
+  echo "▸ bordered layout"
+  cp "$DEMO/.gwm.toml" "$CAP/.tmp/gwm.toml.bak"
+  git -C "$DEMO" update-index --assume-unchanged .gwm.toml
+  trap restore_demo_config EXIT
+  # Pin the preset too: compact paints a background role, so the pair of
+  # captures must not inherit whatever theme the capture machine has in its
+  # global config. Both tapes' terminal background is matched to this palette.
+  { cat "$CAP/.tmp/gwm.toml.bak"; printf '\n[tui]\nlayout = "bordered"\n\n[theme]\npreset = "claude-dark"\n'; } > "$DEMO/.gwm.toml"
+  # Capture the status rather than swallowing it: the restore below must run
+  # whatever happens (the demo repo would keep a `[tui] layout` block and an
+  # `assume-unchanged` flag otherwise), but a failed vhs still has to fail the
+  # script — `|| echo` would let it print "✓ captures regenerated" over a
+  # missing or stale PNG (Codex review, PR #546).
+  vhs "$CAP/bordered.tape" >/dev/null 2>&1; rc=$?
+  restore_demo_config
+  trap - EXIT
+  [[ $rc -ne 0 ]] && { echo "  ✗ vhs failed on bordered.tape"; exit $rc; }
 fi
 
 # ── shrink PNGs for the repo (lossless) ────────────────────────────────────

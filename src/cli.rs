@@ -1810,6 +1810,7 @@ fn cmd_theme_show(name: &str) -> Result<()> {
   println!("staged       = {}", color_str(theme.staged));
   println!("modified     = {}", color_str(theme.modified));
   println!("untracked    = {}", color_str(theme.untracked));
+  println!("section_bg   = {}", color_str(theme.section_bg));
   Ok(())
 }
 

@@ -156,9 +156,14 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → sidebar position / sidebar layout / clipboard / open / countdown
-  // / auto refresh in order.
+  // Tui tab → layout / dim unfocused / sidebar position / sidebar layout /
+  // clipboard / open / countdown / auto refresh in order. `layout` leads
+  // since #545: it is the structural choice the rest of the tab refines.
   panel.tab = SettingsTab::Tui;
+  assert_eq!(panel.selected_field(), Some(SettingField::Layout));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::DimUnfocused));
+  panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarOrientation));
@@ -595,4 +600,56 @@ fn sidebar_choice_lists_cover_every_variant() {
     ClipboardMode::ALL.len(),
     "no stale choice left behind"
   );
+}
+
+#[test]
+fn the_tui_tab_reaches_the_layout_settings() {
+  // Codex review, PR #546: `[tui] layout` is the structural choice #545
+  // introduced, and `bordered` is its opt-out — both were unreachable
+  // from the panel the docs call the editable schema, so the only way
+  // back to the pre-1.8 look was hand-editing TOML.
+  //
+  // Asserted as reachability plus a live round-trip of every choice,
+  // rather than a position: the order is a design call and will move,
+  // but a field that the tab cannot reach is a bug in any order.
+  let fields = SettingsTab::Tui.fields();
+  for field in [SettingField::Layout, SettingField::DimUnfocused] {
+    assert!(
+      fields.contains(&field),
+      "{field:?} must be reachable from the TUI tab, got {fields:?}"
+    );
+    assert_eq!(
+      field.kind(),
+      if field == SettingField::DimUnfocused {
+        FieldKind::Bool
+      } else {
+        FieldKind::Choice
+      },
+      "{field:?} cycles through a fixed set rather than being typed"
+    );
+    assert!(
+      !field.choices().is_empty(),
+      "{field:?} must offer choices to cycle through"
+    );
+  }
+
+  // The value the panel shows for a default config is the default itself,
+  // so cycling starts from where the user actually is.
+  let cfg = gwm::config::Config::default();
+  assert_eq!(SettingField::Layout.current(&cfg), "compact");
+  assert_eq!(SettingField::DimUnfocused.current(&cfg), "false");
+  // And every choice it can write is a value the config can read back —
+  // the drift this panel is most able to cause.
+  for choice in SettingField::Layout.choices() {
+    assert!(
+      gwm::config::TuiLayout::ALL.iter().any(|l| l.label() == *choice),
+      "layout choice {choice:?} has no matching TuiLayout variant"
+    );
+  }
+  for choice in SettingField::DimUnfocused.choices() {
+    assert!(
+      choice.parse::<bool>().is_ok(),
+      "dim_unfocused choice {choice:?} must parse as a bool"
+    );
+  }
 }

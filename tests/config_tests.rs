@@ -1,6 +1,7 @@
 use gwm::config::{
   expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, ClipboardMode, Config, ConfigRow,
-  ConfigSource, MacroOpenMode, SidebarOrientation, SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+  ConfigSource, MacroOpenMode, SidebarOrientation, SidebarPosition, TuiLayout, TuiOpenMode, WorktreeConfig,
+  CONFIG_FILE,
 };
 use tempfile::TempDir;
 
@@ -707,6 +708,74 @@ auto_refresh_secs = 15
   .unwrap();
   let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.auto_refresh_secs, 15);
+}
+
+#[test]
+fn tui_layout_defaults_to_compact() {
+  // #545: compact is the default layout — the density is the point, and
+  // the box rules were the single largest source of wasted space. A
+  // config with no `[tui]` block gets it.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.layout, TuiLayout::Compact, "layout must default to compact");
+  assert!(cfg.tui.layout.is_compact());
+}
+
+#[test]
+fn tui_layout_round_trips_through_toml() {
+  // `bordered` restores the pre-1.8 boxes for users who want them back.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+layout = "bordered"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.layout, TuiLayout::Bordered);
+  assert!(!cfg.tui.layout.is_compact());
+}
+
+#[test]
+fn tui_layout_rejects_an_unknown_value() {
+  // Same contract as the other `[tui]` enums: a typo is a hard load
+  // error, not a silent fallback to the default.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+layout = "borderd"
+"#,
+  )
+  .unwrap();
+  assert!(
+    Config::load_layered(dir.path(), None).is_err(),
+    "an unknown layout must fail the load"
+  );
+}
+
+#[test]
+fn tui_layout_labels_match_their_serialised_spelling() {
+  // The Settings panel offers `label()` as a choice and writes the chosen
+  // string back into `.gwm.toml`, so a label that drifts from the serde
+  // spelling produces a file that no longer loads. (Until #546 wired the
+  // field into the TUI tab, this reasoning described a write-back that
+  // did not exist — the assertion was right, its justification was not.)
+  for layout in TuiLayout::ALL {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+      dir.path().join(CONFIG_FILE),
+      format!("[tui]\nlayout = \"{}\"\n", layout.label()),
+    )
+    .unwrap();
+    let cfg = Config::load_layered(dir.path(), None)
+      .unwrap_or_else(|e| panic!("label {:?} must round-trip: {e}", layout.label()));
+    assert_eq!(cfg.tui.layout, layout);
+  }
 }
 
 #[test]

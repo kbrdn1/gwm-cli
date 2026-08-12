@@ -67,6 +67,7 @@ fn audit_theme() -> Theme {
     staged: Color::Rgb(13, 13, 13),
     modified: Color::Rgb(14, 14, 14),
     untracked: Color::Rgb(15, 15, 15),
+    section_bg: Color::Rgb(16, 16, 16),
   }
 }
 
