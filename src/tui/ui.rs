@@ -2239,6 +2239,10 @@ impl HintContext {
         Hint::Key(LazyGitFullscreen, "git"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
+        // #515: the note is written far more often than a review is
+        // launched, so it sits ahead of `review` / `yank` in the
+        // right-to-left truncation order rather than at the tail.
+        Hint::Key(EditNote, "note"),
         Hint::Key(ReviewFullscreen, "review"),
         Hint::Key(YankPath, "yank"),
         // Find / navigate panes.

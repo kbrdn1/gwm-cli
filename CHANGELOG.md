@@ -147,7 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without saving" to lose prose to: emptying the buffer is how a note is
   deleted, and it removes the file rather than leaving a blank one. Text,
   `Enter`, `Backspace`, `Delete`, the arrows, `Home` / `End` and
-  `PageUp` / `PageDown` are all input and none of them are rebindable —
+  `PageUp` / `PageDown` are all input and none of them are rebindable:
   only `close` and `open_editor` live under `[tui.keys.modal.note]`, and
   binding either to a printable is refused at load time. Notes are plain Markdown at
   `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable and editable with
@@ -163,14 +163,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   note cannot exist on macOS and vanish on the same repo cloned to Windows;
   and `gwm doctor` reports a note whose branch is gone, rather than
   `gwm clean`, whose safety property is that `--yes` only removes directories
-  git already ignores. Two branch names a volume folds together — which
-  `git pack-refs` lets coexist — share one file, so `N` refuses the pair
+  git already ignores. Two branch names a volume folds together (which
+  `git pack-refs` lets coexist) share one file, so `N` refuses the pair
   rather than opening one branch's editor on the other's prose: by name
   before either has a note, and by asking the filesystem once one does, which
   is the only thing that knows whether this volume folds `feat/é` onto
   `feat/É` or an NFC name onto its NFD twin. Presence
   means "non-blank", not "the file exists", because `vi` over an empty buffer
-  writes one byte. One upgrade note, the same one `z` carried in #484: `N` is
+  writes one byte. `N` also sits in the worktrees which-key, between `agents`
+  and `review`, since the footer is the only place a verb is discoverable
+  without opening `?` first. One upgrade note, the same one `z` carried in #484: `N` is
   now a shipped default, so a `.gwm.toml` binding a chord *starting* with `N`
   (say `top = ["N x"]`) is a prefix conflict and is refused at load time.
   Rebind that chord, or move `edit_note` elsewhere.
@@ -298,6 +300,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Docs
+
+- **A comparison page against lazyworktree and gwq**
+  ([#422](https://github.com/kbrdn1/gwm-cli/issues/422)). `/comparison`, in
+  English and French. The issue's premise did not survive the re-read it
+  asked for: it was filed when agent sessions, container execution, GitLab
+  and per-worktree notes were lazyworktree's lead, and gwm shipped all four
+  in the meantime, so the page reports those as parity rather than as a gap.
+  Everything in it is measured rather than recalled (2026-08-12, GitHub API
+  plus both READMEs and `go.mod` manifests), which turned up one difference
+  worth stating precisely: neither competitor carries a git binding in its
+  manifest, so "worktree operations run on vendored libgit2 instead of the
+  `git` CLI" is checkable rather than claimed. The page names where gwm is
+  behind, because the audience for a terminal worktree manager is the
+  audience that goes and checks: lazyworktree's rich worktree metadata
+  (colour, icon, tags, which gwm deliberately does not have), its
+  per-worktree `.wt` hook files, and seven more months of people finding its
+  corners.
 
 - **Retired the em dash across the whole `docs/` tree**
   ([#516](https://github.com/kbrdn1/gwm-cli/issues/516)). 1586 occurrences in
