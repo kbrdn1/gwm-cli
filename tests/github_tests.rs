@@ -1893,3 +1893,212 @@ fn parse_issue_json_survives_null_string_fields() {
   assert!(issue.detail.author.is_empty());
   assert_eq!(issue.detail.comments.len(), 1);
 }
+
+// ---- Inline review comments (issue #528) --------------------------------
+//
+// Two assertions per surface, deliberately: a fixture that contains
+// `diffHunk` parses green even when the query never asks for it, so the
+// query is pinned separately from the parse. The fixtures below mirror the
+// shape of a real `gh api graphql` response (verified against PR #514 of
+// this repo), with the bodies shortened.
+
+#[test]
+fn pr_threads_argv_asks_for_the_anchor_the_hunk_and_the_totals() {
+  let argv = github::pr_threads_argv("kbrdn1/gwm-cli", 514).expect("an owner/repo slug resolves");
+
+  assert_eq!(argv[0], "api", "inline comments are a GraphQL-only surface");
+  assert_eq!(argv[1], "graphql");
+
+  let query = argv
+    .iter()
+    .find(|a| a.starts_with("query="))
+    .expect("the query is passed as -f query=…");
+
+  // Every field the renderer reads has to be requested. Dropping one here
+  // is invisible to the parse tests, which read a fixture rather than gh.
+  for field in [
+    "reviewThreads",
+    "diffHunk",
+    "path",
+    "line",
+    "startLine",
+    "isResolved",
+    "isOutdated",
+    "totalCount",
+  ] {
+    assert!(query.contains(field), "the query must request `{field}`, got: {query}");
+  }
+
+  // GraphQL has no `--repo`, so owner and repo travel as separate
+  // variables — as `-f` strings, since `-F` would read a leading `@` as a
+  // file and coerce a numeric-looking owner to an Int.
+  assert!(argv.iter().any(|a| a == "owner=kbrdn1"), "argv: {argv:?}");
+  assert!(argv.iter().any(|a| a == "repo=gwm-cli"), "argv: {argv:?}");
+  assert!(argv.iter().any(|a| a == "number=514"), "argv: {argv:?}");
+}
+
+#[test]
+fn pr_threads_argv_refuses_a_slug_it_cannot_split() {
+  // `GitHubForge::repo_selector` returns "" for an origin `gh` cannot be
+  // pinned to, and `gh pr view` copes by resolving from the working
+  // directory. A GraphQL query cannot: owner and repo are required
+  // variables, so guessing them would send the request to whichever
+  // instance is ambient — the #458 finding, replayed on a new transport.
+  assert!(
+    github::pr_threads_argv("", 1).is_err(),
+    "an unpinned origin must refuse, never guess"
+  );
+  assert!(github::pr_threads_argv("gwm-cli", 1).is_err(), "a slug with no owner");
+  assert!(
+    github::pr_threads_argv("a/b/c", 1).is_err(),
+    "a slug with too many parts"
+  );
+}
+
+/// One resolved thread anchored to a range, one unresolved thread anchored
+/// to a single line with a reply. Shape copied from a live response.
+const THREADS_JSON: &str = r###"{
+  "data": { "repository": { "pullRequest": { "reviewThreads": {
+    "totalCount": 2,
+    "nodes": [
+      {
+        "id": "PRRT_a",
+        "isResolved": true,
+        "isOutdated": false,
+        "path": "src/tui/app.rs",
+        "line": 11,
+        "startLine": 7,
+        "comments": {
+          "totalCount": 1,
+          "nodes": [
+            {
+              "author": { "login": "coderabbitai" },
+              "body": "This drops the guard.",
+              "diffHunk": "@@ -4,10 +4,11 @@\n context\n-old line\n+new line",
+              "createdAt": "2026-08-04T13:40:21Z",
+              "url": "https://github.com/kbrdn1/gwm-cli/pull/514#discussion_r1"
+            }
+          ]
+        }
+      },
+      {
+        "id": "PRRT_b",
+        "isResolved": false,
+        "isOutdated": true,
+        "path": "docs/7.roadmap.md",
+        "line": 14,
+        "startLine": null,
+        "comments": {
+          "totalCount": 2,
+          "nodes": [
+            {
+              "author": { "login": "kbrdn1" },
+              "body": "Why this order?",
+              "diffHunk": "@@ -1,3 +1,3 @@\n-a\n+b",
+              "createdAt": "2026-08-04T14:00:00Z",
+              "url": "https://github.com/kbrdn1/gwm-cli/pull/514#discussion_r2"
+            },
+            {
+              "author": { "login": "copilot" },
+              "body": "Because the anchor is the last line.",
+              "diffHunk": "@@ -1,3 +1,3 @@\n-a\n+b",
+              "createdAt": "2026-08-04T14:05:00Z",
+              "url": "https://github.com/kbrdn1/gwm-cli/pull/514#discussion_r3"
+            }
+          ]
+        }
+      }
+    ]
+  } } } }
+}"###;
+
+#[test]
+fn parse_pr_threads_json_keeps_the_anchor_the_hunk_and_the_reply_chain() {
+  let parsed = github::parse_pr_threads_json(THREADS_JSON).expect("a live-shaped payload parses");
+  let threads = parsed.threads();
+
+  assert_eq!(threads.len(), 2);
+
+  let first = &threads[0];
+  assert_eq!(first.path, "src/tui/app.rs");
+  assert_eq!(first.line, Some(11));
+  assert_eq!(first.start_line, Some(7), "a range anchor keeps both ends");
+  assert!(first.is_resolved);
+  assert!(!first.is_outdated);
+  assert!(
+    first.diff_hunk.contains("+new line"),
+    "the hunk is the context a review comment is about"
+  );
+  assert_eq!(first.comments.len(), 1);
+  assert_eq!(first.comments[0].author, "coderabbitai");
+
+  // A reply chain stays one thread, not two loose rows.
+  let second = &threads[1];
+  assert!(second.is_outdated);
+  assert_eq!(second.comments.len(), 2);
+  assert_eq!(second.comments[0].author, "kbrdn1");
+  assert_eq!(second.comments[1].author, "copilot");
+  assert_eq!(second.comments[1].body, "Because the anchor is the last line.");
+}
+
+#[test]
+fn parse_pr_threads_json_survives_a_null_start_line_and_a_deleted_author() {
+  // `startLine` is null on every single-line anchor — the common case, not
+  // an edge one. `author` is null for a deleted account.
+  let json = r###"{
+    "data": { "repository": { "pullRequest": { "reviewThreads": {
+      "totalCount": 1,
+      "nodes": [
+        {
+          "id": "PRRT_c",
+          "isResolved": false,
+          "isOutdated": false,
+          "path": "src/lib.rs",
+          "line": 3,
+          "startLine": null,
+          "comments": {
+            "totalCount": 1,
+            "nodes": [
+              { "author": null, "body": null, "diffHunk": null, "createdAt": null, "url": null }
+            ]
+          }
+        }
+      ]
+    } } } }
+  }"###;
+
+  let parsed = github::parse_pr_threads_json(json).expect("a null must degrade, never abort the parse");
+  let threads = parsed.threads();
+
+  assert_eq!(threads.len(), 1);
+  assert_eq!(threads[0].start_line, None);
+  assert_eq!(threads[0].line, Some(3));
+  assert!(threads[0].comments[0].author.is_empty());
+  assert!(threads[0].diff_hunk.is_empty());
+}
+
+#[test]
+fn parse_pr_threads_json_reports_totals_the_page_does_not_hold() {
+  // The page is capped by the query, so `totalCount` is the only honest
+  // source for an "… N more" row.
+  let parsed = github::parse_pr_threads_json(THREADS_JSON).unwrap();
+
+  assert_eq!(parsed.total(), 2, "threads reported by the forge");
+  assert_eq!(parsed.threads()[1].total_comments, 2);
+}
+
+#[test]
+fn parse_pr_threads_json_reads_an_empty_review_as_zero_threads_not_unsupported() {
+  // A clean PR and a forge that cannot answer are different states, and
+  // the view says something different for each.
+  let json = r###"{"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":0,"nodes":[]}}}}}"###;
+
+  let parsed = github::parse_pr_threads_json(json).unwrap();
+
+  assert!(parsed.threads().is_empty());
+  assert_eq!(parsed.total(), 0);
+  assert!(
+    !matches!(parsed, gwm::forge::ReviewThreads::Unsupported),
+    "GitHub answered; the answer was zero"
+  );
+}
