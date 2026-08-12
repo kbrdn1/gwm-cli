@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.6.0`** (machine contracts frozen since 1.0.0 — MSRV 1.95).
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.7.1`** (machine contracts frozen since 1.0.0 — MSRV 1.95).
 
 **Unreleased on `dev`: multi-row selection + bulk delete (#484).** `Space` marks the highlighted worktree in the TUI and `d` deletes every marked row in one batch, behind one confirm that reports `N selected` rather than listing them, with `D` arming the branch deletion for the whole batch. Nothing marked means `d` is the single-row delete it has always been, and only `d` reads the mark set: every other verb keeps acting on the cursor row, which the pane footer makes visible by carrying the count. Marks are keyed by path, cleared by the filter and the manual `f`, and only pruned (never cleared) by the background auto-refresh. `cycle_sidebar_layout` moved off `Space` to `z` to make room; both old defaults are one `[tui.keys]` line away. The non-interactive half is `gwm remove a b c`, which resolves every pattern before touching anything, so an unknown or ambiguous one fails the whole command with nothing removed.
 
@@ -20,7 +20,7 @@ Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.6.0`** (machin
 
 **Multi-forge, shipped in 1.5.0 (#419).** Issue / PR lookups go through a `Forge` trait with two backends — GitHub via `gh`, GitLab via `glab`. `forge = "github" | "gitlab"` in `.gwm.toml` names the backend; `[forge_hosts]` in the **user-level** config authorises a self-hosted host; `gwm trust add` is the per-repo alternative. Worktrees, bootstrap, branch naming and link storage are forge-neutral — only the network layer knows which forge is in play. See [Forge selection](#forge-selection-github--gitlab).
 
-Shipped since 1.0.0: **free-form naming** in 1.6.0 (#416 / #418, above) alongside its security fix; **multi-forge** in 1.5.0 (#419, above); the **help overlay** (`?`, complete by construction — every `Action` must appear, #453) and a trio of TUI polish items in 1.4.0; **agent session detection** in 1.3.0 (#408) — per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts, no process scanning, surfaced as `gwm agents [attach|detach]`, a conditional AGENT column, an `a` overlay, a pinned-only Agents sidebar pane and multi-pins in branch config (`gwm-agent-pin`); plus the **Windows daemon** over a named pipe (#439). 1.0.0 shipped: `gwm exec` / `gwm clean` (#313), `gwm review <PR#>` (#308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` (#37), multi-repo `--workspace` (#36), embedded PTY overlays (#35), a rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree pane and a current-PR CI indicator (#300 / #299).
+Shipped since 1.0.0: **per-worktree notes** (`N`, #515), the **rich PR / issue view** (`I`, #420 + its inline review comments #528), **container execution** on an `exec` profile (#421), **multi-row selection** with a batch delete (`Space` + `d`, #484), the **`symfony` preset** (#392), and a TUI delete that finally runs the remove hooks and records the undo journal (#521 / #531), all in 1.7.0; **free-form naming** in 1.6.0 (#416 / #418, above) alongside its security fix; **multi-forge** in 1.5.0 (#419, above); the **help overlay** (`?`, complete by construction — every `Action` must appear, #453) and a trio of TUI polish items in 1.4.0; **agent session detection** in 1.3.0 (#408) — per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts, no process scanning, surfaced as `gwm agents [attach|detach]`, a conditional AGENT column, an `a` overlay, a pinned-only Agents sidebar pane and multi-pins in branch config (`gwm-agent-pin`); plus the **Windows daemon** over a named pipe (#439). 1.0.0 shipped: `gwm exec` / `gwm clean` (#313), `gwm review <PR#>` (#308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` (#37), multi-repo `--workspace` (#36), embedded PTY overlays (#35), a rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree pane and a current-PR CI indicator (#300 / #299).
 
 ## When to use this skill
 
@@ -324,6 +324,8 @@ context.
 | `y` / `w` / `Y` | yank branch name / worktree name / absolute path to the clipboard           |
 | `i` / `B`       | link prompt (issue/PR) / browse-links menu (open linked issue·PR in browser)|
 | `a`             | agent sessions overlay (#408) — `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
+| `I`             | rich PR / issue view (#420) — description, author, branch pair, diff size, CI rollup, submitted reviews, conversation, and the comments anchored to a diff hunk (#528, a second GraphQL request fired when the view opens). `Enter` opens the selected row's URL, `f` re-fetches. On GitLab: summary, description, author and branch pair only |
+| `x`             | exec profile picker (#325) — pick a `[exec.profiles.<name>]` and run it in a PTY. A profile carrying a `[container]` block runs inside `docker run` / `podman run` with `-i -t` (#421) |
 | `F`             | refresh GitHub issue/PR status via `gh` (off-thread; statusbar spinner)     |
 | `V` / `v`       | toggle the sidebar / flip its position left ↔ right                         |
 | `S` / `z`       | sidebar Details mode (commits ↔ stashes) / cycle layout (auto→side→stacked; `Space` before #484) |
@@ -611,7 +613,38 @@ fullscreen = true
 tool                  = "lumen"
 skip_when_no_changes  = true     # default true — `git rev-list --count {base}..{head} == 0` ⇒ skip
 # default_base        = "dev"    # optional pin overriding the auto-discovery chain
+
+# --- named exec profiles, and running one in a container (issues #325 / #421) --
+# `gwm exec --profile test` runs this; `x` in the TUI picks from the same list.
+[exec.profiles.test]
+command = ["cargo", "test", "--all-features"]
+
+  # A `[container]` block wraps THIS PROFILE's command in `docker run` /
+  # `podman run`. It rides a profile only: an inline `gwm exec -- <cmd>` still
+  # runs on the host whatever the config says, because that is the frozen 1.0
+  # surface.
+  #
+  # The mount is the substance, not the wrapper. A linked worktree's `.git` is
+  # a FILE holding an absolute host path, so gwm mirrors host paths and mounts
+  # the main checkout's gitdir alongside the worktree. Mounting the worktree
+  # alone yields a container where `git status` answers
+  # `fatal: not a git repository`. Every mounted path is declared
+  # `safe.directory` through `GIT_CONFIG_*` (never the blanket `*`), since a
+  # rootful Docker runs as uid 0 against a host-owned tree.
+  [exec.profiles.test.container]
+  image      = "rust:1.90"        # required
+  # runtime  = "docker"           # auto-detected: docker first, then podman
+  # extra_args = ["-e", "CI=1"]   # spliced in before the image; `--name` is refused
+  # selinux_relabel = true        # suffixes gwm's own mounts with `:z`; off by default
 ```
+
+`gwm exec` allocates no TTY (a terminal per container means nothing across a
+fan-out); the TUI overlay spawns into a real pty and runs with `-i -t`. The
+overlay also names its container (`gwm-<worktree>-<pid>-<n>`) and removes it on
+close, because killing a `docker run` client leaves the container running. Any
+Docker-compatible CLI works (OrbStack, Colima, Rancher Desktop, native Docker).
+Refused on Windows, and for a worktree path containing a `:`, which is the
+field separator of `-v source:destination`.
 
 ## Bootstrap report
 
