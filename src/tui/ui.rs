@@ -342,20 +342,24 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       // Compact mode sizes the pane to its rows instead of to its share
       // (issue #545), so a short list stops reserving a column of blank
       // rows above a scrolling sidebar. The share stays the ceiling.
-      let table_constraint = if app.config.tui.compact {
+      //
+      // The sidebar then has to be `Fill`, not its percentage: two
+      // constraints that no longer add up to the body height leave the
+      // remainder as dead space *after* the sidebar under ratatui's
+      // default flex, so the rows the pane gave back would reach nobody
+      // (Codex review, PR #546). Pinned by
+      // `compact_mode_lets_the_sidebar_absorb_the_whole_split`.
+      let (table_constraint, sidebar_constraint) = if app.config.tui.compact {
         let quota = area.height.saturating_mul(table_share) / 100;
         let rows = app.filtered_indices().len() as u16;
-        Constraint::Length(super::state::sidebar::stacked_table_height(
-          quota,
-          rows,
-          Chrome::COMPACT_ROWS,
-        ))
+        let table = super::state::sidebar::stacked_table_height(quota, rows, Chrome::COMPACT_ROWS);
+        (Constraint::Length(table), Constraint::Fill(1))
       } else {
-        table_pct
+        (table_pct, sidebar_pct)
       };
       let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([table_constraint, sidebar_pct])
+        .constraints([table_constraint, sidebar_constraint])
         .split(area);
       draw_list(f, split[0], app);
       draw_sidebar(f, split[1], app);
@@ -418,7 +422,12 @@ pub struct Chrome {
   /// otherwise. Paints the border when boxed and the header text when
   /// compact — with no rules left, the header *is* where focus reads.
   pub accent: Color,
-  /// Header background, compact only.
+  /// Header background, compact only. Carries the focus signal too
+  /// (validation feedback on PR #546: the text colour alone did not read
+  /// at a glance): `selection_bg` on the focused pane, `section_bg`
+  /// elsewhere. Both roles already exist and the theme guarantees they
+  /// differ, so the two header states are distinct by construction on
+  /// every preset — no third background role to keep in tune.
   pub fill: Color,
 }
 
@@ -443,7 +452,7 @@ impl Chrome {
     Self {
       compact,
       accent: panel_border_color(focused, theme),
-      fill: theme.section_bg,
+      fill: if focused { theme.selection_bg } else { theme.section_bg },
     }
   }
 
@@ -509,7 +518,7 @@ pub fn worktrees_pane_title(
   filter_color: Color,
   compact: bool,
 ) -> Line<'static> {
-  let mut spans = vec![Span::raw(if compact { " 1 WORKTREES " } else { " [1] Worktrees " })];
+  let mut spans = vec![Span::raw(if compact { " [1] WORKTREES " } else { " [1] Worktrees " })];
   // Live filter (typing or sticky): show the `/query` prompt + optional
   // cursor, mirroring the Vim-style bar the title replaced.
   if active || !query.is_empty() {
@@ -549,7 +558,7 @@ pub fn worktrees_pane_title(
 /// borrowed title rather than allocating one per frame.
 pub fn status_pane_title(compact: bool) -> &'static str {
   if compact {
-    " 2 STATUS "
+    " [2] STATUS "
   } else {
     " [2] Status "
   }
@@ -557,17 +566,18 @@ pub fn status_pane_title(compact: bool) -> &'static str {
 
 /// Render a pane title in the idiom of the current mode (issue #545).
 ///
-/// Boxed: ` Issue / PR [F] ` — the label reads inside the top rule and
-/// the chord trails it, which is where the eye lands on a framed panel.
+/// Both modes keep the same shape — `[<focus key>] Label [<action key>]`,
+/// bracketed, chord trailing for a sub-pane and leading for a focusable
+/// pane. Compact only shouts the label, so the header reads as chrome
+/// rather than as a row of content now that no rule delimits it.
 ///
-/// Compact: ` F ISSUE / PR ` — with no rule to delimit it, the header is
-/// one filled line among content lines, so the chord leads (it is the
-/// actionable half, and a left-anchored key column scans like lazygit's)
-/// and the label goes uppercase to read as chrome rather than as a row of
-/// content.
+/// Compact first led with a bare chord (` F ISSUE / PR `); validation
+/// feedback on PR #546 sent it back. The bracket convention is how every
+/// other surface in the TUI writes a key — the footer, the help overlay,
+/// the palette — and the compact mode has no business forking it.
 fn pane_title(compact: bool, label: &str, chord: &str) -> String {
   if compact {
-    format!(" {} {} ", chord, label.to_uppercase())
+    format!(" {} [{}] ", label.to_uppercase(), chord)
   } else {
     format!(" {} [{}] ", label, chord)
   }

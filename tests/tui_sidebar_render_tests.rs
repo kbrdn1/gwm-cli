@@ -383,8 +383,8 @@ fn compact_mode_headers_carry_the_chord_and_the_fill() {
   let dir = repo_with_commits(4);
   let terminal = draw_list_view(dir.path(), true);
   let text = buffer_text(&terminal);
-  assert!(text.contains("1 WORKTREES"), "compact worktrees header: {text}");
-  assert!(text.contains("2 STATUS"), "compact status header: {text}");
+  assert!(text.contains("[1] WORKTREES"), "compact worktrees header: {text}");
+  assert!(text.contains("[2] STATUS"), "compact status header: {text}");
 
   let theme = gwm::tui::theme::Theme::default();
   let buffer = terminal.backend().buffer();
@@ -488,7 +488,7 @@ fn compact_mode_gives_a_short_lists_blank_rows_to_the_sidebar() {
   terminal.draw(|f| draw(f, &mut app)).unwrap();
   terminal.draw(|f| draw(f, &mut app)).unwrap();
 
-  let status_row = row_of(&terminal, "2 STATUS").expect("the compact Status header must render");
+  let status_row = row_of(&terminal, "[2] STATUS").expect("the compact Status header must render");
   // The pane's 42% share of a 40-row terminal is ~16 rows; sized to its
   // single row it spends 3. Anything past the share means the pane is
   // still reserving space it does not draw.
@@ -532,8 +532,8 @@ fn compact_headers_carry_the_focus_signal_the_borders_used_to() {
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     (
-      fg_of(&terminal, "1 WORKTREES").expect("worktrees header"),
-      fg_of(&terminal, "2 STATUS").expect("status header"),
+      fg_of(&terminal, "[1] WORKTREES").expect("worktrees header"),
+      fg_of(&terminal, "[2] STATUS").expect("status header"),
     )
   };
 
@@ -544,4 +544,89 @@ fn compact_headers_carry_the_focus_signal_the_borders_used_to() {
   let (worktrees, status) = headers_when(false);
   assert_eq!(worktrees, theme.focus, "focus moves to the list header");
   assert_eq!(status, theme.muted, "and leaves the sidebar header muted");
+}
+
+#[test]
+fn compact_mode_lets_the_sidebar_absorb_the_whole_split() {
+  // Codex review, PR #546: sizing the table with `Length` next to the
+  // sidebar's `Percentage(58)` does not add up to the body height, and
+  // ratatui's default flex leaves the remainder as dead space *after* the
+  // sidebar. The rows the pane gives back would then reach nobody — the
+  // opposite of what the mode claims.
+  //
+  // Measured on a repo whose commit section overflows, so the sidebar has
+  // content for every row it is granted: the last body line (just above
+  // the footer) must be painted, in both layouts.
+  let dir = repo_with_commits(40);
+  let painted_last_body_row = |compact: bool| {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.compact = compact;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    // Screen = header row, body, footer row. The last body row is the
+    // one above the footer.
+    let y = area.y + area.height - 2;
+    (area.x..area.x + area.width).any(|x| !buffer[(x, y)].symbol().trim().is_empty())
+  };
+  assert!(
+    painted_last_body_row(false),
+    "bordered baseline: the split already fills the body"
+  );
+  assert!(
+    painted_last_body_row(true),
+    "compact must hand the pane's unused rows to the sidebar, not to dead space"
+  );
+}
+
+/// Background colour of the first cell of `needle` on the row that
+/// carries it.
+fn bg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
+  let buffer = terminal.backend().buffer();
+  let area = buffer.area;
+  for y in area.y..area.y + area.height {
+    let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+    if let Some(byte_idx) = line.find(needle) {
+      let col = line[..byte_idx].chars().count() as u16;
+      return Some(buffer[(area.x + col, y)].bg);
+    }
+  }
+  None
+}
+
+#[test]
+fn compact_header_fill_follows_the_focus_too() {
+  // Validation feedback on PR #546: moving the focus signal onto the
+  // header *text* alone did not read at a glance. The fill carries it as
+  // well — `selection_bg` on the focused pane, `section_bg` elsewhere.
+  //
+  // Both roles already exist and the theme guarantees they differ
+  // (`section_bg_never_collides_with_selection_bg`), so the two header
+  // states are distinct on every preset without a third background role.
+  let dir = repo_with_commits(4);
+  let theme = gwm::tui::theme::Theme::default();
+  let fills_when = |sidebar_focused: bool| {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.compact = true;
+    app.sidebar.focused = sidebar_focused;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    (
+      bg_of(&terminal, "[1] WORKTREES").expect("worktrees header"),
+      bg_of(&terminal, "[2] STATUS").expect("status header"),
+    )
+  };
+
+  let (worktrees, status) = fills_when(true);
+  assert_eq!(status, theme.selection_bg, "focused sidebar header takes the loud fill");
+  assert_eq!(worktrees, theme.section_bg, "the unfocused pane keeps the quiet one");
+
+  let (worktrees, status) = fills_when(false);
+  assert_eq!(worktrees, theme.selection_bg, "the fill follows focus to the list");
+  assert_eq!(status, theme.section_bg, "and leaves the sidebar quiet");
 }

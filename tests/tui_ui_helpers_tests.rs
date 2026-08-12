@@ -178,21 +178,37 @@ fn status_pane_title_carries_the_focus_index() {
 }
 
 #[test]
-fn compact_titles_lead_with_the_chord_and_shout_the_label() {
-  // Issue #545: with no rule around it, a section header has to carry
-  // its own weight — the chord leads (it is the actionable half) and
-  // the label goes uppercase so it reads as chrome rather than as a
-  // content row. The bracket form belongs to the boxed mode, where the
-  // title sits inside the top rule.
+fn compact_titles_keep_the_bracket_shape_and_shout_the_label() {
+  // Issue #545 + validation feedback on PR #546: compact only changes
+  // the *case*, never the shape. The chord stays bracketed and keeps its
+  // side — leading for a focusable pane (`[1]`, `[2]`), trailing for a
+  // sub-pane — because that is how every other surface in the TUI writes
+  // a key. Uppercase is what marks the line as chrome now that no rule
+  // delimits it.
   let km = Keymap::defaults();
-  assert_eq!(status_pane_title(true), " 2 STATUS ");
-  assert_eq!(issue_pr_pane_title(&km, true), " F ISSUE / PR ");
-  assert_eq!(working_tree_pane_title(&km, true), " R WORKING TREE ");
+  assert_eq!(status_pane_title(true), " [2] STATUS ");
+  assert_eq!(issue_pr_pane_title(&km, true), " ISSUE / PR [F] ");
+  assert_eq!(working_tree_pane_title(&km, true), " WORKING TREE [R] ");
   assert_eq!(
     recent_items_pane_title(SidebarMode::Commits, &km, true),
-    " L RECENT COMMITS "
+    " RECENT COMMITS [L] "
   );
-  assert_eq!(recent_items_pane_title(SidebarMode::Stashes, &km, true), " L STASHES ");
+  assert_eq!(
+    recent_items_pane_title(SidebarMode::Stashes, &km, true),
+    " STASHES [L] "
+  );
+  // Same shape as the bordered form, case aside — the property the
+  // feedback asked for, stated as one assertion rather than five.
+  for (compact, bordered) in [
+    (issue_pr_pane_title(&km, true), issue_pr_pane_title(&km, false)),
+    (working_tree_pane_title(&km, true), working_tree_pane_title(&km, false)),
+  ] {
+    assert_eq!(
+      compact.to_uppercase(),
+      bordered.to_uppercase(),
+      "compact must not reorder or re-punctuate the title"
+    );
+  }
 }
 
 #[test]
@@ -282,7 +298,7 @@ fn compact_titles_still_track_a_rebound_chord() {
   let mut km = Keymap::defaults();
   km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
     .unwrap();
-  assert_eq!(issue_pr_pane_title(&km, true), " Ctrl+g ISSUE / PR ");
+  assert_eq!(issue_pr_pane_title(&km, true), " ISSUE / PR [Ctrl+g] ");
 }
 
 #[test]
