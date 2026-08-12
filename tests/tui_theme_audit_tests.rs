@@ -845,5 +845,6 @@ fn base_worktree(name: &str) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: Some(Duration::from_secs(3600)),
+    has_note: false,
   }
 }

@@ -78,6 +78,14 @@ pub struct JsonWorktree {
   /// `docs/schema/README.md` for the tier rules.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub agents: Option<JsonWorktreeAgents>,
+  /// The worktree's note, verbatim (issue #515). **Experimental tier** —
+  /// additive, omitted entirely (never `null`) when the branch carries no
+  /// note, so pre-#515 payloads are byte-identical. A note that exists only
+  /// inside the TUI would be off-contract for a project shipping a frozen
+  /// JSON schema, a daemon and a statusline; this is that machine surface,
+  /// alongside `gwm note show`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub note: Option<String>,
 }
 
 /// The agent-session summary of one worktree row (issue #408).
@@ -155,6 +163,10 @@ impl From<&WorktreeInfo> for JsonWorktree {
       // Filled by the list assembly when detection ran (issue #408); a bare
       // conversion carries no session info.
       agents: None,
+      // Filled by [`attach_notes`] (issue #515). `WorktreeInfo` carries only
+      // the presence flag the table marker needs, so the note text never
+      // travels through the TUI's per-row snapshot.
+      note: None,
     }
   }
 }
@@ -236,7 +248,25 @@ pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
   let reals: Vec<std::path::PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
   let pins = agent_pins_for_rows(repo, &trees);
   attach_agents(&mut rows, &reals, &pins);
+  attach_notes(repo, &mut rows);
   Ok(rows)
+}
+
+/// Populate the experimental `note` field on already-built rows (issue
+/// #515) — one small file read per branched row, the same order of cost as
+/// the `git config` reads `list` already pays per row.
+///
+/// Every failure mode (detached row, unportable branch name, absent,
+/// unreadable, or blank file) collapses to `None` through
+/// [`crate::notes::read`]: a permission problem on one note must not fail
+/// `gwm list --format=json` or a daemon poll.
+pub fn attach_notes(repo: &git2::Repository, rows: &mut [JsonWorktree]) {
+  for row in rows.iter_mut() {
+    let Some(branch) = crate::github::pinnable_branch(row.branch.as_deref()) else {
+      continue;
+    };
+    row.note = crate::notes::read(repo, branch);
+  }
 }
 
 /// Manual agent pins for already-built rows: `(path key, session id)` pairs

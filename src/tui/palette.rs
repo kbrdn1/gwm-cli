@@ -87,6 +87,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "rename the selected worktree's branch",
     },
     PaletteEntry {
+      action: Action::EditNote,
+      name: "edit-note",
+      description: "edit the selected worktree's note",
+    },
+    PaletteEntry {
       action: Action::ExitToWorktree,
       name: "exit-to-worktree",
       description: "quit the TUI and cd to the selected worktree path",

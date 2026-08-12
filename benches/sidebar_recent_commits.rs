@@ -58,6 +58,7 @@ fn fixture_repo(commit_count: usize) -> (TempDir, Repository, WorktreeInfo) {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   };
 
   (dir, repo, info)

@@ -369,8 +369,42 @@ text, because a note is something one may want to `grep` or open without gwm
 running, which is also what rules git config out despite gwm already keeping
 three per-branch keys there.
 
-Comes after the PR/Issue view, which pays for the overlay machinery it would
-reuse.
+- [ ] [#515](https://github.com/kbrdn1/gwm-cli/issues/515) ([PR #530](https://github.com/kbrdn1/gwm-cli/pull/530)) : `N` opens the selected worktree's note in `$EDITOR`, a binary marker flags the rows that carry one, `gwm note show [slug]` reads it back and the `--format=json` rows carry it in an additive `note` field. A rename moves the file, and `gwm doctor` reports a note whose branch is gone
+
+It was meant to come after the PR/Issue view, which pays for the overlay
+machinery it would reuse. It does not reuse it: the note opens in `$EDITOR`
+through the handoff `o` already had, so the dependency dropped and it landed
+alongside.
+
+Three decisions carry the rest of it.
+
+**Presence means non-blank, not "the file exists".** `vi` over an empty buffer
+writes one byte, so both `exists()` and a non-zero length would light the marker
+for a note nobody wrote. One predicate, in one function, and every surface reads
+through it. The cost is that the scan reads the files instead of listing a
+directory, which is nothing next to the `Repository::open` and revwalk `list`
+already does per row.
+
+**A branch name is not always a filename.** git accepts `< > " |`, a component
+ending in `.` and the Windows device names; Windows accepts none of them, and it
+silently normalises the trailing dot away, which would make two branches share
+one note. Those names carry no note anywhere, refused out loud rather than
+written under a name that means a different branch once the repo is cloned. The
+test that fixed the on-disk layout is the round trip: the scan re-joins path
+components with `/` explicitly, never through `to_string_lossy()`, which yields
+`feat\#515-x` on a Windows runner and would never compare equal to the branch it
+came from.
+
+**`N` confiscates its prefix space**, exactly as `z` did in #484. It was unbound
+before, so a `.gwm.toml` binding a chord starting with `N` is now a prefix
+conflict refused at load time. Stated in the changelog and both keybinding docs,
+and pinned by a test rather than left to a bug report.
+
+Deleting a note is `gwm doctor`'s to report and nobody's to do automatically.
+Not `gwm clean`, whose stated safety property is that `--yes` only removes
+directories git already ignores, and not `gwm remove`, since outliving the
+worktree until the work lands is the whole reason the note sits in the main
+checkout's git dir.
 
 ### 6. Container execution ([#421](https://github.com/kbrdn1/gwm-cli/issues/421) ✅)
 

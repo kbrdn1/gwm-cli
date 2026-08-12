@@ -1,6 +1,6 @@
 ---
 name: gwm
-description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Also covers multi-forge (#419): GitHub via `gh` **or** GitLab via `glab`, the `forge` / `[forge_hosts]` keys, and `gwm trust add`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `forge`, `forge_hosts`, `glab`, `gwm trust add`, GitLab MR, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
+description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Also covers multi-forge (#419): GitHub via `gh` **or** GitLab via `glab`, the `forge` / `[forge_hosts]` keys, and `gwm trust add`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `forge`, `forge_hosts`, `glab`, `gwm trust add`, GitLab MR, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm note`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
@@ -11,6 +11,8 @@ Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI
 Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.6.0`** (machine contracts frozen since 1.0.0 — MSRV 1.95).
 
 **Unreleased on `dev`: multi-row selection + bulk delete (#484).** `Space` marks the highlighted worktree in the TUI and `d` deletes every marked row in one batch, behind one confirm that reports `N selected` rather than listing them, with `D` arming the branch deletion for the whole batch. Nothing marked means `d` is the single-row delete it has always been, and only `d` reads the mark set: every other verb keeps acting on the cursor row, which the pane footer makes visible by carrying the count. Marks are keyed by path, cleared by the filter and the manual `f`, and only pruned (never cleared) by the background auto-refresh. `cycle_sidebar_layout` moved off `Space` to `z` to make room; both old defaults are one `[tui.keys]` line away. The non-interactive half is `gwm remove a b c`, which resolves every pattern before touching anything, so an unknown or ambiguous one fails the whole command with nothing removed.
+
+**Unreleased on `dev`: per-worktree notes (#515).** `N` opens the selected worktree's note in an editable modal (`Esc` writes and closes; `Ctrl+e` hands the same file to `$EDITOR` — `editor_cmd`, then `$EDITOR`, then `vi`, the handoff `o` uses in `mode = "editor"`), and the table carries a binary `≡` marker on the rows that have one. Notes are plain Markdown at `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable with gwm shut down, never committed, and they survive `gwm remove`, which is why they live in the main checkout rather than in the worktree. `gwm note show [slug]` prints one and exits 1 when there is none; the `--format=json` rows carry it in an additive `note` field. The note is keyed on the branch, so a detached row cannot carry one (and says so), a rename moves the file, and `gwm doctor` reports a note whose branch is gone (not `gwm clean`, whose `--yes` only ever removes directories git already ignores). Presence means non-blank, since `vi` over an empty buffer writes one byte. `N` was unbound before, so a `.gwm.toml` binding a chord starting with `N` is now a prefix conflict refused at load time.
 
 **Security, 1.6.0 (GHSA-fffq-vg6f-gxqm, high).** Every version up to and including 1.5.0 expanded lifecycle-hook placeholders into `sh -c` unescaped, so a branch name carrying `;` / `|` / `$` / backticks (all legal in a git ref, and a branch can arrive from someone else's push) ran arbitrary commands as the user, with no trust prompt in the path: the TOFU gate covers the repo's hooks, never the branch name flowing into them. Values are shell-escaped on expansion in 1.6.0, and hooks also get their context as `GWM_*` environment variables, which need no quoting at all. No backport: upgrade.
 
@@ -29,6 +31,7 @@ Shipped since 1.0.0: **free-form naming** in 1.6.0 (#416 / #418, above) alongsid
 - User asks **which AI agents are working where**: `gwm agents` (per-worktree sessions + an `unmatched` section), `gwm agents attach <wt> <id>` / `detach <wt> [<id>]` (multi-pins), the TUI `a` overlay (select `j`/`k`, pin `a`, unpin `d`, attach-by-id `i`), the pinned-only `Agents` sidebar pane, or the `GWM_AGENTS_HOME` test seam.
 - User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
 - User wants to **delete several worktrees at once**: `Space` to mark rows in the TUI then `d` (#484), or `gwm remove a b c` from the shell.
+- User wants to **write down where they were** on a worktree: `N` in the TUI opens its note in an editable modal (#515), `gwm note show` reads it back, `gwm doctor` reports the ones whose branch is gone.
 - User asks about the redesigned TUI: PTY overlays (`l`/`L` lazygit, `r`/`R` review, `o`/`O` shell, #35), the Settings panel (`4`) and its live-editable Keys tab (#294), the Command Logs modal (`3`), the Working Tree file-explorer pane (#300), the current-PR CI indicator (#299), `[tui.keys.modal.<context>]` rebindable overlay keys (#219), and `[tui.macro1]`/`[tui.macro2]` (`h`/`H`).
 - User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[tui.open]`, `[git_tui]`, `[review]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
 - User asks about composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`) and the `!` / `&&` / `||` operators.
@@ -121,6 +124,7 @@ gwm create feat 123 foo --repo <name>     # workspace mode: which child repo get
 gwm list [--format table|names|json] [--detect-pr]   # `json` = stable schema (#38); names = completion
 gwm path <pattern> [--format text|json]   # print path (fuzzy match) → use $(gwm path auth)
 gwm cd   <pattern>                        # alias of `gwm path`
+gwm note show [<slug>]                    # print a worktree's note; exit 1 when there is none (#515)
 gwm bootstrap                             # re-run bootstrap on cwd worktree
 gwm bootstrap <pattern>                   # ...or on a named worktree
 gwm sync                                  # fetch + rebase the cwd worktree onto its upstream
@@ -199,6 +203,8 @@ Runs a structured set of checks across config, environment, and worktree state. 
 | `2`  | At least one **failure** (broken config, prunable worktree, etc.)        |
 
 Trunk branches the orphan-branch check treats as merge destinations come from `[doctor] trunks = [...]` (default `["dev", "main"]`). Setting `trunks = []` disables the filter (every unclaimed gwm-style branch is flagged).
+
+One of the warnings is an **orphan note** (#515): a note under `.git/gwm/notes/` whose branch no longer exists. This is the only place the note lifecycle is enforced, on purpose. `gwm clean` does not touch notes: its stated safety property is that `--yes` only removes directories git already ignores, and prose is neither regenerable nor ignored.
 
 ### `gwm shell-init` → `gcd <pattern>`
 
@@ -292,7 +298,8 @@ Built-in defaults after the **v0.10 keymap redesign (#290)**, plus the `Space` /
 rebindable via `[tui.keys]` (list view) and `[tui.keys.modal.<context>]`
 (overlays, #219). One upgrade note: `z` is now a shipped default, so a
 `.gwm.toml` binding a chord that *starts* with `z` (`top = ["z z"]`) is a prefix
-conflict and is refused at load time. Run `gwm tui keys` for the full resolved map incl. every modal
+conflict and is refused at load time, and the same now goes for `N` (#515).
+Run `gwm tui keys` for the full resolved map incl. every modal
 context.
 
 | Key             | Action                                                                      |
@@ -304,6 +311,7 @@ context.
 | `3` / `4`       | open the Command Logs modal / the Settings (config) panel (#290 / #294)     |
 | `n` / `d` / `b` | new worktree modal / delete the marked rows (or the cursor row) / re-run bootstrap (TOFU gate) |
 | `Space`         | mark / unmark the cursor row for the bulk delete (#484); only `d` reads the set |
+| `N`             | edit the selected worktree's note in a modal (#515); `≡` marks the rows that have one   |
 | `D`             | toggle "delete branch on remove" (arms the safety countdown when ON)        |
 | `p` / `P`       | pull / push the selected worktree's branch                                  |
 | `s` / `f`       | sync (fetch + rebase) / refresh the worktree list                           |
@@ -900,6 +908,7 @@ gwm pr [--draft] [--render]  # render [pr_template], then gh pr create
 gwm daemon                   # JSON-RPC 2.0 over a unix socket
 gwm statusline [--watch]     # one-line prompt summary off the daemon
 gwm agents [attach|detach]   # AI-agent sessions per worktree + manual pins (#408)
+gwm note show [slug]         # print a worktree's note (exit 1 = none) (#515)
 gwm types                    # show branch types
 gwm doctor [--format json]   # diagnose setup (exit 0/1/2)
 gwm config get|set|list      # edit .gwm.toml (comment-preserving)

@@ -45,6 +45,7 @@ pub mod lifecycle;
 pub mod milestones;
 pub mod multiplexer;
 pub mod naming;
+pub mod notes;
 pub mod pr_templates;
 pub mod presets;
 pub mod removal;

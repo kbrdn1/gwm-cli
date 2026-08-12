@@ -200,6 +200,45 @@ fn list_workspace_names_format_lists_worktrees_per_repo() {
     .stdout(predicate::str::contains("beta/beta"));
 }
 
+#[test]
+fn workspace_json_reads_each_note_from_its_own_repo(/* issue #515 */) {
+  // A note lives in the `.git` of the repo that owns the row, so the
+  // workspace listing is the only surface that has to open a handle PER ROW
+  // (the same per-row open the agent pins need). Two repos with a note each,
+  // both on a branch called `main`: read through one shared handle and both
+  // rows would carry the same text, which is the bug this pins.
+  let root = workspace_root();
+  for (repo, body) in [("alpha", "alpha's own note\n"), ("beta", "beta's own note\n")] {
+    let notes = root.path().join(repo).join(".git/gwm/notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("main.md"), body).unwrap();
+  }
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["list", "--format=json", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+  let note_of = |name: &str| {
+    rows
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|r| r["repo"] == name)
+      .unwrap_or_else(|| panic!("no row for {name} in {rows}"))["note"]
+      .as_str()
+      .map(str::to_string)
+  };
+
+  assert_eq!(note_of("alpha").as_deref(), Some("alpha's own note\n"));
+  assert_eq!(note_of("beta").as_deref(), Some("beta's own note\n"));
+}
+
 /// A containerised `[exec.profiles.ci]` whose `runtime` is `echo`, so the
 /// "container" run prints the argv gwm built instead of needing a daemon.
 /// `runtime` is explicit, which the resolver honours without a `PATH` probe.

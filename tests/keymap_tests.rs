@@ -645,3 +645,27 @@ fn exec_and_clean_overlays_are_repo_mutating() {
   assert!(!Action::CommandLogs.is_repo_mutating());
   assert!(!Action::ConfigPanel.is_repo_mutating());
 }
+
+#[test]
+fn the_note_default_confiscates_its_prefix_space() {
+  // #515 binds `N`, which was entirely unbound before. Per the #87 policy a
+  // single-key default is a strict prefix of every chord starting with that
+  // key, so a `.gwm.toml` carrying `something = ["N x"]` from before the
+  // upgrade now fails to resolve at load time — the same cost `z` paid in
+  // #484. Pinned here so the break is a stated consequence rather than a
+  // surprise in a bug report, and so a future rebinding of `N` has to
+  // acknowledge it.
+  let mut km = Keymap::defaults();
+  assert!(matches!(
+    km.lookup(&KeyStroke::parse_chord("N").unwrap()),
+    ChordResolution::Matched(Action::EditNote)
+  ));
+
+  let err = km
+    .apply_override(Action::TerminalFullscreen, vec![KeyStroke::parse_chord("N x").unwrap()])
+    .unwrap_err();
+  assert!(
+    err.to_string().to_lowercase().contains("prefix"),
+    "expected a prefix-collision error, got: {err}"
+  );
+}

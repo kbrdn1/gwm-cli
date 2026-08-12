@@ -132,6 +132,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code is worse than a slow first request. `composer install` and
   `direnv allow .` run on the same `when` predicates as the Laravel preset.
 
+- **Per-worktree notes**
+  ([#515](https://github.com/kbrdn1/gwm-cli/issues/515)). gwm knew the
+  branch, the linked issue, the diff against base and the agent session, but
+  not where you were: what you had just figured out, what is blocking, what
+  to check before opening the PR. `N` now opens the selected worktree's note
+  in an editable modal, and the worktrees table carries a binary marker on
+  the rows that have one. The modal rather than `$EDITOR`, because a note is
+  usually three lines written in the ten seconds between two thoughts and
+  suspending the whole TUI to spawn an editor is a heavier gesture than
+  that; `Ctrl+e` inside it still hands the same file over (`editor_cmd`,
+  then `$EDITOR`, then `vi`, the handoff `o` uses in `mode = "editor"`) and
+  reloads what that editor wrote. `Esc` writes and closes, with no "quit
+  without saving" to lose prose to: emptying the buffer is how a note is
+  deleted, and it removes the file rather than leaving a blank one. Text,
+  `Enter`, `Backspace`, `Delete`, the arrows, `Home` / `End` and
+  `PageUp` / `PageDown` are all input and none of them are rebindable —
+  only `close` and `open_editor` live under `[tui.keys.modal.note]`, and
+  binding either to a printable is refused at load time. Notes are plain Markdown at
+  `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable and editable with
+  gwm shut down, never committed, readable from the main checkout, and they
+  survive `gwm remove`, which is the point of keeping them out of the
+  worktree. `gwm note show [slug]` prints one on stdout and exits 1 when
+  there is none, so it doubles as a presence test in a script, and the
+  `--format=json` list rows carry an additive `note` field alongside the
+  daemon payload. The note is keyed on the branch, which has four stated
+  consequences: a detached row cannot carry one and says so instead of
+  no-oping; a rename moves the file with the branch; a branch name a
+  filesystem will not take backs no note anywhere, on every platform, so a
+  note cannot exist on macOS and vanish on the same repo cloned to Windows;
+  and `gwm doctor` reports a note whose branch is gone, rather than
+  `gwm clean`, whose safety property is that `--yes` only removes directories
+  git already ignores. Two branch names a volume folds together — which
+  `git pack-refs` lets coexist — share one file, so `N` refuses the pair
+  rather than opening one branch's editor on the other's prose: by name
+  before either has a note, and by asking the filesystem once one does, which
+  is the only thing that knows whether this volume folds `feat/é` onto
+  `feat/É` or an NFC name onto its NFD twin. Presence
+  means "non-blank", not "the file exists", because `vi` over an empty buffer
+  writes one byte. One upgrade note, the same one `z` carried in #484: `N` is
+  now a shipped default, so a `.gwm.toml` binding a chord *starting* with `N`
+  (say `top = ["N x"]`) is a prefix conflict and is refused at load time.
+  Rebind that chord, or move `edit_note` elsewhere.
+
 ### Changed
 
 - **The TUI delete runs the remove hooks and records the undo journal**
@@ -188,6 +231,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rebind that chord, or move `cycle_sidebar_layout` elsewhere.
 
 ### Fixed
+
+- **An editor or shell configured with arguments now launches.** `editor_cmd`
+  / `shell_cmd` in `[tui.open]`, and the `$EDITOR` / `$SHELL` they fall back
+  to, were handed to the spawner whole, so a perfectly ordinary
+  `EDITOR="code --wait"` made the system look for an executable literally
+  named `code --wait` and `o` in `mode = "editor"` could never open anything.
+  These are shell lines by convention (git, cargo and systemctl all word-split
+  them), and gwm already reads `[review]` tools and hook `run =` lines that
+  way, so they are word-split now, with a quoted program path staying one
+  token and an unbalanced quote falling back to the raw string. Splitting is
+  POSIX and filenames are not, so a value that already names a file is handed
+  over whole and never split: `EDITOR=C:\Tools\nvim.exe` keeps launching
+  rather than becoming `C:Toolsnvim.exe` once the splitter eats the
+  backslashes. Found while
+  reviewing the note editor (#515), which reuses the same handoff and would
+  have shipped with the same hole. The path also reaches the child as an
+  `OsStr` rather than a lossy string, so a repo path carrying non-UTF-8 bytes
+  no longer opens a different file than the one gwm resolved.
 
 - **`gwm doctor` now reads `[hooks.*]`, not just `[[bootstrap.command]]`.**
   Two checks walked the bootstrap commands alone, so a config whose commands

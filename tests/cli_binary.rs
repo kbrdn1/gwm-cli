@@ -39,6 +39,9 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  review "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::is_match(r"\[alias(es)?: cd\]").unwrap())
+    // Issue #515: read a worktree's note from the CLI, so the note is not a
+    // TUI-only capability.
+    .stdout(predicate::str::contains("  note "))
     .stdout(predicate::str::contains("  bootstrap "))
     // Issue #24: fetch + rebase/merge a worktree onto its upstream.
     .stdout(predicate::str::contains("  sync "))
@@ -7429,4 +7432,224 @@ fn bootstrap_gives_hooks_the_branch_of_the_worktree_it_targets() {
     .assert()
     .success()
     .stdout(predicate::str::contains(expected));
+}
+
+// ---------------------------------------------------------------------------
+// `gwm note show` (issue #515)
+// ---------------------------------------------------------------------------
+
+/// Write a note straight into the store, the way an `$EDITOR` would.
+fn write_note_file(repo_dir: &Path, branch: &str, body: &str) {
+  let path = repo_dir.join(".git/gwm/notes").join(format!("{branch}.md"));
+  fs::create_dir_all(path.parent().unwrap()).unwrap();
+  fs::write(path, body).unwrap();
+}
+
+#[test]
+fn note_show_prints_the_note_verbatim() {
+  let (dir, _repo) = init_repo();
+  // Trailing spaces and a blank line: the note is prose, and `show` is the
+  // machine surface, so it must not reflow or trim what the editor wrote.
+  let body = "- [ ] check ETXTBSY  \n\nthe flaky one, do not chase it\n";
+  write_note_file(dir.path(), "main", body);
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::eq(body));
+}
+
+#[test]
+fn note_show_exits_one_when_there_is_no_note() {
+  // The non-zero exit is the contract that makes `gwm note show >/dev/null`
+  // a usable presence test in a script.
+  let (dir, _repo) = init_repo();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .code(1)
+    .stdout(predicate::str::is_empty())
+    .stderr(predicate::str::contains("no note on main"));
+}
+
+#[test]
+fn note_show_treats_a_blank_note_as_no_note() {
+  // What `vi` leaves behind when the user saves an empty buffer. Presence is
+  // "non-blank", not "the file exists" — the same predicate the table
+  // marker reads through.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .code(1)
+    .stderr(predicate::str::contains("no note on main"));
+}
+
+#[test]
+fn note_show_resolves_a_slug_to_its_branch() {
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  let branch = git2::Repository::open(&wt)
+    .unwrap()
+    .head()
+    .unwrap()
+    .shorthand()
+    .unwrap()
+    .to_string();
+  write_note_file(dir.path(), &branch, "worktree-scoped\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show", "feat-1"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("worktree-scoped"));
+}
+
+#[test]
+fn note_show_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["note", "show"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn list_json_carries_the_note() {
+  // The CLI list assembly is separate code from `json_api::worktrees` (the
+  // daemon's), so it needs its own guard or the two drift.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "- [ ] check the ETXTBSY retry\n");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert_eq!(
+    rows[0]["note"].as_str(),
+    Some("- [ ] check the ETXTBSY retry\n"),
+    "payload was: {rows}"
+  );
+}
+
+#[test]
+fn list_json_omits_note_when_there_is_none() {
+  let (dir, _repo) = init_repo();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert!(
+    rows[0].as_object().unwrap().get("note").is_none(),
+    "additive field: omitted, never null, so a pre-#515 consumer sees the old payload — got {rows}"
+  );
+}
+
+#[test]
+fn note_show_without_a_slug_reads_the_worktree_the_cwd_sits_in() {
+  // The trap this closes: `worktree::discover_repo` deliberately walks back
+  // to the MAIN checkout from inside a linked worktree, so its HEAD is the
+  // main checkout's branch, not the branch the user is standing on. Reading
+  // the branch off that handle would print `main`'s note (or none) from
+  // inside every worktree. The command opens the repo at the CWD instead.
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  let branch = git2::Repository::open(&wt)
+    .unwrap()
+    .head()
+    .unwrap()
+    .shorthand()
+    .unwrap()
+    .to_string();
+  write_note_file(dir.path(), &branch, "read me from inside the worktree\n");
+  // A different note on the main checkout's own branch, so resolving through
+  // the main repo would produce a wrong answer rather than an empty one.
+  write_note_file(dir.path(), "main", "the main checkout's note\n");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["note", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::eq("read me from inside the worktree\n"));
+}
+
+#[test]
+fn agents_json_carries_the_note_like_the_list_does() {
+  // `gwm agents --format=json` is documented as mirroring `gwm list
+  // --format=json`, and it assembles its rows itself, so the additive field
+  // needs its own guard or the two drift.
+  let (dir, _repo) = init_repo();
+  write_note_file(dir.path(), "main", "mirrored onto the agents payload\n");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["agents", "--format=json"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let rows: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+  assert_eq!(
+    rows[0]["note"].as_str(),
+    Some("mirrored onto the agents payload\n"),
+    "payload was: {rows}"
+  );
+}
+
+#[test]
+fn note_show_resolves_the_main_checkout_by_name() {
+  // `worktree::find_fuzzy` filters the main worktree out, so naming it from
+  // inside a linked worktree answered "not found" for a note every other
+  // surface handles: the TUI's `N`, the no-slug path and the JSON row all
+  // carry the main row's note (Codex review, PR #530, pass 3).
+  let (dir, repo) = init_repo();
+  let wt = dir.path().join("feat-1");
+  repo.worktree("feat-1", &wt, None).unwrap();
+  write_note_file(dir.path(), "main", "the main checkout's note\n");
+  let main_name = dir.path().file_name().unwrap().to_string_lossy().to_string();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(&wt)
+    .args(["note", "show", &main_name])
+    .assert()
+    .success()
+    .stdout(predicate::eq("the main checkout's note\n"));
 }

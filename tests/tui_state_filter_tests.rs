@@ -42,6 +42,7 @@ fn wt(name: &str) -> WorktreeInfo {
     issue_state: None,
     pr_state: None,
     age: None,
+    has_note: false,
   }
 }
 
