@@ -30,7 +30,7 @@ The v0.8.0 polish pass tightened the TUI's frame. All colours follow the resolve
 
 - **Statusline**: a single line. Key hints render as reverse-video badge chips (the key painted with the theme accent, then a short label); the status message (action log) is pinned flush-right with absolute priority. Under width pressure the hint list truncates with an `…` marker while the log stays visible.
 - **Header**, a single borderless row: the version is a reverse-video chip, the repo name is bold, and the working directory is dimmed and tilde-compressed. The `picker` flag is its own reverse-video chip. Drop order under width pressure is path → repo name → version chip (the version survives last).
-- **Modals** all share one frame: a rounded border with a bold themed title, theme colours, and a box sized to its content rather than a fixed percentage of the screen.
+- **Modals** all share one frame: a rounded border carrying a bold themed title in its top rule, theme colours, and a box sized to its content rather than a fixed percentage of the screen. The title moved into the rule in [#549](https://github.com/kbrdn1/gwm-cli/issues/549) — it used to be a centred row inside the frame followed by a blank spacer, so every overlay is two rows shorter.
 
 ### layout
 
@@ -40,4 +40,6 @@ The capture at the top of this page shows it, as does every other capture in the
 
 `layout = "bordered"` restores gwm's layout up to 1.7, the lazygit-style boxes:
 
-![gwm TUI in bordered mode: lazygit-style box rules around every section](./_assets/bordered.png) Modals keep their frame under either value. Configuration and the `section_bg` theme role are documented under [`.gwm.toml`](/configuration/gwm-toml#layout).
+![gwm TUI in bordered mode: lazygit-style box rules around every section](./_assets/bordered.png)
+
+Modals keep their frame under either value. Configuration and the `section_bg` theme role are documented under [`.gwm.toml`](/configuration/gwm-toml#layout).

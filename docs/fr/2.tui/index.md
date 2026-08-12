@@ -30,7 +30,7 @@ La passe de polish v0.8.0 a resserré le cadre de la TUI. Toutes les couleurs su
 
 - **Statusline** : une seule ligne. Les indications de touches sont rendues comme des puces badge en vidéo inversée (la touche peinte avec l'accent du thème, puis un libellé court) ; le message de statut (journal d'action) est épinglé à droite avec une priorité absolue. Sous contrainte de largeur, la liste des indications est tronquée avec un marqueur `…` tandis que le journal reste visible.
 - **Header**, une seule ligne sans bordure : la version est une puce en vidéo inversée, le nom du dépôt est en gras, et le répertoire de travail est atténué et compressé avec un tilde. Le drapeau `picker` est sa propre puce en vidéo inversée. L'ordre d'abandon sous contrainte de largeur est chemin → nom du dépôt → puce de version (la version survit en dernier).
-- **Modals** : chaque surcouche partage un même cadre, avec une bordure arrondie, un titre en gras thématisé, les couleurs du thème, et une boîte dimensionnée à son contenu plutôt qu'à un pourcentage fixe de l'écran.
+- **Modals** : chaque surcouche partage un même cadre, avec une bordure arrondie qui porte un titre en gras thématisé dans son filet du haut, les couleurs du thème, et une boîte dimensionnée à son contenu plutôt qu'à un pourcentage fixe de l'écran. Le titre a rejoint le filet dans [#549](https://github.com/kbrdn1/gwm-cli/issues/549) — c'était auparavant une ligne centrée dans le cadre suivie d'une ligne vide, donc chaque surcouche est plus courte de deux lignes.
 
 ### layout
 
@@ -40,4 +40,6 @@ La capture en haut de cette page le montre, comme toutes les autres captures de 
 
 `layout = "bordered"` restaure la disposition de gwm jusqu'à la 1.7, les boîtes façon lazygit :
 
-![TUI gwm en mode bordé : filets façon lazygit autour de chaque section](../../2.tui/_assets/bordered.png) Les modales gardent leur cadre dans les deux cas. La configuration et le rôle de thème `section_bg` sont documentés sous [`.gwm.toml`](/fr/configuration/gwm-toml#layout).
+![TUI gwm en mode bordé : filets façon lazygit autour de chaque section](../../2.tui/_assets/bordered.png)
+
+Les modales gardent leur cadre dans les deux cas. La configuration et le rôle de thème `section_bg` sont documentés sous [`.gwm.toml`](/fr/configuration/gwm-toml#layout).
