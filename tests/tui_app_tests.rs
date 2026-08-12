@@ -8723,7 +8723,15 @@ fn activate_choice_setting_persists_project_layer_and_applies_live() {
   let (dir, mut app) = make_app();
   app.enter_config_panel();
   app.config_panel.tab = SettingsTab::Tui;
-  app.config_panel.selected = 0; // sidebar position
+  // Looked up rather than hard-coded: the tab's order is a design call
+  // and moved when #545 put `layout` at the top. An index literal made
+  // this test fail for a reason that had nothing to do with what it
+  // checks.
+  app.config_panel.selected = SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == gwm::tui::SettingField::SidebarPosition)
+    .expect("the TUI tab must offer sidebar position");
   assert_eq!(app.config.tui.sidebar_position, SidebarPosition::Right);
 
   // Cycle the choice: right → left, written to the project `.gwm.toml` and
@@ -13047,4 +13055,41 @@ fn refreshing_the_view_asks_for_the_threads_again() {
     "and the section still renders them:\n{}",
     overlay_text(&app)
   );
+}
+
+#[test]
+fn activating_layout_from_the_panel_switches_the_live_layout() {
+  // Codex review, PR #546: the panel is documented as the editable
+  // schema, so `bordered` — the opt-out of the layout #545 made the
+  // default — must be reachable from it and take effect without a
+  // relaunch.
+  //
+  // No `apply_*` step is needed for this one, and that is the point of
+  // reading `config.tui.layout` at render time rather than mirroring it
+  // onto `App`: reloading the config *is* applying it. The assertion
+  // below is what proves that, so a future refactor that caches the
+  // layout on `App` fails here until it wires its own apply.
+  use gwm::config::TuiLayout;
+  use gwm::tui::SettingsTab;
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == gwm::tui::SettingField::Layout)
+    .expect("the TUI tab must offer the layout field");
+  assert_eq!(app.config.tui.layout, TuiLayout::Compact, "default is compact");
+
+  app.activate_selected_setting();
+  assert_eq!(
+    app.config.tui.layout,
+    TuiLayout::Bordered,
+    "cycling the choice must reach the live config"
+  );
+
+  // And back, so the cycle is a cycle rather than a one-way door.
+  app.activate_selected_setting();
+  assert_eq!(app.config.tui.layout, TuiLayout::Compact);
 }

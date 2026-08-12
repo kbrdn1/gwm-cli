@@ -760,9 +760,11 @@ layout = "borderd"
 
 #[test]
 fn tui_layout_labels_match_their_serialised_spelling() {
-  // The Settings panel writes `label()` back into `.gwm.toml`, so a
-  // label that drifts from the serde spelling produces a file that no
-  // longer loads.
+  // The Settings panel offers `label()` as a choice and writes the chosen
+  // string back into `.gwm.toml`, so a label that drifts from the serde
+  // spelling produces a file that no longer loads. (Until #546 wired the
+  // field into the TUI tab, this reasoning described a write-back that
+  // did not exist — the assertion was right, its justification was not.)
   for layout in TuiLayout::ALL {
     let dir = TempDir::new().unwrap();
     std::fs::write(
