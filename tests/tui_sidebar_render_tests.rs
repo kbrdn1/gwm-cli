@@ -497,3 +497,51 @@ fn compact_mode_gives_a_short_lists_blank_rows_to_the_sidebar() {
     "the sidebar must start right under a one-row table, got row {status_row}"
   );
 }
+
+/// Foreground colour of the first cell of `needle` on the row that
+/// carries it.
+fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
+  let buffer = terminal.backend().buffer();
+  let area = buffer.area;
+  for y in area.y..area.y + area.height {
+    let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+    if let Some(byte_idx) = line.find(needle) {
+      let col = line[..byte_idx].chars().count() as u16;
+      return Some(buffer[(area.x + col, y)].fg);
+    }
+  }
+  None
+}
+
+#[test]
+fn compact_headers_carry_the_focus_signal_the_borders_used_to() {
+  // Issue #545, unknown #1 — the one the issue calls the real half.
+  // Without rules, the border colour has nowhere to live, so the focus
+  // signal moves onto the header text. Both panes are checked in both
+  // configurations because focus is exclusive: `list_has_focus` is the
+  // negation of the sidebar's, so a header wired to a constant (rather
+  // than to focus) would show the two agreeing in at least one of them.
+  let dir = repo_with_commits(4);
+  let theme = gwm::tui::theme::Theme::default();
+  let headers_when = |sidebar_focused: bool| {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.compact = true;
+    app.sidebar.focused = sidebar_focused;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    (
+      fg_of(&terminal, "1 WORKTREES").expect("worktrees header"),
+      fg_of(&terminal, "2 STATUS").expect("status header"),
+    )
+  };
+
+  let (worktrees, status) = headers_when(true);
+  assert_eq!(status, theme.focus, "focused sidebar header wears the focus role");
+  assert_eq!(worktrees, theme.muted, "the unfocused pane header is muted");
+
+  let (worktrees, status) = headers_when(false);
+  assert_eq!(worktrees, theme.focus, "focus moves to the list header");
+  assert_eq!(status, theme.muted, "and leaves the sidebar header muted");
+}
