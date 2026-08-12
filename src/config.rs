@@ -838,6 +838,17 @@ pub struct TuiConfig {
   /// Absent → the key does nothing.
   #[serde(default)]
   pub macro2: Option<TuiMacroConfig>,
+
+  /// Compact layout (issue #545): panes and sidebar sections drop their
+  /// box rules and delimit with a filled one-line header instead, which
+  /// buys back two rows and two columns per section.
+  ///
+  /// Default `false`. The mode changes what every shipped screenshot
+  /// looks like, so it is opt-in rather than the new default; the
+  /// overlay block keeps its border either way, since a modal floating
+  /// over content is exactly where a rule earns its keep.
+  #[serde(default)]
+  pub compact: bool,
 }
 
 impl Default for TuiConfig {
@@ -852,6 +863,7 @@ impl Default for TuiConfig {
       keys: TuiKeysConfig::default(),
       macro1: None,
       macro2: None,
+      compact: false,
     }
   }
 }

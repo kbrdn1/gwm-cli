@@ -710,6 +710,32 @@ auto_refresh_secs = 15
 }
 
 #[test]
+fn tui_compact_defaults_to_off() {
+  // #545: compact mode changes what every shipped screenshot looks
+  // like, so it stays opt-in. A config with no `[tui]` block must
+  // render exactly as it did before the mode existed.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(!cfg.tui.compact, "compact must default to false");
+}
+
+#[test]
+fn tui_compact_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+compact = true
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(cfg.tui.compact, "[tui] compact = true must reach the config");
+}
+
+#[test]
 fn tui_countdown_clamped_to_five_seconds() {
   // A user who types `confirm_countdown_secs = 30` in their .gwm.toml
   // wants more friction; we cap it at 5 so the destructive path is never
