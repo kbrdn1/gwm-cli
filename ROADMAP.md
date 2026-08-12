@@ -4,11 +4,17 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there. This file is the map, not the spec.
 
-## Current state: v1.6.1 stable
+## Current state: v1.7.0 stable
 
-The current **stable** line is **v1.6.1** (2026-08-04), a follow-up closing the
-gaps left by the v1.6.0 **security fix affecting every earlier version** (see
-the highlights table). The machine-readable
+The current **stable** line is **v1.7.0** (2026-08-12), the largest feature line
+since 1.0: per-worktree notes, the rich PR/Issue view and its inline review
+comments, container execution on `exec` profiles, multi-row selection with a
+batch delete, and the Symfony preset. It closes the four capability gaps that
+came out of the comparative read of the field, so the
+[comparison page](docs/8.comparison.md) reports parity where it used to report a
+deficit. The previous line, **v1.6.1** (2026-08-04), closed the gaps left by the
+v1.6.0 **security fix affecting every earlier version** (see the highlights
+table). The machine-readable
 contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
 the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
 section set will not break without a major bump (see
