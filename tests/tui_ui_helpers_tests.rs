@@ -9,11 +9,11 @@ use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, bootstrap_report_lines, centered_abs, confirm_buttons_line, create_buttons_line, ellipsize_middle,
-  field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, recent_items_pane_title,
-  status_pane_title, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, confirm_buttons_line,
+  create_buttons_line, ellipsize_middle, field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line,
+  pane_counter, recent_items_pane_title, status_pane_title, type_selector_line, working_tree_counts_footer,
+  working_tree_pane_title, working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
@@ -127,7 +127,7 @@ fn worktrees_pane_title_unfiltered_shows_total_with_focus_index() {
   // No filter (empty query, not active) → the `(N)` counter is the full
   // worktree count, and the pane carries the `[1]` focus mnemonic (focusable
   // with the `1` key). Casing is fixed to `Worktrees`.
-  let line = worktrees_pane_title("", false, 5, 5, Color::Yellow);
+  let line = worktrees_pane_title("", false, 5, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees (5) ");
 }
 
@@ -136,7 +136,7 @@ fn worktrees_pane_title_active_filter_shows_query_cursor_and_ratio() {
   // Issue #262: the live `/` filter renders in the pane title. While typing
   // (active), the title carries the `/query`, a block cursor, and the
   // `(visible/total)` ratio so the user sees how much the filter narrowed.
-  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow);
+  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees /au\u{2588} (3/5) ");
 }
 
@@ -145,7 +145,7 @@ fn worktrees_pane_title_sticky_filter_shows_query_without_cursor() {
   // Sticky (committed) filter: the query stays visible in the title for
   // context, but with no cursor (the bar is closed) and a compact form — no
   // oversized hint.
-  let line = worktrees_pane_title("au", false, 3, 5, Color::Yellow);
+  let line = worktrees_pane_title("au", false, 3, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees /au (3/5) ");
 }
 
@@ -153,7 +153,7 @@ fn worktrees_pane_title_sticky_filter_shows_query_without_cursor() {
 fn worktrees_pane_title_active_empty_query_shows_prompt_and_total() {
   // Just opened the bar with an empty buffer: the `/` prompt + cursor show,
   // but the counter stays the `(total)` form (an empty query matches all).
-  let line = worktrees_pane_title("", true, 5, 5, Color::Yellow);
+  let line = worktrees_pane_title("", true, 5, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees /\u{2588} (5) ");
 }
 
@@ -161,7 +161,7 @@ fn worktrees_pane_title_active_empty_query_shows_prompt_and_total() {
 fn worktrees_pane_title_paints_the_slash_in_the_filter_colour() {
   // The `/` prompt keeps its dedicated filter colour (historically the
   // `dirty` role) so it reads as an editable affordance, not chrome.
-  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow);
+  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow, false);
   let slash = line
     .spans
     .iter()
@@ -174,16 +174,124 @@ fn worktrees_pane_title_paints_the_slash_in_the_filter_colour() {
 fn status_pane_title_carries_the_focus_index() {
   // The sidebar reads as the `[2] Status` pane (focusable with `2`),
   // mirroring `[1] Worktrees`.
-  assert_eq!(status_pane_title(), " [2] Status ");
+  assert_eq!(status_pane_title(false), " [2] Status ");
+}
+
+#[test]
+fn compact_titles_lead_with_the_chord_and_shout_the_label() {
+  // Issue #545: with no rule around it, a section header has to carry
+  // its own weight — the chord leads (it is the actionable half) and
+  // the label goes uppercase so it reads as chrome rather than as a
+  // content row. The bracket form belongs to the boxed mode, where the
+  // title sits inside the top rule.
+  let km = Keymap::defaults();
+  assert_eq!(status_pane_title(true), " 2 STATUS ");
+  assert_eq!(issue_pr_pane_title(&km, true), " F ISSUE / PR ");
+  assert_eq!(working_tree_pane_title(&km, true), " R WORKING TREE ");
+  assert_eq!(
+    recent_items_pane_title(SidebarMode::Commits, &km, true),
+    " L RECENT COMMITS "
+  );
+  assert_eq!(recent_items_pane_title(SidebarMode::Stashes, &km, true), " L STASHES ");
+}
+
+#[test]
+fn compact_header_line_fills_the_width_and_right_aligns_the_counter() {
+  // Issue #545: the counter moves out of the bottom rule (which no longer
+  // exists) onto the right of the header line, so a section spends one row
+  // on chrome instead of two. The line is padded to the full width because
+  // the fill has to reach the right edge — a header that stops at its text
+  // reads as a stray highlighted word, not as a section boundary.
+  let line = compact_header_line(
+    ratatui::text::Line::from(" 1 WORKTREES "),
+    Some(ratatui::text::Line::from(" 3 of 5 ")),
+    30,
+    Color::Cyan,
+  );
+  let text = title_text(&line);
+  assert_eq!(text.chars().count(), 30, "header must span the pane width: {text:?}");
+  assert!(text.starts_with(" 1 WORKTREES "), "title leads: {text:?}");
+  assert!(text.ends_with(" 3 of 5 "), "counter is flushed right: {text:?}");
+}
+
+#[test]
+fn compact_header_line_without_a_counter_still_spans_the_width() {
+  let line = compact_header_line(ratatui::text::Line::from(" 2 STATUS "), None, 18, Color::Cyan);
+  let text = title_text(&line);
+  assert_eq!(text.chars().count(), 18, "got {text:?}");
+  assert!(text.starts_with(" 2 STATUS "), "got {text:?}");
+}
+
+#[test]
+fn compact_header_line_drops_the_counter_before_the_title() {
+  // A narrow pane cannot show both. The title carries the focus mnemonic
+  // and says *what* the section is, so it is the half that survives; the
+  // counter is the first thing cut, then the title itself is truncated.
+  let line = compact_header_line(
+    ratatui::text::Line::from(" 1 WORKTREES "),
+    Some(ratatui::text::Line::from(" 3 of 5 ")),
+    14,
+    Color::Cyan,
+  );
+  let text = title_text(&line);
+  assert_eq!(text.chars().count(), 14, "got {text:?}");
+  assert!(
+    !text.contains("of"),
+    "counter dropped rather than overlapping: {text:?}"
+  );
+
+  let squeezed = compact_header_line(ratatui::text::Line::from(" 1 WORKTREES "), None, 6, Color::Cyan);
+  let text = title_text(&squeezed);
+  assert_eq!(text.chars().count(), 6, "never overflows the pane: {text:?}");
+}
+
+#[test]
+fn compact_header_line_paints_unstyled_spans_with_the_focus_accent() {
+  // Focus indication moves from the border colour to the header text —
+  // that is the whole signal once the rules are gone. Spans that already
+  // carry a colour (the filter `/` prompt) keep theirs: they encode
+  // something other than focus.
+  let title = ratatui::text::Line::from(vec![
+    ratatui::text::Span::raw(" 1 WORKTREES "),
+    ratatui::text::Span::styled("/", Style::default().fg(Color::Yellow)),
+  ]);
+  let line = compact_header_line(title, None, 30, Color::Magenta);
+  let plain = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("WORKTREES"))
+    .expect("title span");
+  assert_eq!(plain.style.fg, Some(Color::Magenta), "unstyled title wears the accent");
+  let slash = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "/")
+    .expect("slash span");
+  assert_eq!(
+    slash.style.fg,
+    Some(Color::Yellow),
+    "an already-coloured span is left alone"
+  );
+}
+
+#[test]
+fn compact_titles_still_track_a_rebound_chord() {
+  // The chord in a compact header is resolved live, exactly like the
+  // bracketed one — a user who rebinds `F` must see the new key lead
+  // the header rather than a stale literal.
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
+    .unwrap();
+  assert_eq!(issue_pr_pane_title(&km, true), " Ctrl+g ISSUE / PR ");
 }
 
 #[test]
 fn sidebar_subpane_titles_surface_live_bindings() {
   let mut km = Keymap::defaults();
-  assert_eq!(issue_pr_pane_title(&km), " Issue / PR [F] ");
-  assert_eq!(working_tree_pane_title(&km), " Working Tree [R] ");
+  assert_eq!(issue_pr_pane_title(&km, false), " Issue / PR [F] ");
+  assert_eq!(working_tree_pane_title(&km, false), " Working Tree [R] ");
   assert_eq!(
-    recent_items_pane_title(SidebarMode::Commits, &km),
+    recent_items_pane_title(SidebarMode::Commits, &km, false),
     " Recent Commits [L] "
   );
 
@@ -200,10 +308,10 @@ fn sidebar_subpane_titles_surface_live_bindings() {
   )
   .unwrap();
 
-  assert_eq!(issue_pr_pane_title(&km), " Issue / PR [Ctrl+g] ");
-  assert_eq!(working_tree_pane_title(&km), " Working Tree [Ctrl+r] ");
+  assert_eq!(issue_pr_pane_title(&km, false), " Issue / PR [Ctrl+g] ");
+  assert_eq!(working_tree_pane_title(&km, false), " Working Tree [Ctrl+r] ");
   assert_eq!(
-    recent_items_pane_title(SidebarMode::Commits, &km),
+    recent_items_pane_title(SidebarMode::Commits, &km, false),
     " Recent Commits [Ctrl+l] "
   );
 }

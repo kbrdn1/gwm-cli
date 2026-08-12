@@ -382,6 +382,94 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
+/// What a pane's frame costs and how it is painted (issue #545).
+///
+/// Two shapes, resolved once per pane and threaded down rather than
+/// re-decided at each site: the boxed default (a rule on all four sides,
+/// the title in the top one, the counter in the bottom one) and compact
+/// (a single filled header line, no rules at all).
+///
+/// Threading the *cost* rather than a bare `compact` flag is deliberate.
+/// The chrome budget is read at half a dozen places — layout constraints,
+/// the two scroll clamps, the inner width that trims a PR title — and a
+/// flag re-tested at each of them drifts. When it does, the failure is the
+/// #437 class: the solver hands a section less than it asked for and its
+/// trailing rows become unreachable.
+#[derive(Debug, Clone, Copy)]
+pub struct Chrome {
+  /// `true` when the pane draws a filled header instead of box rules.
+  pub compact: bool,
+  /// Focus signal: `theme.focus` when the pane holds focus, `theme.muted`
+  /// otherwise. Paints the border when boxed and the header text when
+  /// compact — with no rules left, the header *is* where focus reads.
+  pub accent: Color,
+  /// Header background, compact only.
+  pub fill: Color,
+}
+
+impl Chrome {
+  /// Chrome for a surface that stays boxed whatever `[tui] compact`
+  /// says — the modals, where a rule separates the panel from the
+  /// content it floats over.
+  pub fn boxed(accent: Color) -> Self {
+    Self {
+      compact: false,
+      accent,
+      fill: Color::Reset,
+    }
+  }
+
+  pub fn resolve(compact: bool, focused: bool, theme: &super::theme::Theme) -> Self {
+    Self {
+      compact,
+      accent: panel_border_color(focused, theme),
+      fill: theme.section_bg,
+    }
+  }
+
+  /// Rows the frame costs: the top and bottom rules, or the single
+  /// header line.
+  pub fn rows(self) -> u16 {
+    if self.compact {
+      1
+    } else {
+      2
+    }
+  }
+
+  /// Columns unavailable to content: the two side rules plus the one
+  /// leading pad column, or just that pad when there are no rules.
+  pub fn cols(self) -> u16 {
+    if self.compact {
+      1
+    } else {
+      3
+    }
+  }
+
+  /// The content rect inside a section frame — what a scrollbar or an
+  /// inner overlay must aim at. Boxed: inset on all four sides. Compact:
+  /// only the header row is spent, so the content keeps the full width
+  /// and the right column stays available for the scrollbar.
+  pub fn inner(self, area: Rect) -> Rect {
+    if self.compact {
+      Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(1),
+      }
+    } else {
+      Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+      }
+    }
+  }
+}
+
 /// Title for the worktree pane block (issue #217; carries the inline fuzzy
 /// filter since #262). Always leads with the `[1]` focus mnemonic (the pane
 /// is focusable with the `1` key). When a filter is live — the user is typing
@@ -399,8 +487,9 @@ pub fn worktrees_pane_title(
   visible: usize,
   total: usize,
   filter_color: Color,
+  compact: bool,
 ) -> Line<'static> {
-  let mut spans = vec![Span::raw(" [1] Worktrees ")];
+  let mut spans = vec![Span::raw(if compact { " 1 WORKTREES " } else { " [1] Worktrees " })];
   // Live filter (typing or sticky): show the `/query` prompt + optional
   // cursor, mirroring the Vim-style bar the title replaced.
   if active || !query.is_empty() {
@@ -434,8 +523,106 @@ pub fn worktrees_pane_title(
 /// [`worktrees_pane_title`]'s `[1]`. The sidebar is a stack of sub-sections;
 /// this labels the first one so the pane reads as `[2] Status` without
 /// nesting an extra bordered frame.
-pub fn status_pane_title() -> &'static str {
-  " [2] Status "
+///
+/// `compact` switches to the mode's idiom — see [`pane_title`]. Both arms
+/// stay `&'static str` so `render_section` keeps handing ratatui a
+/// borrowed title rather than allocating one per frame.
+pub fn status_pane_title(compact: bool) -> &'static str {
+  if compact {
+    " 2 STATUS "
+  } else {
+    " [2] Status "
+  }
+}
+
+/// Render a pane title in the idiom of the current mode (issue #545).
+///
+/// Boxed: ` Issue / PR [F] ` — the label reads inside the top rule and
+/// the chord trails it, which is where the eye lands on a framed panel.
+///
+/// Compact: ` F ISSUE / PR ` — with no rule to delimit it, the header is
+/// one filled line among content lines, so the chord leads (it is the
+/// actionable half, and a left-anchored key column scans like lazygit's)
+/// and the label goes uppercase to read as chrome rather than as a row of
+/// content.
+fn pane_title(compact: bool, label: &str, chord: &str) -> String {
+  if compact {
+    format!(" {} {} ", chord, label.to_uppercase())
+  } else {
+    format!(" {} [{}] ", label, chord)
+  }
+}
+
+/// Compose the single header line a compact pane spends instead of a box
+/// (issue #545): the title on the left, the counter flushed right, and
+/// padding in between so the line spans `width` exactly.
+///
+/// Padding to the full width is not cosmetic. The caller paints the fill
+/// by styling the whole header row, and a line that stopped at its text
+/// would leave the boundary reading as a stray highlighted word rather
+/// than as the edge of a section.
+///
+/// `accent` carries the focus signal — with the rules gone, the header
+/// text is where "which pane am I in" now lives. It is applied only to
+/// spans that have no colour of their own; a span that already carries
+/// one (the filter `/` prompt) encodes something other than focus and is
+/// left alone.
+///
+/// On a pane too narrow for both, the counter is dropped whole rather
+/// than overlapped — the title names the section and carries its focus
+/// mnemonic, so it is the half worth keeping — and the title itself is
+/// truncated only once it is alone and still too wide.
+///
+/// Pure and width-explicit so `tests/tui_ui_helpers_tests.rs` pins the
+/// layout without a ratatui backend.
+pub fn compact_header_line(
+  title: Line<'static>,
+  counter: Option<Line<'static>>,
+  width: u16,
+  accent: Color,
+) -> Line<'static> {
+  let width = width as usize;
+  let accent_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+  // Only spans with no colour of their own take the accent; the filter `/`
+  // prompt and the Working Tree's per-category counts already encode
+  // something that is not focus.
+  let accentuate = |s: Span<'static>| {
+    if s.style.fg.is_none() {
+      Span::styled(s.content, accent_style.patch(s.style))
+    } else {
+      s
+    }
+  };
+  let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(accentuate).collect();
+
+  let title_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+  // Truncate the title when it alone overflows. Cutting from the tail
+  // keeps the leading chord — the actionable half — visible longest.
+  if title_w > width {
+    let mut left = width;
+    for s in spans.iter_mut() {
+      let w = s.content.chars().count();
+      if w <= left {
+        left -= w;
+      } else {
+        *s = Span::styled(s.content.chars().take(left).collect::<String>(), s.style);
+        left = 0;
+      }
+    }
+    spans.retain(|s| !s.content.is_empty());
+    return Line::from(spans);
+  }
+
+  let counter_w = |c: &Line<'static>| -> usize { c.spans.iter().map(|s| s.content.chars().count()).sum() };
+  let counter = counter.filter(|c| title_w + counter_w(c) <= width);
+  let pad = width - title_w - counter.as_ref().map(counter_w).unwrap_or(0);
+  if pad > 0 {
+    spans.push(Span::styled(" ".repeat(pad), accent_style));
+  }
+  if let Some(counter) = counter {
+    spans.extend(counter.spans.into_iter().map(accentuate));
+  }
+  Line::from(spans)
 }
 
 /// Bottom-right `selected of visible` counter for a pane footer (issue
@@ -618,7 +805,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   widths.push(Constraint::Fill(1));
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
-  let border_color = panel_border_color(list_has_focus, &app.theme);
+  let chrome = Chrome::resolve(app.config.tui.compact, list_has_focus, &app.theme);
 
   let title = worktrees_pane_title(
     app.filter.query(),
@@ -626,6 +813,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     visible.len(),
     app.worktrees.len(),
     app.theme.dirty,
+    chrome.compact,
   );
 
   // Bottom-right `selected of visible` counter (issue #217), mirroring the
@@ -634,22 +822,41 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let selected_1based = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
   let counter = list_pane_counter(selected_1based, visible.len(), marked_count);
 
-  let mut block = Block::default()
-    .borders(Borders::ALL)
-    .title(title)
-    .border_style(Style::default().fg(border_color));
-  if let Some(counter) = counter {
-    block = block.title_bottom(Line::from(counter).right_aligned());
-  }
-
-  let table = Table::new(rows, widths)
+  let mut table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
-    .block(block)
     .row_highlight_style(Style::default().bg(theme.selection_bg).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
-  f.render_stateful_widget(table, area, &mut app.list_state);
+  // Compact mode: the counter has no bottom rule to sit in, so it moves to
+  // the right of the header line and the whole box collapses to that one
+  // row, painted here. The table then renders into the area below with no
+  // block at all — one row of chrome instead of two, two columns back.
+  let table_area = if chrome.compact {
+    let header_area = Rect { height: 1, ..area };
+    let line = compact_header_line(title, counter.map(Line::from), header_area.width, chrome.accent);
+    f.render_widget(
+      Paragraph::new(line).style(Style::default().bg(chrome.fill)),
+      header_area,
+    );
+    Rect {
+      y: area.y.saturating_add(1),
+      height: area.height.saturating_sub(1),
+      ..area
+    }
+  } else {
+    let mut block = Block::default()
+      .borders(Borders::ALL)
+      .title(title)
+      .border_style(Style::default().fg(chrome.accent));
+    if let Some(counter) = counter {
+      block = block.title_bottom(Line::from(counter).right_aligned());
+    }
+    table = table.block(block);
+    area
+  };
+
+  f.render_stateful_widget(table, table_area, &mut app.list_state);
 }
 
 /// Details panel for the selected worktree — structured info, recent commits,
@@ -659,7 +866,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
-  let border_color = panel_border_color(app.sidebar.focused, &app.theme);
+  let chrome = Chrome::resolve(app.config.tui.compact, app.sidebar.focused, &app.theme);
   // `Theme` is `Copy`; snapshot it so the cached section builder can read
   // roles while `app.sidebar.cache` is mutably borrowed below.
   let theme = app.theme;
@@ -681,14 +888,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // long PR titles would either overflow the block right border or be
   // wrapped onto a second visual row that the `Constraint::Length` below
   // never budgeted for, breaking the layout.
-  let issue_pr_inner_width = area.width.saturating_sub(3) as usize;
+  let issue_pr_inner_width = area.width.saturating_sub(chrome.cols()) as usize;
 
   let Some(w) = app.selected().cloned() else {
     // Nothing selected: render the placeholder and bail. No cache to read,
     // so the borrow gymnastics below don't apply.
     let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
     let placeholder = [Line::from("(nothing selected)")];
-    let h = |lines: usize| (lines as u16).saturating_add(2);
+    let h = |lines: usize| (lines as u16).saturating_add(chrome.rows());
     let constraints = [
       Constraint::Length(h(placeholder.len())),
       Constraint::Length(h(issue_pr_lines.len())),
@@ -707,27 +914,27 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     render_section(
       f,
       chunks[0],
-      status_pane_title(),
+      status_pane_title(chrome.compact),
       SectionBody::new(&placeholder),
-      border_color,
+      chrome,
       0,
       None,
     );
     render_section(
       f,
       chunks[1],
-      issue_pr_pane_title(&app.keymap),
+      issue_pr_pane_title(&app.keymap, chrome.compact),
       SectionBody::new(&issue_pr_lines),
-      border_color,
+      chrome,
       0,
       None,
     );
     render_section(
       f,
       chunks[4],
-      recent_items_pane_title(active_mode, &app.keymap),
+      recent_items_pane_title(active_mode, &app.keymap, chrome.compact),
       SectionBody::new(&[]),
-      border_color,
+      chrome,
       0,
       None,
     );
@@ -821,11 +1028,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // on overflow. Empty sections keep their collapse behaviour (issue
   // #34: Working Tree is empty in `Stashes` mode; #408: Agents hidden
   // with no session).
-  let h = |lines: usize| (lines as u16).saturating_add(2);
+  let h = |lines: usize| (lines as u16).saturating_add(chrome.rows());
   let fixed = h(worktree_len).saturating_add(h(issue_pr_lines.len()));
   let (agents_height, working_tree_height, commits_height) = super::state::sidebar::split_section_heights(
     area.height.saturating_sub(fixed),
-    2,
+    chrome.rows(),
     agent_lines.len() as u16,
     working_tree_len as u16,
     commits_len,
@@ -846,7 +1053,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // offset to its visible area so `j` / `k` can't scroll past the end.
   // Done before the render borrow so no mutable `app` access overlaps it.
   let commits_area = chunks[4];
-  let commits_visible = commits_area.height.saturating_sub(2);
+  let commits_visible = commits_area.height.saturating_sub(chrome.rows());
   app.sidebar.max_scroll = commits_len.saturating_sub(commits_visible);
   if app.sidebar.scroll > app.sidebar.max_scroll {
     app.sidebar.scroll = app.sidebar.max_scroll;
@@ -858,7 +1065,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // the sidebar column is shorter than the sum of its sections — the
   // exact case where entries used to be unreachable. Republish the max
   // against the clamped viewport, same contract as Recent Commits.
-  let wt_visible = chunks[3].height.saturating_sub(2);
+  let wt_visible = chunks[3].height.saturating_sub(chrome.rows());
   app.sidebar.wt_max_scroll = (working_tree_len as u16).saturating_sub(wt_visible);
   if app.sidebar.wt_scroll > app.sidebar.wt_max_scroll {
     app.sidebar.wt_scroll = app.sidebar.wt_max_scroll;
@@ -870,7 +1077,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // hint switches to "Enter: copy stash@{N}" in stashes mode.
   let (panel_title, panel_footer) = match active_mode {
     super::state::sidebar::SidebarMode::Commits => {
-      let title = recent_items_pane_title(active_mode, &app.keymap);
+      let title = recent_items_pane_title(active_mode, &app.keymap, chrome.compact);
       let footer = if commits_len == 0 {
         None
       } else {
@@ -880,7 +1087,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       (title, footer)
     }
     super::state::sidebar::SidebarMode::Stashes => {
-      let title = recent_items_pane_title(active_mode, &app.keymap);
+      let title = recent_items_pane_title(active_mode, &app.keymap, chrome.compact);
       // The "Enter on stash …" hint from the issue is the operative
       // affordance in this mode — it's worth more than the i/N
       // counter because the user needs to know they can paste the
@@ -893,8 +1100,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       (title, footer)
     }
   };
-  let issue_pr_title = issue_pr_pane_title(&app.keymap);
-  let working_tree_title = working_tree_pane_title(&app.keymap);
+  let issue_pr_title = issue_pr_pane_title(&app.keymap, chrome.compact);
+  let working_tree_title = working_tree_pane_title(&app.keymap, chrome.compact);
   // Working Tree footer (issue #287): colour-coded created / modified /
   // deleted counts. `None` in stashes mode (no section) and on a clean tree
   // (all-zero counts → `working_tree_counts_footer` returns `None`), so the
@@ -923,9 +1130,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   render_section(
     f,
     chunks[0],
-    status_pane_title(),
+    status_pane_title(chrome.compact),
     SectionBody::with_prefix(&prefix_lines, &sections.worktree),
-    border_color,
+    chrome,
     0,
     None,
   );
@@ -934,7 +1141,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     chunks[1],
     issue_pr_title,
     SectionBody::new(&issue_pr_lines),
-    border_color,
+    chrome,
     0,
     None,
   );
@@ -942,9 +1149,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     render_section(
       f,
       chunks[2],
-      agents_pane_title(&app.keymap),
+      agents_pane_title(&app.keymap, chrome.compact),
       SectionBody::new(&agent_lines),
-      border_color,
+      chrome,
       0,
       None,
     );
@@ -955,7 +1162,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       chunks[3],
       working_tree_title,
       SectionBody::new(&sections.working_tree),
-      border_color,
+      chrome,
       wt_scroll,
       working_tree_footer,
     );
@@ -964,12 +1171,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     // the scroll existed (#437) but nothing showed where the viewport
     // sat. Same herdr-style helper as the overflowing modals; no-op when
     // everything fits.
-    let inner = Rect {
-      x: chunks[3].x.saturating_add(1),
-      y: chunks[3].y.saturating_add(1),
-      width: chunks[3].width.saturating_sub(2),
-      height: chunks[3].height.saturating_sub(2),
-    };
+    let inner = chrome.inner(chunks[3]);
     if inner.height > 0 {
       let _ = scrollable_body_area(f, inner, wt_scroll, working_tree_len, &theme);
     }
@@ -979,7 +1181,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     commits_area,
     panel_title,
     SectionBody::new(&sections.recent_commits),
-    border_color,
+    chrome,
     scroll,
     panel_footer.map(ratatui::text::Line::from),
   );
@@ -1027,19 +1229,11 @@ fn render_section(
   // which copied every static literal on every render frame.
   title: impl Into<ratatui::text::Line<'static>>,
   body: SectionBody<'_>,
-  border_color: Color,
+  chrome: Chrome,
   scroll: u16,
   footer: Option<ratatui::text::Line<'static>>,
 ) {
   let SectionBody { prefix, lines } = body;
-  let mut block = Block::default()
-    .borders(Borders::ALL)
-    .border_type(BorderType::Rounded)
-    .title(title.into())
-    .border_style(Style::default().fg(border_color));
-  if let Some(f) = footer {
-    block = block.title_bottom(f.right_aligned());
-  }
   // Pad content with one leading space per line for breathing room against
   // the left border. Each padded line BORROWS its span content from the
   // source line (`Span::styled(&str, style)` yields a `Cow::Borrowed`, zero
@@ -1055,6 +1249,32 @@ fn render_section(
   // No `Wrap`: every section now relies on ratatui's view-level hard-clip,
   // matching lazygit's commits panel and ensuring 1 logical row = 1 visual
   // row (so the layout's `Constraint::Length` always matches what we draw).
+  if chrome.compact {
+    // One filled row of chrome instead of a rounded box: the title on the
+    // left, the footer (counter / hint) flushed right on that same row
+    // rather than in a bottom rule that no longer exists.
+    let header_area = Rect { height: 1, ..area };
+    let header = compact_header_line(title.into(), footer, header_area.width, chrome.accent);
+    f.render_widget(
+      Paragraph::new(header).style(Style::default().bg(chrome.fill)),
+      header_area,
+    );
+    let body_area = Rect {
+      y: area.y.saturating_add(1),
+      height: area.height.saturating_sub(1),
+      ..area
+    };
+    f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), body_area);
+    return;
+  }
+  let mut block = Block::default()
+    .borders(Borders::ALL)
+    .border_type(BorderType::Rounded)
+    .title(title.into())
+    .border_style(Style::default().fg(chrome.accent));
+  if let Some(f) = footer {
+    block = block.title_bottom(f.right_aligned());
+  }
   let paragraph = Paragraph::new(padded).block(block).scroll((scroll, 0));
   f.render_widget(paragraph, area);
 }
@@ -1065,8 +1285,8 @@ fn render_section(
 /// expensive git preview cache underneath.
 /// Title of the Agents sidebar pane (issue #408, user feedback 2026-07-22):
 /// advertises the overlay key like `Issue / PR [F]` does its fetch key.
-pub fn agents_pane_title(keymap: &Keymap) -> String {
-  format!(" Agents [{}] ", action_chord(keymap, Action::AgentSessions, "a"))
+pub fn agents_pane_title(keymap: &Keymap, compact: bool) -> String {
+  pane_title(compact, "Agents", &action_chord(keymap, Action::AgentSessions, "a"))
 }
 
 /// Per-frame body of the Agents sidebar pane: one line per **pinned**
@@ -2538,25 +2758,24 @@ fn action_chord(keymap: &Keymap, action: Action, fallback: &str) -> String {
   keymap.primary_chord(action).unwrap_or_else(|| fallback.to_string())
 }
 
-pub fn issue_pr_pane_title(keymap: &Keymap) -> String {
-  format!(" Issue / PR [{}] ", action_chord(keymap, Action::FetchGithub, "F"))
+pub fn issue_pr_pane_title(keymap: &Keymap, compact: bool) -> String {
+  pane_title(compact, "Issue / PR", &action_chord(keymap, Action::FetchGithub, "F"))
 }
 
-pub fn working_tree_pane_title(keymap: &Keymap) -> String {
-  format!(
-    " Working Tree [{}] ",
-    action_chord(keymap, Action::ReviewFullscreen, "R")
+pub fn working_tree_pane_title(keymap: &Keymap, compact: bool) -> String {
+  pane_title(
+    compact,
+    "Working Tree",
+    &action_chord(keymap, Action::ReviewFullscreen, "R"),
   )
 }
 
-pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
-  match mode {
-    SidebarMode::Commits => format!(
-      " Recent Commits [{}] ",
-      action_chord(keymap, Action::LazyGitFullscreen, "l")
-    ),
-    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::LazyGitFullscreen, "l")),
-  }
+pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap, compact: bool) -> String {
+  let label = match mode {
+    SidebarMode::Commits => "Recent Commits",
+    SidebarMode::Stashes => "Stashes",
+  };
+  pane_title(compact, label, &action_chord(keymap, Action::LazyGitFullscreen, "l"))
 }
 
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
@@ -4825,7 +5044,17 @@ fn draw_report(f: &mut Frame, app: &App) {
     ),
     layout[0],
   );
-  render_section(f, layout[2], " Logs ", SectionBody::new(&logs), accent, 0, None);
+  // A modal keeps its rules whatever `[tui] compact` says: a panel
+  // floating over content is exactly where a border earns its keep.
+  render_section(
+    f,
+    layout[2],
+    " Logs ",
+    SectionBody::new(&logs),
+    Chrome::boxed(accent),
+    0,
+    None,
+  );
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::Report,

@@ -10752,7 +10752,7 @@ mod agent_pane {
   #[test]
   fn pane_title_advertises_the_overlay_key() {
     let km = gwm::tui::keymap::Keymap::defaults();
-    let title = agents_pane_title(&km);
+    let title = agents_pane_title(&km, false);
     assert!(title.contains("Agents"), "got {title}");
     assert!(title.contains('a'), "resolved overlay key expected: {title}");
   }

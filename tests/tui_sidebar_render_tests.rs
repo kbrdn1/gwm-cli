@@ -328,3 +328,123 @@ fn status_pane_renders_diff_vs_base_line_on_a_feature_branch() {
   assert!(text.contains("+2"), "Status pane must show insertions: {text}");
   assert!(text.contains("-1"), "Status pane must show deletions: {text}");
 }
+
+// ---------------------------------------------------------------------------
+// Compact mode (issue #545)
+// ---------------------------------------------------------------------------
+
+/// Count the box-drawing glyphs the panes and sidebar sections draw. The
+/// worktrees pane uses square corners, the sidebar sections rounded ones;
+/// both are covered.
+fn rule_glyph_count(terminal: &Terminal<TestBackend>) -> usize {
+  terminal
+    .backend()
+    .buffer()
+    .content()
+    .iter()
+    .filter(|c| matches!(c.symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘" | "╭" | "╮" | "╰" | "╯"))
+    .count()
+}
+
+/// Draw the list view once at a fixed size with `[tui] compact` set as
+/// asked, and hand back the terminal for inspection. Two draws: the first
+/// settles the layout-dependent state (scroll clamps republished against
+/// the areas the solver granted), exactly like the Diff test above.
+fn draw_list_view(dir: &Path, compact: bool) -> Terminal<TestBackend> {
+  let mut app = App::new_at_layered(Some(dir), None).unwrap();
+  app.config.tui.compact = compact;
+  let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal
+}
+
+#[test]
+fn compact_mode_drops_the_rules_and_default_mode_keeps_them() {
+  // The observable half of issue #545: with `compact = true` the panes and
+  // sidebar sections draw no box rules at all. Asserted against the default
+  // render of the *same* repo, so a change that silently stopped drawing
+  // borders everywhere would fail the second half rather than pass both.
+  let dir = repo_with_commits(6);
+  let bordered = rule_glyph_count(&draw_list_view(dir.path(), false));
+  let compact = rule_glyph_count(&draw_list_view(dir.path(), true));
+
+  assert!(bordered > 0, "the default layout must still draw its box rules");
+  assert_eq!(compact, 0, "compact mode must draw no box rules at all");
+}
+
+#[test]
+fn compact_mode_headers_carry_the_chord_and_the_fill() {
+  // The rules are replaced, not merely removed: each section keeps a
+  // one-line header, led by its keybinding, painted on the `section_bg`
+  // role. Without the fill the headers would read as ordinary content
+  // rows and the layout would lose its boundaries entirely.
+  let dir = repo_with_commits(4);
+  let terminal = draw_list_view(dir.path(), true);
+  let text = buffer_text(&terminal);
+  assert!(text.contains("1 WORKTREES"), "compact worktrees header: {text}");
+  assert!(text.contains("2 STATUS"), "compact status header: {text}");
+
+  let theme = gwm::tui::theme::Theme::default();
+  let buffer = terminal.backend().buffer();
+  let filled = buffer.content().iter().filter(|c| c.bg == theme.section_bg).count();
+  assert!(
+    filled > 0,
+    "section headers must be painted with the section_bg role, found none"
+  );
+}
+
+#[test]
+fn compact_mode_hands_the_saved_rows_to_content() {
+  // The point of the mode. At an identical terminal size the compact
+  // render must fit strictly more commit subjects in the Recent Commits
+  // section than the bordered one — otherwise the borders were dropped
+  // for nothing.
+  let dir = repo_with_commits(40);
+  let count_subjects = |t: &Terminal<TestBackend>| {
+    let text = buffer_text(t);
+    (0..40).filter(|i| text.contains(&format!("commit-{i}"))).count()
+  };
+  let bordered = count_subjects(&draw_list_view(dir.path(), false));
+  let compact = count_subjects(&draw_list_view(dir.path(), true));
+  assert!(
+    compact > bordered,
+    "compact must show more commits than bordered at the same size (bordered {bordered}, compact {compact})"
+  );
+}
+
+#[test]
+fn compact_mode_scrolls_recent_commits_to_the_end() {
+  // The scroll clamps read the same `chrome.rows()` the layout does, so a
+  // compact section publishes a viewport one row taller than the bordered
+  // one. What is observable from a buffer is the end state: parked at the
+  // published `max_scroll`, the oldest commit is on screen.
+  //
+  // Note what this does NOT pin: whether `max_scroll` overshoots the end
+  // by a row. Both a correct clamp and one still subtracting a hard-coded
+  // 2 put `init` on screen here, and the geometry needed to tell them
+  // apart is not exposed. The arithmetic itself is pinned upstream, on
+  // the pure solver (`section_heights_*` in tui_app_tests).
+  let dir = repo_with_commits(40);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.config.tui.compact = true;
+  let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  assert!(
+    app.sidebar.max_scroll > 0,
+    "the fixture must overflow the section: {}",
+    app.sidebar.max_scroll
+  );
+  app.sidebar.scroll = app.sidebar.max_scroll;
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("init"),
+    "at max_scroll the oldest commit must be on screen: {text}"
+  );
+}
