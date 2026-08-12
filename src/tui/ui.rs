@@ -4471,7 +4471,14 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let block = overlay_block(clean);
+  let block = overlay_block_titled(
+    if app.create_form.mode == Mode::Freeform {
+      "New Worktree — free-form"
+    } else {
+      "New Worktree"
+    },
+    clean,
+  );
   let term = f.area();
   let outer = centered_box(70, 72, 1, term);
   let inner_w = block.inner(outer).width as usize;
@@ -4494,14 +4501,7 @@ fn draw_create(f: &mut Frame, app: &App) {
   let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
   let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
-  let mut lines = overlay_title_lines(
-    if freeform {
-      "New Worktree — free-form"
-    } else {
-      "New Worktree"
-    },
-    clean,
-  );
+  let mut lines: Vec<Line<'static>> = Vec::new();
   // The live preview first, then the editable fields — the preview sits above
   // the inputs so the resulting names stay in view while typing (issue #217
   // follow-up). Which inputs those are comes from the patterns (#418), so a
@@ -4800,6 +4800,10 @@ pub fn link_target_keys(ctx: HintContext, modal: &ModalKeymap) -> (String, Strin
 pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
+  // `title` no longer renders here — since #549 it rides the modal's top
+  // rule, posted by the caller. It stays a parameter because it is also
+  // the discriminant that picks the hint context, which is the older of
+  // its two jobs.
   let ctx = if title == "Link" {
     HintContext::LinkPrompt
   } else {
@@ -4808,7 +4812,7 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
   // #219: the direct-pick chips track the active context's issue/pr bindings
   // (like the footer below) so a rebind shows through instead of `i` / `p`.
   let (issue_key, pr_key) = link_target_keys(ctx, &app.modal_keymap);
-  let mut lines = overlay_title_lines(title, accent);
+  let mut lines: Vec<Line<'static>> = Vec::new();
   lines.extend(github_status_lines(app, 56));
   lines.push(Line::from(""));
   lines.push(link_target_line(&issue_key, "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
@@ -4824,14 +4828,12 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // instead of the pre-#187 hard-coded `Red`.
   let danger = app.theme.prunable;
 
-  let block = overlay_block(danger);
-
   // #484: the overlay is about the batch snapshotted when it opened, not
   // about wherever the cursor sits now.
   let targets = app.pending_delete();
   if targets.is_empty() {
-    let mut lines = overlay_title_lines(delete_worktree_title(), danger);
-    lines.push(Line::from("nothing selected").centered());
+    let block = overlay_block_titled(delete_worktree_title(), danger);
+    let lines: Vec<Line<'static>> = vec![Line::from("nothing selected").centered()];
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
     let area = centered_h(40, height, f.area());
     f.render_widget(Clear, area);
@@ -4850,7 +4852,8 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
   // Title stays centred; details use an aligned label/value grid so the
   // destructive target is easier to scan (#220 visual follow-up).
-  let mut content: Vec<Line> = overlay_title_lines(&delete_batch_title(targets.len()), danger);
+  let block = overlay_block_titled(&delete_batch_title(targets.len()), danger);
+  let mut content: Vec<Line> = Vec::new();
   if targets.len() > 1 {
     // A batch reports its size, not its members (#484): the user picked the
     // rows deliberately and the list is already on screen behind the modal.
@@ -5115,16 +5118,16 @@ fn draw_report(f: &mut Frame, app: &App) {
   // box (#187).
   let term = f.area();
   let logs_height = (logs.len() as u16 + 2/* nested border */).max(3);
-  let height = (2 /* title */ + logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */)
-    .min(term.height.saturating_mul(80) / 100);
+  // Two rows shorter than pre-#549: the title and its spacer row moved
+  // into the top rule.
+  let height =
+    (logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
   let area = centered_h(80, height, term);
-  let block = overlay_block(accent);
+  let block = overlay_block_titled("Bootstrap Report", accent);
   let inner = block.inner(area);
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
-      Constraint::Length(1), // title
-      Constraint::Length(1), // title gap
       Constraint::Min(3),    // logs pane
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
@@ -5132,21 +5135,11 @@ fn draw_report(f: &mut Frame, app: &App) {
     .split(inner);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
-  f.render_widget(
-    Paragraph::new(
-      Line::from(Span::styled(
-        "Bootstrap Report",
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-      ))
-      .centered(),
-    ),
-    layout[0],
-  );
-  // A modal keeps its rules whatever `[tui] compact` says: a panel
+  // A modal keeps its rules whatever `[tui] layout` says: a panel
   // floating over content is exactly where a border earns its keep.
   render_section(
     f,
-    layout[2],
+    layout[0],
     " Logs ",
     SectionBody::new(&logs),
     Chrome::boxed(accent),
@@ -5160,7 +5153,7 @@ fn draw_report(f: &mut Frame, app: &App) {
       &app.modal_keymap,
       &app.theme,
     )),
-    layout[4],
+    layout[2],
   );
 }
 
@@ -5307,12 +5300,11 @@ fn centered_box(width_pct: u16, max_width: u16, height: u16, area: Rect) -> Rect
 /// A modal overlay frame: a rounded border in `color` with interior
 /// padding on every side. Shared by every overlay (#187) so the confirm /
 /// help / create / report / open / link / palette modals read consistently.
-/// The title is *not* embedded in the border any more (issue #217): it
-/// lives inside the frame as its own centred line via [`overlay_title_lines`]
-/// so the border stays clean and no content hugs the edge. The padding
-/// (2 cols horizontal, 1 row vertical) is the breathing room callers must
-/// account for when sizing — inner height shrinks by 2 rows, inner width by
-/// 4 cols, on top of the 2-cell border.
+/// The padding (2 cols horizontal, 1 row vertical) is the breathing room
+/// callers must account for when sizing — inner height shrinks by 2 rows,
+/// inner width by 4 cols, on top of the 2-cell border.
+///
+/// Untitled frame. Modals that carry a title use [`overlay_block_titled`].
 fn overlay_block(color: Color) -> Block<'static> {
   Block::default()
     .borders(Borders::ALL)
@@ -5321,19 +5313,26 @@ fn overlay_block(color: Color) -> Block<'static> {
     .border_style(Style::default().fg(color))
 }
 
-/// The detached modal title: a centred bold line in `color` followed by a
-/// blank spacer row, prepended to a modal's content so the title sits
-/// inside the rounded frame rather than embedded in the top border
-/// (issue #217). Returns two lines, so callers sizing to content add 2.
-fn overlay_title_lines(title: &str, color: Color) -> Vec<Line<'static>> {
-  vec![
+/// A titled modal frame: the title rides the top rule, centred and bold in
+/// `color` (issue #549).
+///
+/// #217 had put it on its own centred row inside the frame, followed by a
+/// blank spacer — four rows of chrome before a modal's first line of
+/// content, two of which existed only to carry text ratatui can draw in
+/// the rule for free. #545 spent the rest of the TUI's chrome budget on
+/// density; modals are the surfaces most likely to overflow a short
+/// terminal, so they get the same treatment.
+///
+/// Callers size to `lines.len() + 2 /* border */ + 2 /* padding */` and
+/// keep that formula: the two title rows simply leave `lines`.
+fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
+  overlay_block(color).title(
     Line::from(Span::styled(
-      title.to_string(),
+      format!(" {} ", title),
       Style::default().fg(color).add_modifier(Modifier::BOLD),
     ))
     .centered(),
-    Line::from(String::new()),
-  ]
+  )
 }
 
 /// Middle-ellipsize `s` to at most `max` display columns, keeping the
@@ -5390,17 +5389,22 @@ fn trunc(s: &str, max: usize) -> String {
 
 fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let lines = link_open_modal_lines(app, "Open in Browser", Some(app.open_menu_selected));
+  let title = "Open in Browser";
+  let lines = link_open_modal_lines(app, title, Some(app.open_menu_selected));
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block_titled(title, accent)), area);
 }
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
+  // Each stage names the frame it draws (issue #549): the title rides the
+  // top rule now, so it is resolved alongside the lines rather than
+  // prepended to them.
+  let mut title = String::from("Link");
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => {
       // A vertical selectable list (#217): j/k move the highlight, Enter
@@ -5415,10 +5419,8 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
         Some(super::app::LinkTarget::Pr) => "PR #",
         None => "#",
       };
-      let mut lines = overlay_title_lines(
-        &format!("type the {} number", label.trim_end_matches('#').trim()),
-        accent,
-      );
+      let mut lines: Vec<Line<'static>> = Vec::new();
+      title = format!("type the {} number", label.trim_end_matches('#').trim());
       lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
       push_modal_hint(
         &mut lines,
@@ -5435,7 +5437,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block_titled(&title, accent)), area);
 }
 
 /// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
@@ -5547,7 +5549,7 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let term = f.area();
   let width = overlay_modal_width(term.width);
   let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
-  let mut lines = overlay_title_lines("Run an exec profile", accent);
+  let mut lines: Vec<Line<'static>> = Vec::new();
   // Leave room for the title + hint + borders; the picker scrolls past that.
   let max_visible = (term.height as usize).saturating_sub(8).max(3);
   let labels: Vec<&str> = app.exec_picker.profiles().iter().map(String::as_str).collect();
@@ -5568,7 +5570,10 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  f.render_widget(
+    Paragraph::new(lines).block(overlay_block_titled("Run an exec profile", accent)),
+    area,
+  );
 }
 
 /// Render the generic detail overlay (issue #408). A centred modal listing
@@ -5593,7 +5598,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
     let (start, end) = picker_window(matches.len(), ov.input_selected, list_h);
 
-    let mut lines = overlay_title_lines("Filter CI checks", accent);
+    let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
       Span::styled("filter: ", Style::default().fg(app.theme.muted)),
       Span::styled(
@@ -5631,7 +5636,10 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let height = (2 + list_h + 2) as u16 + 2 /* border */ + 2 /* padding */;
     let area = centered_abs(width, height, term);
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    f.render_widget(
+      Paragraph::new(lines).block(overlay_block_titled("Filter CI checks", accent)),
+      area,
+    );
     // Scrollbar over the LISTING sub-area (Codex review #455): the rows
     // start after border (1) + padding (1) + two title lines + the query
     // line + its blank spacer = y + 6 — anchoring at + 4 overlapped the
@@ -5662,7 +5670,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let (start, end) = picker_window(candidates.len(), ov.input_selected, list_h);
     let now = std::time::SystemTime::now();
 
-    let mut lines = overlay_title_lines("Attach a session", accent);
+    let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
       Span::styled("id: ", Style::default().fg(app.theme.muted)),
       Span::styled(
@@ -5717,7 +5725,10 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
     let area = centered_abs(width, height, term);
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    f.render_widget(
+      Paragraph::new(lines).block(overlay_block_titled("Attach a session", accent)),
+      area,
+    );
     // Scrollbar over the listing sub-area when the candidates overflow the
     // fixed window — same affordance as the detail mode below (issue #445).
     // Intersected with the modal's real area: on a tiny terminal
@@ -5744,7 +5755,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let (start, end) = picker_window(total, ov.selected, visible);
 
   let label_w = ov.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
-  let mut lines = overlay_title_lines(&ov.title, accent);
+  let mut lines: Vec<Line<'static>> = Vec::new();
   for (i, row) in ov.rows.iter().enumerate().take(end).skip(start) {
     let (label_color, value_color, value_bold) = match row.role {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
@@ -5824,7 +5835,10 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  f.render_widget(
+    Paragraph::new(lines).block(overlay_block_titled(&ov.title, accent)),
+    area,
+  );
   // Scrollbar over the rows sub-area (right padding column) when the list
   // overflows — the missing affordance from the feedback.
   // Intersected with the modal's real area for the same tiny-terminal
@@ -5857,7 +5871,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let width = overlay_modal_width(term.width);
   let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
 
-  let mut lines = overlay_title_lines("Reclaim build artifacts", border);
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
   // Profile picker — the `(default)` choice plus any `[clean.profiles]`.
   // Full-width, scrollable; only rendered when named profiles exist.
@@ -5961,7 +5975,10 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block(border)), area);
+  f.render_widget(
+    Paragraph::new(lines).block(overlay_block_titled("Reclaim build artifacts", border)),
+    area,
+  );
 }
 
 /// Render the command palette overlay (issue #32).
@@ -5989,7 +6006,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let block = overlay_block(clean);
+  let block = overlay_block_titled("Rename Worktree", clean);
   let term = f.area();
   let outer = centered_box(70, 72, 1, term);
   let inner_w = block.inner(outer).width as usize;
@@ -6009,11 +6026,10 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
   let freeform = app.create_form.mode == Mode::Freeform;
-  let mut lines = overlay_title_lines("Rename Worktree", clean);
-  lines.push(Line::from(vec![
+  let mut lines: Vec<Line<'static>> = vec![Line::from(vec![
     Span::raw("  From   : "),
     Span::styled(old_display, Style::default().fg(muted)),
-  ]));
+  ])];
   lines.push(Line::from(String::new()));
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),

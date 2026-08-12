@@ -1245,3 +1245,50 @@ fn an_all_literal_pattern_set_names_no_field_at_all() {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Titles ride the border (issue #549)
+// ---------------------------------------------------------------------------
+
+/// The row a title landed on, and whether that row also carries the modal's
+/// top rule. A title drawn *in* the rule shares its row with the corner and
+/// horizontal glyphs; a title on its own content row does not.
+fn title_row_has_rule(buf: &Buffer, needle: &str) -> Option<bool> {
+  row_strings(buf)
+    .into_iter()
+    .find(|row| row.contains(needle))
+    .map(|row| row.contains('╭') && row.contains('─'))
+}
+
+#[test]
+fn modal_titles_ride_the_top_rule_rather_than_a_content_row() {
+  // Issue #549: the title used to be a centred row inside the frame,
+  // followed by a blank spacer — four rows of chrome before a modal's
+  // first line of content, two of them carrying text ratatui draws in the
+  // rule for free.
+  //
+  // Checked structurally rather than by counting rows: the title's row
+  // must also carry the rounded top-left corner, which only the border
+  // draws. A regression that put the title back on its own line would
+  // find it on a row with no rule on it.
+  let (_dir, mut app) = make_app();
+
+  app.view = View::Create;
+  let buf = render(&mut app);
+  assert_eq!(
+    title_row_has_rule(&buf, "New Worktree"),
+    Some(true),
+    "the create modal's title must sit in the top rule — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+
+  let (_dir2, mut app) = make_app();
+  app.view = View::OpenMenu;
+  let buf = render(&mut app);
+  assert_eq!(
+    title_row_has_rule(&buf, "Open in Browser"),
+    Some(true),
+    "the open-menu modal's title must sit in the top rule — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
