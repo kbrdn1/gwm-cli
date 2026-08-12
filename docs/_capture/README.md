@@ -18,6 +18,21 @@ GWM_KEEP_DEMO=1 ./docs/_capture/generate.sh
 Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
 (`CaskaydiaCove Nerd Font Mono`, as set in each tape's `Set FontFamily`).
 
+`demo.tape` is **not** in `generate.sh`'s loop — it is the one long-form
+recording and is run on its own, from the repo root, after the fixture exists:
+
+```bash
+bash docs/_capture/setup-demo.sh && vhs docs/_capture/demo.tape
+```
+
+### maintainer-only for now
+
+Every tape hardcodes `/Users/kbrdn1/gwm-demo/...` in its `cd`, so the set only
+regenerates on the maintainer's machine as it stands. `setup-demo.sh` and
+`generate.sh` both honour `GWM_DEMO_ROOT`; the tapes do not. Making them
+portable means threading the variable through 17 `Type "cd …"` lines and is
+tracked separately — until then, treat regeneration as a maintainer task.
+
 ## how it fits together
 
 - **`setup-demo.sh`** builds `~/gwm-demo/acme-api`: a branchy trunk history (so
