@@ -108,9 +108,20 @@ pub struct Theme {
   ///
   /// Deliberately **not** a translucent white: that has no equivalent
   /// in ANSI 256, and the compact layout has to stay readable on a
-  /// terminal without truecolor. Each preset therefore picks a real
-  /// surface tone from its own palette, and the default is an indexed
-  /// value.
+  /// terminal without truecolor.
+  ///
+  /// A preset knows the background it is designed against, so it takes
+  /// the tone its own palette reserves for chrome bands: `Surface 0`
+  /// for claude-dark, `bg0_soft` for gruvbox, `Mantle` for catppuccin,
+  /// `bg_dark` for tokyo-night. The default theme knows nothing about
+  /// the terminal it lands on and bets on a dark one.
+  ///
+  /// Sanity-checked by eye on `docs/2.tui/_assets/compact.png`, not by
+  /// arithmetic: the fill only has to separate from the *terminal*
+  /// background, which no unit test can see. That capture pins its own
+  /// terminal background to the palette's for the same reason — shot on
+  /// the neutral grey the other tapes use, claude-dark's fill landed
+  /// two shades off the terminal and the mode looked like a no-op.
   ///
   /// Invariant, pinned by `tests/theme_tests.rs`: never equal to
   /// [`Self::selection_bg`]. Both are backgrounds, and a header that
@@ -143,8 +154,11 @@ impl Default for Theme {
       staged: Color::Cyan,
       modified: Color::Yellow,
       untracked: Color::Green,
-      // #545: one notch under the DarkGray selection, so the compact
-      // header reads as chrome and the cursor stays the loudest fill.
+      // #545: the default theme cannot know the terminal's background,
+      // so it bets on the common dark one — 236 is #303030, roughly the
+      // 7% white the mock-up asked for over a near-black. Well under
+      // `DarkGray`, so the selected row stays the loudest fill.
+      // `[theme] section_bg = "…"` retunes it for an unusual background.
       section_bg: Color::Indexed(236),
     }
   }
@@ -232,7 +246,7 @@ impl Theme {
       staged: Color::Rgb(0xfa, 0xbd, 0x2f),       // = accent / Bright yellow
       modified: Color::Rgb(0xfa, 0xbd, 0x2f),     // = dirty / Bright yellow
       untracked: Color::Rgb(0xb8, 0xbb, 0x26),    // = clean / Bright green
-      section_bg: Color::Rgb(0x28, 0x28, 0x28),   // bg0 / Dark0 (under Dark1)
+      section_bg: Color::Rgb(0x32, 0x30, 0x2f),   // bg0_soft (over bg0, under the Dark1 selection)
     }
   }
 
