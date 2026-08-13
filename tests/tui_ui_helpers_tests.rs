@@ -132,6 +132,52 @@ fn ellipsize_middle_cuts_on_grapheme_boundaries() {
   );
 }
 
+/// Cells the renderer actually paints for `s`: the cursor `set_stringn`
+/// leaves behind. The oracle for every cell-budget assertion below that
+/// `unicode-width` alone would get wrong.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 120, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 120, Style::default());
+  usize::from(x)
+}
+
+#[test]
+fn ellipsize_middle_budgets_the_cells_the_renderer_paints() {
+  // Codex review on PR #561, third pass, verified against `set_stringn`
+  // rather than taken on the report. `UnicodeWidthStr::width` on the whole
+  // string undercounts twice over, and both cases are real text:
+  //
+  //   "لالالا"   unicode-width 3, painted 6 (lam-alef reads as a ligature)
+  //   "ｶﾞｶﾞｶﾞ"   unicode-width 3, painted 6 (U+FF9E is Grapheme_Extend, but
+  //              terminals give the halfwidth dakuten its own cell)
+  //
+  // Either one sailed through the early return and overflowed the frame.
+  for s in ["لالالا", "ｶﾞｶﾞｶﾞ", "ﾊﾟﾊﾟﾊﾟﾊﾟ", "لا/tmp/لالا"] {
+    assert!(
+      painted(s) > s.width(),
+      "the fixture must be one unicode-width gets wrong: {s:?}"
+    );
+    for max in 2..=painted(s) {
+      let out = ellipsize_middle(s, max);
+      assert!(
+        painted(&out) <= max,
+        "{s:?} at max={max} came back {} painted cells: {out:?}",
+        painted(&out)
+      );
+    }
+  }
+}
+
+#[test]
+fn pad_cells_pads_to_the_cells_the_renderer_paints() {
+  // Same measure on the padding side: `pad_cells` undercounting means the
+  // right-pinned size column of the `clean` report leaves the frame.
+  for s in ["لا", "ｶﾞ", "作業", "ab"] {
+    let out = pad_cells(s, 10);
+    assert_eq!(painted(&out), 10, "{s:?} padded to {:?}", out);
+  }
+}
+
 #[test]
 fn pad_cells_fills_a_row_by_cells_so_a_pinned_column_stays_put() {
   // The other half of #554. A picker row and a reclaim row pad the
