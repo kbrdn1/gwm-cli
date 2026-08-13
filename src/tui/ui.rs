@@ -3185,7 +3185,7 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   // must stay one visual line.
   let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
   let status_text = format!("[{}]", status);
-  let status_w = status_text.chars().count();
+  let status_w = cells(&status_text);
 
   // Priority floor: if even the status cannot fit, show a clipped status
   // alone — never a hint at the log's expense.
@@ -3206,7 +3206,7 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   for (i, (key, label)) in hints.iter().enumerate() {
     let sep = if i > 0 { 2 } else { 0 }; // two spaces between hint groups (#279)
                                          // flat bind `key` + ` label` (label + 1 leading space)
-    let badge_w = key.chars().count() + 1 + label.chars().count();
+    let badge_w = cells(key) + 1 + cells(label);
     if used + sep + badge_w > hint_budget {
       truncated = true;
       break;
@@ -3272,7 +3272,7 @@ pub fn status_line(
 
   let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
   let status_text = format!("[{}]", status);
-  let status_w = status_text.chars().count();
+  let status_w = cells(&status_text);
 
   // Priority floor: if even the status cannot fit, show a clipped status
   // alone — never a chip or hint at the log's expense.
@@ -3286,7 +3286,7 @@ pub fn status_line(
 
   // Context chip — load-bearing, kept whenever it fits at all.
   let ctx_chip = format!(" {} ", context);
-  let ctx_w = ctx_chip.chars().count();
+  let ctx_w = cells(&ctx_chip);
   if ctx_w <= avail {
     spans.push(Span::styled(ctx_chip, context_style));
     used += ctx_w;
@@ -3296,7 +3296,7 @@ pub fn status_line(
   // and there is room.
   if let Some(glyph) = spinner {
     let padded = format!(" {} ", glyph);
-    let gw = padded.chars().count();
+    let gw = cells(&padded);
     if used + gw <= avail {
       spans.push(Span::styled(padded, spinner_style));
       used += gw;
@@ -3316,7 +3316,7 @@ pub fn status_line(
     // Two spaces between hint groups (#279); a single space after the left
     // cluster (context chip / spinner) before the first hint.
     let sep = if i > 0 { 2 } else { usize::from(used > 0) };
-    let badge_w = key.chars().count() + 1 + label.chars().count();
+    let badge_w = cells(key) + 1 + cells(label);
     if hint_used + sep + badge_w > hint_budget {
       truncated = true;
       break;

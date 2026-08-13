@@ -537,3 +537,37 @@ fn the_statusbar_never_paints_past_its_width_on_ascii() {
     );
   }
 }
+
+#[test]
+fn neither_footer_nor_statusbar_paints_past_its_width_on_wide_glyphs() {
+  // The action log is the segment that arrives wide: it carries branch names,
+  // paths and error blobs. Both rows budget in characters and pin the log
+  // right, so a CJK log under-counted by half and pushed itself off the
+  // terminal. Measured before the fix: 100 cells into an 80-column row.
+  //
+  // CJK, halfwidth katakana and emoji are the fixtures because the measure at
+  // fault is `chars().count()`; the discriminant is columns per character.
+  let theme = Theme::default();
+  for status in [
+    "作業作業作業作業作業作業作業作業作業作業",
+    "created ｶﾞｶﾞｶﾞｶﾞｶﾞ",
+    "pushed 🚀🚀🚀🚀🚀🚀",
+  ] {
+    for w in [40usize, 60, 80, 120] {
+      let footer = footer_line(HINTS, status, w, &theme);
+      assert!(
+        painted_line(&footer) <= w,
+        "footer at {w} columns painted {} cells: {:?}",
+        painted_line(&footer),
+        plain_line(&footer)
+      );
+      let bar = status_line("worktrees", HINTS, status, None, w, &theme);
+      assert!(
+        painted_line(&bar) <= w,
+        "statusbar at {w} columns painted {} cells: {:?}",
+        painted_line(&bar),
+        plain_line(&bar)
+      );
+    }
+  }
+}
