@@ -67,6 +67,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `selection_bg` — which is also what separates a focused header from an
   unfocused one.
 
+### Fixed
+
+- **Returning from a fullscreen surface no longer ends the session when the
+  terminal is slow to answer** ([#548](https://github.com/kbrdn1/gwm-cli/issues/548)).
+  Coming back from the PTY overlay, an `exec` run or a review launch, gwm could
+  exit with `error: io error: The cursor position could not be read within a
+  normal duration`. That message is crossterm giving up on a DSR report:
+  `Terminal::clear` snapshots the cursor with `ESC [ 6 n` before wiping the
+  screen, and the return path from a fullscreen child is exactly when the
+  terminal is least likely to answer in time.
+
+  The three call sites now clear without asking. The snapshot was dead weight
+  here — each one repaints the whole frame on the next loop iteration, so the
+  position it restored was overwritten before anyone could see it. What the
+  callers needed was the other half of `clear`, wiping the screen *and*
+  resetting the back buffer so the next `draw` is a full repaint rather than a
+  diff against stale content; a fix that only wiped would have traded the crash
+  for a blank TUI.
+
 ## Past releases
 
 In reverse chronological order:

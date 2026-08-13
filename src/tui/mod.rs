@@ -166,6 +166,35 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   Ok(Terminal::new(CrosstermBackend::new(stderr))?)
 }
 
+/// Clear the whole screen and force a full repaint on the next `draw`,
+/// **without** asking the terminal where the cursor is (issue #548).
+///
+/// `Terminal::clear` snapshots the cursor first — `backend.get_cursor_position()`
+/// writes `ESC [ 6 n` and blocks until the terminal answers with a DSR report.
+/// Returning from a fullscreen surface (PTY overlay, `exec` run, review launch)
+/// is exactly the moment that answer is most likely to be late: crossterm then
+/// returns `The cursor position could not be read within a normal duration` and
+/// the `?` ended the whole session over a cosmetic operation.
+///
+/// Dropping the snapshot costs nothing here: every caller repaints the entire
+/// frame on the very next loop iteration, so the position `Terminal::clear`
+/// would have restored is overwritten before anyone could see it. What the
+/// callers actually need from `clear` is the other half — wiping the screen and
+/// resetting the back buffer so the next `draw` is a full repaint rather than a
+/// diff against stale content. `Terminal::resize` does precisely that pair for a
+/// `Fullscreen` viewport (`clear_region(All)` + back-buffer reset) and never
+/// touches the cursor, and gwm only ever builds a fullscreen terminal
+/// (`enter_terminal` above). Nothing left under the `?` can time out either:
+/// `backend.size()` is a `TIOCGWINSZ` ioctl (falling back to a `tput` spawn),
+/// never a request the terminal has to answer — and `Terminal::draw` already
+/// calls it on every frame through `autoresize`.
+pub fn clear_without_cursor_query<B: ratatui::backend::Backend>(
+  terminal: &mut Terminal<B>,
+) -> std::result::Result<(), B::Error> {
+  let area = terminal.size()?.into();
+  terminal.resize(area)
+}
+
 /// Inverse of `enter_terminal`. Always called from the same scope as
 /// `enter_terminal` so the order of teardown matches the order of setup.
 fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> Result<()> {
@@ -358,7 +387,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // resize that never reached it would leave the rows wrapped for the
       // previous terminal and the renderer would ellipsise the overflow.
       app.set_term_width(cols);
-      terminal.clear()?;
+      clear_without_cursor_query(terminal)?;
       continue;
     }
     let Event::Key(key) = ev else { continue };
@@ -1199,7 +1228,7 @@ fn run_launcher(
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-    terminal.clear()?;
+    clear_without_cursor_query(terminal)?;
 
     match spawn {
       Ok(s) if s.success() => app.status = format!("{} exited ok", bin),
@@ -1277,7 +1306,7 @@ fn run_subshell(
   // Always restore the TUI, even if the child failed to spawn or exited non-zero.
   enable_raw_mode()?;
   execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-  terminal.clear()?;
+  clear_without_cursor_query(terminal)?;
 
   match spawn {
     Ok(s) if s.success() => app.status = format!("{} exited ok ({})", label, cmd),
