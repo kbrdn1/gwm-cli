@@ -1689,6 +1689,40 @@ fn the_confirm_modal_ellipsizes_to_the_width_its_frame_actually_gets() {
 }
 
 #[test]
+fn the_confirm_modal_ellipsizes_a_wide_glyph_path_by_its_cell_width() {
+  // #554, the other half of the same finding. The budget is a rect width,
+  // in cells; `ellipsize_middle` counted chars. This path is 52 chars and
+  // 77 cells against a value column the 88-column ceiling caps at 67, so
+  // the char count called it short and returned it whole. Measured, the
+  // row then renders as `Path` alone: label + value overflows the frame,
+  // the paragraph wraps (`Wrap { trim: false }`), and the value drops to
+  // the next row — the aligned label/value grid #187 built this modal for,
+  // gone. Narrower still and ratatui clips the tail outright.
+  let (_dir, mut app) = make_app();
+  let mut long = deletable_worktree("fix-554-wide");
+  long.path = PathBuf::from("/tmp/gwm-test/作業ディレクトリの深い入れ子/さらに深い階層構造の中/TAIL-MARKER");
+  app.worktrees.push(long);
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+
+  let rows = modal_rows(&render_at(&mut app, 200, 40));
+  let path_row = rows.iter().find(|r| r.contains("Path")).unwrap_or_else(|| {
+    panic!(
+      "the confirm modal must render its Path row — modal rows:\n{}",
+      rows.join("\n")
+    )
+  });
+  assert!(
+    path_row.contains('…'),
+    "a path this wide must be middle-ellipsized, not left for ratatui to clip — row:\n{path_row}"
+  );
+  assert!(
+    path_row.contains("TAIL-MARKER"),
+    "the path's tail must survive a cell-measured budget — row:\n{path_row}"
+  );
+}
+
+#[test]
 fn the_bootstrap_report_shows_a_long_hook_line_on_a_wide_terminal() {
   // #550, Codex review (P2). The report displays arbitrary external text:
   // hook stdout, error messages, paths. `render_section` hard-clips by

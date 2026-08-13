@@ -33,7 +33,7 @@ use ratatui::{
   Frame,
 };
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Per-section content of the worktree details sidebar. Rendered by
 /// [`draw_sidebar`] into separate rounded-border blocks (no outer
@@ -5510,15 +5510,24 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
   )
 }
 
-/// Middle-ellipsize `s` to at most `max` display columns, keeping the
-/// head and tail so a long path keeps both its root and the worktree
-/// name (e.g. `~/Projects/…/feat-187-modal`). Returns `s` unchanged when
-/// it already fits, and a lone `…` when `max` is too small to keep
-/// anything either side. Counts by `char`, not byte, so multi-byte path
-/// segments are not sliced mid-codepoint.
+/// Middle-ellipsize `s` to at most `max` terminal cells, keeping the head
+/// and tail so a long path keeps both its root and the worktree name
+/// (e.g. `~/Projects/…/feat-187-modal`). Returns `s` unchanged when it
+/// already fits, and a lone `…` when `max` is too small to keep anything
+/// either side. Never slices a codepoint.
+///
+/// Measured in CELLS, not chars (issue #554). Every caller's budget is the
+/// width of a ratatui rect, and a CJK path draws two columns per char: a
+/// char count judged such a path short, returned it whole, and the row then
+/// overflowed its frame — wrapped away from its label in the confirm grid,
+/// clipped outright in a table cell. Either way the tail a middle ellipsis
+/// exists to keep is what goes. Same measure, and the same per-glyph walk,
+/// as `compact_header_line`.
+///
+/// A glyph that would straddle the budget is dropped whole rather than
+/// half-drawn, so the result is `<= max` cells, not exactly `max`.
 pub fn ellipsize_middle(s: &str, max: usize) -> String {
-  let count = s.chars().count();
-  if count <= max {
+  if UnicodeWidthStr::width(s) <= max {
     return s.to_string();
   }
   if max <= 1 {
@@ -5527,9 +5536,39 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   let keep = max - 1; // reserve one column for the ellipsis
   let head = keep.div_ceil(2);
   let tail = keep - head;
-  let head_str: String = s.chars().take(head).collect();
-  let tail_str: String = s.chars().skip(count - tail).collect();
+  // Walked per glyph from each end rather than sliced by char index: the
+  // index and the cell budget are the same number only for narrow text.
+  fn take_cells(it: impl Iterator<Item = char>, budget: usize) -> Vec<char> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for ch in it {
+      let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+      if used + cw > budget {
+        break;
+      }
+      out.push(ch);
+      used += cw;
+    }
+    out
+  }
+  let head_str: String = take_cells(s.chars(), head).into_iter().collect();
+  let mut tail_chars = take_cells(s.chars().rev(), tail);
+  tail_chars.reverse();
+  let tail_str: String = tail_chars.into_iter().collect();
   format!("{head_str}…{tail_str}")
+}
+
+/// Right-pad `s` to `width` terminal cells.
+///
+/// `{:<width$}` pads to a *char* count, which is the same thing only for
+/// single-cell text. Once the value is measured in cells (#554), a row of
+/// wide glyphs fits its budget and the format padding then pushes it back
+/// over — trailing blanks for a plain row, but a column pinned to the right
+/// edge is shoved off the frame.
+pub fn pad_cells(s: &str, width: usize) -> String {
+  let mut out = s.to_string();
+  out.push_str(&" ".repeat(width.saturating_sub(UnicodeWidthStr::width(s))));
+  out
 }
 
 /// Clip `s` to `max` columns, neutralising what must never reach the terminal
@@ -5691,7 +5730,7 @@ fn picker_lines(
   for (i, label) in labels.iter().enumerate().take(end).skip(start) {
     let marker = if i == selected { "▸" } else { " " };
     // Pad to the full inner width so the selection bar fills the whole row.
-    let txt = format!(" {marker} {:<textw$}", ellipsize_middle(label, textw));
+    let txt = format!(" {marker} {}", pad_cells(&ellipsize_middle(label, textw), textw));
     let style = if i == selected {
       Style::default()
         .fg(theme.accent)
@@ -6084,7 +6123,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
       let row = |icon: &str, left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
         Line::from(vec![
           Span::styled(format!(" {icon}  "), Style::default().fg(accent)),
-          Span::styled(format!("{:<namew$}", ellipsize_middle(left, namew)), left_style),
+          Span::styled(pad_cells(&ellipsize_middle(left, namew), namew), left_style),
           Span::styled(format!("{:>10} ", crate::clean::human_size(bytes)), size_style),
         ])
       };

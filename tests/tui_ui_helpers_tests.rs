@@ -11,7 +11,7 @@ use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, confirm_buttons_line,
   create_buttons_line, ellipsize_middle, field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line,
-  pane_counter, recent_items_pane_title, status_pane_title, type_selector_line, working_tree_counts_footer,
+  pad_cells, pane_counter, recent_items_pane_title, status_pane_title, type_selector_line, working_tree_counts_footer,
   working_tree_pane_title, working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON,
   WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
@@ -21,6 +21,7 @@ use gwm::tui::{
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use unicode_width::UnicodeWidthStr;
 
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
@@ -34,7 +35,7 @@ fn ellipsize_middle_keeps_head_and_tail_around_the_ellipsis() {
   // A long path keeps both its root and the worktree name at the end.
   let s = "/Users/kb/Projects/Flippad/worktrees/chore-880-drop-deprecated";
   let out = ellipsize_middle(s, 20);
-  assert_eq!(out.chars().count(), 20, "must fit exactly within max");
+  assert_eq!(out.width(), 20, "must fit exactly within max");
   assert!(out.contains('…'), "must carry the middle ellipsis: {out}");
   assert!(out.starts_with("/Users"), "keeps the head: {out}");
   // Tail length is `max - 1 - ceil((max-1)/2)` chars, so a suffix that
@@ -50,13 +51,59 @@ fn ellipsize_middle_degrades_to_a_single_ellipsis_when_too_narrow() {
 }
 
 #[test]
-fn ellipsize_middle_counts_chars_not_bytes() {
-  // Multi-byte segments must not be sliced mid-codepoint, and the budget
-  // is measured in chars.
+fn ellipsize_middle_never_slices_a_codepoint() {
+  // Multi-byte segments must not be sliced mid-codepoint. These accents
+  // are one cell each, so the budget spends exactly.
   let s = "~/Projets/dépôt-très-long/branche-accentuée-éàü";
   let out = ellipsize_middle(s, 15);
-  assert_eq!(out.chars().count(), 15);
+  assert_eq!(out.width(), 15);
   assert!(out.contains('…'));
+}
+
+#[test]
+fn ellipsize_middle_measures_in_terminal_cells_not_chars() {
+  // Issue #554. Every caller's budget is the width of a ratatui rect, in
+  // cells. A CJK path counts one char per two columns drawn, so a char
+  // count judged this short, returned it whole, and ratatui clipped the
+  // tail the middle ellipsis exists to keep. Same measure, and the same
+  // per-glyph walk, as `compact_header_line`.
+  let s = "/tmp/作業ディレクトリ/深い/入れ子/TAIL";
+  assert!(s.chars().count() < 30, "the fixture must fit the budget in chars");
+  assert!(s.width() > 30, "and overflow it in cells");
+
+  let out = ellipsize_middle(s, 30);
+  assert!(out.width() <= 30, "must fit the cell budget: {} cells", out.width());
+  assert!(out.contains('…'), "must carry the middle ellipsis: {out}");
+  assert!(out.starts_with("/tmp"), "keeps the head: {out}");
+  assert!(out.ends_with("TAIL"), "keeps the tail: {out}");
+}
+
+#[test]
+fn ellipsize_middle_drops_a_wide_glyph_rather_than_half_drawing_it() {
+  // A 2-cell glyph against a 1-cell remainder is dropped whole, so the
+  // result is `<= max` cells rather than exactly `max` — half a glyph is
+  // not a thing a terminal can draw. The budget is never overspent.
+  for max in 2..=12 {
+    let out = ellipsize_middle("作業ディレクトリの名前", max);
+    assert!(
+      out.width() <= max,
+      "max={max} overspent: {out:?} is {} cells",
+      out.width()
+    );
+  }
+}
+
+#[test]
+fn pad_cells_fills_a_row_by_cells_so_a_pinned_column_stays_put() {
+  // The other half of #554. A picker row and a reclaim row pad the
+  // ellipsized value to the column width; `{:<w$}` counts chars, so once
+  // the value is cell-measured a wide-glyph row got padded past its budget
+  // and pushed the right-pinned size column off the frame.
+  assert_eq!(pad_cells("ab", 5).width(), 5);
+  let wide = pad_cells("作業", 8);
+  assert_eq!(wide.width(), 8, "4 cells of text, 4 of padding: {wide:?}");
+  // Never trims: a value already at or over the column keeps its cells.
+  assert_eq!(pad_cells("作業ディレクトリ", 4), "作業ディレクトリ");
 }
 
 #[test]

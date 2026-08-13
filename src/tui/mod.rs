@@ -79,7 +79,7 @@ pub use ui::{
   help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line,
   link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter,
   modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width, overlay_modal_width,
-  palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line,
+  pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line,
   recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
   status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
   working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
