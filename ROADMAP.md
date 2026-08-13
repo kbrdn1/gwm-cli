@@ -504,6 +504,34 @@ are already emitted per page.
 three languages, and no native reader is lined up for any of the three. Worth
 naming before it is scheduled against a date.
 
+### Post-1.7: TUI density, from the ratatui maintainer's feedback ([#544](https://github.com/kbrdn1/gwm-cli/issues/544))
+
+The traffic that took the repository from 30 to 122 stars came through the
+ratatui circle, and its maintainer sent back a design read: captures too wide,
+too much empty space, borders everywhere, weak contrast on the site. #544 tracks
+acting on it. The work below is **on `dev`, not in a published version** — it
+lands in the next minor.
+
+Shipped there so far:
+
+- [#545](https://github.com/kbrdn1/gwm-cli/issues/545) ✅ + [#549](https://github.com/kbrdn1/gwm-cli/issues/549) ✅: **compact is the default layout**. A section is delimited by a filled one-line header instead of four rules, which buys back two rows and two columns per section; modal titles moved into the top rule, two more rows per overlay. `[tui] layout = "bordered"` restores the pre-1.8 boxes, deliberately untouched by the compact refinements so it stays a faithful restore. `[tui] dim_unfocused` arrived with it.
+- [#550](https://github.com/kbrdn1/gwm-cli/issues/550) ✅: **one width policy for every modal**. Four different rules, two of which made a modal *narrower* as the terminal widened past 80 columns, collapse into a single `modal_width(term_width, pct, min, max)`. The floor also makes 80 columns, the width the docs advertise, a size these surfaces were actually sized for: the confirm modal was 49 columns wide there, with its hint row cut mid-word.
+- [#547](https://github.com/kbrdn1/gwm-cli/issues/547) ✅: **the Status block folds onto one line**, under `[tui] status_one_line` (default on). Four labelled rows for four values of a handful of characters each was the largest waste left in the sidebar once #545 cut the chrome. A knob rather than a compact-mode behaviour, so `bordered` folds too.
+- [#548](https://github.com/kbrdn1/gwm-cli/issues/548) ✅: the cursor-position read that failed on return from a fullscreen overlay.
+
+Still open, all found by the same pass and all cheap:
+
+- [#553](https://github.com/kbrdn1/gwm-cli/issues/553): the two form modals drop a field below 18 rows. The horizontal policy landed with #550; the vertical one did not, so a short terminal silently hides an input rather than scrolling it.
+- [#554](https://github.com/kbrdn1/gwm-cli/issues/554): `ellipsize_middle` counts characters where the terminal counts cells, so a CJK or emoji title overflows the box it was measured into.
+- [#551](https://github.com/kbrdn1/gwm-cli/issues/551): polish pass on the rich PR / Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)), queued behind the density line rather than reopening it.
+- [#544](https://github.com/kbrdn1/gwm-cli/issues/544) itself stays open for what is not TUI code: capture width and the site's contrast.
+
+⚠️ The doc captures still show the pre-fold sidebar. Every screenshot under
+`docs/**/_assets/` is generated from a committed tape by
+`docs/_capture/generate.sh`, which drives the **installed** `gwm`, so the set
+regenerates in one pass on the maintainer's machine and has to be redone before
+the cut, not per-PR.
+
 ### Deferred
 
 - [#414](https://github.com/kbrdn1/gwm-cli/issues/414): **process-level agent liveness on macOS / Linux**: detection reads transcript mtime, which is *activity*, not liveness. It lags a session that is thinking or waiting on a long tool call, and a crashed one looks recent for a while. The targeted Unix refinement shipped in v1.3.0 ([#441](https://github.com/kbrdn1/gwm-cli/issues/441)): a Claude Code session whose recorded PID is gone drops to idle immediately. What remains is the general case, deferred by the issue's own title.
