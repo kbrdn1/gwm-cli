@@ -84,13 +84,21 @@ tracked separately — until then, treat regeneration as a maintainer task.
 - **`generate.sh`** orchestrates the above and drops each asset into the correct
   `docs/<section>/_assets/` directory.
 
-## the grey background
+## the dark background
 
 `gwm`'s default theme paints no background, so the TUI inherits the terminal's.
-Every tape sets a neutral grey vhs theme (`#2b2b2b`) so the default-theme
-captures read as grey, not the blue-tinted default of a bundled theme. The
+Every tape sets a neutral dark vhs theme (`#141414`) so the default-theme
+captures read as neutral, not the blue-tinted default of a bundled theme. The
 theme-gallery shots are the exception: each preset paints its own background on
 purpose.
+
+It was `#2b2b2b` until 1.8.0, a mid-grey that cost twice over. Compact paints
+its section headers with the `section_bg` role, a band only a few steps off the
+terminal background, and against a mid-grey the band barely read as one. On the
+docs site the frames also sat *in* the page rather than on it, which is the
+contrast half of the ratatui maintainer's feedback
+([#544](https://github.com/kbrdn1/gwm-cli/issues/544)). Going darker fixes both
+with one value, and the palette above it is unchanged.
 
 ## captured off the demo
 
