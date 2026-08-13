@@ -84,6 +84,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Table cells and pane headers are cut by the room their text takes**
+  ([#560](https://github.com/kbrdn1/gwm-cli/issues/560),
+  [#562](https://github.com/kbrdn1/gwm-cli/issues/562)). The two width funnels
+  left standing after #554, now on the same measure as the ellipsizer.
+
+  `trunc` clips every width-constrained table cell, and it counted characters
+  where its callers hand it a column width. A branch of 20 ideographs is 20
+  characters and 40 columns, so it was judged short and passed through whole,
+  and the table then hard-clipped it at the column edge: the tail vanished with
+  no `…` to say the name shown is not the branch you are on. That marker is the
+  reason the funnel exists.
+
+  `compact_header_line` budgeted its title through `Span::width`, which is
+  `unicode-width` over the whole string, and that is not the measure ratatui
+  applies when it paints. The two agree on CJK, which is where #546 was
+  measured, and disagree on text that is not exotic: a title reading `لالالا`
+  is 3 columns to `unicode-width` and 6 on screen, `ｶﾞｶﾞｶﾞ` likewise. An
+  undercounted title means padding computed against the undercount, so the
+  right-aligned counter was pushed off the pane. A filter query reaches this
+  directly, being arbitrary typed text. The truncation branch stepped
+  character by character on top of that, where a variation selector reads zero
+  and the sequence it completes paints two, so every one of those was free.
+
+  Both now measure with ratatui's own `CellWidth` per extended grapheme, the
+  walk `Buffer::set_stringn` performs, through the `cells` helper #554 left
+  behind; the prefix walk the three of them share is one function rather than
+  three. Nothing in `src/` measures with `unicode-width` any more, so it moves
+  to a dev-dependency, where the width tests keep it as the contrast measure
+  that proves a fixture is one the two disagree on.
+
 - **A path of wide glyphs is ellipsized by the room it actually takes**
   ([#554](https://github.com/kbrdn1/gwm-cli/issues/554)). `ellipsize_middle`
   counted characters while all eleven of its callers hand it a budget in

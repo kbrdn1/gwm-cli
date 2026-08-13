@@ -32,6 +32,14 @@ fn painted(s: &str) -> usize {
   usize::from(x)
 }
 
+/// Same oracle for a whole `Line`, span by span — which is how ratatui draws
+/// one. Not `Line::width()`: that sums `Span::width()`, i.e.
+/// `UnicodeWidthStr::width`, which is the measure under test rather than the
+/// one the renderer applies (issue #562).
+fn painted_line(line: &ratatui::text::Line<'_>) -> usize {
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
+
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
   assert_eq!(ellipsize_middle("short", 10), "short");
@@ -1464,15 +1472,16 @@ fn compact_header_line_measures_in_terminal_cells_not_chars() {
   // line wider than the pane — the right-aligned counter fell off the
   // edge — because the padding was computed against an undercount.
   //
-  // `Line::width()` is the same measure ratatui uses when it draws, so
-  // asserting on it is asserting on what lands in the buffer.
+  // Asserted against what `set_stringn` paints, not against `Line::width()`
+  // — that one sums `Span::width()`, the measure the helper itself uses, so
+  // it would agree with a wrong implementation (issue #562).
   let title = ratatui::text::Line::from(" [1] WORKTREES /界 ");
   let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Color::Cyan);
   assert_eq!(
-    line.width(),
+    painted_line(&line),
     40,
     "the header must span exactly the pane width in cells, got {}: {:?}",
-    line.width(),
+    painted_line(&line),
     title_text(&line)
   );
 }
@@ -1485,8 +1494,85 @@ fn compact_header_line_truncates_wide_glyphs_by_cell_budget() {
   let title = ratatui::text::Line::from("界界界界界界界界");
   let line = compact_header_line(title, None, 9, Color::Cyan);
   assert!(
-    line.width() <= 9,
+    painted_line(&line) <= 9,
     "must never exceed the pane width in cells, got {}",
-    line.width()
+    painted_line(&line)
+  );
+}
+
+/// Titles `unicode-width` reads narrower than the renderer paints them, with
+/// the two measures spelled out. CJK is deliberately absent: `UnicodeWidthStr`
+/// and `CellWidth` agree on it, which is why #546 shipped `Span::width()` and
+/// why every fixture above stays green either way.
+const UNDERCOUNTED: &[(&str, usize, usize)] = &[
+  // Lam-alef is a ligature to `unicode-width`; the renderer walks graphemes
+  // and paints both letters.
+  ("لالالالالا", 5, 10),
+  // U+FF9E carries `Grapheme_Extend`, so `unicode-width` gives it no cell,
+  // but a terminal draws the halfwidth dakuten in one and ratatui adds it back.
+  ("ｶﾞｶﾞｶﾞｶﾞｶﾞ", 5, 10),
+];
+
+#[test]
+fn compact_header_line_pads_against_the_cells_the_renderer_paints() {
+  for (title, narrow, wide) in UNDERCOUNTED {
+    assert_eq!(
+      (UnicodeWidthStr::width(*title), painted(title)),
+      (*narrow, *wide),
+      "{title:?} must be a case the two measures disagree on, or this proves nothing"
+    );
+    let counter = ratatui::text::Line::from(" 3 of 5 ");
+    let line = compact_header_line(
+      ratatui::text::Line::from(title.to_string()),
+      Some(counter),
+      20,
+      Color::Cyan,
+    );
+    // Padding computed against the undercount leaves the line wider than the
+    // pane, which pushes the right-aligned counter off it.
+    assert_eq!(
+      painted_line(&line),
+      20,
+      "{title:?}: header painted {} cells into a 20-cell pane: {:?}",
+      painted_line(&line),
+      title_text(&line)
+    );
+  }
+}
+
+#[test]
+fn compact_header_line_truncates_by_the_cells_the_renderer_paints() {
+  for (title, narrow, wide) in UNDERCOUNTED {
+    // Narrower than what gets painted, wider than what `unicode-width` reads:
+    // the truncation branch is only entered at all once the measure is right.
+    let width = (narrow + wide) / 2;
+    let line = compact_header_line(
+      ratatui::text::Line::from(title.to_string()),
+      None,
+      width as u16,
+      Color::Cyan,
+    );
+    assert!(
+      painted_line(&line) <= width,
+      "{title:?}: title painted {} cells into a {width}-cell pane: {:?}",
+      painted_line(&line),
+      title_text(&line)
+    );
+  }
+}
+
+#[test]
+fn compact_header_line_truncates_sequences_whole_not_char_by_char() {
+  // The truncation branch used to step `UnicodeWidthChar::width` per char. A
+  // variation selector reads 0 there while the sequence it completes paints 2,
+  // so every one of these was free and the whole title survived its budget.
+  let title = "*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}";
+  assert_eq!(painted(title), 10, "fixture must paint two cells per sequence");
+  let line = compact_header_line(ratatui::text::Line::from(title), None, 5, Color::Cyan);
+  assert!(
+    painted_line(&line) <= 5,
+    "title painted {} cells into a 5-cell pane: {:?}",
+    painted_line(&line),
+    title_text(&line)
   );
 }

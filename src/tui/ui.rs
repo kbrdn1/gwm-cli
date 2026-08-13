@@ -34,7 +34,6 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthChar;
 
 /// Per-section content of the worktree details sidebar. Rendered by
 /// [`draw_sidebar`] into separate rounded-border blocks (no outer
@@ -202,10 +201,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 ///
 /// Priority when the terminal is narrow: the version chip survives (clipped
 /// only if it alone exceeds `width`), then the current-dir badge, then the
-/// picker chip, and the path is sacrificed first. Pure and measured with
-/// `chars().count()` so the contract is pinned by `tests/tui_header_tests.rs`
-/// without a ratatui backend; control chars are collapsed to spaces so a
-/// pathological path can never split the single row.
+/// picker chip, and the path is sacrificed first. Pure, so the contract is
+/// pinned by `tests/tui_header_tests.rs` without a ratatui backend; control
+/// chars are collapsed to spaces so a pathological path can never split the
+/// single row.
+///
+/// Its own arithmetic still counts `chars()`, which is a cell count only for
+/// the ASCII these segments carry in practice. The path is the one value a
+/// user can make wide, and an undercount there pushes the pinned version chip
+/// past the row. Tracked as #563 with the rest of the row arithmetic; the
+/// three truncators it calls into measure cells since #554 / #560 / #562.
 pub fn header_line(
   repo_name: &str,
   workdir_display: &str,
@@ -696,9 +701,16 @@ pub fn compact_header_line(
   // Measured in terminal CELLS, not chars: a CJK glyph or an emoji in a
   // filter query counts one char and draws two columns, and padding
   // computed against the undercount pushed the right-aligned counter off
-  // the pane (Codex review, PR #546). `Span::width` is the same measure
-  // ratatui uses when it draws.
-  let span_w = |s: &Span<'static>| s.width();
+  // the pane (Codex review, PR #546).
+  //
+  // Through `cells`, not `Span::width` (issue #562). `Span::width` is
+  // `UnicodeWidthStr::width`, which is *not* what ratatui applies when it
+  // draws: `Buffer::set_stringn` walks graphemes and calls `CellWidth` on
+  // each. The two agree on CJK, which is where #546 was measured, and part
+  // company on text that is not exotic — a title of `لالالا` reads 3 and
+  // paints 6, `ｶﾞｶﾞｶﾞ` likewise. A filter query is arbitrary typed text, so
+  // it reaches this directly.
+  let span_w = |s: &Span<'static>| cells(&s.content);
   let title_w: usize = spans.iter().map(span_w).sum();
   // Truncate the title when it alone overflows. Cutting from the tail
   // keeps the leading chord — the actionable half — visible longest. A
@@ -711,16 +723,11 @@ pub fn compact_header_line(
       if w <= left {
         left -= w;
       } else {
-        let mut kept = String::new();
-        let mut used = 0usize;
-        for ch in s.content.chars() {
-          let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-          if used + cw > left {
-            break;
-          }
-          kept.push(ch);
-          used += cw;
-        }
+        // `head_end`, shared with `ellipsize_middle` and `trunc`: one
+        // grapheme at a time, so a sequence is weighed whole. The per-char
+        // `UnicodeWidthChar` step this replaces read a variation selector as
+        // zero and let every sequence through for free.
+        let kept = s.content[..head_end(&s.content, left)].to_string();
         *s = Span::styled(kept, s.style);
         left = 0;
       }
@@ -3155,8 +3162,12 @@ fn push_modal_hint(
 ///
 /// Pure and width-driven so the contract is pinned by
 /// `tests/tui_footer_tests.rs` without spinning up a ratatui backend. Widths
-/// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
-/// labels and the bracketed status are ASCII / single-width in practice).
+/// are measured with `chars().count()`, which is a cell count for the ASCII
+/// keys, labels and bracketed status this carries in practice. Not the rest
+/// of `ui.rs` any more: the three truncators measure cells since #554 / #560
+/// / #562, and the row arithmetic that has not followed is tracked as #563.
+/// The status message is an action log, so it is the segment that can arrive
+/// wide.
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
   let key_style = hint_key_style(theme);
   let label_style = hint_label_style(theme);
@@ -5601,6 +5612,28 @@ fn grapheme_cells(g: &str) -> usize {
   }
 }
 
+/// Byte index ending the longest prefix of `s` that fits in `max` cells.
+///
+/// One pass, one grapheme at a time — not a per-char sum, which undercounts
+/// every sequence (`"*\u{FE0F}"` reads 1 + 0 per char and paints 2), and not a
+/// rescan of each prefix, which is the same walk done `n` times. A glyph that
+/// would straddle the budget is left out whole, so the prefix is `<= max`
+/// cells and the cut lands where a glyph ends rather than between a base and
+/// its combining mark.
+fn head_end(s: &str, max: usize) -> usize {
+  let mut end = 0usize;
+  let mut used = 0usize;
+  for (i, g) in s.grapheme_indices(true) {
+    let w = grapheme_cells(g);
+    if used + w > max {
+      break;
+    }
+    used += w;
+    end = i + g.len();
+  }
+  end
+}
+
 /// Middle-ellipsize `s` to at most `max` terminal cells, keeping the head
 /// and tail so a long path keeps both its root and the worktree name
 /// (e.g. `~/Projects/…/feat-187-modal`). Returns `s` unchanged when it
@@ -5631,23 +5664,10 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   let head = keep.div_ceil(2);
   let tail = keep - head;
   // Walked one GRAPHEME at a time from each end, each measured through
-  // `cells` (Codex review, PR #561). Not per char: `unicode-width` reads
-  // `"*\u{FE0F}"` as 2 cells but its two chars in isolation as 1 and 0, so a
-  // per-char sum undercounts every variation-selector sequence — measured, a
-  // 20-sequence string budgeted at 30 cells came back 59 wide. Not per byte
-  // index either: an index is not a column. A grapheme is the unit the
-  // renderer walks, so the cut lands where a glyph ends instead of between a
-  // base and its combining mark.
-  let mut head_end = 0usize;
-  let mut used = 0usize;
-  for (i, g) in s.grapheme_indices(true) {
-    let w = grapheme_cells(g);
-    if used + w > head {
-      break;
-    }
-    used += w;
-    head_end = i + g.len();
-  }
+  // `cells` (Codex review, PR #561). The head half is `head_end`, shared with
+  // `trunc` and `compact_header_line` — all three cut a string to a cell
+  // budget, and one walk is one place to be wrong.
+  let head_end = head_end(s, head);
   let mut tail_start = s.len();
   let mut used = 0usize;
   for (i, g) in s.grapheme_indices(true).rev() {
@@ -5693,12 +5713,24 @@ pub fn pad_cells(s: &str, width: usize) -> String {
 /// It runs **before** the width count, so what is measured is what is drawn: a
 /// replacement is one char for one char, but a `Bidi_Control` character can
 /// measure zero columns where `?` measures one.
+///
+/// Measured in CELLS, not chars (issue #560), the same unit and the same walk
+/// as `ellipsize_middle`. Every caller hands it a column width: a branch of 20
+/// ideographs is 20 characters and 40 columns, so a character count called it
+/// short and returned it whole, and the `Table` then hard-clipped it at the
+/// column edge — silently, where this funnel exists to leave an `…` saying the
+/// value is not all there. On the truncating branch a char count was the same
+/// error in the other direction, keeping `max` characters where `max` columns
+/// were free.
 fn trunc(s: &str, max: usize) -> String {
   let s = crate::naming::sanitise_for_terminal(s);
-  if s.chars().count() <= max {
+  if cells(&s) <= max {
     s
   } else {
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    // One column goes to the `…`, and a glyph that would straddle what is
+    // left is dropped whole, so the result is `<= max` cells rather than
+    // exactly `max`.
+    let mut out = s[..head_end(&s, max.saturating_sub(1))].to_string();
     out.push('…');
     out
   }

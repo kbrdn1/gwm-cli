@@ -132,9 +132,6 @@ daemon = []
 clap = { version = "4.5", features = ["derive", "color"] }
 clap_complete = "4.5"
 ratatui = "0.30"
-# Terminal cell widths for the compact header (#545). Already in the tree via
-# ratatui; taken directly so the header can budget a wide glyph per char.
-unicode-width = "0.2"
 # Grapheme boundaries for the middle-ellipsizer (#554). Already in the tree via
 # crossterm and nucleo-matcher; taken directly so a slice is cut where a glyph
 # ends rather than between a base and its combining mark, and so the walk costs
@@ -201,6 +198,11 @@ interprocess = "2.4.2"
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"
+# Was a runtime dependency until #560/#562: the crate measured widths with it.
+# Nothing in `src/` does any more — the renderer's own `CellWidth` is the only
+# measure now — so it stays only as the *contrast* measure the width tests
+# assert against, to keep proving a fixture is one the two disagree on.
+unicode-width = "0.2"
 # Parse our own Cargo.toml in tests/binstall_metadata_tests.rs (#27) so
 # the `[package.metadata.binstall]` contract is asserted structurally,
 # not by string-matching. Same `toml` major as the runtime dependency.
