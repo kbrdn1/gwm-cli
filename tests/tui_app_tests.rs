@@ -5478,6 +5478,7 @@ fn sidebar_sections_omit_commands_block() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let all = format!(
     "{}\n{}\n{}",
@@ -5513,6 +5514,7 @@ fn sidebar_sections_omit_inline_section_headers() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let all = format!(
     "{}\n{}\n{}",
@@ -5533,6 +5535,7 @@ fn sidebar_worktree_section_is_compact_identity() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let text = section_text(&sections.worktree);
 
@@ -5561,6 +5564,7 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   assert!(
     sections.worktree.len() <= 5,
@@ -5590,7 +5594,13 @@ fn sidebar_diff_line_renders_counts_in_theme_roles() {
     insertions: 12,
     deletions: 4,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, Some(diff), &theme);
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    Some(diff),
+    &theme,
+    false,
+  );
 
   let diff_line = sections
     .worktree
@@ -5618,6 +5628,7 @@ fn sidebar_diff_line_absent_for_empty_or_missing_stat() {
       gwm::tui::state::sidebar::SidebarMode::Commits,
       diff,
       &Theme::default(),
+      false,
     );
     assert!(
       !sections
@@ -5757,6 +5768,7 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let text = section_text(&sections.worktree);
   assert!(
@@ -5795,6 +5807,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    false,
   );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
@@ -5820,6 +5833,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    false,
   );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
@@ -5841,6 +5855,7 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    false,
   );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
@@ -6546,6 +6561,7 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   assert_eq!(
     sections.recent_commits.len(),

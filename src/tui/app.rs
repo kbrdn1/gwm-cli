@@ -1541,7 +1541,8 @@ impl App {
     };
     let trunks = self.config.doctor.trunks.clone();
     let theme = self.theme;
-    self.spawn_sidebar(generation, w, mode, trunks, theme);
+    let status_one_line = self.config.tui.status_one_line;
+    self.spawn_sidebar(generation, w, mode, trunks, theme, status_one_line);
   }
 
   /// Spawn one background sidebar-rebuild worker tagged with `generation`
@@ -1558,11 +1559,12 @@ impl App {
     mode: crate::tui::state::sidebar::SidebarMode,
     trunks: Vec<String>,
     theme: crate::tui::theme::Theme,
+    status_one_line: bool,
   ) {
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
       let path = w.path.clone();
-      let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme);
+      let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme, status_one_line);
       let _ = tx.send(TaskMsg::Sidebar(generation, path, mode, sections));
     });
   }
