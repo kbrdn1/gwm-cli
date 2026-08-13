@@ -5526,6 +5526,8 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
 ///
 /// A glyph that would straddle the budget is dropped whole rather than
 /// half-drawn, so the result is `<= max` cells, not exactly `max`.
+/// "Glyph" is the slice's own measure, not a sum of per-char ones: a
+/// sequence measures wider than its characters do apart.
 pub fn ellipsize_middle(s: &str, max: usize) -> String {
   if UnicodeWidthStr::width(s) <= max {
     return s.to_string();
@@ -5536,26 +5538,31 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   let keep = max - 1; // reserve one column for the ellipsis
   let head = keep.div_ceil(2);
   let tail = keep - head;
-  // Walked per glyph from each end rather than sliced by char index: the
-  // index and the cell budget are the same number only for narrow text.
-  fn take_cells(it: impl Iterator<Item = char>, budget: usize) -> Vec<char> {
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    for ch in it {
-      let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-      if used + cw > budget {
-        break;
-      }
-      out.push(ch);
-      used += cw;
+  // Grown one char at a time from each end, and remeasured on the slice
+  // rather than by summing per-char widths: `unicode-width` reads
+  // `"*\u{FE0F}"` as 2 cells, but its two chars in isolation as 1 and 0, so
+  // a per-char sum undercounts every variation-selector sequence. Measured,
+  // that let a 20-sequence string budgeted at 30 cells come back at 59
+  // (Codex review, PR #561). Slicing by char index is out for the same
+  // reason it was before: an index is not a column.
+  let mut head_end = 0usize;
+  for (i, ch) in s.char_indices() {
+    let end = i + ch.len_utf8();
+    if UnicodeWidthStr::width(&s[..end]) > head {
+      break;
     }
-    out
+    head_end = end;
   }
-  let head_str: String = take_cells(s.chars(), head).into_iter().collect();
-  let mut tail_chars = take_cells(s.chars().rev(), tail);
-  tail_chars.reverse();
-  let tail_str: String = tail_chars.into_iter().collect();
-  format!("{head_str}…{tail_str}")
+  let mut tail_start = s.len();
+  for (i, _) in s.char_indices().rev() {
+    if UnicodeWidthStr::width(&s[i..]) > tail {
+      break;
+    }
+    tail_start = i;
+  }
+  // The two slices cannot meet: `head + tail` is `max - 1`, and we only get
+  // here when the whole string is wider than `max`.
+  format!("{}…{}", &s[..head_end], &s[tail_start..])
 }
 
 /// Right-pad `s` to `width` terminal cells.

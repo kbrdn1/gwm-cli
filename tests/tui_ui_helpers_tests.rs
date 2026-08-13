@@ -94,6 +94,24 @@ fn ellipsize_middle_drops_a_wide_glyph_rather_than_half_drawing_it() {
 }
 
 #[test]
+fn ellipsize_middle_measures_sequences_whole_not_char_by_char() {
+  // Codex review on PR #561. `unicode-width` reads `"*\u{FE0F}"` as 2 cells
+  // but its two chars in isolation as 1 and 0, so a per-char sum undercounts
+  // every variation-selector sequence. Measured before the fix: this string
+  // budgeted at 30 came back 59 cells wide.
+  let s = "*\u{FE0F}".repeat(20);
+  assert_eq!(s.width(), 40, "the fixture must overflow the budget");
+  for max in 2..=30 {
+    let out = ellipsize_middle(&s, max);
+    assert!(
+      out.width() <= max,
+      "max={max} overspent: {out:?} is {} cells",
+      out.width()
+    );
+  }
+}
+
+#[test]
 fn pad_cells_fills_a_row_by_cells_so_a_pinned_column_stays_put() {
   // The other half of #554. A picker row and a reclaim row pad the
   // ellipsized value to the column width; `{:<w$}` counts chars, so once
