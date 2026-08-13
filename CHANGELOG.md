@@ -55,6 +55,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[tui] status_one_line`** ([#547](https://github.com/kbrdn1/gwm-cli/issues/547)):
+  folds the sidebar's Status block onto a single row — branch, head, state
+  badges, diff and age joined by ` · ` — where it used to spend one labelled
+  row per value. **On by default**, which frees three rows for the panes below;
+  `status_one_line = false` restores the labelled block.
+
+  A knob rather than a compact-mode behaviour, so it applies under `bordered`
+  too. The `Path` row never folds in: a path is the one value long enough that
+  sharing a row would clip both halves. Segment order is the width policy — the
+  sidebar does not wrap, so a row wider than the pane is clipped on the right,
+  and the fold puts identity first and the age last. Reachable from the
+  Settings panel's **TUI** tab, where the edit now drops the sidebar cache so
+  the new shape is visible immediately (a live theme change had the same
+  staleness and is fixed with it).
+
 - **`[tui] dim_unfocused`** ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)):
   dims the body of whichever pane does not hold focus, in either layout. Off by
   default — it trades contrast for a stronger focus cue, and the inactive

@@ -313,6 +313,17 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # Overlays and modals keep their border under either value.
 #
+# `status_one_line` folds the sidebar's Status block onto a single row —
+# branch, head, state badges, diff and age joined by ` · ` — instead of one
+# labelled row per value. ON by default (#547): four rows for four short
+# values was the largest waste left in the sidebar. It is independent of
+# `layout`, so `bordered` folds too; set it to false for the labelled block.
+# The `Path` row never folds in. Under width pressure the row is clipped on
+# the right, so the age goes first and the branch survives.
+#
+#   [tui]
+#   status_one_line = false
+#
 # [tui]
 # layout = "bordered"
 

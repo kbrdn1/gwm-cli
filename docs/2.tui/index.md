@@ -43,3 +43,5 @@ The capture at the top of this page shows it, as does every other capture in the
 ![gwm TUI in bordered mode: lazygit-style box rules around every section](./_assets/bordered.png)
 
 Modals keep their frame under either value. Configuration and the `section_bg` theme role are documented under [`.gwm.toml`](/configuration/gwm-toml#layout).
+
+`[tui] status_one_line` ([#547](https://github.com/kbrdn1/gwm-cli/issues/547)) folds the Status block's four values — branch, head, state badges, diff, age — onto one row joined by ` · `, leaving only the path a row of its own. **On by default**, under either layout. It is the content half of the same density argument: `layout` cut what a section spends on its frame, this cuts what the identity card spends on labels. Set `status_one_line = false` for the labelled four-row block.
