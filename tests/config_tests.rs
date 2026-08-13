@@ -779,6 +779,64 @@ fn tui_layout_labels_match_their_serialised_spelling() {
 }
 
 #[test]
+fn tui_status_one_line_defaults_to_true() {
+  // #547: the fold is the default, so a config with no `[tui]` block gets
+  // it. `#[serde(default)]` on a bool would yield `false` and silently
+  // invert the knob for every user who does not spell the key out — this
+  // is the assertion that catches that.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(cfg.tui.status_one_line, "status_one_line must default to true");
+  // Including when `[tui]` exists but says nothing about it.
+  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nlayout = \"bordered\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(
+    cfg.tui.status_one_line,
+    "a `[tui]` block that omits the key still gets the default"
+  );
+  assert!(
+    Config::default().tui.status_one_line,
+    "`Config::default()` must agree with the serde default"
+  );
+}
+
+#[test]
+fn tui_status_one_line_round_trips_through_toml() {
+  // `false` restores the labelled four-row block for users who want it.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+status_one_line = false
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(!cfg.tui.status_one_line);
+}
+
+#[test]
+fn tui_status_one_line_is_independent_of_the_layout() {
+  // The knob is not a compact-mode behaviour (#547 amends #545's
+  // acceptance): bordered folds too unless the user turns it off.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+layout = "bordered"
+status_one_line = true
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.layout, TuiLayout::Bordered);
+  assert!(cfg.tui.status_one_line, "bordered + folded is a valid combination");
+}
+
+#[test]
 fn tui_countdown_clamped_to_five_seconds() {
   // A user who types `confirm_countdown_secs = 30` in their .gwm.toml
   // wants more friction; we cap it at 5 so the destructive path is never

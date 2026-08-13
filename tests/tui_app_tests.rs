@@ -5578,6 +5578,173 @@ fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
+// ---- `[tui] status_one_line` — the folded Status row (issue #547) ---------
+
+/// A fixture carrying every foldable value at once: branch, head, a dirty
+/// state, a non-empty diff, and a measurable age. The labelled block spends
+/// four rows on these; the fold spends one.
+fn foldable_worktree_fixture() -> WorktreeInfo {
+  let mut w = detailed_worktree_fixture();
+  w.is_main = false;
+  w.age = Some(std::time::Duration::from_secs(3 * 24 * 60 * 60));
+  w.status = BranchStatus {
+    is_dirty: true,
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  w
+}
+
+#[test]
+fn status_fold_carries_every_value_of_the_labelled_block() {
+  let w = foldable_worktree_fixture();
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let row = section_text_single(&gwm::tui::folded_status_line(&w, Some(&diff), &Theme::default()));
+
+  for needle in ["feat/#42-api-rest", "08d1029", "dirty", "+12", "-4", "3d"] {
+    assert!(row.contains(needle), "folded row must carry {needle:?}: {row}");
+  }
+  // The labels are what the fold buys back — four of them, one per row.
+  for label in ["Branch ", "Created", "Diff ", "State "] {
+    assert!(!row.contains(label), "folded row must drop the {label:?} label: {row}");
+  }
+}
+
+#[test]
+fn status_fold_orders_identity_first_and_age_last() {
+  // The sidebar renders without `Wrap`, so a row wider than the pane is
+  // hard-clipped on the right: segment order *is* the width policy (open
+  // question 2 of #547). Identity leads, `Created` trails, because age is
+  // the value the pane can most afford to lose.
+  let w = foldable_worktree_fixture();
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let row = section_text_single(&gwm::tui::folded_status_line(&w, Some(&diff), &Theme::default()));
+  let at = |needle: &str| {
+    row
+      .find(needle)
+      .unwrap_or_else(|| panic!("{needle:?} missing from {row}"))
+  };
+
+  assert!(at("feat/#42-api-rest") < at("08d1029"), "branch before head: {row}");
+  assert!(at("08d1029") < at("dirty"), "head before state: {row}");
+  assert!(at("dirty") < at("+12"), "state before diff: {row}");
+  assert!(at("+12") < at("3d"), "diff before age — age clips first: {row}");
+}
+
+#[test]
+fn status_fold_keeps_the_theme_roles_of_the_labelled_block() {
+  // The fold is a change of shape, not of colour: every segment keeps the
+  // role it wears in the labelled block. Unique `Rgb` values so a hardcoded
+  // `Color::Red` cannot pass here (the #170/#211 rule).
+  let theme = Theme {
+    prunable: Color::Rgb(40, 50, 60),
+    untracked: Color::Rgb(10, 20, 30),
+    dirty: Color::Rgb(70, 80, 90),
+    ..Theme::default()
+  };
+  let w = foldable_worktree_fixture();
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let line = gwm::tui::folded_status_line(&w, Some(&diff), &theme);
+  let fg = |needle: &str| -> Option<Color> {
+    line
+      .spans
+      .iter()
+      .find(|s| s.content.contains(needle))
+      .unwrap_or_else(|| panic!("no span carrying {needle:?} in {}", section_text_single(&line)))
+      .style
+      .fg
+  };
+
+  assert_eq!(fg("feat/#42-api-rest"), Some(theme.prunable), "dirty branch → prunable");
+  assert_eq!(fg("08d1029"), Some(theme.dirty), "short head → dirty role");
+  assert_eq!(fg("+12"), Some(theme.untracked), "insertions → untracked");
+  assert_eq!(fg("-4"), Some(theme.prunable), "deletions → prunable");
+}
+
+#[test]
+fn status_fold_skips_the_segments_the_labelled_block_skips() {
+  // No head, no diff, no age → those segments are absent rather than
+  // rendered empty, exactly as the labelled block omits their rows.
+  let mut w = foldable_worktree_fixture();
+  w.head = None;
+  w.age = None;
+  let row = section_text_single(&gwm::tui::folded_status_line(&w, None, &Theme::default()));
+
+  assert!(row.contains("feat/#42-api-rest"), "branch survives: {row}");
+  assert!(row.contains("dirty"), "state survives: {row}");
+  assert!(!row.contains('+'), "no diff segment without a stat: {row}");
+  assert!(
+    !row.ends_with('·') && !row.contains("· ·"),
+    "no dangling separator: {row}"
+  );
+}
+
+#[test]
+fn status_one_line_folds_the_identity_block_to_two_rows() {
+  let w = foldable_worktree_fixture();
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    Some(gwm::worktree::DiffLineStat {
+      insertions: 12,
+      deletions: 4,
+    }),
+    &Theme::default(),
+    true,
+  );
+
+  assert_eq!(
+    sections.worktree.len(),
+    2,
+    "folded status + path, nothing else: {:?}",
+    sections.worktree.iter().map(section_text_single).collect::<Vec<_>>()
+  );
+  let status = section_text_single(&sections.worktree[0]);
+  for needle in ["feat/#42-api-rest", "08d1029", "dirty", "+12", "3d"] {
+    assert!(
+      status.contains(needle),
+      "row 1 is the folded status, not an empty line — missing {needle:?}: {status}"
+    );
+  }
+  assert!(
+    section_text_single(&sections.worktree[1]).contains("Path"),
+    "the path keeps its own labelled row: {}",
+    section_text_single(&sections.worktree[1])
+  );
+}
+
+#[test]
+fn status_one_line_off_keeps_the_labelled_block() {
+  let w = foldable_worktree_fixture();
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    Some(gwm::worktree::DiffLineStat {
+      insertions: 12,
+      deletions: 4,
+    }),
+    &Theme::default(),
+    false,
+  );
+  let text = section_text(&sections.worktree);
+
+  assert_eq!(sections.worktree.len(), 5, "branch, created, diff, state, path: {text}");
+  for label in ["Branch", "Created", "Diff", "State", "Path"] {
+    assert!(text.contains(label), "{label} row still labelled: {text}");
+  }
+}
+
 #[test]
 fn sidebar_diff_line_renders_counts_in_theme_roles() {
   // A passed `DiffLineStat` surfaces a `Diff +<ins> -<del>` line whose
