@@ -2274,8 +2274,18 @@ pub fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
 /// cell to that under-sized budget, and the row showed nine glyphs and an
 /// ellipsis inside a column the solver had grown wider than the ask. The
 /// ceiling is what bounds the greed, not the unit.
+///
+/// Sanitised before being measured, in that order, because that is the order
+/// `trunc` uses on the cell this sizes (#506): a `Bidi_Control` character
+/// measures zero columns and the `?` replacing it measures one, so measuring
+/// the raw text under-counts by one per neutralised character and the cell is
+/// then cut inside a column that had the room. The character count this
+/// replaced happened to get it right, one char in for one column out.
 fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) -> u16 {
-  let observed = items.map(|s| cells(s) as u16).max().unwrap_or(min);
+  let observed = items
+    .map(|s| cells(&crate::naming::sanitise_for_terminal(s)) as u16)
+    .max()
+    .unwrap_or(min);
   observed.clamp(min, max)
 }
 
