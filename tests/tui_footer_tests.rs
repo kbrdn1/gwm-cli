@@ -498,3 +498,42 @@ fn help_close_hint_resolves_user_rebinding() {
     "the stale literal `Esc/q` must not linger after the rebind: {resolved:?}"
   );
 }
+
+// --- the row never paints past its width (issue #563) ----------------------
+
+/// Cells the renderer paints for `s`: the cursor `set_stringn` leaves behind.
+/// The oracle for every budget assertion below, because the builders measure
+/// with `chars().count()` and asserting on that would agree with them whatever
+/// they did.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 400, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 400, ratatui::style::Style::default());
+  usize::from(x)
+}
+
+fn painted_line(line: &Line<'_>) -> usize {
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
+
+fn plain_line(line: &Line<'_>) -> String {
+  line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn the_statusbar_never_paints_past_its_width_on_ascii() {
+  // Pure ASCII, so this is not about the measure: the `…` marker costs two
+  // columns whenever anything precedes it (a space, then the glyph), and the
+  // hint budget only ever reserved one. `footer_line` reserves both, which is
+  // why it does not have this. Asserted as an invariant over a band of widths
+  // rather than one case, since the overflow only shows where the truncation
+  // lands.
+  for w in 20usize..=60 {
+    let line = status_line("worktrees", HINTS, "plain message", None, w, &Theme::default());
+    assert!(
+      painted_line(&line) <= w,
+      "at {w} columns the statusbar painted {} cells: {:?}",
+      painted_line(&line),
+      plain_line(&line)
+    );
+  }
+}

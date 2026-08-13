@@ -3303,8 +3303,13 @@ pub fn status_line(
     }
   }
 
-  // Hint badges fill whatever is left, minus one column for the `…` marker.
-  let hint_budget = avail.saturating_sub(used).saturating_sub(1);
+  // Hint badges fill whatever is left, minus the `…` marker. The marker is
+  // TWO columns whenever anything precedes it, since it is pushed as a space
+  // then the glyph, and only one was reserved here — so the row painted one
+  // column past its width on every terminal narrow enough to truncate, ASCII
+  // included. `footer_line` reserves both, which is why it never showed this.
+  let marker_w = 1 + usize::from(used > 0);
+  let hint_budget = avail.saturating_sub(used).saturating_sub(marker_w);
   let mut truncated = false;
   let mut hint_used = 0usize;
   for (i, (key, label)) in hints.iter().enumerate() {
@@ -3325,8 +3330,12 @@ pub fn status_line(
     hint_used += badge_w;
   }
   used += hint_used;
-  if truncated {
-    if used > 0 {
+  // The reservation above is not enough on its own: when the chip alone eats
+  // `avail`, the budget saturates to zero, no hint fits, and the marker was
+  // still pushed — two columns past the row. It is only worth drawing if it
+  // fits, and its leading space is the half to drop first.
+  if truncated && used < avail {
+    if used > 0 && used + 1 < avail {
       spans.push(Span::raw(" "));
       used += 1;
     }
