@@ -224,9 +224,14 @@ pub fn header_line(
     return Line::default();
   }
 
-  let sanitize = |s: &str| -> String { s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect() };
-  let repo = sanitize(repo_name);
-  let path = sanitize(workdir_display);
+  // `sanitise_for_terminal`, not a local `is_control` pass: that one is `Cc`
+  // only, so the `Bidi_Control` format characters went straight through and
+  // the row could read in an order its bytes do not have (#502 / #506). A
+  // directory on disk can carry one, and this row shows both its name and the
+  // working path. Still keeps a control from splitting the single row, which
+  // is what the local pass was for.
+  let repo = crate::naming::sanitise_for_terminal(repo_name);
+  let path = crate::naming::sanitise_for_terminal(workdir_display);
 
   let version_style = chip_style(theme.accent);
   let dir_badge_style = chip_style(theme.name);
@@ -3200,7 +3205,11 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   // tabs. `Wrap` is disabled, but a raw `\n` would still split the row in
   // two, so collapse every control char to a single space first — the footer
   // must stay one visual line.
-  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+  // Same sink as the header (#502 / #506): the action log carries branch names
+  // and paths, and git's ref rules refuse the ASCII controls but not the
+  // format characters, so one arrives with a fetch. `is_control` is `Cc` only
+  // and never matched them.
+  let status: String = crate::naming::sanitise_for_terminal(status);
   let status_text = format!("[{}]", status);
   let status_w = cells(&status_text);
 
@@ -3287,7 +3296,11 @@ pub fn status_line(
     return Line::default();
   }
 
-  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+  // Same sink as the header (#502 / #506): the action log carries branch names
+  // and paths, and git's ref rules refuse the ASCII controls but not the
+  // format characters, so one arrives with a fetch. `is_control` is `Cc` only
+  // and never matched them.
+  let status: String = crate::naming::sanitise_for_terminal(status);
   let status_text = format!("[{}]", status);
   let status_w = cells(&status_text);
 

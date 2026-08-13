@@ -571,3 +571,43 @@ fn neither_footer_nor_statusbar_paints_past_its_width_on_wide_glyphs() {
     }
   }
 }
+
+/// Every character carrying the Unicode `Bidi_Control` property. They are
+/// `Cf`, not `Cc`, so `char::is_control` matches none of them, which is the
+/// whole reason they need naming (#502).
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+  '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+#[test]
+fn a_bidi_control_in_the_action_log_never_reaches_the_row() {
+  // Both rows neutralised `char::is_control`, which is `Cc` only, so the
+  // format characters that reorder how a terminal *renders* the text around
+  // them went straight through. The log carries branch names and paths, and
+  // git's ref rules refuse the ASCII controls but not these, so one arrives
+  // with a fetch rather than being typed. The row can then read in an order
+  // the bytes do not have, which is the guarantee #506 exists to give at every
+  // width-constrained sink.
+  //
+  // Pre-dates this branch: `dev` leaks the same characters at the same widths.
+  // Found by a Codex review of #563 and fixed here rather than left behind,
+  // since the fix is the sanitiser these rows already had half of.
+  for c in BIDI_CONTROLS {
+    let status = format!("opened feat/{c}danger");
+    for w in [30usize, 60, 120] {
+      let footer = footer_line(HINTS, &status, w, &Theme::default());
+      assert!(
+        !plain_line(&footer).contains(*c),
+        "the footer replayed U+{:04X} from the action log at {w} columns",
+        *c as u32
+      );
+      let bar = status_line("worktrees", HINTS, &status, None, w, &Theme::default());
+      assert!(
+        !plain_line(&bar).contains(*c),
+        "the statusbar replayed U+{:04X} from the action log at {w} columns",
+        *c as u32
+      );
+    }
+  }
+}

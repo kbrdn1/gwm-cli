@@ -209,3 +209,35 @@ fn the_header_never_paints_past_its_width_on_wide_glyphs() {
     }
   }
 }
+
+/// See `tests/tui_footer_tests.rs` for the same set and the same reasoning:
+/// `Cf`, not `Cc`, so `char::is_control` matches none of them (#502).
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+  '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+#[test]
+fn a_bidi_control_in_the_repo_or_path_never_reaches_the_row() {
+  // The header neutralised `char::is_control` only, so a directory named with
+  // a format character reordered how the row reads. Unlike a ref name this
+  // needs no fetch: a directory on disk can carry one, and the header shows
+  // both its name and the working path.
+  //
+  // Pre-dates this branch, `dev` leaks the same characters. Found by a Codex
+  // review of #563.
+  for c in BIDI_CONTROLS {
+    for (repo, path) in [
+      (format!("re{c}po"), "~/dev/x".to_string()),
+      ("repo".into(), format!("~/dev/x{c}y")),
+    ] {
+      let line = header_line(&repo, &path, false, 120, &Theme::default());
+      assert!(
+        !plain(&line).contains(*c),
+        "the header replayed U+{:04X} from {:?}",
+        *c as u32,
+        (&repo, &path)
+      );
+    }
+  }
+}
