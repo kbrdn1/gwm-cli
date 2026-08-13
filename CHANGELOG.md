@@ -106,6 +106,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ratatui's own `CellWidth` per grapheme. ASCII renders exactly as before,
   which is what kept this standing for so long.
 
+- **The header, footer and statusbar neutralise bidi control characters**
+  ([#563](https://github.com/kbrdn1/gwm-cli/issues/563)). All three replaced
+  what `char::is_control` matches, which is the `Cc` block only. The
+  `Bidi_Control` characters are `Cf`, which is why they had to be named
+  explicitly in the first place: they reorder how a terminal renders the text
+  around them, so a row can read in an order its bytes do not have. The
+  sanitiser sits at the funnel every width-constrained cell passes through, and
+  these three rows reach the terminal without going through it whenever their
+  text fits, which is the ordinary case.
+
+  Neither vector is exotic. The header shows the repo directory name and the
+  working path, and a directory on disk can carry one of these without anyone
+  fetching anything. The action log carries branch names and paths, and git's
+  ref rules refuse the ASCII controls and `~^:?*[` but not the format
+  characters, so a ref carrying one arrives with a fetch. All three call the
+  same sanitiser as the rest of the codebase now, so the replacement shows as
+  `?` rather than a blank.
+
 - **The statusbar no longer paints one column past its width**
   ([#563](https://github.com/kbrdn1/gwm-cli/issues/563)). Unrelated to the
   measure and visible on plain ASCII: the `…` marking a cut hint list is drawn
