@@ -95,11 +95,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipped the tail, which is the half a middle ellipsis exists to keep.
 
   The budget, the head/tail split and the padding that fills a picker or
-  reclaim row are all measured in cells now. The split walks extended
-  graphemes and measures each one whole, so the cut lands where a glyph ends
-  instead of between a base and its combining mark, and a sequence such as an
-  emoji with a variation selector counts the two columns it draws rather than
-  the one its characters add up to. A glyph that would straddle the last
+  reclaim row are all measured in cells now, and the measure is ratatui's own
+  `CellWidth` summed per extended grapheme, which is exactly what
+  `Buffer::set_stringn` walks. Anything less agrees with the renderer on CJK
+  and disagrees elsewhere: `unicode-width` reads `لالالا` as 3 columns where 6
+  get painted, because lam-alef counts as a ligature, and `ｶﾞｶﾞｶﾞ` as 3 where 6
+  get painted, because a halfwidth dakuten is `Grapheme_Extend` yet terminals
+  give it a cell. Walking graphemes also puts the cut where a glyph ends
+  rather than between a base and its combining mark, and skips control
+  characters the way the renderer does. A glyph that would straddle the last
   column is dropped whole rather than half-drawn, so a result is at most the
   budget rather than exactly it. `unicode-segmentation`, already in the tree
   through crossterm, is now a direct dependency.
