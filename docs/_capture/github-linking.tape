@@ -1,6 +1,9 @@
-# GitHub linking — the Issue·PR sidebar pane with a live, gh-detected PR.
-# Captured against the real gwm-cli repo (the acme-api demo has no remote), on
-# the docs/#206 worktree once its PR is open. Filter to it, fetch (F), screenshot.
+# GitHub linking: the Issue·PR sidebar pane with a live, gh-detected PR.
+# Captured against the real gwm-cli repo, because the acme-api demo has no
+# remote and this pane needs one. It reads the checkout's current branch, so it
+# wants to run from a branch whose PR is open; `F` fetches, then screenshot.
+# No filter: the pane follows the selected row, and the default selection is the
+# checkout the tape cds into.
 Output docs/_capture/.tmp/github-linking.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
@@ -22,12 +25,6 @@ Sleep 400ms
 Type "gwm"
 Enter
 Sleep 3s
-Type "/"
-Sleep 500ms
-Type@120ms "206"
-Sleep 800ms
-Enter
-Sleep 800ms
 Type "F"
 Sleep 6000ms
 Screenshot docs/5.integrations/_assets/github-linking.png
