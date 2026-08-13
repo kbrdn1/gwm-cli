@@ -334,6 +334,38 @@ fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
 }
 
 #[test]
+fn a_settings_edit_drops_the_sidebar_cache() {
+  // #547: the folded / labelled shape is baked into the *cached* payload,
+  // and the cache is keyed by (path, mode) alone — neither of which a
+  // settings edit changes. Without an explicit drop, toggling
+  // `status_one_line` from the panel leaves the old shape on screen until
+  // the user navigates away and back, i.e. reads as a toggle that did
+  // nothing. The theme has the same exposure (it colours every span in
+  // there), which is why the drop is unconditional rather than per-field.
+  use gwm::tui::{App, SettingField, SettingsLayer};
+
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  let w = app.selected().expect("a worktree is selected").clone();
+  let mode = app.sidebar.mode;
+  let sections = gwm::tui::build_sidebar_payload(&w, mode, &app.config.doctor.trunks, &app.theme, false);
+  app.sidebar.cache = Some(((w.path.clone(), mode), sections));
+
+  app.config_panel.layer = SettingsLayer::Project;
+  app.apply_setting(SettingField::StatusOneLine, "true");
+
+  assert!(
+    app.config.tui.status_one_line,
+    "the edit reached the live config: {}",
+    app.status
+  );
+  assert!(
+    app.sidebar.cache.is_none(),
+    "the pre-edit payload must be dropped so the new shape is rebuilt"
+  );
+}
+
+#[test]
 fn a_shadowed_global_key_rebind_warns() {
   // Codex #297 review (P3): editing the global layer for a key the repo
   // overrides leaves the effective binding unchanged (repo wins). Mirror

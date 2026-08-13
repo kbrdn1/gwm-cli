@@ -3983,6 +3983,13 @@ impl App {
       Err(e) => self.status = format!("theme: {}", e),
     }
     self.apply_sidebar_config();
+    // The sidebar payload is *built* from the config and the theme, not
+    // merely styled by them — `status_one_line` picks its shape (#547) and
+    // the theme colours every span in it. Both live in a cache keyed by
+    // (path, mode) alone, so without this drop the edit only shows up after
+    // navigating away and back, and the user reads a toggle that did
+    // nothing. Cheap: the payload rebuilds off-thread on the next tick.
+    self.sidebar.invalidate();
     // A Settings edit can rewrite the patterns themselves, and the field set is
     // derived from them (#418) — refresh it here too, or the form keeps asking
     // for a token the pattern no longer carries until the next launch.
