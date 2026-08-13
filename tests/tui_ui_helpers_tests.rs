@@ -112,6 +112,27 @@ fn ellipsize_middle_measures_sequences_whole_not_char_by_char() {
 }
 
 #[test]
+fn ellipsize_middle_cuts_on_grapheme_boundaries() {
+  // Codex review on PR #561, second pass. Walking codepoints let the cut
+  // fall between a base and its combining mark: `("作作\u{0301}", 3)` came
+  // back as `"…\u{0301}"`, an accent landing on the ellipsis and not one
+  // character of the path kept.
+  let out = ellipsize_middle("作作\u{0301}", 3);
+  assert!(out.width() <= 3, "{out:?} is {} cells", out.width());
+  assert!(
+    !out.starts_with('…') || out.chars().nth(1) != Some('\u{0301}'),
+    "a combining mark must not be left to attach to the ellipsis: {out:?}"
+  );
+  // A tail that keeps the accented glyph keeps its base with it.
+  let out = ellipsize_middle("/tmp/a/e\u{0301}", 5);
+  assert!(out.width() <= 5, "{out:?} is {} cells", out.width());
+  assert!(
+    !out.contains('\u{0301}') || out.contains("e\u{0301}"),
+    "the mark travels with its base: {out:?}"
+  );
+}
+
+#[test]
 fn pad_cells_fills_a_row_by_cells_so_a_pinned_column_stays_put() {
   // The other half of #554. A picker row and a reclaim row pad the
   // ellipsized value to the column width; `{:<w$}` counts chars, so once

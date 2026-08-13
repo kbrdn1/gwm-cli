@@ -33,6 +33,7 @@ use ratatui::{
   Frame,
 };
 use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Per-section content of the worktree details sidebar. Rendered by
@@ -5525,9 +5526,10 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
 /// as `compact_header_line`.
 ///
 /// A glyph that would straddle the budget is dropped whole rather than
-/// half-drawn, so the result is `<= max` cells, not exactly `max`.
-/// "Glyph" is the slice's own measure, not a sum of per-char ones: a
-/// sequence measures wider than its characters do apart.
+/// half-drawn, so the result is `<= max` cells, not exactly `max`. "Glyph"
+/// means one extended grapheme, measured whole: a sequence is wider than
+/// its characters are apart, and cutting inside one leaves a combining mark
+/// to land on the ellipsis.
 pub fn ellipsize_middle(s: &str, max: usize) -> String {
   if UnicodeWidthStr::width(s) <= max {
     return s.to_string();
@@ -5538,26 +5540,33 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   let keep = max - 1; // reserve one column for the ellipsis
   let head = keep.div_ceil(2);
   let tail = keep - head;
-  // Grown one char at a time from each end, and remeasured on the slice
-  // rather than by summing per-char widths: `unicode-width` reads
-  // `"*\u{FE0F}"` as 2 cells, but its two chars in isolation as 1 and 0, so
-  // a per-char sum undercounts every variation-selector sequence. Measured,
-  // that let a 20-sequence string budgeted at 30 cells come back at 59
-  // (Codex review, PR #561). Slicing by char index is out for the same
-  // reason it was before: an index is not a column.
+  // Walked one GRAPHEME at a time from each end, each measured whole
+  // (Codex review, PR #561). Not per char: `unicode-width` reads
+  // `"*\u{FE0F}"` as 2 cells but its two chars in isolation as 1 and 0, so a
+  // per-char sum undercounts every variation-selector sequence — measured, a
+  // 20-sequence string budgeted at 30 cells came back 59 wide. Not per byte
+  // index either: an index is not a column. A grapheme is the unit a
+  // terminal draws, so the cut lands where a glyph ends instead of between a
+  // base and its combining mark, and one pass replaces remeasuring a growing
+  // prefix.
   let mut head_end = 0usize;
-  for (i, ch) in s.char_indices() {
-    let end = i + ch.len_utf8();
-    if UnicodeWidthStr::width(&s[..end]) > head {
+  let mut used = 0usize;
+  for (i, g) in s.grapheme_indices(true) {
+    let w = UnicodeWidthStr::width(g);
+    if used + w > head {
       break;
     }
-    head_end = end;
+    used += w;
+    head_end = i + g.len();
   }
   let mut tail_start = s.len();
-  for (i, _) in s.char_indices().rev() {
-    if UnicodeWidthStr::width(&s[i..]) > tail {
+  let mut used = 0usize;
+  for (i, g) in s.grapheme_indices(true).rev() {
+    let w = UnicodeWidthStr::width(g);
+    if used + w > tail {
       break;
     }
+    used += w;
     tail_start = i;
   }
   // The two slices cannot meet: `head + tail` is `max - 1`, and we only get

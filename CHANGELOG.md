@@ -95,10 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipped the tail, which is the half a middle ellipsis exists to keep.
 
   The budget, the head/tail split and the padding that fills a picker or
-  reclaim row are all measured in cells now, the same walk
-  `compact_header_line` already uses. A glyph that would straddle the last column is
-  dropped whole rather than half-drawn, so a result is at most the budget
-  rather than exactly it.
+  reclaim row are all measured in cells now. The split walks extended
+  graphemes and measures each one whole, so the cut lands where a glyph ends
+  instead of between a base and its combining mark, and a sequence such as an
+  emoji with a variation selector counts the two columns it draws rather than
+  the one its characters add up to. A glyph that would straddle the last
+  column is dropped whole rather than half-drawn, so a result is at most the
+  budget rather than exactly it. `unicode-segmentation`, already in the tree
+  through crossterm, is now a direct dependency.
 
 - **Returning from a fullscreen surface no longer ends the session when the
   terminal is slow to answer** ([#548](https://github.com/kbrdn1/gwm-cli/issues/548)).
