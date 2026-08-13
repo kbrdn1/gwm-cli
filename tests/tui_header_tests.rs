@@ -169,3 +169,43 @@ fn control_chars_never_break_the_single_line_contract() {
   assert!(!plain(&line).contains('\n'), "newline leaked into header row");
   assert!(!plain(&line).contains('\t'), "tab leaked into header row");
 }
+
+// --- the row never paints past its width (issue #563) ----------------------
+
+/// Cells the renderer paints for `s`. The oracle here, because the builder
+/// budgets with `chars().count()` and asserting on that would agree with it
+/// whatever it did.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 400, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 400, ratatui::style::Style::default());
+  usize::from(x)
+}
+
+fn painted_line(line: &Line<'_>) -> usize {
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
+
+#[test]
+fn the_header_never_paints_past_its_width_on_wide_glyphs() {
+  // A repo directory named in CJK is 1 character and 2 columns per glyph, and
+  // the row budgets in characters: at 80 columns the header painted 102, so
+  // the version chip it pins right went off the terminal. The discriminant is
+  // width per character, not the `unicode-width` divergence #562 chased, so
+  // Arabic is not a fixture here: it reads one column per letter both ways.
+  let theme = Theme::default();
+  for (repo, path) in [
+    ("作業作業作業作業作業", "~/dev/作業作業作業作業作業作業"),
+    ("plain", "~/dev/ｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞ"),
+    ("🚀🚀🚀🚀🚀", "~/dev/🚀🚀🚀🚀🚀🚀🚀🚀"),
+  ] {
+    for w in [80usize, 100, 120] {
+      let line = header_line(repo, path, false, w, &theme);
+      assert!(
+        painted_line(&line) <= w,
+        "{repo:?} at {w} columns: header painted {} cells: {:?}",
+        painted_line(&line),
+        plain(&line)
+      );
+    }
+  }
+}

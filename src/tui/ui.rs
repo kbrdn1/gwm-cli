@@ -237,9 +237,9 @@ pub fn header_line(
   let path_style = Style::default().fg(theme.muted);
 
   let version_text = format!(" gwm {} ", env!("CARGO_PKG_VERSION"));
-  let version_w = version_text.chars().count();
+  let version_w = cells(&version_text);
   let dir_text = format!(" {} ", repo);
-  let dir_w = dir_text.chars().count();
+  let dir_w = cells(&dir_text);
 
   // Priority floor: if even the right-pinned version chip cannot fit, show it
   // clipped alone — never an empty header.
@@ -259,7 +259,7 @@ pub fn header_line(
     used += dir_w;
   } else if dir_budget > 0 {
     let clipped = trunc(&dir_text, dir_budget);
-    used += clipped.chars().count();
+    used += cells(&clipped);
     spans.push(Span::styled(clipped, dir_badge_style));
   }
 
@@ -267,7 +267,7 @@ pub fn header_line(
   // badge when there is room.
   if picker_mode {
     let picker_text = " picker ".to_string();
-    let need = 1 + picker_text.chars().count(); // leading space + chip
+    let need = 1 + cells(&picker_text); // leading space + chip
     if used + need + version_w < width {
       spans.push(Span::raw(" "));
       spans.push(Span::styled(picker_text, picker_style));
@@ -283,7 +283,7 @@ pub fn header_line(
     let avail = width - used - path_gap - version_w;
     let path_disp = trunc(&path, avail);
     if !path_disp.is_empty() {
-      let w = path_disp.chars().count();
+      let w = cells(&path_disp);
       spans.push(Span::raw("  "));
       spans.push(Span::styled(path_disp, path_style));
       used += path_gap + w;
