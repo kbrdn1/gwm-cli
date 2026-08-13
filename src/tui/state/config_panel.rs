@@ -78,6 +78,7 @@ impl SettingsTab {
       SettingsTab::Tui => &[
         SettingField::Layout,
         SettingField::DimUnfocused,
+        SettingField::StatusOneLine,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::Clipboard,
@@ -306,6 +307,8 @@ pub enum SettingField {
   Layout,
   /// `tui.dim_unfocused` — dim the pane without focus (issue #545).
   DimUnfocused,
+  /// `tui.status_one_line` — fold the sidebar Status block (issue #547).
+  StatusOneLine,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,
   /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
@@ -335,6 +338,7 @@ impl SettingField {
       SettingField::SidebarPosition => "sidebar position",
       SettingField::Layout => "layout",
       SettingField::DimUnfocused => "dim unfocused pane",
+      SettingField::StatusOneLine => "status on one line",
       SettingField::SidebarOrientation => "sidebar layout",
       SettingField::Clipboard => "clipboard",
       SettingField::OpenMode => "open mode",
@@ -355,6 +359,7 @@ impl SettingField {
       SettingField::SidebarPosition => "tui.sidebar_position",
       SettingField::Layout => "tui.layout",
       SettingField::DimUnfocused => "tui.dim_unfocused",
+      SettingField::StatusOneLine => "tui.status_one_line",
       SettingField::SidebarOrientation => "tui.sidebar_orientation",
       SettingField::Clipboard => "tui.clipboard",
       SettingField::OpenMode => "tui.open.mode",
@@ -374,7 +379,7 @@ impl SettingField {
       | SettingField::SidebarOrientation
       | SettingField::Clipboard
       | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::DimUnfocused => FieldKind::Bool,
+      SettingField::DimUnfocused | SettingField::StatusOneLine => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
@@ -399,7 +404,7 @@ impl SettingField {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
       SettingField::Layout => LAYOUT_CHOICES,
-      SettingField::DimUnfocused => BOOL_CHOICES,
+      SettingField::DimUnfocused | SettingField::StatusOneLine => BOOL_CHOICES,
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
@@ -417,6 +422,7 @@ impl SettingField {
       SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
       SettingField::Layout => cfg.tui.layout.label().into(),
       SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
+      SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
       SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
       SettingField::Clipboard => cfg.tui.clipboard.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {
