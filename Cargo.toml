@@ -135,6 +135,11 @@ ratatui = "0.30"
 # Terminal cell widths for the compact header (#545). Already in the tree via
 # ratatui; taken directly so the header can budget a wide glyph per char.
 unicode-width = "0.2"
+# Grapheme boundaries for the middle-ellipsizer (#554). Already in the tree via
+# crossterm and nucleo-matcher; taken directly so a slice is cut where a glyph
+# ends rather than between a base and its combining mark, and so the walk costs
+# one pass instead of remeasuring every prefix.
+unicode-segmentation = "1.13"
 # `osc52` pulls crossterm's `clipboard` module (`CopyToClipboard`) and, with it,
 # base64 — the encoder OSC52 needs. Using the framing crossterm already ships,
 # and which its own tests pin, beats hand-rolling the sequence here (#367).
