@@ -2267,8 +2267,15 @@ pub fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
 }
 
 /// Constraint-friendly column width based on observed content, clamped to [min, max].
+///
+/// Observed in CELLS (issue #563). `min`, `max` and the `Constraint` this
+/// feeds are all column counts, so a character count was the odd one out: a
+/// 20-ideograph branch asked for 20 where it needs 40, `trunc` then cut the
+/// cell to that under-sized budget, and the row showed nine glyphs and an
+/// ellipsis inside a column the solver had grown wider than the ask. The
+/// ceiling is what bounds the greed, not the unit.
 fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) -> u16 {
-  let observed = items.map(|s| s.chars().count() as u16).max().unwrap_or(min);
+  let observed = items.map(|s| cells(s) as u16).max().unwrap_or(min);
   observed.clamp(min, max)
 }
 

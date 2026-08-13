@@ -344,3 +344,33 @@ fn the_note_marker_is_only_on_the_rows_that_carry_one() {
     "exactly one row carries a note: {text}"
   );
 }
+
+// --- a column is sized by the room its content takes (issue #563) ----------
+
+#[test]
+fn a_column_of_wide_glyphs_is_sized_by_its_columns_not_its_characters() {
+  // #560 made the cell cut in cells; the column it is cut to was still sized
+  // in characters. A 20-ideograph branch is 20 characters and 40 columns, so
+  // `column_width` asked for 20, `trunc` cut to 19, and the cell then sat
+  // inside a column the solver had grown past that: nine glyphs, an ellipsis,
+  // and eleven blank columns before STATUS.
+  let branch = "作".repeat(20);
+  let dir = repo_on_branch(&branch);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let rows = rows(&terminal);
+  let row = rows
+    .iter()
+    .find(|r| r.starts_with('▶'))
+    .unwrap_or_else(|| panic!("no cursor row:\n{}", rows.join("\n")));
+
+  // The ceiling is 38 columns, so 18 glyphs plus the ellipsis is what fits.
+  // Asserted as a count rather than a slice: it is the gap that was the
+  // defect, and a count is what shrinks when the column is under-sized.
+  assert!(
+    row.matches('作').count() >= 18,
+    "the branch column is sized in characters, so it wastes what it was given: {row:?}"
+  );
+}
