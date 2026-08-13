@@ -156,13 +156,16 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → layout / dim unfocused / sidebar position / sidebar layout /
-  // clipboard / open / countdown / auto refresh in order. `layout` leads
-  // since #545: it is the structural choice the rest of the tab refines.
+  // Tui tab → layout / dim unfocused / status one line / sidebar position /
+  // sidebar layout / clipboard / open / countdown / auto refresh in order.
+  // `layout` leads since #545: it is the structural choice the rest of the
+  // tab refines, and the two density knobs (#545, #547) sit right under it.
   panel.tab = SettingsTab::Tui;
   assert_eq!(panel.selected_field(), Some(SettingField::Layout));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::DimUnfocused));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::StatusOneLine));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
   panel.select_next();
@@ -650,6 +653,35 @@ fn the_tui_tab_reaches_the_layout_settings() {
     assert!(
       choice.parse::<bool>().is_ok(),
       "dim_unfocused choice {choice:?} must parse as a bool"
+    );
+  }
+}
+
+#[test]
+fn the_tui_tab_reaches_the_status_fold_setting() {
+  // #547: same reasoning as the layout field above — a knob the panel
+  // cannot reach is a knob only a TOML editor can turn. `Bool`, not
+  // `Choice`: a quoted `"true"` is what serde refuses where a bool
+  // belongs, so the write would fail and the setting never change (the
+  // trap PR #546 hit with `dim_unfocused`).
+  let fields = SettingsTab::Tui.fields();
+  assert!(
+    fields.contains(&SettingField::StatusOneLine),
+    "status_one_line must be reachable from the TUI tab, got {fields:?}"
+  );
+  assert_eq!(SettingField::StatusOneLine.kind(), FieldKind::Bool);
+  assert_eq!(SettingField::StatusOneLine.key_path(), "tui.status_one_line");
+
+  // The panel opens on the live value, and the default is `true` (#547).
+  let cfg = gwm::config::Config::default();
+  assert_eq!(SettingField::StatusOneLine.current(&cfg), "true");
+  // Cycling from the default lands on the opt-out, and both spellings are
+  // values the config can read back.
+  assert_eq!(SettingField::StatusOneLine.next_choice(&cfg).as_deref(), Some("false"));
+  for choice in SettingField::StatusOneLine.choices() {
+    assert!(
+      choice.parse::<bool>().is_ok(),
+      "status_one_line choice {choice:?} must parse as a bool"
     );
   }
 }

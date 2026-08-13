@@ -25,7 +25,13 @@ use tempfile::TempDir;
 fn warm_sidebar(app: &mut App) {
   let w = app.selected().expect("a worktree must be selected").clone();
   let mode = app.sidebar.mode;
-  let payload = build_sidebar_payload(&w, mode, &app.config.doctor.trunks, &app.theme);
+  let payload = build_sidebar_payload(
+    &w,
+    mode,
+    &app.config.doctor.trunks,
+    &app.theme,
+    app.config.tui.status_one_line,
+  );
   app.sidebar.cache = Some(((w.path.clone(), mode), payload));
 }
 
@@ -336,18 +342,34 @@ fn status_pane_renders_diff_vs_base_line_on_a_feature_branch() {
   std::fs::write(path.join("f.txt"), "a\nB\nc\nd\n").unwrap();
   git_in(path, &["commit", "-am", "tweak"]);
 
-  let mut app = App::new_at_layered(Some(path), None).unwrap();
-  let backend = TestBackend::new(120, 40);
-  let mut terminal = Terminal::new(backend).unwrap();
-  warm_sidebar(&mut app);
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  // Both shapes of the Status block (#547): the figures are what #287 is
+  // about, and they must reach the pane whether they sit on a labelled row
+  // of their own or folded in with the rest.
+  for status_one_line in [false, true] {
+    let mut app = App::new_at_layered(Some(path), None).unwrap();
+    app.config.tui.status_one_line = status_one_line;
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
 
-  let text = buffer_text(&terminal);
-  assert!(text.contains("Diff"), "Status pane must show the Diff label: {text}");
-  // +2 insertions (line B replaced + line d added), -1 deletion (line b).
-  assert!(text.contains("+2"), "Status pane must show insertions: {text}");
-  assert!(text.contains("-1"), "Status pane must show deletions: {text}");
+    let text = buffer_text(&terminal);
+    assert_eq!(
+      text.contains("Diff "),
+      !status_one_line,
+      "the `Diff` label belongs to the labelled block only (status_one_line={status_one_line}): {text}"
+    );
+    // +2 insertions (line B replaced + line d added), -1 deletion (line b).
+    assert!(
+      text.contains("+2"),
+      "Status pane must show insertions (status_one_line={status_one_line}): {text}"
+    );
+    assert!(
+      text.contains("-1"),
+      "Status pane must show deletions (status_one_line={status_one_line}): {text}"
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +789,10 @@ fn dim_unfocused_dims_the_body_of_the_pane_without_focus() {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
     app.config.tui.layout = TuiLayout::Compact;
     app.config.tui.dim_unfocused = true;
+    // The probe below is the `Branch  ` label, which only the labelled
+    // Status block prints (#547 folds it away by default). Pinned here so
+    // this test keeps measuring dimming rather than the block's shape.
+    app.config.tui.status_one_line = false;
     app.sidebar.focused = sidebar_focused;
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
     warm_sidebar(&mut app);
@@ -859,6 +885,8 @@ fn dim_unfocused_dims_the_unfocused_pane_in_both_layouts() {
       let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
       app.config.tui.layout = layout;
       app.config.tui.dim_unfocused = true;
+      // Same `Branch  ` probe as above — keep the labelled block (#547).
+      app.config.tui.status_one_line = false;
       app.sidebar.focused = sidebar_focused;
       let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
       warm_sidebar(&mut app);

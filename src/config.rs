@@ -861,6 +861,21 @@ pub struct TuiConfig {
   /// replacing it.
   #[serde(default)]
   pub dim_unfocused: bool,
+
+  /// Fold the sidebar's Status block onto a single line (issue #547).
+  ///
+  /// Default `true`: the four values (branch · head · state · diff ·
+  /// age) are a handful of characters each, and four labelled rows for
+  /// them was the largest remaining waste in the sidebar. `false`
+  /// restores the labelled block (`Branch` / `Created` / `Diff` /
+  /// `State`, one row apiece).
+  ///
+  /// Independent of [`TuiLayout`] — a knob rather than a compact-mode
+  /// behaviour, so the bordered layout folds too unless this is turned
+  /// off. The `Path` row is never folded in: a path is the one value
+  /// long enough that sharing a row with anything else would clip both.
+  #[serde(default = "default_status_one_line")]
+  pub status_one_line: bool,
 }
 
 /// How the TUI frames its panes and sidebar sections (issue #545).
@@ -918,6 +933,7 @@ impl Default for TuiConfig {
       macro2: None,
       layout: TuiLayout::Compact,
       dim_unfocused: false,
+      status_one_line: default_status_one_line(),
     }
   }
 }
@@ -1261,6 +1277,13 @@ impl TuiConfig {
 
 fn default_confirm_countdown_secs() -> u32 {
   3
+}
+
+/// `[tui] status_one_line` defaults to `true`, so a bare `#[serde(default)]`
+/// (which yields `false` for a bool) would invert the contract for every
+/// config that does not spell the key out.
+fn default_status_one_line() -> bool {
+  true
 }
 
 fn default_auto_refresh_secs() -> u64 {

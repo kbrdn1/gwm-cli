@@ -43,3 +43,5 @@ La capture en haut de cette page le montre, comme toutes les autres captures de 
 ![TUI gwm en mode bordé : filets façon lazygit autour de chaque section](../../2.tui/_assets/bordered.png)
 
 Les modales gardent leur cadre dans les deux cas. La configuration et le rôle de thème `section_bg` sont documentés sous [`.gwm.toml`](/fr/configuration/gwm-toml#layout).
+
+`[tui] status_one_line` ([#547](https://github.com/kbrdn1/gwm-cli/issues/547)) replie les quatre valeurs du bloc Status — branche, head, pastilles d'état, diff, âge — sur une seule ligne jointe par ` · `, et ne laisse une ligne à part qu'au chemin. **On par défaut**, quelle que soit la disposition. C'est la moitié « contenu » du même argument de densité : `layout` a coupé ce qu'une section dépense en cadre, ceci coupe ce que la carte d'identité dépense en libellés. `status_one_line = false` rend le bloc labellisé de quatre lignes.

@@ -1098,7 +1098,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     SidebarSections::default()
   } else {
     SidebarSections {
-      worktree: worktree_identity_lines(&w, None, &theme),
+      // Same shape as the payload the worker will land (#547), or the card
+      // would visibly change height the moment the cache warms.
+      worktree: worktree_identity_lines(&w, None, &theme, app.config.tui.status_one_line),
       working_tree: match active_mode {
         super::state::sidebar::SidebarMode::Commits => {
           vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))]
@@ -1523,6 +1525,7 @@ pub fn build_sidebar_sections(
   mode: super::state::sidebar::SidebarMode,
   diff: Option<worktree::DiffLineStat>,
   theme: &Theme,
+  status_one_line: bool,
 ) -> SidebarSections {
   use super::state::sidebar::SidebarMode;
   let body = match mode {
@@ -1543,7 +1546,7 @@ pub fn build_sidebar_sections(
     SidebarMode::Stashes => (Vec::new(), WorkingTreeCounts::default()),
   };
   SidebarSections {
-    worktree: worktree_identity_lines(w, diff.as_ref(), theme),
+    worktree: worktree_identity_lines(w, diff.as_ref(), theme, status_one_line),
     working_tree,
     working_tree_counts,
     recent_commits: body,
@@ -1563,9 +1566,10 @@ pub fn build_sidebar_payload(
   mode: super::state::sidebar::SidebarMode,
   trunks: &[String],
   theme: &Theme,
+  status_one_line: bool,
 ) -> SidebarSections {
   let diff = worktree::git_diff_stat_vs_base(&w.path, trunks).ok().flatten();
-  build_sidebar_sections(w, mode, diff, theme)
+  build_sidebar_sections(w, mode, diff, theme, status_one_line)
 }
 
 /// Number of stash entries shown in `SidebarMode::Stashes`. Set to
@@ -1615,10 +1619,19 @@ fn worktree_identity_lines(
   w: &WorktreeInfo,
   diff: Option<&worktree::DiffLineStat>,
   theme: &Theme,
+  status_one_line: bool,
 ) -> Vec<Line<'static>> {
   let mut out: Vec<Line<'static>> = Vec::with_capacity(5);
   let label_w = "Created".chars().count();
   let label_style = Style::default().fg(theme.muted);
+
+  // `[tui] status_one_line` (issue #547) — the four values below fold
+  // onto one row, and only the path keeps a row of its own.
+  if status_one_line {
+    out.push(folded_status_line(w, diff, theme));
+    out.push(identity_path_line(w, label_w, label_style, theme));
+    return out;
+  }
 
   // Line 1 — "Branch  <branch> · <short head>". Branch colour follows the
   // lazygit scheme (PR #73): worst-state wins (dirty → red,
@@ -1672,15 +1685,83 @@ fn worktree_identity_lines(
   out.push(Line::from(state_spans));
 
   // Line 4 — "Path  <path>", tilde-compressed for compactness.
-  out.push(Line::from(vec![
+  out.push(identity_path_line(w, label_w, label_style, theme));
+
+  out
+}
+
+/// The `Path  <path>` row, shared by both shapes of the identity card:
+/// the labelled block builds it last, the folded one keeps it as the
+/// only row it does not fold in (issue #547 — a path is long enough
+/// that sharing a row would clip the path *and* whatever joined it).
+fn identity_path_line(w: &WorktreeInfo, label_w: usize, label_style: Style, theme: &Theme) -> Line<'static> {
+  Line::from(vec![
     Span::styled(format!("{:<label_w$}  ", "Path", label_w = label_w), label_style),
     Span::styled(
       tilde_compress(&w.path.display().to_string()),
       Style::default().fg(theme.muted),
     ),
-  ]));
+  ])
+}
 
-  out
+/// The Status block folded onto one row (issue #547), under
+/// `[tui] status_one_line` (default on):
+///
+/// ```text
+/// feat/#42-payment-webhooks · f9e8a58 · ● dirty · +2 -0 · 1w
+/// ```
+///
+/// Every segment keeps the theme role it wears in the labelled block,
+/// so the fold is a change of shape only. Segments absent from the
+/// labelled block are absent here too: no head on a detached-less
+/// worktree, no diff when the branch has none against its base.
+///
+/// **Order is the width policy.** The sidebar renders without `Wrap`,
+/// so a row too long for the pane is hard-clipped on the right and the
+/// tail is what disappears. The identity half (branch, head) leads
+/// because it is what the row is *for*; `Created` trails because it is
+/// the value the pane can most afford to lose. That answers open
+/// question 2 of #547 without measuring anything at build time — the
+/// payload is built off-thread, where the pane width is not known.
+///
+/// Pure and cache-free: pinned by
+/// `tests/tui_app_tests.rs::sidebar_status_fold_*`.
+pub fn folded_status_line(w: &WorktreeInfo, diff: Option<&worktree::DiffLineStat>, theme: &Theme) -> Line<'static> {
+  // Each segment is the spans of one value, joined by ` · ` — built as a
+  // list of segments rather than pushed inline so an absent value cannot
+  // leave a dangling separator behind it.
+  let mut segments: Vec<Vec<Span<'static>>> = Vec::with_capacity(5);
+
+  segments.push(vec![Span::styled(
+    w.branch.clone().unwrap_or_else(|| "-".into()),
+    Style::default().fg(branch_name_color(&w.status, theme)),
+  )]);
+  if let Some(head) = w.head.as_deref() {
+    segments.push(vec![Span::styled(short_oid(head), Style::default().fg(theme.dirty))]);
+  }
+  segments.push(badges_line(w, theme).spans);
+  if let Some(d) = diff.filter(|d| !d.is_empty()) {
+    segments.push(vec![
+      Span::styled(format!("+{}", d.insertions), Style::default().fg(theme.untracked)),
+      Span::raw(" "),
+      Span::styled(format!("-{}", d.deletions), Style::default().fg(theme.prunable)),
+    ]);
+  }
+  if w.age.is_some() {
+    segments.push(vec![Span::styled(
+      branch_age_label(w),
+      Style::default().fg(branch_age_color(w, theme)),
+    )]);
+  }
+
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  for segment in segments {
+    if !spans.is_empty() {
+      spans.push(Span::styled(" · ".to_string(), Style::default().fg(theme.muted)));
+    }
+    spans.extend(segment);
+  }
+  Line::from(spans)
 }
 
 /// Render the "Created" line value: compact relative duration (`2d`,

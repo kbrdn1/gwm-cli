@@ -334,6 +334,80 @@ fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
 }
 
 #[test]
+fn a_settings_edit_drops_the_sidebar_cache() {
+  // #547: the folded / labelled shape is baked into the *cached* payload,
+  // and the cache is keyed by (path, mode) alone — neither of which a
+  // settings edit changes. Without an explicit drop, toggling
+  // `status_one_line` from the panel leaves the old shape on screen until
+  // the user navigates away and back, i.e. reads as a toggle that did
+  // nothing. The theme has the same exposure (it colours every span in
+  // there), which is why the drop is unconditional rather than per-field.
+  use gwm::tui::{App, SettingField, SettingsLayer};
+
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  let w = app.selected().expect("a worktree is selected").clone();
+  let mode = app.sidebar.mode;
+  let sections = gwm::tui::build_sidebar_payload(&w, mode, &app.config.doctor.trunks, &app.theme, false);
+  app.sidebar.cache = Some(((w.path.clone(), mode), sections));
+
+  app.config_panel.layer = SettingsLayer::Project;
+  app.apply_setting(SettingField::StatusOneLine, "true");
+
+  assert!(
+    app.config.tui.status_one_line,
+    "the edit reached the live config: {}",
+    app.status
+  );
+  assert!(
+    app.sidebar.cache.is_none(),
+    "the pre-edit payload must be dropped so the new shape is rebuilt"
+  );
+}
+
+#[test]
+fn a_settings_edit_invalidates_an_inflight_sidebar_rebuild() {
+  // Codex review, PR #556 (P2): dropping the cache is only half the pair.
+  // A worker spawned *before* the edit carries the pre-edit config and theme;
+  // its generation is still current, so `drain_task_results` accepts the
+  // payload and stores it under the same (path, mode) key. `maybe_refresh_sidebar`
+  // then reads a warm cache and never rebuilds — the toggle looks ignored
+  // again, this time through the race rather than the cache.
+  //
+  // Same pairing `apply_refreshed_worktrees` makes for the #343 hazard:
+  // `sidebar.invalidate()` and `tasks.invalidate(TaskKind::Sidebar)` travel
+  // together or not at all.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::{App, SettingField, SettingsLayer, SidebarSections};
+
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  let w = app.selected().expect("a worktree is selected").clone();
+  let mode = app.sidebar.mode;
+  let stale = app.tasks.request(TaskKind::Sidebar).expect("no rebuild in flight yet");
+
+  app.config_panel.layer = SettingsLayer::Project;
+  app.apply_setting(SettingField::StatusOneLine, "false");
+
+  // The pre-edit worker lands after the write, for the *current* selection.
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(
+      stale,
+      w.path.clone(),
+      mode,
+      SidebarSections::default(),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.sidebar.cache.is_none(),
+    "a rebuild that started before the edit carries the pre-edit shape — it must be dropped"
+  );
+}
+
+#[test]
 fn a_shadowed_global_key_rebind_warns() {
   // Codex #297 review (P3): editing the global layer for a key the repo
   // overrides leaves the effective binding unchanged (repo wins). Mirror
@@ -5478,6 +5552,7 @@ fn sidebar_sections_omit_commands_block() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let all = format!(
     "{}\n{}\n{}",
@@ -5513,6 +5588,7 @@ fn sidebar_sections_omit_inline_section_headers() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let all = format!(
     "{}\n{}\n{}",
@@ -5533,6 +5609,7 @@ fn sidebar_worktree_section_is_compact_identity() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let text = section_text(&sections.worktree);
 
@@ -5561,6 +5638,7 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   assert!(
     sections.worktree.len() <= 5,
@@ -5572,6 +5650,173 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
 
 fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+// ---- `[tui] status_one_line` — the folded Status row (issue #547) ---------
+
+/// A fixture carrying every foldable value at once: branch, head, a dirty
+/// state, a non-empty diff, and a measurable age. The labelled block spends
+/// four rows on these; the fold spends one.
+fn foldable_worktree_fixture() -> WorktreeInfo {
+  let mut w = detailed_worktree_fixture();
+  w.is_main = false;
+  w.age = Some(std::time::Duration::from_secs(3 * 24 * 60 * 60));
+  w.status = BranchStatus {
+    is_dirty: true,
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  w
+}
+
+#[test]
+fn status_fold_carries_every_value_of_the_labelled_block() {
+  let w = foldable_worktree_fixture();
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let row = section_text_single(&gwm::tui::folded_status_line(&w, Some(&diff), &Theme::default()));
+
+  for needle in ["feat/#42-api-rest", "08d1029", "dirty", "+12", "-4", "3d"] {
+    assert!(row.contains(needle), "folded row must carry {needle:?}: {row}");
+  }
+  // The labels are what the fold buys back — four of them, one per row.
+  for label in ["Branch ", "Created", "Diff ", "State "] {
+    assert!(!row.contains(label), "folded row must drop the {label:?} label: {row}");
+  }
+}
+
+#[test]
+fn status_fold_orders_identity_first_and_age_last() {
+  // The sidebar renders without `Wrap`, so a row wider than the pane is
+  // hard-clipped on the right: segment order *is* the width policy (open
+  // question 2 of #547). Identity leads, `Created` trails, because age is
+  // the value the pane can most afford to lose.
+  let w = foldable_worktree_fixture();
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let row = section_text_single(&gwm::tui::folded_status_line(&w, Some(&diff), &Theme::default()));
+  let at = |needle: &str| {
+    row
+      .find(needle)
+      .unwrap_or_else(|| panic!("{needle:?} missing from {row}"))
+  };
+
+  assert!(at("feat/#42-api-rest") < at("08d1029"), "branch before head: {row}");
+  assert!(at("08d1029") < at("dirty"), "head before state: {row}");
+  assert!(at("dirty") < at("+12"), "state before diff: {row}");
+  assert!(at("+12") < at("3d"), "diff before age — age clips first: {row}");
+}
+
+#[test]
+fn status_fold_keeps_the_theme_roles_of_the_labelled_block() {
+  // The fold is a change of shape, not of colour: every segment keeps the
+  // role it wears in the labelled block. Unique `Rgb` values so a hardcoded
+  // `Color::Red` cannot pass here (the #170/#211 rule).
+  let theme = Theme {
+    prunable: Color::Rgb(40, 50, 60),
+    untracked: Color::Rgb(10, 20, 30),
+    dirty: Color::Rgb(70, 80, 90),
+    ..Theme::default()
+  };
+  let w = foldable_worktree_fixture();
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let line = gwm::tui::folded_status_line(&w, Some(&diff), &theme);
+  let fg = |needle: &str| -> Option<Color> {
+    line
+      .spans
+      .iter()
+      .find(|s| s.content.contains(needle))
+      .unwrap_or_else(|| panic!("no span carrying {needle:?} in {}", section_text_single(&line)))
+      .style
+      .fg
+  };
+
+  assert_eq!(fg("feat/#42-api-rest"), Some(theme.prunable), "dirty branch → prunable");
+  assert_eq!(fg("08d1029"), Some(theme.dirty), "short head → dirty role");
+  assert_eq!(fg("+12"), Some(theme.untracked), "insertions → untracked");
+  assert_eq!(fg("-4"), Some(theme.prunable), "deletions → prunable");
+}
+
+#[test]
+fn status_fold_skips_the_segments_the_labelled_block_skips() {
+  // No head, no diff, no age → those segments are absent rather than
+  // rendered empty, exactly as the labelled block omits their rows.
+  let mut w = foldable_worktree_fixture();
+  w.head = None;
+  w.age = None;
+  let row = section_text_single(&gwm::tui::folded_status_line(&w, None, &Theme::default()));
+
+  assert!(row.contains("feat/#42-api-rest"), "branch survives: {row}");
+  assert!(row.contains("dirty"), "state survives: {row}");
+  assert!(!row.contains('+'), "no diff segment without a stat: {row}");
+  assert!(
+    !row.ends_with('·') && !row.contains("· ·"),
+    "no dangling separator: {row}"
+  );
+}
+
+#[test]
+fn status_one_line_folds_the_identity_block_to_two_rows() {
+  let w = foldable_worktree_fixture();
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    Some(gwm::worktree::DiffLineStat {
+      insertions: 12,
+      deletions: 4,
+    }),
+    &Theme::default(),
+    true,
+  );
+
+  assert_eq!(
+    sections.worktree.len(),
+    2,
+    "folded status + path, nothing else: {:?}",
+    sections.worktree.iter().map(section_text_single).collect::<Vec<_>>()
+  );
+  let status = section_text_single(&sections.worktree[0]);
+  for needle in ["feat/#42-api-rest", "08d1029", "dirty", "+12", "3d"] {
+    assert!(
+      status.contains(needle),
+      "row 1 is the folded status, not an empty line — missing {needle:?}: {status}"
+    );
+  }
+  assert!(
+    section_text_single(&sections.worktree[1]).contains("Path"),
+    "the path keeps its own labelled row: {}",
+    section_text_single(&sections.worktree[1])
+  );
+}
+
+#[test]
+fn status_one_line_off_keeps_the_labelled_block() {
+  let w = foldable_worktree_fixture();
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    Some(gwm::worktree::DiffLineStat {
+      insertions: 12,
+      deletions: 4,
+    }),
+    &Theme::default(),
+    false,
+  );
+  let text = section_text(&sections.worktree);
+
+  assert_eq!(sections.worktree.len(), 5, "branch, created, diff, state, path: {text}");
+  for label in ["Branch", "Created", "Diff", "State", "Path"] {
+    assert!(text.contains(label), "{label} row still labelled: {text}");
+  }
 }
 
 #[test]
@@ -5590,7 +5835,13 @@ fn sidebar_diff_line_renders_counts_in_theme_roles() {
     insertions: 12,
     deletions: 4,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, Some(diff), &theme);
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    Some(diff),
+    &theme,
+    false,
+  );
 
   let diff_line = sections
     .worktree
@@ -5618,6 +5869,7 @@ fn sidebar_diff_line_absent_for_empty_or_missing_stat() {
       gwm::tui::state::sidebar::SidebarMode::Commits,
       diff,
       &Theme::default(),
+      false,
     );
     assert!(
       !sections
@@ -5757,6 +6009,7 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   let text = section_text(&sections.worktree);
   assert!(
@@ -5795,6 +6048,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    false,
   );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
@@ -5820,6 +6074,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    false,
   );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
@@ -5841,6 +6096,7 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    false,
   );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
@@ -6546,6 +6802,7 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
     gwm::tui::state::sidebar::SidebarMode::Commits,
     None,
     &Theme::default(),
+    true,
   );
   assert_eq!(
     sections.recent_commits.len(),
