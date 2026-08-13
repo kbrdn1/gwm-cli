@@ -6143,7 +6143,16 @@ fn tilde_compress_falls_back_when_path_outside_home() {
 use gwm::tui::{issue_summary_line, pr_summary_line};
 
 fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
-  line.spans.iter().map(|s| s.content.chars().count()).sum()
+  // The cells `set_stringn` paints, span by span, which is how ratatui draws a
+  // `Line`. Not `chars().count()`, the measure the builders under test use:
+  // that would agree with them whatever they did (issue #563).
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
+
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 200, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 200, ratatui::style::Style::default());
+  usize::from(x)
 }
 
 #[test]

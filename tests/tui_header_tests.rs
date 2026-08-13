@@ -169,3 +169,75 @@ fn control_chars_never_break_the_single_line_contract() {
   assert!(!plain(&line).contains('\n'), "newline leaked into header row");
   assert!(!plain(&line).contains('\t'), "tab leaked into header row");
 }
+
+// --- the row never paints past its width (issue #563) ----------------------
+
+/// Cells the renderer paints for `s`. The oracle here, because the builder
+/// budgets with `chars().count()` and asserting on that would agree with it
+/// whatever it did.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 400, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 400, ratatui::style::Style::default());
+  usize::from(x)
+}
+
+fn painted_line(line: &Line<'_>) -> usize {
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
+
+#[test]
+fn the_header_never_paints_past_its_width_on_wide_glyphs() {
+  // A repo directory named in CJK is 1 character and 2 columns per glyph, and
+  // the row budgets in characters: at 80 columns the header painted 102, so
+  // the version chip it pins right went off the terminal. The discriminant is
+  // width per character, not the `unicode-width` divergence #562 chased, so
+  // Arabic is not a fixture here: it reads one column per letter both ways.
+  let theme = Theme::default();
+  for (repo, path) in [
+    ("作業作業作業作業作業", "~/dev/作業作業作業作業作業作業"),
+    ("plain", "~/dev/ｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞ"),
+    ("🚀🚀🚀🚀🚀", "~/dev/🚀🚀🚀🚀🚀🚀🚀🚀"),
+  ] {
+    for w in [80usize, 100, 120] {
+      let line = header_line(repo, path, false, w, &theme);
+      assert!(
+        painted_line(&line) <= w,
+        "{repo:?} at {w} columns: header painted {} cells: {:?}",
+        painted_line(&line),
+        plain(&line)
+      );
+    }
+  }
+}
+
+/// See `tests/tui_footer_tests.rs` for the same set and the same reasoning:
+/// `Cf`, not `Cc`, so `char::is_control` matches none of them (#502).
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+  '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+#[test]
+fn a_bidi_control_in_the_repo_or_path_never_reaches_the_row() {
+  // The header neutralised `char::is_control` only, so a directory named with
+  // a format character reordered how the row reads. Unlike a ref name this
+  // needs no fetch: a directory on disk can carry one, and the header shows
+  // both its name and the working path.
+  //
+  // Pre-dates this branch, `dev` leaks the same characters. Found by a Codex
+  // review of #563.
+  for c in BIDI_CONTROLS {
+    for (repo, path) in [
+      (format!("re{c}po"), "~/dev/x".to_string()),
+      ("repo".into(), format!("~/dev/x{c}y")),
+    ] {
+      let line = header_line(&repo, &path, false, 120, &Theme::default());
+      assert!(
+        !plain(&line).contains(*c),
+        "the header replayed U+{:04X} from {:?}",
+        *c as u32,
+        (&repo, &path)
+      );
+    }
+  }
+}

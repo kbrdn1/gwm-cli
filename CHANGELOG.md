@@ -84,6 +84,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The header, footer and statusbar stay inside the terminal**
+  ([#563](https://github.com/kbrdn1/gwm-cli/issues/563)). The rows that pin
+  something to their right edge computed the padding before it by counting
+  characters, so anything wider than one column per character under-counted by
+  half and pushed that pinned element off the terminal. The header carries the
+  repo directory name and the working path, the footer and statusbar carry the
+  action log, and none of those three is a value gwm picks: they are wherever
+  you cloned, and whatever the last command had to say. Measured, an 80-column
+  header painted 102 cells and the version chip went with the overflow; the
+  footer painted 100.
+
+  Table columns are sized the same way now. #560 made the cell cut in cells and
+  left the column it is cut to sized in characters, so a branch of wide glyphs
+  got a column half the width it needed and rendered as nine glyphs, an
+  ellipsis, and eleven blank columns. With a wide name and a wide branch both
+  claiming their ceiling, the path column gives up the width they take, which
+  is the intended trade and a better one than spending it on blanks.
+
+  The row arithmetic joins the three truncators (#554, #560, #562) on
+  ratatui's own `CellWidth` per grapheme. ASCII renders exactly as before,
+  which is what kept this standing for so long.
+
+- **The header, footer and statusbar neutralise bidi control characters**
+  ([#563](https://github.com/kbrdn1/gwm-cli/issues/563)). All three replaced
+  what `char::is_control` matches, which is the `Cc` block only. The
+  `Bidi_Control` characters are `Cf`, which is why they had to be named
+  explicitly in the first place: they reorder how a terminal renders the text
+  around them, so a row can read in an order its bytes do not have. The
+  sanitiser sits at the funnel every width-constrained cell passes through, and
+  these three rows reach the terminal without going through it whenever their
+  text fits, which is the ordinary case.
+
+  Neither vector is exotic. The header shows the repo directory name and the
+  working path, and a directory on disk can carry one of these without anyone
+  fetching anything. The action log carries branch names and paths, and git's
+  ref rules refuse the ASCII controls and `~^:?*[` but not the format
+  characters, so a ref carrying one arrives with a fetch. All three call the
+  same sanitiser as the rest of the codebase now, so the replacement shows as
+  `?` rather than a blank.
+
+- **The statusbar no longer paints one column past its width**
+  ([#563](https://github.com/kbrdn1/gwm-cli/issues/563)). Unrelated to the
+  measure and visible on plain ASCII: the `…` marking a cut hint list is drawn
+  as a space then the glyph, so it costs two columns wherever anything precedes
+  it, and only one was ever reserved. Any terminal narrow enough to truncate
+  its hints overflowed. Where the context chip alone fills the row, the marker
+  is now dropped rather than drawn past the edge, its leading space first.
+
 - **Table cells and pane headers are cut by the room their text takes**
   ([#560](https://github.com/kbrdn1/gwm-cli/issues/560),
   [#562](https://github.com/kbrdn1/gwm-cli/issues/562)). The two width funnels

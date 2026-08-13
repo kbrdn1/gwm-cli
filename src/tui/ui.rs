@@ -224,9 +224,14 @@ pub fn header_line(
     return Line::default();
   }
 
-  let sanitize = |s: &str| -> String { s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect() };
-  let repo = sanitize(repo_name);
-  let path = sanitize(workdir_display);
+  // `sanitise_for_terminal`, not a local `is_control` pass: that one is `Cc`
+  // only, so the `Bidi_Control` format characters went straight through and
+  // the row could read in an order its bytes do not have (#502 / #506). A
+  // directory on disk can carry one, and this row shows both its name and the
+  // working path. Still keeps a control from splitting the single row, which
+  // is what the local pass was for.
+  let repo = crate::naming::sanitise_for_terminal(repo_name);
+  let path = crate::naming::sanitise_for_terminal(workdir_display);
 
   let version_style = chip_style(theme.accent);
   let dir_badge_style = chip_style(theme.name);
@@ -237,9 +242,9 @@ pub fn header_line(
   let path_style = Style::default().fg(theme.muted);
 
   let version_text = format!(" gwm {} ", env!("CARGO_PKG_VERSION"));
-  let version_w = version_text.chars().count();
+  let version_w = cells(&version_text);
   let dir_text = format!(" {} ", repo);
-  let dir_w = dir_text.chars().count();
+  let dir_w = cells(&dir_text);
 
   // Priority floor: if even the right-pinned version chip cannot fit, show it
   // clipped alone — never an empty header.
@@ -259,7 +264,7 @@ pub fn header_line(
     used += dir_w;
   } else if dir_budget > 0 {
     let clipped = trunc(&dir_text, dir_budget);
-    used += clipped.chars().count();
+    used += cells(&clipped);
     spans.push(Span::styled(clipped, dir_badge_style));
   }
 
@@ -267,7 +272,7 @@ pub fn header_line(
   // badge when there is room.
   if picker_mode {
     let picker_text = " picker ".to_string();
-    let need = 1 + picker_text.chars().count(); // leading space + chip
+    let need = 1 + cells(&picker_text); // leading space + chip
     if used + need + version_w < width {
       spans.push(Span::raw(" "));
       spans.push(Span::styled(picker_text, picker_style));
@@ -283,7 +288,7 @@ pub fn header_line(
     let avail = width - used - path_gap - version_w;
     let path_disp = trunc(&path, avail);
     if !path_disp.is_empty() {
-      let w = path_disp.chars().count();
+      let w = cells(&path_disp);
       spans.push(Span::raw("  "));
       spans.push(Span::styled(path_disp, path_style));
       used += path_gap + w;
@@ -2267,8 +2272,25 @@ pub fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
 }
 
 /// Constraint-friendly column width based on observed content, clamped to [min, max].
+///
+/// Observed in CELLS (issue #563). `min`, `max` and the `Constraint` this
+/// feeds are all column counts, so a character count was the odd one out: a
+/// 20-ideograph branch asked for 20 where it needs 40, `trunc` then cut the
+/// cell to that under-sized budget, and the row showed nine glyphs and an
+/// ellipsis inside a column the solver had grown wider than the ask. The
+/// ceiling is what bounds the greed, not the unit.
+///
+/// Sanitised before being measured, in that order, because that is the order
+/// `trunc` uses on the cell this sizes (#506): a `Bidi_Control` character
+/// measures zero columns and the `?` replacing it measures one, so measuring
+/// the raw text under-counts by one per neutralised character and the cell is
+/// then cut inside a column that had the room. The character count this
+/// replaced happened to get it right, one char in for one column out.
 fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) -> u16 {
-  let observed = items.map(|s| s.chars().count() as u16).max().unwrap_or(min);
+  let observed = items
+    .map(|s| cells(&crate::naming::sanitise_for_terminal(s)) as u16)
+    .max()
+    .unwrap_or(min);
   observed.clamp(min, max)
 }
 
@@ -3183,9 +3205,13 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   // tabs. `Wrap` is disabled, but a raw `\n` would still split the row in
   // two, so collapse every control char to a single space first — the footer
   // must stay one visual line.
-  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+  // Same sink as the header (#502 / #506): the action log carries branch names
+  // and paths, and git's ref rules refuse the ASCII controls but not the
+  // format characters, so one arrives with a fetch. `is_control` is `Cc` only
+  // and never matched them.
+  let status: String = crate::naming::sanitise_for_terminal(status);
   let status_text = format!("[{}]", status);
-  let status_w = status_text.chars().count();
+  let status_w = cells(&status_text);
 
   // Priority floor: if even the status cannot fit, show a clipped status
   // alone — never a hint at the log's expense.
@@ -3206,7 +3232,7 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   for (i, (key, label)) in hints.iter().enumerate() {
     let sep = if i > 0 { 2 } else { 0 }; // two spaces between hint groups (#279)
                                          // flat bind `key` + ` label` (label + 1 leading space)
-    let badge_w = key.chars().count() + 1 + label.chars().count();
+    let badge_w = cells(key) + 1 + cells(label);
     if used + sep + badge_w > hint_budget {
       truncated = true;
       break;
@@ -3270,9 +3296,13 @@ pub fn status_line(
     return Line::default();
   }
 
-  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+  // Same sink as the header (#502 / #506): the action log carries branch names
+  // and paths, and git's ref rules refuse the ASCII controls but not the
+  // format characters, so one arrives with a fetch. `is_control` is `Cc` only
+  // and never matched them.
+  let status: String = crate::naming::sanitise_for_terminal(status);
   let status_text = format!("[{}]", status);
-  let status_w = status_text.chars().count();
+  let status_w = cells(&status_text);
 
   // Priority floor: if even the status cannot fit, show a clipped status
   // alone — never a chip or hint at the log's expense.
@@ -3286,7 +3316,7 @@ pub fn status_line(
 
   // Context chip — load-bearing, kept whenever it fits at all.
   let ctx_chip = format!(" {} ", context);
-  let ctx_w = ctx_chip.chars().count();
+  let ctx_w = cells(&ctx_chip);
   if ctx_w <= avail {
     spans.push(Span::styled(ctx_chip, context_style));
     used += ctx_w;
@@ -3296,22 +3326,27 @@ pub fn status_line(
   // and there is room.
   if let Some(glyph) = spinner {
     let padded = format!(" {} ", glyph);
-    let gw = padded.chars().count();
+    let gw = cells(&padded);
     if used + gw <= avail {
       spans.push(Span::styled(padded, spinner_style));
       used += gw;
     }
   }
 
-  // Hint badges fill whatever is left, minus one column for the `…` marker.
-  let hint_budget = avail.saturating_sub(used).saturating_sub(1);
+  // Hint badges fill whatever is left, minus the `…` marker. The marker is
+  // TWO columns whenever anything precedes it, since it is pushed as a space
+  // then the glyph, and only one was reserved here — so the row painted one
+  // column past its width on every terminal narrow enough to truncate, ASCII
+  // included. `footer_line` reserves both, which is why it never showed this.
+  let marker_w = 1 + usize::from(used > 0);
+  let hint_budget = avail.saturating_sub(used).saturating_sub(marker_w);
   let mut truncated = false;
   let mut hint_used = 0usize;
   for (i, (key, label)) in hints.iter().enumerate() {
     // Two spaces between hint groups (#279); a single space after the left
     // cluster (context chip / spinner) before the first hint.
     let sep = if i > 0 { 2 } else { usize::from(used > 0) };
-    let badge_w = key.chars().count() + 1 + label.chars().count();
+    let badge_w = cells(key) + 1 + cells(label);
     if hint_used + sep + badge_w > hint_budget {
       truncated = true;
       break;
@@ -3325,8 +3360,12 @@ pub fn status_line(
     hint_used += badge_w;
   }
   used += hint_used;
-  if truncated {
-    if used > 0 {
+  // The reservation above is not enough on its own: when the chip alone eats
+  // `avail`, the budget saturates to zero, no hint fits, and the marker was
+  // still pushed — two columns past the row. It is only worth drawing if it
+  // fits, and its leading space is the half to drop first.
+  if truncated && used < avail {
+    if used > 0 && used + 1 < avail {
       spans.push(Span::raw(" "));
       used += 1;
     }

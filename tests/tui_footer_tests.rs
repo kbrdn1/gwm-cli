@@ -498,3 +498,116 @@ fn help_close_hint_resolves_user_rebinding() {
     "the stale literal `Esc/q` must not linger after the rebind: {resolved:?}"
   );
 }
+
+// --- the row never paints past its width (issue #563) ----------------------
+
+/// Cells the renderer paints for `s`: the cursor `set_stringn` leaves behind.
+/// The oracle for every budget assertion below, because the builders measure
+/// with `chars().count()` and asserting on that would agree with them whatever
+/// they did.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 400, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 400, ratatui::style::Style::default());
+  usize::from(x)
+}
+
+fn painted_line(line: &Line<'_>) -> usize {
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
+
+fn plain_line(line: &Line<'_>) -> String {
+  line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn the_statusbar_never_paints_past_its_width_on_ascii() {
+  // Pure ASCII, so this is not about the measure: the `…` marker costs two
+  // columns whenever anything precedes it (a space, then the glyph), and the
+  // hint budget only ever reserved one. `footer_line` reserves both, which is
+  // why it does not have this. Asserted as an invariant over a band of widths
+  // rather than one case, since the overflow only shows where the truncation
+  // lands.
+  for w in 20usize..=60 {
+    let line = status_line("worktrees", HINTS, "plain message", None, w, &Theme::default());
+    assert!(
+      painted_line(&line) <= w,
+      "at {w} columns the statusbar painted {} cells: {:?}",
+      painted_line(&line),
+      plain_line(&line)
+    );
+  }
+}
+
+#[test]
+fn neither_footer_nor_statusbar_paints_past_its_width_on_wide_glyphs() {
+  // The action log is the segment that arrives wide: it carries branch names,
+  // paths and error blobs. Both rows budget in characters and pin the log
+  // right, so a CJK log under-counted by half and pushed itself off the
+  // terminal. Measured before the fix: 100 cells into an 80-column row.
+  //
+  // CJK, halfwidth katakana and emoji are the fixtures because the measure at
+  // fault is `chars().count()`; the discriminant is columns per character.
+  let theme = Theme::default();
+  for status in [
+    "作業作業作業作業作業作業作業作業作業作業",
+    "created ｶﾞｶﾞｶﾞｶﾞｶﾞ",
+    "pushed 🚀🚀🚀🚀🚀🚀",
+  ] {
+    for w in [40usize, 60, 80, 120] {
+      let footer = footer_line(HINTS, status, w, &theme);
+      assert!(
+        painted_line(&footer) <= w,
+        "footer at {w} columns painted {} cells: {:?}",
+        painted_line(&footer),
+        plain_line(&footer)
+      );
+      let bar = status_line("worktrees", HINTS, status, None, w, &theme);
+      assert!(
+        painted_line(&bar) <= w,
+        "statusbar at {w} columns painted {} cells: {:?}",
+        painted_line(&bar),
+        plain_line(&bar)
+      );
+    }
+  }
+}
+
+/// Every character carrying the Unicode `Bidi_Control` property. They are
+/// `Cf`, not `Cc`, so `char::is_control` matches none of them, which is the
+/// whole reason they need naming (#502).
+const BIDI_CONTROLS: &[char] = &[
+  '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+  '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+#[test]
+fn a_bidi_control_in_the_action_log_never_reaches_the_row() {
+  // Both rows neutralised `char::is_control`, which is `Cc` only, so the
+  // format characters that reorder how a terminal *renders* the text around
+  // them went straight through. The log carries branch names and paths, and
+  // git's ref rules refuse the ASCII controls but not these, so one arrives
+  // with a fetch rather than being typed. The row can then read in an order
+  // the bytes do not have, which is the guarantee #506 exists to give at every
+  // width-constrained sink.
+  //
+  // Pre-dates this branch: `dev` leaks the same characters at the same widths.
+  // Found by a Codex review of #563 and fixed here rather than left behind,
+  // since the fix is the sanitiser these rows already had half of.
+  for c in BIDI_CONTROLS {
+    let status = format!("opened feat/{c}danger");
+    for w in [30usize, 60, 120] {
+      let footer = footer_line(HINTS, &status, w, &Theme::default());
+      assert!(
+        !plain_line(&footer).contains(*c),
+        "the footer replayed U+{:04X} from the action log at {w} columns",
+        *c as u32
+      );
+      let bar = status_line("worktrees", HINTS, &status, None, w, &Theme::default());
+      assert!(
+        !plain_line(&bar).contains(*c),
+        "the statusbar replayed U+{:04X} from the action log at {w} columns",
+        *c as u32
+      );
+    }
+  }
+}
