@@ -3989,7 +3989,15 @@ impl App {
     // (path, mode) alone, so without this drop the edit only shows up after
     // navigating away and back, and the user reads a toggle that did
     // nothing. Cheap: the payload rebuilds off-thread on the next tick.
+    //
+    // Both halves, or neither: a rebuild spawned before the edit carries the
+    // pre-edit config and theme, and its generation is still current, so the
+    // drain would accept it and store the old shape under the very key this
+    // just cleared (Codex review, PR #556 — the #343 hazard, from the
+    // settings path this time). `apply_refreshed_worktrees` pairs them for
+    // the same reason.
     self.sidebar.invalidate();
+    self.tasks.invalidate(TaskKind::Sidebar);
     // A Settings edit can rewrite the patterns themselves, and the field set is
     // derived from them (#418) — refresh it here too, or the form keeps asking
     // for a token the pattern no longer carries until the next launch.

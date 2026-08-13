@@ -366,6 +366,48 @@ fn a_settings_edit_drops_the_sidebar_cache() {
 }
 
 #[test]
+fn a_settings_edit_invalidates_an_inflight_sidebar_rebuild() {
+  // Codex review, PR #556 (P2): dropping the cache is only half the pair.
+  // A worker spawned *before* the edit carries the pre-edit config and theme;
+  // its generation is still current, so `drain_task_results` accepts the
+  // payload and stores it under the same (path, mode) key. `maybe_refresh_sidebar`
+  // then reads a warm cache and never rebuilds — the toggle looks ignored
+  // again, this time through the race rather than the cache.
+  //
+  // Same pairing `apply_refreshed_worktrees` makes for the #343 hazard:
+  // `sidebar.invalidate()` and `tasks.invalidate(TaskKind::Sidebar)` travel
+  // together or not at all.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::{App, SettingField, SettingsLayer, SidebarSections};
+
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  let w = app.selected().expect("a worktree is selected").clone();
+  let mode = app.sidebar.mode;
+  let stale = app.tasks.request(TaskKind::Sidebar).expect("no rebuild in flight yet");
+
+  app.config_panel.layer = SettingsLayer::Project;
+  app.apply_setting(SettingField::StatusOneLine, "false");
+
+  // The pre-edit worker lands after the write, for the *current* selection.
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(
+      stale,
+      w.path.clone(),
+      mode,
+      SidebarSections::default(),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.sidebar.cache.is_none(),
+    "a rebuild that started before the edit carries the pre-edit shape — it must be dropped"
+  );
+}
+
+#[test]
 fn a_shadowed_global_key_rebind_warns() {
   // Codex #297 review (P3): editing the global layer for a key the repo
   // overrides leaves the effective binding unchanged (repo wins). Mirror
