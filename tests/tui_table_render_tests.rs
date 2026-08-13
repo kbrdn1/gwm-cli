@@ -174,6 +174,54 @@ fn a_worktree_path_cannot_carry_a_bidi_control_into_the_table() {
   }
 }
 
+// --- wide glyphs in a table cell (issue #560) ------------------------------
+
+/// The rendered rows, one string per terminal line — `buffer_text` flattens
+/// the whole buffer, so a needle found in it may come from any row.
+fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+  let buf = terminal.backend().buffer();
+  let area = *buf.area();
+  (0..area.height)
+    .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+    .collect()
+}
+
+#[test]
+fn a_branch_of_wide_glyphs_is_truncated_by_gwm_not_clipped_by_ratatui() {
+  // 20 ideographs: 20 characters, 40 columns. The BRANCH column is sized off
+  // the same character count, so it is 20 cells wide — `trunc` measuring
+  // characters called the name short and handed it over whole, and the
+  // `Table` then hard-clipped it at the column edge. A clip drops the tail
+  // with no marker, which is the whole difference: nothing on the row says
+  // the branch shown is not the branch it is on.
+  let branch = "作".repeat(20);
+  let dir = repo_on_branch(&branch);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let rows = rows(&terminal);
+
+  // The cursor row, not the sidebar's Status block, which shows the same
+  // branch through a funnel of its own.
+  let row = rows
+    .iter()
+    .find(|r| r.starts_with('▶'))
+    .unwrap_or_else(|| panic!("no cursor row in the table:\n{}", rows.join("\n")));
+  assert!(
+    row.matches('作').count() >= 5,
+    "the fixture never reached the BRANCH column: {row:?}"
+  );
+  // Whatever follows the last ideograph is what the cell ended on. A wide
+  // glyph owns a second buffer cell the renderer leaves blank, so the
+  // ellipsis is reached past that blank rather than glued to the glyph.
+  let last = row.rfind('作').unwrap() + '作'.len_utf8();
+  assert!(
+    row[last..].trim_start().starts_with('…'),
+    "the branch cell must end on gwm's ellipsis, not on a ratatui clip: {row:?}"
+  );
+}
+
 // --- mark column (issue #484) ---------------------------------------------
 //
 // Same conditional-column contract as AGENT above: a user who never presses
