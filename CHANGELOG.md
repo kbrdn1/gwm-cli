@@ -84,6 +84,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A path of wide glyphs is ellipsized by the room it actually takes**
+  ([#554](https://github.com/kbrdn1/gwm-cli/issues/554)). `ellipsize_middle`
+  counted characters while all eleven of its callers hand it a budget in
+  terminal cells, the width of a ratatui rect. For anything but narrow Latin
+  the two disagree: a path of 40 CJK glyphs is 40 characters and 80 columns, so
+  the helper called it short and returned it whole. In the delete confirmation
+  the row then overflowed its frame and wrapped, dropping the path off its
+  `Path` label and breaking the aligned grid; in a table cell ratatui simply
+  clipped the tail, which is the half a middle ellipsis exists to keep.
+
+  The budget, the head/tail split and the padding that fills a picker or
+  reclaim row are all measured in cells now, the same walk
+  `compact_header_line` already uses. A glyph that would straddle the last column is
+  dropped whole rather than half-drawn, so a result is at most the budget
+  rather than exactly it.
+
 - **Returning from a fullscreen surface no longer ends the session when the
   terminal is slow to answer** ([#548](https://github.com/kbrdn1/gwm-cli/issues/548)).
   Coming back from the PTY overlay, an `exec` run or a review launch, gwm could
