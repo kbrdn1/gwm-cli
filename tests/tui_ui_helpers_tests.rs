@@ -23,6 +23,15 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
+/// Cells the renderer actually paints for `s`: the cursor `set_stringn`
+/// leaves behind. The oracle for every cell-budget assertion here that
+/// `unicode-width` alone would get wrong.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 120, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 120, Style::default());
+  usize::from(x)
+}
+
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
   assert_eq!(ellipsize_middle("short", 10), "short");
@@ -35,7 +44,7 @@ fn ellipsize_middle_keeps_head_and_tail_around_the_ellipsis() {
   // A long path keeps both its root and the worktree name at the end.
   let s = "/Users/kb/Projects/Flippad/worktrees/chore-880-drop-deprecated";
   let out = ellipsize_middle(s, 20);
-  assert_eq!(out.width(), 20, "must fit exactly within max");
+  assert_eq!(painted(&out), 20, "must fit exactly within max");
   assert!(out.contains('…'), "must carry the middle ellipsis: {out}");
   assert!(out.starts_with("/Users"), "keeps the head: {out}");
   // Tail length is `max - 1 - ceil((max-1)/2)` chars, so a suffix that
@@ -56,7 +65,7 @@ fn ellipsize_middle_never_slices_a_codepoint() {
   // are one cell each, so the budget spends exactly.
   let s = "~/Projets/dépôt-très-long/branche-accentuée-éàü";
   let out = ellipsize_middle(s, 15);
-  assert_eq!(out.width(), 15);
+  assert_eq!(painted(&out), 15);
   assert!(out.contains('…'));
 }
 
@@ -69,10 +78,10 @@ fn ellipsize_middle_measures_in_terminal_cells_not_chars() {
   // per-glyph walk, as `compact_header_line`.
   let s = "/tmp/作業ディレクトリ/深い/入れ子/TAIL";
   assert!(s.chars().count() < 30, "the fixture must fit the budget in chars");
-  assert!(s.width() > 30, "and overflow it in cells");
+  assert!(painted(s) > 30, "and overflow it in cells");
 
   let out = ellipsize_middle(s, 30);
-  assert!(out.width() <= 30, "must fit the cell budget: {} cells", out.width());
+  assert!(painted(&out) <= 30, "must fit the cell budget: {} cells", painted(&out));
   assert!(out.contains('…'), "must carry the middle ellipsis: {out}");
   assert!(out.starts_with("/tmp"), "keeps the head: {out}");
   assert!(out.ends_with("TAIL"), "keeps the tail: {out}");
@@ -86,9 +95,9 @@ fn ellipsize_middle_drops_a_wide_glyph_rather_than_half_drawing_it() {
   for max in 2..=12 {
     let out = ellipsize_middle("作業ディレクトリの名前", max);
     assert!(
-      out.width() <= max,
+      painted(&out) <= max,
       "max={max} overspent: {out:?} is {} cells",
-      out.width()
+      painted(&out)
     );
   }
 }
@@ -100,13 +109,13 @@ fn ellipsize_middle_measures_sequences_whole_not_char_by_char() {
   // every variation-selector sequence. Measured before the fix: this string
   // budgeted at 30 came back 59 cells wide.
   let s = "*\u{FE0F}".repeat(20);
-  assert_eq!(s.width(), 40, "the fixture must overflow the budget");
+  assert_eq!(painted(&s), 40, "the fixture must overflow the budget");
   for max in 2..=30 {
     let out = ellipsize_middle(&s, max);
     assert!(
-      out.width() <= max,
+      painted(&out) <= max,
       "max={max} overspent: {out:?} is {} cells",
-      out.width()
+      painted(&out)
     );
   }
 }
@@ -118,27 +127,18 @@ fn ellipsize_middle_cuts_on_grapheme_boundaries() {
   // back as `"…\u{0301}"`, an accent landing on the ellipsis and not one
   // character of the path kept.
   let out = ellipsize_middle("作作\u{0301}", 3);
-  assert!(out.width() <= 3, "{out:?} is {} cells", out.width());
+  assert!(painted(&out) <= 3, "{out:?} is {} cells", painted(&out));
   assert!(
     !out.starts_with('…') || out.chars().nth(1) != Some('\u{0301}'),
     "a combining mark must not be left to attach to the ellipsis: {out:?}"
   );
   // A tail that keeps the accented glyph keeps its base with it.
   let out = ellipsize_middle("/tmp/a/e\u{0301}", 5);
-  assert!(out.width() <= 5, "{out:?} is {} cells", out.width());
+  assert!(painted(&out) <= 5, "{out:?} is {} cells", painted(&out));
   assert!(
     !out.contains('\u{0301}') || out.contains("e\u{0301}"),
     "the mark travels with its base: {out:?}"
   );
-}
-
-/// Cells the renderer actually paints for `s`: the cursor `set_stringn`
-/// leaves behind. The oracle for every cell-budget assertion below that
-/// `unicode-width` alone would get wrong.
-fn painted(s: &str) -> usize {
-  let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 120, 1));
-  let (x, _) = buf.set_stringn(0, 0, s, 120, Style::default());
-  usize::from(x)
 }
 
 #[test]
@@ -202,9 +202,9 @@ fn pad_cells_fills_a_row_by_cells_so_a_pinned_column_stays_put() {
   // ellipsized value to the column width; `{:<w$}` counts chars, so once
   // the value is cell-measured a wide-glyph row got padded past its budget
   // and pushed the right-pinned size column off the frame.
-  assert_eq!(pad_cells("ab", 5).width(), 5);
+  assert_eq!(painted(&pad_cells("ab", 5)), 5);
   let wide = pad_cells("作業", 8);
-  assert_eq!(wide.width(), 8, "4 cells of text, 4 of padding: {wide:?}");
+  assert_eq!(painted(&wide), 8, "4 cells of text, 4 of padding: {wide:?}");
   // Never trims: a value already at or over the column keeps its cells.
   assert_eq!(pad_cells("作業ディレクトリ", 4), "作業ディレクトリ");
 }
