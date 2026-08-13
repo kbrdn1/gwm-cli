@@ -19,7 +19,7 @@
 //! the cursor lives here, `max_scroll` / `max_x_scroll` are republished by
 //! the renderer each frame against the live viewport.
 
-use crate::config::{ClipboardMode, Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition};
+use crate::config::{ClipboardMode, Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition, TuiLayout};
 use crate::tui::keymap::{Action, KeyStroke, Keymap};
 use crate::tui::modal_keymap::{ModalAction, ModalKeymap};
 
@@ -76,6 +76,9 @@ impl SettingsTab {
         SettingField::WorktreeBranchPattern,
       ],
       SettingsTab::Tui => &[
+        SettingField::Layout,
+        SettingField::DimUnfocused,
+        SettingField::StatusOneLine,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::Clipboard,
@@ -247,8 +250,19 @@ impl SettingsLayer {
 /// How a [`SettingField`] is edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
-  /// Cycle through a fixed set of values (Space / Enter advances).
+  /// Cycle through a fixed set of values (Space / Enter advances),
+  /// written to TOML as a **string**.
   Choice,
+  /// Cycle through `false` / `true`, written to TOML as a **bare
+  /// boolean** (issue #545).
+  ///
+  /// It is a separate kind from [`Self::Choice`] purely because of how
+  /// the value is spelled on disk: quoting it produces
+  /// `dim_unfocused = "true"`, which serde refuses as a string where a
+  /// bool belongs, so the write fails and the setting never changes
+  /// (Codex review, PR #546). Everything else — cycling, rendering —
+  /// behaves like a choice.
+  Bool,
   /// A numeric (`u32`) value edited character-by-character in a buffer.
   Uint,
   /// A free-text value edited character-by-character in a buffer.
@@ -260,6 +274,10 @@ pub enum FieldKind {
 // serde spelling would make the panel produce a file that no longer loads. Going
 // through `label()` makes that drift impossible to express (#365).
 const SIDEBAR_CHOICES: &[&str] = &[SidebarPosition::Right.label(), SidebarPosition::Left.label()];
+const LAYOUT_CHOICES: &[&str] = &[TuiLayout::Compact.label(), TuiLayout::Bordered.label()];
+// A bool is a two-value cycle; the strings are what TOML spells them, so the
+// round-trip test covers them like any other choice list.
+const BOOL_CHOICES: &[&str] = &["false", "true"];
 const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &[
   SidebarOrientation::Stacked.label(),
   SidebarOrientation::SideBySide.label(),
@@ -285,6 +303,12 @@ pub enum SettingField {
   WorktreePathPattern,
   /// `worktree.branch_pattern` — the branch-name pattern (text).
   WorktreeBranchPattern,
+  /// `tui.layout` — compact / bordered (issue #545).
+  Layout,
+  /// `tui.dim_unfocused` — dim the pane without focus (issue #545).
+  DimUnfocused,
+  /// `tui.status_one_line` — fold the sidebar Status block (issue #547).
+  StatusOneLine,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,
   /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
@@ -312,6 +336,9 @@ impl SettingField {
       SettingField::WorktreePathPattern => "path pattern",
       SettingField::WorktreeBranchPattern => "branch pattern",
       SettingField::SidebarPosition => "sidebar position",
+      SettingField::Layout => "layout",
+      SettingField::DimUnfocused => "dim unfocused pane",
+      SettingField::StatusOneLine => "status on one line",
       SettingField::SidebarOrientation => "sidebar layout",
       SettingField::Clipboard => "clipboard",
       SettingField::OpenMode => "open mode",
@@ -330,6 +357,9 @@ impl SettingField {
       SettingField::WorktreePathPattern => "worktree.path_pattern",
       SettingField::WorktreeBranchPattern => "worktree.branch_pattern",
       SettingField::SidebarPosition => "tui.sidebar_position",
+      SettingField::Layout => "tui.layout",
+      SettingField::DimUnfocused => "tui.dim_unfocused",
+      SettingField::StatusOneLine => "tui.status_one_line",
       SettingField::SidebarOrientation => "tui.sidebar_orientation",
       SettingField::Clipboard => "tui.clipboard",
       SettingField::OpenMode => "tui.open.mode",
@@ -344,10 +374,12 @@ impl SettingField {
   pub fn kind(self) -> FieldKind {
     match self {
       SettingField::ThemePreset
+      | SettingField::Layout
       | SettingField::SidebarPosition
       | SettingField::SidebarOrientation
       | SettingField::Clipboard
       | SettingField::OpenMode => FieldKind::Choice,
+      SettingField::DimUnfocused | SettingField::StatusOneLine => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
@@ -371,6 +403,8 @@ impl SettingField {
     match self {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
+      SettingField::Layout => LAYOUT_CHOICES,
+      SettingField::DimUnfocused | SettingField::StatusOneLine => BOOL_CHOICES,
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
@@ -386,6 +420,9 @@ impl SettingField {
       SettingField::WorktreePathPattern => cfg.worktree.path_pattern.clone(),
       SettingField::WorktreeBranchPattern => cfg.worktree.branch_pattern.clone(),
       SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
+      SettingField::Layout => cfg.tui.layout.label().into(),
+      SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
+      SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
       SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
       SettingField::Clipboard => cfg.tui.clipboard.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {

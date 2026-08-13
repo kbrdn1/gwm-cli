@@ -27,7 +27,7 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 **What you get that a `git worktree add` wrapper doesn't:**
 
 - **Bootstrap that actually runs your project.** File copies with deny-list regexes (born from a real "AWS RDS credentials in a copied `.env`" incident), six lifecycle hook phases, stack presets for Laravel / Symfony / Node / Rust / Go / Python.
-- **A TUI you can live in.** Embedded lazygit and shell overlays, a details sidebar with CI state and working-tree file explorer, remappable keys, themes, command palette.
+- **A TUI you can live in.** Embedded lazygit and shell overlays, a details sidebar with CI state and working-tree file explorer, remappable keys, themes, command palette. Compact by default since 1.8.0: sections are delimited by a filled header line rather than a box rule, which buys back two rows and two columns each. `[tui] layout = "bordered"` restores the lazygit-style frames.
 - **It knows which AI agent works where.** Sessions from Claude Code, Codex, opencode and Mistral Vibe are detected from their on-disk artefacts (no process enumeration, Windows included; on Unix a dead recorded PID drops the session to idle at once) and surfaced everywhere: an AGENT column in the table and TUI, a detail overlay on `a`, `gwm agents` with manual pinning, the JSON/daemon field and the statusline (fed by the daemon transport everywhere: a unix socket, or a named pipe on Windows).
 - **A machine surface, not just a human one.** `--format=json`, a JSON-RPC daemon with a push stream, and `gwm statusline` for your prompt. The schemas are frozen under SemVer.
 - **Undo.** `gwm undo` and `gwm history` recover a worktree you removed by mistake, without `git reflog`.

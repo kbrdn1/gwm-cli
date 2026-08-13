@@ -71,20 +71,21 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 pub use ui::{
   agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, bootstrap_report_lines,
   branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style,
-  ci_indicator, clean_dir_icon, command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints,
-  config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line,
-  delete_batch_title, delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress,
-  footer_line, format_status, freshness_color, github_status_lines, header_line, help_body_section_color,
-  help_entry_line, help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style,
-  issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width,
-  link_target_keys, link_target_line, list_pane_counter, modal_hint_for_context, modal_hint_for_context_with_fields,
-  modal_hint_line, overlay_modal_width, palette_name_style, pane_counter, panel_border_color, picker_window,
-  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
-  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
-  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
-  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
-  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
-  WT_DELETED_ICON, WT_MODIFIED_ICON,
+  ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_line, config_capture_footer_hints,
+  config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
+  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, ellipsize_middle,
+  field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll, format_status,
+  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
+  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
+  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
+  list_pane_counter, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
+  overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
+  pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
+  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
+  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
+  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -164,6 +165,35 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   let mut stderr = io::stderr();
   execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
   Ok(Terminal::new(CrosstermBackend::new(stderr))?)
+}
+
+/// Clear the whole screen and force a full repaint on the next `draw`,
+/// **without** asking the terminal where the cursor is (issue #548).
+///
+/// `Terminal::clear` snapshots the cursor first — `backend.get_cursor_position()`
+/// writes `ESC [ 6 n` and blocks until the terminal answers with a DSR report.
+/// Returning from a fullscreen surface (PTY overlay, `exec` run, review launch)
+/// is exactly the moment that answer is most likely to be late: crossterm then
+/// returns `The cursor position could not be read within a normal duration` and
+/// the `?` ended the whole session over a cosmetic operation.
+///
+/// Dropping the snapshot costs nothing here: every caller repaints the entire
+/// frame on the very next loop iteration, so the position `Terminal::clear`
+/// would have restored is overwritten before anyone could see it. What the
+/// callers actually need from `clear` is the other half — wiping the screen and
+/// resetting the back buffer so the next `draw` is a full repaint rather than a
+/// diff against stale content. `Terminal::resize` does precisely that pair for a
+/// `Fullscreen` viewport (`clear_region(All)` + back-buffer reset) and never
+/// touches the cursor, and gwm only ever builds a fullscreen terminal
+/// (`enter_terminal` above). Nothing left under the `?` can time out either:
+/// `backend.size()` is a `TIOCGWINSZ` ioctl (falling back to a `tput` spawn),
+/// never a request the terminal has to answer — and `Terminal::draw` already
+/// calls it on every frame through `autoresize`.
+pub fn clear_without_cursor_query<B: ratatui::backend::Backend>(
+  terminal: &mut Terminal<B>,
+) -> std::result::Result<(), B::Error> {
+  let area = terminal.size()?.into();
+  terminal.resize(area)
 }
 
 /// Inverse of `enter_terminal`. Always called from the same scope as
@@ -358,7 +388,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // resize that never reached it would leave the rows wrapped for the
       // previous terminal and the renderer would ellipsise the overflow.
       app.set_term_width(cols);
-      terminal.clear()?;
+      clear_without_cursor_query(terminal)?;
       continue;
     }
     let Event::Key(key) = ev else { continue };
@@ -1199,7 +1229,7 @@ fn run_launcher(
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-    terminal.clear()?;
+    clear_without_cursor_query(terminal)?;
 
     match spawn {
       Ok(s) if s.success() => app.status = format!("{} exited ok", bin),
@@ -1277,7 +1307,7 @@ fn run_subshell(
   // Always restore the TUI, even if the child failed to spawn or exited non-zero.
   enable_raw_mode()?;
   execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-  terminal.clear()?;
+  clear_without_cursor_query(terminal)?;
 
   match spawn {
     Ok(s) if s.success() => app.status = format!("{} exited ok ({})", label, cmd),

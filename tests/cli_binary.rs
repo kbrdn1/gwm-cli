@@ -5237,6 +5237,23 @@ fn theme_show_includes_git_status_family_roles() {
 }
 
 #[test]
+fn theme_show_includes_the_compact_section_fill_role() {
+  // #545: `section_bg` paints the compact-mode section headers. It has to
+  // be dumpable like every other role — `gwm theme show` is how a user
+  // discovers a role name and copies its current value before overriding
+  // it, so a role missing here is a role that cannot be retuned without
+  // reading the source (Codex review, PR #546).
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("section_bg   ="));
+}
+
+#[test]
 fn theme_show_rejects_unknown_preset() {
   let (dir, _) = init_repo();
   Command::cargo_bin("gwm")

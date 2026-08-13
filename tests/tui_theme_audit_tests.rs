@@ -67,6 +67,7 @@ fn audit_theme() -> Theme {
     staged: Color::Rgb(13, 13, 13),
     modified: Color::Rgb(14, 14, 14),
     untracked: Color::Rgb(15, 15, 15),
+    section_bg: Color::Rgb(16, 16, 16),
   }
 }
 
@@ -741,7 +742,7 @@ fn sidebar_identity_badges_resolve_through_theme_roles() {
   w.is_prunable = true;
   w.status = dirty_status();
 
-  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &t);
+  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &t, true);
 
   // The badges_line lives in the worktree identity section. Flatten its
   // spans and assert each flag badge wears its role colour.
@@ -779,7 +780,7 @@ fn sidebar_identity_default_theme_preserves_legacy_palette() {
   w.is_main = true;
   w.is_locked = true;
   w.is_prunable = true;
-  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &d);
+  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &d, true);
   let badge_fg = |needle: &str| -> Option<Color> {
     sections
       .worktree

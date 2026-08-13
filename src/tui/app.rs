@@ -1541,7 +1541,8 @@ impl App {
     };
     let trunks = self.config.doctor.trunks.clone();
     let theme = self.theme;
-    self.spawn_sidebar(generation, w, mode, trunks, theme);
+    let status_one_line = self.config.tui.status_one_line;
+    self.spawn_sidebar(generation, w, mode, trunks, theme, status_one_line);
   }
 
   /// Spawn one background sidebar-rebuild worker tagged with `generation`
@@ -1558,11 +1559,12 @@ impl App {
     mode: crate::tui::state::sidebar::SidebarMode,
     trunks: Vec<String>,
     theme: crate::tui::theme::Theme,
+    status_one_line: bool,
   ) {
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
       let path = w.path.clone();
-      let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme);
+      let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme, status_one_line);
       let _ = tx.send(TaskMsg::Sidebar(generation, path, mode, sections));
     });
   }
@@ -3884,7 +3886,7 @@ impl App {
       return;
     };
     match field.kind() {
-      FieldKind::Choice => {
+      FieldKind::Choice | FieldKind::Bool => {
         if let Some(next) = field.next_choice(&self.config) {
           self.apply_setting(field, &next);
         }
@@ -3947,7 +3949,11 @@ impl App {
     // TOML string, so a value like `123` / `true` in a shell command or
     // worktree pattern is preserved as text rather than coerced (review P2).
     let write = match field.kind() {
-      FieldKind::Uint => crate::config_cli::set_value_at(&path, field.key_path(), value),
+      // `Bool` joins `Uint` on the bare-value path: quoting it would
+      // write `dim_unfocused = "true"`, which serde refuses as a string
+      // where a bool belongs — the write fails and the setting never
+      // changes (Codex review, PR #546).
+      FieldKind::Uint | FieldKind::Bool => crate::config_cli::set_value_at(&path, field.key_path(), value),
       FieldKind::Choice | FieldKind::Text => crate::config_cli::set_string_at(&path, field.key_path(), value),
     };
     if let Err(e) = write {
@@ -3977,6 +3983,21 @@ impl App {
       Err(e) => self.status = format!("theme: {}", e),
     }
     self.apply_sidebar_config();
+    // The sidebar payload is *built* from the config and the theme, not
+    // merely styled by them — `status_one_line` picks its shape (#547) and
+    // the theme colours every span in it. Both live in a cache keyed by
+    // (path, mode) alone, so without this drop the edit only shows up after
+    // navigating away and back, and the user reads a toggle that did
+    // nothing. Cheap: the payload rebuilds off-thread on the next tick.
+    //
+    // Both halves, or neither: a rebuild spawned before the edit carries the
+    // pre-edit config and theme, and its generation is still current, so the
+    // drain would accept it and store the old shape under the very key this
+    // just cleared (Codex review, PR #556 — the #343 hazard, from the
+    // settings path this time). `apply_refreshed_worktrees` pairs them for
+    // the same reason.
+    self.sidebar.invalidate();
+    self.tasks.invalidate(TaskKind::Sidebar);
     // A Settings edit can rewrite the patterns themselves, and the field set is
     // derived from them (#418) — refresh it here too, or the form keeps asking
     // for a token the pattern no longer carries until the next launch.

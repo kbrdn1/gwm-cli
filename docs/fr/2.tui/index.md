@@ -12,7 +12,7 @@ navigation:
 Lancer `gwm` sans argument ouvre l'interface ratatui sur le dépôt courant. De là, vous pouvez créer, supprimer, bootstrapper et naviguer entre les worktrees sans quitter le terminal.
 
 - **[Raccourcis clavier](/fr/tui/keybindings)** : la table complète des touches, y compris la [refonte du keymap v0.10 (#290)](/fr/tui/keybindings#v010-rebind-summary) qui a réorganisé les valeurs par défaut (par ex. `O` est désormais le terminal plein écran, et non plus le menu d'ouverture ; `y` copie désormais le nom de la branche, et non plus le chemin). Le keymap est entièrement configurable via `[tui.keys]`.
-- **[Barre latérale de détails](/fr/tui/sidebar)** : les quatre sous-sections encadrées du panneau de droite, l'orientation responsive, le graphe de commits à la lazygit, le bloc Issue / PR en direct (avec l'indicateur d'état CI), l'arbre de fichiers du `git status`, et le mode stashes `S`.
+- **[Barre latérale de détails](/fr/tui/sidebar)** : les quatre sous-sections du panneau de droite, l'orientation responsive, le graphe de commits à la lazygit, le bloc Issue / PR en direct (avec l'indicateur d'état CI), l'arbre de fichiers du `git status`, et le mode stashes `S`.
 - **[Filtre flou](/fr/tui/filter)** : `/` ouvre la barre de filtre en ligne ; nucleo-matcher sous le capot.
 - **[Compte à rebours de la surcouche de confirmation](/fr/tui/confirm-countdown)** : le compte à rebours de sécurité qui empêche les suppressions accidentelles de branches lorsque `D` est armé.
 - **[Lanceurs configurables](/fr/tui/launchers)** : `[git_tui]` (`l` overlay / `L` plein écran) et `[review]` (`r` overlay / `R` plein écran), avec les placeholders `{base} {head} {path} {diff}` et l'overlay PTY embarqué.
@@ -30,4 +30,18 @@ La passe de polish v0.8.0 a resserré le cadre de la TUI. Toutes les couleurs su
 
 - **Statusline** : une seule ligne. Les indications de touches sont rendues comme des puces badge en vidéo inversée (la touche peinte avec l'accent du thème, puis un libellé court) ; le message de statut (journal d'action) est épinglé à droite avec une priorité absolue. Sous contrainte de largeur, la liste des indications est tronquée avec un marqueur `…` tandis que le journal reste visible.
 - **Header**, une seule ligne sans bordure : la version est une puce en vidéo inversée, le nom du dépôt est en gras, et le répertoire de travail est atténué et compressé avec un tilde. Le drapeau `picker` est sa propre puce en vidéo inversée. L'ordre d'abandon sous contrainte de largeur est chemin → nom du dépôt → puce de version (la version survit en dernier).
-- **Modals** : chaque surcouche partage un même cadre, avec une bordure arrondie, un titre en gras thématisé, les couleurs du thème, et une boîte dimensionnée à son contenu plutôt qu'à un pourcentage fixe de l'écran.
+- **Modals** : chaque surcouche partage un même cadre, avec une bordure arrondie qui porte un titre en gras thématisé dans son filet du haut, les couleurs du thème, et une boîte dimensionnée à son contenu plutôt qu'à un pourcentage fixe de l'écran. Le titre a rejoint le filet dans [#549](https://github.com/kbrdn1/gwm-cli/issues/549) : c'était auparavant une ligne centrée dans le cadre suivie d'une ligne vide, donc chaque surcouche est plus courte de deux lignes.
+
+### layout
+
+`[tui] layout` ([#545](https://github.com/kbrdn1/gwm-cli/issues/545)) choisit comment les panneaux et les sections de la sidebar sont encadrés. **`"compact"` est le défaut** : aucun filet, un en-tête d'une ligne en aplat par section. Le titre garde son raccourci entre crochets et passe en majuscules, le compteur se place à droite de cette même ligne, un filet `muted` marque la frontière entre les deux panneaux, et le panneau des worktrees se dimensionne à son nombre de lignes au lieu de réserver sa part du split. Le focus se lit sur l'en-tête : le panneau actif prend l'aplat `selection_bg`. `[tui] dim_unfocused` atténue en plus le corps du panneau inactif, dans les deux dispositions, off par défaut.
+
+La capture en haut de cette page le montre, comme toutes les autres captures de cette documentation.
+
+`layout = "bordered"` restaure la disposition de gwm jusqu'à la 1.7, les boîtes façon lazygit :
+
+![TUI gwm en mode bordé : filets façon lazygit autour de chaque section](../../2.tui/_assets/bordered.png)
+
+Les modales gardent leur cadre dans les deux cas. La configuration et le rôle de thème `section_bg` sont documentés sous [`.gwm.toml`](/fr/configuration/gwm-toml#layout).
+
+`[tui] status_one_line` ([#547](https://github.com/kbrdn1/gwm-cli/issues/547)) replie les quatre valeurs du bloc Status (branche, head, pastilles d'état, diff, âge) sur une seule ligne jointe par ` · `, et ne laisse une ligne à part qu'au chemin. **On par défaut**, quelle que soit la disposition. C'est la moitié « contenu » du même argument de densité : `layout` a coupé ce qu'une section dépense en cadre, ceci coupe ce que la carte d'identité dépense en libellés. `status_one_line = false` rend le bloc labellisé de quatre lignes.

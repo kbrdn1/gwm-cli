@@ -174,6 +174,54 @@ fn a_worktree_path_cannot_carry_a_bidi_control_into_the_table() {
   }
 }
 
+// --- wide glyphs in a table cell (issue #560) ------------------------------
+
+/// The rendered rows, one string per terminal line — `buffer_text` flattens
+/// the whole buffer, so a needle found in it may come from any row.
+fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+  let buf = terminal.backend().buffer();
+  let area = *buf.area();
+  (0..area.height)
+    .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+    .collect()
+}
+
+#[test]
+fn a_branch_of_wide_glyphs_is_truncated_by_gwm_not_clipped_by_ratatui() {
+  // 20 ideographs: 20 characters, 40 columns. The BRANCH column is sized off
+  // the same character count, so it is 20 cells wide — `trunc` measuring
+  // characters called the name short and handed it over whole, and the
+  // `Table` then hard-clipped it at the column edge. A clip drops the tail
+  // with no marker, which is the whole difference: nothing on the row says
+  // the branch shown is not the branch it is on.
+  let branch = "作".repeat(20);
+  let dir = repo_on_branch(&branch);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let rows = rows(&terminal);
+
+  // The cursor row, not the sidebar's Status block, which shows the same
+  // branch through a funnel of its own.
+  let row = rows
+    .iter()
+    .find(|r| r.starts_with('▶'))
+    .unwrap_or_else(|| panic!("no cursor row in the table:\n{}", rows.join("\n")));
+  assert!(
+    row.matches('作').count() >= 5,
+    "the fixture never reached the BRANCH column: {row:?}"
+  );
+  // Whatever follows the last ideograph is what the cell ended on. A wide
+  // glyph owns a second buffer cell the renderer leaves blank, so the
+  // ellipsis is reached past that blank rather than glued to the glyph.
+  let last = row.rfind('作').unwrap() + '作'.len_utf8();
+  assert!(
+    row[last..].trim_start().starts_with('…'),
+    "the branch cell must end on gwm's ellipsis, not on a ratatui clip: {row:?}"
+  );
+}
+
 // --- mark column (issue #484) ---------------------------------------------
 //
 // Same conditional-column contract as AGENT above: a user who never presses
@@ -294,5 +342,68 @@ fn the_note_marker_is_only_on_the_rows_that_carry_one() {
     text.matches('\u{2261}').count(),
     1,
     "exactly one row carries a note: {text}"
+  );
+}
+
+// --- a column is sized by the room its content takes (issue #563) ----------
+
+#[test]
+fn a_column_of_wide_glyphs_is_sized_by_its_columns_not_its_characters() {
+  // #560 made the cell cut in cells; the column it is cut to was still sized
+  // in characters. A 20-ideograph branch is 20 characters and 40 columns, so
+  // `column_width` asked for 20, `trunc` cut to 19, and the cell then sat
+  // inside a column the solver had grown past that: nine glyphs, an ellipsis,
+  // and eleven blank columns before STATUS.
+  let branch = "作".repeat(20);
+  let dir = repo_on_branch(&branch);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let rows = rows(&terminal);
+  let row = rows
+    .iter()
+    .find(|r| r.starts_with('▶'))
+    .unwrap_or_else(|| panic!("no cursor row:\n{}", rows.join("\n")));
+
+  // The ceiling is 38 columns, so 18 glyphs plus the ellipsis is what fits.
+  // Asserted as a count rather than a slice: it is the gap that was the
+  // defect, and a count is what shrinks when the column is under-sized.
+  assert!(
+    row.matches('作').count() >= 18,
+    "the branch column is sized in characters, so it wastes what it was given: {row:?}"
+  );
+}
+
+#[test]
+fn a_column_is_sized_on_the_text_that_reaches_the_terminal() {
+  // `trunc` sanitises *before* it measures, on purpose: a `Bidi_Control`
+  // character measures zero columns and the `?` replacing it measures one, so
+  // what is measured has to be what is drawn (#506). `column_width` sizes the
+  // column that same `trunc` then cuts to, so it has to sanitise first too, or
+  // the two disagree by one column per neutralised character and the cell is
+  // truncated inside a column that had the room.
+  //
+  // The character count this replaced got that right by accident: a
+  // `Bidi_Control` is one char and its replacement is one column.
+  let branch = format!("feat/{}danger-branch-name", '\u{202E}');
+  let sanitised = gwm::naming::sanitise_for_terminal(&branch);
+  assert!(
+    sanitised.chars().count() < 38,
+    "the fixture must fit under the column ceiling, or nothing is proven"
+  );
+  let dir = repo_on_branch(&branch);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let rows = rows(&terminal);
+  let row = rows
+    .iter()
+    .find(|r| r.starts_with('\u{25B6}'))
+    .unwrap_or_else(|| panic!("no cursor row:\n{}", rows.join("\n")));
+  assert!(
+    row.contains(&sanitised),
+    "the branch fits its column and must render whole: {row:?}"
   );
 }

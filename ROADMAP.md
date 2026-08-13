@@ -4,27 +4,35 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there. This file is the map, not the spec.
 
-## Current state: v1.7.1 stable
+## Current state: v1.8.0 stable
 
-The current **stable** line is **v1.7.1** (2026-08-12), a documentation patch on
-top of the feature line below: the agent session pane gets its own page, five
-text-only pages get a capture, and a guard now fails the build on a broken
-image link rather than letting the docs site deploy fail. The binary is
-unchanged from v1.7.0.
+The current **stable** line is **v1.8.0** (2026-08-13), the density line: the
+TUI is **compact by default**. Panes and sidebar sections drop their box rules
+for a filled one-line header, buying back two rows and two columns each, and the
+Status block folds onto a single row. `[tui] layout = "bordered"` restores the
+lazygit-style boxes. Alongside it, every bounded overlay resolves its width
+through one policy instead of four, two of which used to get *narrower* as the
+terminal widened. The rest of the line is width arithmetic: four separate
+truncators were counting characters where their callers hand them terminal
+cells, so anything but narrow Latin was measured wrong and cut in the wrong
+place or not at all.
 
-**v1.7.0** (2026-08-12) is the largest feature line
-since 1.0: per-worktree notes, the rich PR/Issue view and its inline review
-comments, container execution on `exec` profiles, multi-row selection with a
-batch delete, and the Symfony preset. It closes the four capability gaps that
-came out of the comparative read of the field, so the
-[comparison page](docs/8.comparison.md) reports parity where it used to report a
-deficit. The previous line, **v1.6.1** (2026-08-04), closed the gaps left by the
+**v1.7.1** (2026-08-12) was a documentation patch on top of **v1.7.0**
+(2026-08-12), the largest feature line since 1.0: per-worktree notes, the rich
+PR/Issue view and its inline review comments, container execution on `exec`
+profiles, multi-row selection with a batch delete, and the Symfony preset. It
+closes the four capability gaps that came out of the comparative read of the
+field, so the [comparison page](docs/8.comparison.md) reports parity where it
+used to report a deficit. **v1.6.1** (2026-08-04) closed the gaps left by the
 v1.6.0 **security fix affecting every earlier version** (see the highlights
 table). The machine-readable
 contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
 the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
 section set will not break without a major bump (see
-[Stability & compatibility](docs/6.development/3.stability.md)).
+[Stability & compatibility](docs/6.development/3.stability.md)). A default
+layout is explicitly outside that promise: the policy leaves "any visual detail
+of the ratatui interface" free to change in a minor, which is why compact by
+default is 1.8.0 and not 2.0.0.
 
 Since the 1.0.0 milestone (2026-06-26): the **1.0.x patches** hardened the line
 (security-only 1.0.3 among them); **1.1.0** shipped the first outside-report
@@ -169,6 +177,7 @@ For reference (each linked to its closing PR):
 | [#502](https://github.com/kbrdn1/gwm-cli/issues/502) / [#506](https://github.com/kbrdn1/gwm-cli/issues/506) / [#507](https://github.com/kbrdn1/gwm-cli/issues/507) + [#423](https://github.com/kbrdn1/gwm-cli/issues/423) / [#511](https://github.com/kbrdn1/gwm-cli/issues/511) | v1.6.1 | **Bidi follow-up to the security release, and the documentation pipeline.** The 1.6.0 neutralisation rests on `char::is_control`, which covers C0, DEL and C1: it does not cover the twelve characters carrying the `Bidi_Control` property, which are `Cf`, not `Cc`, and reorder how a terminal renders the text around them without ever being a control byte. The pre-trust bootstrap summary inherited the gap, the one output whose job is to let someone authorise a shell command out of an unvetted repo. The TUI worktrees table was never on the path the CLI sinks protect at all: measured on ratatui 0.30, every render path drops the zero-width bytes but `List` and `Table` keep the `Bidi_Control` ones, so a fetched ref could read in an order it is not stored in. Both closed, the neutralisation landing in the width-clipping funnel so a column added later inherits it, plus an alias expansion refused rather than neutralised because it becomes argv before clap is reached. Alongside: the published documentation now resyncs and redeploys itself when `main` moves ([#423](https://github.com/kbrdn1/gwm-cli/issues/423), <https://gwm.kbrdn.dev>), and `herdr-plugin-gwm` gets an integration page in English and French ([#511](https://github.com/kbrdn1/gwm-cli/issues/511)) |
 | [#515](https://github.com/kbrdn1/gwm-cli/issues/515) / [#420](https://github.com/kbrdn1/gwm-cli/issues/420) / [#528](https://github.com/kbrdn1/gwm-cli/issues/528) / [#421](https://github.com/kbrdn1/gwm-cli/issues/421) / [#484](https://github.com/kbrdn1/gwm-cli/issues/484) / [#392](https://github.com/kbrdn1/gwm-cli/issues/392) + [#521](https://github.com/kbrdn1/gwm-cli/issues/521) / [#531](https://github.com/kbrdn1/gwm-cli/issues/531) / [#422](https://github.com/kbrdn1/gwm-cli/issues/422) | v1.7.0 | **The feature line that closes the comparative read of the field.** Four capability gaps came out of reading `lazyworktree` and `gwq` against this codebase; the last of them close here, so the [comparison page](docs/8.comparison.md) (#422) reports parity where it would have reported a deficit. **Per-worktree notes** (#515): `N` opens the selected worktree's note in an editable modal rather than suspending the TUI for `$EDITOR`, stored as plain Markdown under `.git/gwm/notes/` in the main checkout, so it survives `gwm remove` and stays greppable with gwm shut down; keyed on the branch, with a refusal rather than a silent collision when a volume folds two branch names together. **Rich PR/Issue view** (#420): `I` renders the description, author, branch pair, diff size, CI rollup, reviews and conversation at no extra request, the fields riding the call gwm already made for the rollup; the comments anchored to a diff hunk followed as a second transport (#528), GraphQL-only, fired by the view rather than by every `gwm status`. **Container execution** (#421): a `[container]` block on an `exec` profile, where the mount is the substance rather than the wrapper, since a linked worktree's `.git` is a file holding an absolute host path and mounting the worktree alone yields a container in which git does not answer. **Multi-row selection** (#484): `Space` marks, `d` deletes the batch behind one confirm that snapshots its targets, with `gwm remove a b c` as the non-interactive half. **Symfony preset** (#392), built on Symfony's dotenv convention rather than copied from the Laravel one. Alongside: the TUI delete now runs the remove hooks and records the undo journal (#521), and the removal sequence records itself at its point of no return instead of before the destructive call, which had left `gwm undo` blocked for the whole repo on a refused removal (#531) |
 | [#524](https://github.com/kbrdn1/gwm-cli/issues/524) / [#523](https://github.com/kbrdn1/gwm-cli/issues/523) | v1.7.1 | **Documentation patch, binary unchanged.** The agent session pane is what the repository description leads on and it had no page of its own; `tui/agent-sessions` now covers the four backends, the freshness rules and the pinning, in English and French, and five text-only pages get the capture they described in prose. The demo GIF closes its last defect (#523): the agent pane, which needed a fake on-disk agent store rather than a tape edit, since the fixture simulated no session at all. Shipped with `docs_assets_tests`, because a capture referenced but absent is not a cosmetic dead link: Astro fails the whole build on it, so the docs site stops deploying. That exact failure happened during this cycle, from the other side: the sync computed capture links from `cli/reference.md` while writing pages into `cli/reference/`, one level deeper, so every link was short a `../`. Latent since the CLI reference split existed, and only triggered once an image finally lived there |
+| [#545](https://github.com/kbrdn1/gwm-cli/issues/545) + [#549](https://github.com/kbrdn1/gwm-cli/issues/549) / [#547](https://github.com/kbrdn1/gwm-cli/issues/547) / [#550](https://github.com/kbrdn1/gwm-cli/issues/550) / [#548](https://github.com/kbrdn1/gwm-cli/issues/548) / [#554](https://github.com/kbrdn1/gwm-cli/issues/554) + [#560](https://github.com/kbrdn1/gwm-cli/issues/560) + [#562](https://github.com/kbrdn1/gwm-cli/issues/562) + [#563](https://github.com/kbrdn1/gwm-cli/issues/563) / [#553](https://github.com/kbrdn1/gwm-cli/issues/553) / [#544](https://github.com/kbrdn1/gwm-cli/issues/544) | v1.8.0 | **The density line, and the width arithmetic underneath it.** **Compact by default** (#545): panes and sidebar sections drop their box rules for a filled one-line header, two rows and two columns back each, with `[tui] layout = "bordered"` as the opt-out and the same pass moving modal titles into the top rule (#549). The idea predates the feedback that triggered it; the work was never the removal but relocating **focus**, which the border used to carry and the header now does, plus a `section_bg` theme role that is an indexed colour rather than a translucent white so the mode survives a terminal without truecolor. **`[tui] status_one_line`** (#547) is the content half: the Status block folds onto one row, three more rows for the panes, on by default under either layout. **One modal width policy** (#550): four rules became one, two of which branched on `term_width <= 80` and so got *narrower* as the terminal widened, while four others had no ceiling at all. **A crash on returning from a fullscreen surface** (#548), and not a cosmetic one: `Terminal::clear` snapshots the cursor over DSR, and the return path from a PTY overlay is exactly when a terminal is least likely to answer in time. **Four truncators moved from characters to terminal cells** (#554 / #560 / #562 / #563), on ratatui's own `CellWidth` per grapheme rather than `unicode-width`, which disagrees with the renderer on more than CJK: `لالالا` is 3 columns to one and 6 painted. ASCII rendered identically throughout, which is what kept it standing. `unicode-width` is now a dev-dependency, kept as the contrast measure that proves a width fixture is one the two disagree on. Alongside: forms scroll to their focused field instead of clipping it away (#553), and the doc captures were regenerated narrower, fitted to their content and on a darker terminal (#544) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit: check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -193,6 +202,23 @@ follow-ups, and multi-forge support
 ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)) in v1.5.0, which landed
 deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both.
+
+**What is actually queued now**, after the v1.8.0 cut, is smaller than a feature
+line and mostly came out of one source: unsolicited design feedback from
+ratatui's maintainer on the awesome-ratatui listing
+([#544](https://github.com/kbrdn1/gwm-cli/issues/544)). Three of its four axes
+are closed; the fourth, the docs site reading flat, lives in `kbrdn1/kbrdn-docs`
+rather than here. Beyond it: richer note editing
+([#557](https://github.com/kbrdn1/gwm-cli/issues/557)), forms compressing their
+spacing before they scroll ([#559](https://github.com/kbrdn1/gwm-cli/issues/559)),
+polish on the rich PR/Issue view
+([#551](https://github.com/kbrdn1/gwm-cli/issues/551)), the remaining relays
+([#525](https://github.com/kbrdn1/gwm-cli/issues/525)) and the distribution
+channels still open under
+[#383](https://github.com/kbrdn1/gwm-cli/issues/383). Translating the docs into
+German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/522))
+is roughly 155,000 words with no native reviewer lined up, so it stays a
+decision rather than a plan.
 
 **The lot below shipped in the v1.7.0 cut** (2026-08-12); it is kept here with
 its reasoning rather than folded into a one-line highlight, because the sequence
@@ -503,6 +529,34 @@ are already emitted per page.
 ⚠️ The content is 51,612 English words across 41 pages, so roughly 155,000 at
 three languages, and no native reader is lined up for any of the three. Worth
 naming before it is scheduled against a date.
+
+### Post-1.7: TUI density, from the ratatui maintainer's feedback ([#544](https://github.com/kbrdn1/gwm-cli/issues/544))
+
+The traffic that took the repository from 30 to 122 stars came through the
+ratatui circle, and its maintainer sent back a design read: captures too wide,
+too much empty space, borders everywhere, weak contrast on the site. #544 tracks
+acting on it. The work below is **on `dev`, not in a published version**: it
+lands in the next minor.
+
+Shipped there so far:
+
+- [#545](https://github.com/kbrdn1/gwm-cli/issues/545) ✅ + [#549](https://github.com/kbrdn1/gwm-cli/issues/549) ✅: **compact is the default layout**. A section is delimited by a filled one-line header instead of four rules, which buys back two rows and two columns per section; modal titles moved into the top rule, two more rows per overlay. `[tui] layout = "bordered"` restores the pre-1.8 boxes, deliberately untouched by the compact refinements so it stays a faithful restore. `[tui] dim_unfocused` arrived with it.
+- [#550](https://github.com/kbrdn1/gwm-cli/issues/550) ✅: **one width policy for every modal**. Four different rules, two of which made a modal *narrower* as the terminal widened past 80 columns, collapse into a single `modal_width(term_width, pct, min, max)`. The floor also makes 80 columns, the width the docs advertise, a size these surfaces were actually sized for: the confirm modal was 49 columns wide there, with its hint row cut mid-word.
+- [#547](https://github.com/kbrdn1/gwm-cli/issues/547) ✅: **the Status block folds onto one line**, under `[tui] status_one_line` (default on). Four labelled rows for four values of a handful of characters each was the largest waste left in the sidebar once #545 cut the chrome. A knob rather than a compact-mode behaviour, so `bordered` folds too.
+- [#548](https://github.com/kbrdn1/gwm-cli/issues/548) ✅: the cursor-position read that failed on return from a fullscreen overlay.
+
+Still open, all found by the same pass and all cheap:
+
+- [#553](https://github.com/kbrdn1/gwm-cli/issues/553): the two form modals drop a field below 18 rows. The horizontal policy landed with #550; the vertical one did not, so a short terminal silently hides an input rather than scrolling it.
+- [#554](https://github.com/kbrdn1/gwm-cli/issues/554): `ellipsize_middle` counts characters where the terminal counts cells, so a CJK or emoji title overflows the box it was measured into.
+- [#551](https://github.com/kbrdn1/gwm-cli/issues/551): polish pass on the rich PR / Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)), queued behind the density line rather than reopening it.
+- [#544](https://github.com/kbrdn1/gwm-cli/issues/544) itself stays open for what is not TUI code: capture width and the site's contrast.
+
+⚠️ The doc captures still show the pre-fold sidebar. Every screenshot under
+`docs/**/_assets/` is generated from a committed tape by
+`docs/_capture/generate.sh`, which drives the **installed** `gwm`, so the set
+regenerates in one pass on the maintainer's machine and has to be redone before
+the cut, not per-PR.
 
 ### Deferred
 

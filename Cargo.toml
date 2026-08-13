@@ -4,7 +4,7 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.7.1"
+version = "1.8.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the newest
 # one introduced here. Our own std usage sits far lower: `std::sync::LazyLock`
@@ -132,6 +132,11 @@ daemon = []
 clap = { version = "4.5", features = ["derive", "color"] }
 clap_complete = "4.5"
 ratatui = "0.30"
+# Grapheme boundaries for the middle-ellipsizer (#554). Already in the tree via
+# crossterm and nucleo-matcher; taken directly so a slice is cut where a glyph
+# ends rather than between a base and its combining mark, and so the walk costs
+# one pass instead of remeasuring every prefix.
+unicode-segmentation = "1.13"
 # `osc52` pulls crossterm's `clipboard` module (`CopyToClipboard`) and, with it,
 # base64 — the encoder OSC52 needs. Using the framing crossterm already ships,
 # and which its own tests pin, beats hand-rolling the sequence here (#367).
@@ -193,6 +198,11 @@ interprocess = "2.4.2"
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"
+# Was a runtime dependency until #560/#562: the crate measured widths with it.
+# Nothing in `src/` does any more — the renderer's own `CellWidth` is the only
+# measure now — so it stays only as the *contrast* measure the width tests
+# assert against, to keep proving a fixture is one the two disagree on.
+unicode-width = "0.2"
 # Parse our own Cargo.toml in tests/binstall_metadata_tests.rs (#27) so
 # the `[package.metadata.binstall]` contract is asserted structurally,
 # not by string-matching. Same `toml` major as the runtime dependency.

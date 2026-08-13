@@ -838,6 +838,85 @@ pub struct TuiConfig {
   /// Absent → the key does nothing.
   #[serde(default)]
   pub macro2: Option<TuiMacroConfig>,
+
+  /// How panes and sidebar sections are framed (issue #545): `compact`
+  /// (default) delimits each with a filled one-line header, `bordered`
+  /// draws the lazygit-style box rules.
+  ///
+  /// Overlays and modals keep their border under either value — a panel
+  /// floating over content is exactly where a rule earns its keep.
+  #[serde(default)]
+  pub layout: TuiLayout,
+
+  /// Dim the body of whichever pane does *not* hold focus (issue #545).
+  ///
+  /// Default `false`. It is a real trade-off rather than a strict
+  /// improvement: the inactive pane's content is still information you
+  /// may be reading, and dimming it costs contrast on a surface that is
+  /// often a screenshot. Users who navigate between the two panes
+  /// constantly get a stronger "where am I" signal by turning it on.
+  ///
+  /// Applies to both layouts. `compact` already moves the focus signal
+  /// onto the section headers; this stacks on top of it rather than
+  /// replacing it.
+  #[serde(default)]
+  pub dim_unfocused: bool,
+
+  /// Fold the sidebar's Status block onto a single line (issue #547).
+  ///
+  /// Default `true`: the four values (branch · head · state · diff ·
+  /// age) are a handful of characters each, and four labelled rows for
+  /// them was the largest remaining waste in the sidebar. `false`
+  /// restores the labelled block (`Branch` / `Created` / `Diff` /
+  /// `State`, one row apiece).
+  ///
+  /// Independent of [`TuiLayout`] — a knob rather than a compact-mode
+  /// behaviour, so the bordered layout folds too unless this is turned
+  /// off. The `Path` row is never folded in: a path is the one value
+  /// long enough that sharing a row with anything else would clip both.
+  #[serde(default = "default_status_one_line")]
+  pub status_one_line: bool,
+}
+
+/// How the TUI frames its panes and sidebar sections (issue #545).
+///
+/// `kebab-case` for the same reason as [`SidebarOrientation`]: it keeps
+/// the serialised form equal to [`Self::label`], so a Settings-panel
+/// write-back produces a file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuiLayout {
+  /// One filled header line per section, no rules. Costs one row and one
+  /// column of chrome where `Bordered` costs two of each, plus the row a
+  /// counter used to take in a bottom rule.
+  ///
+  /// The default since it landed: the density is the point, and the box
+  /// rules were the single largest source of wasted space on screen.
+  #[default]
+  Compact,
+  /// The lazygit-style boxes: a rule on all four sides, the title in the
+  /// top one, the counter in the bottom one. gwm's layout up to 1.7.
+  Bordered,
+}
+
+impl TuiLayout {
+  /// Every variant, default first.
+  pub const ALL: [TuiLayout; 2] = [TuiLayout::Compact, TuiLayout::Bordered];
+
+  /// Status-bar label, equal to the serialised TOML spelling.
+  pub const fn label(self) -> &'static str {
+    match self {
+      TuiLayout::Compact => "compact",
+      TuiLayout::Bordered => "bordered",
+    }
+  }
+
+  /// `true` when sections are delimited by a filled header rather than
+  /// by box rules. The renderer asks this rather than matching, so a
+  /// third variant later does not have to touch every call site.
+  pub const fn is_compact(self) -> bool {
+    matches!(self, TuiLayout::Compact)
+  }
 }
 
 impl Default for TuiConfig {
@@ -852,6 +931,9 @@ impl Default for TuiConfig {
       keys: TuiKeysConfig::default(),
       macro1: None,
       macro2: None,
+      layout: TuiLayout::Compact,
+      dim_unfocused: false,
+      status_one_line: default_status_one_line(),
     }
   }
 }
@@ -1195,6 +1277,13 @@ impl TuiConfig {
 
 fn default_confirm_countdown_secs() -> u32 {
   3
+}
+
+/// `[tui] status_one_line` defaults to `true`, so a bare `#[serde(default)]`
+/// (which yields `false` for a bool) would invert the contract for every
+/// config that does not spell the key out.
+fn default_status_one_line() -> bool {
+  true
 }
 
 fn default_auto_refresh_secs() -> u64 {

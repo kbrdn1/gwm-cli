@@ -3,7 +3,8 @@
 //! Role-based colours: every visual signal in the TUI maps to a
 //! semantic role (`focus`, `accent`, `branch`, `clean`, `dirty`,
 //! `main`, `locked`, `prunable`, `muted`, `selection_bg`, `name`,
-//! `path`, `staged`, `modified`, `untracked`) rather than a
+//! `path`, `staged`, `modified`, `untracked`, `section_bg`) rather
+//! than a
 //! hard-coded `Color::Cyan`. Users override roles in `.gwm.toml`:
 //!
 //! ```toml
@@ -101,6 +102,34 @@ pub struct Theme {
   /// borrowed `clean` (the "working tree is clean" indicator); the
   /// dedicated role (default `Green`, issue #211) decouples them.
   pub untracked: Color,
+  /// Background fill behind a section header in compact mode (issue
+  /// #545). Unused while `[tui] compact` is off, where the same
+  /// delimitation is done by the box rules.
+  ///
+  /// Deliberately **not** a translucent white: that has no equivalent
+  /// in ANSI 256, and the compact layout has to stay readable on a
+  /// terminal without truecolor.
+  ///
+  /// A preset knows the background it is designed against, so it takes
+  /// the tone its own palette reserves for chrome bands: `Surface 0`
+  /// for claude-dark, `bg0_soft` for gruvbox, `Mantle` for catppuccin,
+  /// `bg_dark` for tokyo-night. The default theme knows nothing about
+  /// the terminal it lands on and bets on a dark one.
+  ///
+  /// Sanity-checked by eye on `docs/2.tui/_assets/compact.png`, not by
+  /// arithmetic: the fill only has to separate from the *terminal*
+  /// background, which no unit test can see. That capture pins its own
+  /// terminal background to the palette's for the same reason — shot on
+  /// the neutral grey the other tapes use, claude-dark's fill landed
+  /// two shades off the terminal and the mode looked like a no-op.
+  ///
+  /// Invariant, pinned by `tests/theme_tests.rs`: never equal to
+  /// [`Self::selection_bg`]. Both are backgrounds, and a header that
+  /// paints like a selected row destroys the "where is my cursor"
+  /// signal that compact mode already spends its border budget on.
+  /// Each preset keeps this fill *below* its selection tone so the
+  /// cursor stays the loudest background on screen.
+  pub section_bg: Color,
 }
 
 impl Default for Theme {
@@ -125,6 +154,12 @@ impl Default for Theme {
       staged: Color::Cyan,
       modified: Color::Yellow,
       untracked: Color::Green,
+      // #545: the default theme cannot know the terminal's background,
+      // so it bets on the common dark one — 236 is #303030, roughly the
+      // 7% white the mock-up asked for over a near-black. Well under
+      // `DarkGray`, so the selected row stays the loudest fill.
+      // `[theme] section_bg = "…"` retunes it for an unusual background.
+      section_bg: Color::Indexed(236),
     }
   }
 }
@@ -166,6 +201,7 @@ impl Theme {
       staged: Color::Rgb(0xD4, 0x82, 0x5D),       // = accent (preserves the borrowed look)
       modified: Color::Rgb(0xFF, 0xDF, 0x61),     // = dirty
       untracked: Color::Rgb(0x86, 0xE8, 0x9A),    // = clean
+      section_bg: Color::Rgb(0x2A, 0x2A, 0x2A),   // Surface 0 (under the active surface)
     }
   }
 
@@ -188,6 +224,7 @@ impl Theme {
       staged: Color::Rgb(0xcb, 0xa6, 0xf7),       // = accent / Mauve
       modified: Color::Rgb(0xf9, 0xe2, 0xaf),     // = dirty / Yellow
       untracked: Color::Rgb(0xa6, 0xe3, 0xa1),    // = clean / Green
+      section_bg: Color::Rgb(0x18, 0x18, 0x25),   // Mantle (under Surface 0)
     }
   }
 
@@ -209,6 +246,7 @@ impl Theme {
       staged: Color::Rgb(0xfa, 0xbd, 0x2f),       // = accent / Bright yellow
       modified: Color::Rgb(0xfa, 0xbd, 0x2f),     // = dirty / Bright yellow
       untracked: Color::Rgb(0xb8, 0xbb, 0x26),    // = clean / Bright green
+      section_bg: Color::Rgb(0x32, 0x30, 0x2f),   // bg0_soft (over bg0, under the Dark1 selection)
     }
   }
 
@@ -230,6 +268,7 @@ impl Theme {
       staged: Color::Rgb(0xbb, 0x9a, 0xf7),       // = accent / Purple
       modified: Color::Rgb(0xe0, 0xaf, 0x68),     // = dirty / Orange
       untracked: Color::Rgb(0x9e, 0xce, 0x6a),    // = clean / Green
+      section_bg: Color::Rgb(0x1f, 0x23, 0x35),   // bg_dark (under Selection)
     }
   }
 
@@ -275,6 +314,7 @@ impl Theme {
       "staged" => Some(&mut self.staged),
       "modified" => Some(&mut self.modified),
       "untracked" => Some(&mut self.untracked),
+      "section_bg" => Some(&mut self.section_bg),
       _ => None,
     }
   }

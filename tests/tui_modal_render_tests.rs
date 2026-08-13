@@ -35,7 +35,7 @@ mod common;
 
 use common::init_repo;
 use gwm::bootstrap::{BootstrapReport, StepResult};
-use gwm::tui::{draw, App, LinkTarget, TaskKind, View};
+use gwm::tui::{draw, App, Field, LinkTarget, TaskKind, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use std::path::PathBuf;
@@ -1244,4 +1244,666 @@ fn an_all_literal_pattern_set_names_no_field_at_all() {
       row_strings(&buf).join("\n")
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Titles ride the border (issue #549)
+// ---------------------------------------------------------------------------
+
+/// The row a title landed on, and whether that row also carries the modal's
+/// top rule. A title drawn *in* the rule shares its row with the corner and
+/// horizontal glyphs; a title on its own content row does not.
+fn title_row_has_rule(buf: &Buffer, needle: &str) -> Option<bool> {
+  row_strings(buf)
+    .into_iter()
+    .find(|row| row.contains(needle))
+    .map(|row| row.contains('╭') && row.contains('─'))
+}
+
+#[test]
+fn modal_titles_ride_the_top_rule_rather_than_a_content_row() {
+  // Issue #549: the title used to be a centred row inside the frame,
+  // followed by a blank spacer — four rows of chrome before a modal's
+  // first line of content, two of them carrying text ratatui draws in the
+  // rule for free.
+  //
+  // Checked structurally rather than by counting rows: the title's row
+  // must also carry the rounded top-left corner, which only the border
+  // draws. A regression that put the title back on its own line would
+  // find it on a row with no rule on it.
+  let (_dir, mut app) = make_app();
+
+  app.view = View::Create;
+  let buf = render(&mut app);
+  assert_eq!(
+    title_row_has_rule(&buf, "New Worktree"),
+    Some(true),
+    "the create modal's title must sit in the top rule — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+
+  let (_dir2, mut app) = make_app();
+  app.view = View::OpenMenu;
+  let buf = render(&mut app);
+  assert_eq!(
+    title_row_has_rule(&buf, "Open in Browser"),
+    Some(true),
+    "the open-menu modal's title must sit in the top rule — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn modal_frames_are_not_taller_than_their_content() {
+  // Validation feedback + Codex review on PR #546: moving the title into
+  // the top rule (#549) removed two rows from every modal's `lines`, but
+  // three call sites still added `+ 2 /* title */` to their height. The
+  // frame stayed two rows too tall, so the hint row floated with dead
+  // space under it.
+  //
+  // Checked as "no blank row between the last content row and the bottom
+  // rule": that is what the reader actually sees, and it holds whatever
+  // the sizing formula happens to be.
+  let (_dir, mut app) = make_app();
+  app.view = View::DetailOverlay;
+  app.open_agent_overlay();
+  let buf = render(&mut app);
+
+  let rows = row_strings(&buf);
+  let bottom = rows
+    .iter()
+    .rposition(|r| r.contains('╰'))
+    .expect("the modal must draw a bottom rule");
+  let last_content = rows[..bottom]
+    .iter()
+    .rposition(|r| {
+      // A content row inside the frame: has text between the side rules.
+      r.contains('│') && r.trim_matches(|c| c == '│' || c == ' ').len() > 1
+    })
+    .expect("the modal must have content");
+
+  // border row, one padding row, then the bottom rule — nothing else.
+  assert_eq!(
+    bottom - last_content,
+    2,
+    "the frame must end one padding row after its last content row, got {} rows of slack — rows:\n{}",
+    bottom - last_content - 1,
+    rows.join("\n")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Responsive sizing matrix (issue #550)
+// ---------------------------------------------------------------------------
+
+/// The modal's rect, located by the rounded corners its frame draws
+/// (`overlay_block` uses `BorderType::Rounded`). Returns `(x, y, w, h)`.
+///
+/// The oracle is only sound while the surfaces *behind* a modal draw no
+/// rounded corner of their own — `the_background_paints_no_rounded_corner`
+/// below is what keeps that honest.
+fn modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
+  let area = *buf.area();
+  let mut top_left = None;
+  'outer: for y in 0..area.height {
+    for x in 0..area.width {
+      if buf[(x, y)].symbol() == "╭" {
+        top_left = Some((x, y));
+        break 'outer;
+      }
+    }
+  }
+  let (x0, y0) = top_left?;
+  let x1 = (x0 + 1..area.width)
+    .find(|&x| buf[(x, y0)].symbol() == "╮")
+    .unwrap_or(x0);
+  let y1 = (y0 + 1..area.height)
+    .find(|&y| buf[(x0, y)].symbol() == "╰")
+    .unwrap_or(y0);
+  Some((x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// The rendered rows *inside* the modal frame. Needles asserted against the
+/// whole buffer can be satisfied by the statusbar or the worktree table behind
+/// the modal; these rows can only come from the modal itself.
+fn modal_rows(buf: &Buffer) -> Vec<String> {
+  let Some((x, y, w, h)) = modal_rect(buf) else {
+    return Vec::new();
+  };
+  (y..(y + h).min(buf.area().height))
+    .map(|row| {
+      (x..(x + w).min(buf.area().width))
+        .map(|col| buf[(col, row)].symbol())
+        .collect()
+    })
+    .collect()
+}
+
+fn modal_width_at(setup: &dyn Fn() -> (tempfile::TempDir, App), w: u16, h: u16) -> u16 {
+  let (_dir, mut app) = setup();
+  let buf = render_at(&mut app, w, h);
+  modal_rect(&buf)
+    .unwrap_or_else(|| panic!("no modal rendered at {w}x{h} — rows:\n{}", row_strings(&buf).join("\n")))
+    .2
+}
+
+type ModalSetup = Box<dyn Fn() -> (tempfile::TempDir, App)>;
+
+/// Every modal, with the width it must resolve to at the advertised 80-column
+/// floor and on an ultra-wide terminal. Exact values, deliberately: this is a
+/// characterisation matrix, so a refactor that moves a number has to say so.
+fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
+  vec![
+    (
+      "help",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_help();
+        (d, a)
+      }) as ModalSetup,
+      64,
+      96,
+    ),
+    (
+      "config-panel",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_config_panel();
+        (d, a)
+      }),
+      64,
+      96,
+    ),
+    (
+      "command-palette",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.open_command_palette();
+        (d, a)
+      }),
+      64,
+      96,
+    ),
+    (
+      "create",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_create();
+        (d, a)
+      }),
+      56,
+      72,
+    ),
+    (
+      "edit/rename",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-rename"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.enter_edit_worktree();
+        (d, a)
+      }),
+      56,
+      72,
+    ),
+    (
+      "confirm",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-one"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.enter_confirm_delete();
+        (d, a)
+      }),
+      64,
+      88,
+    ),
+    (
+      "open-menu",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_open_menu();
+        (d, a)
+      }),
+      64,
+      72,
+    ),
+    (
+      "link-prompt",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_link_prompt();
+        (d, a)
+      }),
+      64,
+      72,
+    ),
+    (
+      "exec-picker",
+      Box::new(|| {
+        let (d, _) = init_repo();
+        std::fs::write(
+          d.path().join(".gwm.toml"),
+          "[exec.profiles.build]\ncommand = [\"cargo\", \"build\"]\n",
+        )
+        .unwrap();
+        let mut a = App::new_at_layered(Some(d.path()), None).unwrap();
+        a.sidebar.open = false;
+        a.enter_exec_picker();
+        (d, a)
+      }),
+      72,
+      88,
+    ),
+    (
+      "detail/agents",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-agents"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.open_agent_overlay();
+        (d, a)
+      }),
+      72,
+      88,
+    ),
+    // Text canvases: the bootstrap report, the log transcript and the note
+    // editor render arbitrary external text, so they keep spending a bare
+    // percentage of the frame rather than going through `modal_width`. They
+    // have NO floor — the report's 64 at 80 columns is `80 * 80 / 100`, which
+    // merely happens to land on the same number the bounded surfaces are
+    // floored at. Pinned here anyway: an exemption nobody measures is how a
+    // matrix goes green while missing a surface.
+    (
+      "report",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.report = Some(BootstrapReport {
+          steps: vec![StepResult::ok("copy env file"), StepResult::skipped("npm i", "no pkg")],
+        });
+        a.view = View::Report;
+        (d, a)
+      }),
+      64,
+      160,
+    ),
+    (
+      "command-logs",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.view = View::CommandLogs;
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
+      "note-editor",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.worktrees.push(deletable_worktree("feat-550-note"));
+        a.list_state.select(Some(a.worktrees.len() - 1));
+        a.open_note_editor();
+        (d, a)
+      }),
+      64,
+      160,
+    ),
+  ]
+}
+
+#[test]
+fn the_background_paints_no_rounded_corner() {
+  // The matrix below finds each modal by its rounded top-left corner. That
+  // only works while nothing behind the modal draws one — if the worktree
+  // table or the sidebar ever grows a rounded frame, every measurement below
+  // silently starts describing the wrong rect. Prove the oracle, then use it.
+  for sidebar_open in [false, true] {
+    let (_dir, mut app) = make_app();
+    app.sidebar.open = sidebar_open;
+    let buf = render_at(&mut app, 120, 40);
+    let corners = (0..buf.area().height)
+      .flat_map(|y| (0..buf.area().width).map(move |x| (x, y)))
+      .filter(|&(x, y)| buf[(x, y)].symbol() == "╭")
+      .count();
+    assert_eq!(
+      corners,
+      0,
+      "View::List (sidebar open = {sidebar_open}) must paint no rounded corner, found {corners} — rows:\n{}",
+      row_strings(&buf).join("\n")
+    );
+  }
+}
+
+#[test]
+fn every_modal_resolves_to_its_pinned_width_at_the_80_column_floor() {
+  // The docs advertise the TUI at 80 columns. Pre-#550 the confirm modal was
+  // 49 columns wide there and its hint row read `Enter activa`; help was 48
+  // and its rows lost their tail behind the scrollbar. Every *bounded* modal
+  // now has a floor, so 80 columns is a size those surfaces were actually
+  // sized for. The three text canvases have none: their entries below are the
+  // plain percentage, pinned so a change to it still has to be declared.
+  for (name, setup, want_at_80, _) in sizing_matrix() {
+    assert_eq!(
+      modal_width_at(setup.as_ref(), 80, 24),
+      want_at_80,
+      "{name}: width at the 80-column floor"
+    );
+  }
+}
+
+#[test]
+fn every_modal_resolves_to_its_pinned_width_on_an_ultra_wide_terminal() {
+  // Pre-#550 the confirm modal was 124 columns wide at 200 for a four-row
+  // detail grid, and help / config / palette 120, because they sized on a
+  // bare percentage with no ceiling. The three text canvases (report,
+  // command-log transcript, note editor) still do, deliberately, and are
+  // pinned at that width rather than exempted from the matrix.
+  for (name, setup, _, want_at_200) in sizing_matrix() {
+    assert_eq!(
+      modal_width_at(setup.as_ref(), 200, 80),
+      want_at_200,
+      "{name}: width on a 200-column terminal"
+    );
+  }
+}
+
+#[test]
+fn no_modal_gets_narrower_as_the_terminal_gets_wider() {
+  // The render-level companion to
+  // `a_modal_never_shrinks_when_the_terminal_grows` in
+  // tests/tui_ui_helpers_tests.rs: the helpers being monotonic is worth
+  // nothing if a call site reintroduces the seam. Sampled across the
+  // 80-column boundary where the old branch lived.
+  const WIDTHS: [u16; 8] = [60, 79, 80, 81, 90, 100, 140, 200];
+  for (name, setup, _, _) in sizing_matrix() {
+    let mut previous = 0u16;
+    for w in WIDTHS {
+      let got = modal_width_at(setup.as_ref(), w, 40);
+      assert!(
+        got >= previous,
+        "{name}: widening the terminal to {w} cols shrank the modal from {previous} to {got}"
+      );
+      previous = got;
+    }
+  }
+}
+
+#[test]
+fn the_confirm_hint_row_is_not_cut_mid_word_at_80_columns() {
+  // The concrete symptom the floor fixes: at 49 columns the confirm modal's
+  // hint row was clipped by ratatui to `Enter activa` — no ellipsis, just a
+  // half-word. The last hint the row advertises must survive intact.
+  let (_dir, mut app) = make_app();
+  app.worktrees.push(deletable_worktree("feat-550-hint"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+
+  let buf = render_at(&mut app, 80, 24);
+  // Scanned INSIDE the modal rect, not over the whole buffer: the bottom
+  // statusbar advertises `Enter activate` too, so a whole-buffer search stays
+  // green with the modal's own hint row cut in half.
+  let rows = modal_rows(&buf);
+  assert!(
+    rows.iter().any(|r| r.contains("Enter activate")),
+    "the confirm hint row must render its last hint in full at 80 columns — modal rows:\n{}",
+    rows.join("\n")
+  );
+}
+
+#[test]
+fn the_confirm_modal_ellipsizes_to_the_width_its_frame_actually_gets() {
+  // #550, Codex review (P2). The confirm modal computed its ellipsis budget
+  // from `term.width * 62 / 100` by hand: a second copy of the sizing rule.
+  // Harmless while the frame was the same bare percentage, but once the
+  // policy gained an 88-column ceiling the two drifted, and at 200 columns
+  // the text was sized for 124 columns inside an 88-column frame.
+  // `ellipsize_middle` then left the string untouched and ratatui clipped it
+  // at the border, cutting off the very tail a middle-ellipsis exists to
+  // keep. One rule written twice is what let it drift, so the budget now
+  // comes from the frame itself.
+  let (_dir, mut app) = make_app();
+  let mut long = deletable_worktree("feat-550-long");
+  long.path =
+    PathBuf::from("/tmp/gwm-test/a-deliberately-long-worktree-directory-name/nested/deeper/still-deeper/TAIL-MARKER");
+  app.worktrees.push(long);
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+
+  let rows = modal_rows(&render_at(&mut app, 200, 40));
+  let path_row = rows.iter().find(|r| r.contains("Path")).unwrap_or_else(|| {
+    panic!(
+      "the confirm modal must render its Path row — modal rows:\n{}",
+      rows.join("\n")
+    )
+  });
+  assert!(
+    path_row.contains('…'),
+    "a path this long must be middle-ellipsized, not left for ratatui to clip — modal rows:\n{}",
+    rows.join("\n")
+  );
+  assert!(
+    path_row.contains("TAIL-MARKER"),
+    "the path's tail must survive: the budget has to be the frame's own width — row:\n{path_row}"
+  );
+}
+
+#[test]
+fn the_confirm_modal_ellipsizes_a_wide_glyph_path_by_its_cell_width() {
+  // #554, the other half of the same finding. The budget is a rect width,
+  // in cells; `ellipsize_middle` counted chars. This path is 52 chars and
+  // 77 cells against a value column the 88-column ceiling caps at 67, so
+  // the char count called it short and returned it whole. Measured, the
+  // row then renders as `Path` alone: label + value overflows the frame,
+  // the paragraph wraps (`Wrap { trim: false }`), and the value drops to
+  // the next row — the aligned label/value grid #187 built this modal for,
+  // gone. Narrower still and ratatui clips the tail outright.
+  let (_dir, mut app) = make_app();
+  let mut long = deletable_worktree("fix-554-wide");
+  long.path = PathBuf::from("/tmp/gwm-test/作業ディレクトリの深い入れ子/さらに深い階層構造の中/TAIL-MARKER");
+  app.worktrees.push(long);
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+
+  let rows = modal_rows(&render_at(&mut app, 200, 40));
+  let path_row = rows.iter().find(|r| r.contains("Path")).unwrap_or_else(|| {
+    panic!(
+      "the confirm modal must render its Path row — modal rows:\n{}",
+      rows.join("\n")
+    )
+  });
+  assert!(
+    path_row.contains('…'),
+    "a path this wide must be middle-ellipsized, not left for ratatui to clip — row:\n{path_row}"
+  );
+  assert!(
+    path_row.contains("TAIL-MARKER"),
+    "the path's tail must survive a cell-measured budget — row:\n{path_row}"
+  );
+}
+
+#[test]
+fn the_bootstrap_report_shows_a_long_hook_line_on_a_wide_terminal() {
+  // #550, Codex review (P2). The report displays arbitrary external text:
+  // hook stdout, error messages, paths. `render_section` hard-clips by
+  // design (one logical row = one visual row, no wrap, no horizontal
+  // scroll), so whatever does not fit the frame is simply unreachable.
+  //
+  // Capping the report at 96 columns therefore made a hook's error message
+  // 64 cells shorter at 200 columns than it had been. Nothing had reported
+  // that its 80 % width was a problem; the cap was taste, not a fix, so it
+  // is gone and the report sits with the other text canvases.
+  let (_dir, mut app) = make_app();
+  let detail = format!(
+    "error[E0432]: unresolved import `{}` at the end",
+    "very::long::module::path".repeat(3)
+  );
+  assert!(detail.chars().count() > 96, "the fixture must exceed the old cap");
+  app.report = Some(BootstrapReport {
+    steps: vec![StepResult::skipped("cargo build", &detail)],
+  });
+  app.view = View::Report;
+
+  let rows = modal_rows(&render_at(&mut app, 200, 40));
+  assert!(
+    rows.iter().any(|r| r.contains("at the end")),
+    "the tail of a long hook line must stay reachable on a wide terminal — modal rows:\n{}",
+    rows.join("\n")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Vertical overflow: a focused field must stay on screen (issue #553)
+// ---------------------------------------------------------------------------
+
+/// The modal's rows, with the frame proven *closed*.
+///
+/// `modal_rect` falls back to `y1 = y0` when it finds no bottom border, which
+/// collapses the rect to a single row — every "is this label on screen"
+/// assertion below would then fail for the wrong reason. On the short
+/// terminals this section renders, that fallback is exactly the plausible
+/// failure, so the oracle is checked before it is used.
+fn closed_modal_rows(buf: &Buffer, what: &str) -> Vec<String> {
+  let rows = modal_rows(buf);
+  assert!(
+    rows.last().is_some_and(|r| r.starts_with('╰')),
+    "{what}: the modal frame must be closed (bottom border found), \
+     otherwise `modal_rect` is describing the wrong rect — rows:\n{}",
+    rows.join("\n")
+  );
+  rows
+}
+
+/// How a form field's row starts: two columns of indent, the label padded to
+/// the 5-cell label column, then the two-column gap before the value. Precise
+/// enough that the footer hints — which name `field` and `type` as verbs —
+/// cannot satisfy it.
+fn field_row_needle(label: &str) -> String {
+  format!("  {:<5}  ", label)
+}
+
+fn field_label(field: Field) -> &'static str {
+  match field {
+    Field::Type => "Type",
+    Field::Issue => "Issue",
+    Field::Desc => "Desc",
+    Field::Name => "Name",
+  }
+}
+
+fn create_form_app() -> (tempfile::TempDir, App) {
+  let (d, mut a) = make_app();
+  a.enter_create();
+  (d, a)
+}
+
+fn rename_form_app() -> (tempfile::TempDir, App) {
+  let (d, mut a) = make_app();
+  a.worktrees.push(deletable_worktree("feat-553-rename"));
+  a.list_state.select(Some(a.worktrees.len() - 1));
+  a.enter_edit_worktree();
+  (d, a)
+}
+
+#[test]
+fn the_rename_form_keeps_its_desc_field_on_screen_at_16_rows() {
+  // The literal case from issue #553. The rename modal sizes to its content
+  // (18 rows: preview, blank, the field triple, buttons, hints) and
+  // `centered_abs` clamps that to the frame, so at 16 rows ratatui simply cut
+  // the tail off. What fell off was `Desc` — an *editable* field, and the one
+  // the modal opens focused on (`CreateForm::last_field`). The user types into
+  // a row that is not on screen.
+  let (_dir, mut app) = rename_form_app();
+  let buf = render_at(&mut app, 120, 16);
+  let rows = closed_modal_rows(&buf, "rename at 120x16");
+  let needle = field_row_needle("Desc");
+  assert!(
+    rows.iter().any(|r| r.contains(&needle)),
+    "the focused Desc field must be rendered at 120x16 — modal rows:\n{}",
+    rows.join("\n")
+  );
+}
+
+#[test]
+fn every_focused_form_field_stays_on_screen_on_a_short_terminal() {
+  // Written against the property (focused ⇒ visible) over the fields the
+  // repo's patterns actually present, not against a hand-typed list of cases:
+  // a pattern that drops a field must not be able to leave a hole here.
+  //
+  // 16 rows is where the rename modal first overflows, 12 is where both forms
+  // do by a wide margin.
+  for (name, setup) in [
+    ("create", create_form_app as fn() -> (tempfile::TempDir, App)),
+    ("rename", rename_form_app as fn() -> (tempfile::TempDir, App)),
+  ] {
+    for h in [16u16, 12] {
+      let (_dir, mut app) = setup();
+      let fields = app.create_form.fields().to_vec();
+      assert!(!fields.is_empty(), "{name}: the form must present at least one field");
+      for field in fields {
+        app.create_form.field = field;
+        let buf = render_at(&mut app, 120, h);
+        let rows = closed_modal_rows(&buf, &format!("{name} at 120x{h}"));
+        let needle = field_row_needle(field_label(field));
+        assert!(
+          rows.iter().any(|r| r.contains(&needle)),
+          "{name} at 120x{h}: the focused {field:?} field is off screen — \
+           the user edits a row they cannot see. Modal rows:\n{}",
+          rows.join("\n")
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn the_free_form_name_field_stays_on_screen_on_a_short_terminal() {
+  // Free-form mode renders one field instead of the triple, so it overflows
+  // later — but when it does, the row that falls off is the *only* input the
+  // mode has. `fields()` keeps reporting the structured triple in this mode
+  // (`toggle_mode` moves focus, not the field set), so the loop above never
+  // exercises `Field::Name`; it needs its own case.
+  for (name, setup) in [
+    ("create", create_form_app as fn() -> (tempfile::TempDir, App)),
+    ("rename", rename_form_app as fn() -> (tempfile::TempDir, App)),
+  ] {
+    for h in [16u16, 12] {
+      let (_dir, mut app) = setup();
+      app.create_form.toggle_mode();
+      assert_eq!(app.create_form.field, Field::Name, "{name}: free-form focuses Name");
+      let buf = render_at(&mut app, 120, h);
+      let rows = closed_modal_rows(&buf, &format!("{name} free-form at 120x{h}"));
+      let needle = field_row_needle("Name");
+      assert!(
+        rows.iter().any(|r| r.contains(&needle)),
+        "{name} free-form at 120x{h}: the Name field is off screen — it is the \
+         only input this mode has. Modal rows:\n{}",
+        rows.join("\n")
+      );
+    }
+  }
+}
+
+#[test]
+fn a_form_that_had_to_scroll_says_so() {
+  // Scrolling the focused field into view fixes the loss, but on its own it
+  // trades a silent truncation for a silent scroll. The forms borrow the
+  // Settings panel's scrollbar (`scrollable_body_area`), which paints a thumb
+  // only when the content outruns its viewport — so the indicator is also the
+  // assertion that the form is not scrolling when it does not need to.
+  let (_dir, mut app) = rename_form_app();
+
+  let rows = closed_modal_rows(&render_at(&mut app, 120, 12), "rename at 120x12");
+  assert!(
+    rows.iter().any(|r| r.contains('█')),
+    "a form whose fields do not fit must show a scrollbar — modal rows:\n{}",
+    rows.join("\n")
+  );
+
+  let rows = closed_modal_rows(&render_at(&mut app, 120, 40), "rename at 120x40");
+  assert!(
+    !rows.iter().any(|r| r.contains('█')),
+    "a form that fits must not show a scrollbar — modal rows:\n{}",
+    rows.join("\n")
+  );
 }

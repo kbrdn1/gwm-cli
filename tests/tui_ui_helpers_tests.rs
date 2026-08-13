@@ -9,11 +9,11 @@ use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, bootstrap_report_lines, centered_abs, confirm_buttons_line, create_buttons_line, ellipsize_middle,
-  field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, recent_items_pane_title,
-  status_pane_title, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, confirm_buttons_line,
+  create_buttons_line, ellipsize_middle, field_input_line, form_field_scroll, link_prompt_modal_width,
+  link_target_line, modal_hint_line, pad_cells, pane_counter, recent_items_pane_title, status_pane_title,
+  type_selector_line, working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts,
+  worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
@@ -21,6 +21,24 @@ use gwm::tui::{
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use unicode_width::UnicodeWidthStr;
+
+/// Cells the renderer actually paints for `s`: the cursor `set_stringn`
+/// leaves behind. The oracle for every cell-budget assertion here that
+/// `unicode-width` alone would get wrong.
+fn painted(s: &str) -> usize {
+  let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 120, 1));
+  let (x, _) = buf.set_stringn(0, 0, s, 120, Style::default());
+  usize::from(x)
+}
+
+/// Same oracle for a whole `Line`, span by span — which is how ratatui draws
+/// one. Not `Line::width()`: that sums `Span::width()`, i.e.
+/// `UnicodeWidthStr::width`, which is the measure under test rather than the
+/// one the renderer applies (issue #562).
+fn painted_line(line: &ratatui::text::Line<'_>) -> usize {
+  line.spans.iter().map(|s| painted(&s.content)).sum()
+}
 
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
@@ -34,7 +52,7 @@ fn ellipsize_middle_keeps_head_and_tail_around_the_ellipsis() {
   // A long path keeps both its root and the worktree name at the end.
   let s = "/Users/kb/Projects/Flippad/worktrees/chore-880-drop-deprecated";
   let out = ellipsize_middle(s, 20);
-  assert_eq!(out.chars().count(), 20, "must fit exactly within max");
+  assert_eq!(painted(&out), 20, "must fit exactly within max");
   assert!(out.contains('…'), "must carry the middle ellipsis: {out}");
   assert!(out.starts_with("/Users"), "keeps the head: {out}");
   // Tail length is `max - 1 - ceil((max-1)/2)` chars, so a suffix that
@@ -50,13 +68,153 @@ fn ellipsize_middle_degrades_to_a_single_ellipsis_when_too_narrow() {
 }
 
 #[test]
-fn ellipsize_middle_counts_chars_not_bytes() {
-  // Multi-byte segments must not be sliced mid-codepoint, and the budget
-  // is measured in chars.
+fn ellipsize_middle_never_slices_a_codepoint() {
+  // Multi-byte segments must not be sliced mid-codepoint. These accents
+  // are one cell each, so the budget spends exactly.
   let s = "~/Projets/dépôt-très-long/branche-accentuée-éàü";
   let out = ellipsize_middle(s, 15);
-  assert_eq!(out.chars().count(), 15);
+  assert_eq!(painted(&out), 15);
   assert!(out.contains('…'));
+}
+
+#[test]
+fn ellipsize_middle_measures_in_terminal_cells_not_chars() {
+  // Issue #554. Every caller's budget is the width of a ratatui rect, in
+  // cells. A CJK path counts one char per two columns drawn, so a char
+  // count judged this short, returned it whole, and ratatui clipped the
+  // tail the middle ellipsis exists to keep. Same measure, and the same
+  // per-glyph walk, as `compact_header_line`.
+  let s = "/tmp/作業ディレクトリ/深い/入れ子/TAIL";
+  assert!(s.chars().count() < 30, "the fixture must fit the budget in chars");
+  assert!(painted(s) > 30, "and overflow it in cells");
+
+  let out = ellipsize_middle(s, 30);
+  assert!(painted(&out) <= 30, "must fit the cell budget: {} cells", painted(&out));
+  assert!(out.contains('…'), "must carry the middle ellipsis: {out}");
+  assert!(out.starts_with("/tmp"), "keeps the head: {out}");
+  assert!(out.ends_with("TAIL"), "keeps the tail: {out}");
+}
+
+#[test]
+fn ellipsize_middle_drops_a_wide_glyph_rather_than_half_drawing_it() {
+  // A 2-cell glyph against a 1-cell remainder is dropped whole, so the
+  // result is `<= max` cells rather than exactly `max` — half a glyph is
+  // not a thing a terminal can draw. The budget is never overspent.
+  for max in 2..=12 {
+    let out = ellipsize_middle("作業ディレクトリの名前", max);
+    assert!(
+      painted(&out) <= max,
+      "max={max} overspent: {out:?} is {} cells",
+      painted(&out)
+    );
+  }
+}
+
+#[test]
+fn ellipsize_middle_measures_sequences_whole_not_char_by_char() {
+  // Codex review on PR #561. `unicode-width` reads `"*\u{FE0F}"` as 2 cells
+  // but its two chars in isolation as 1 and 0, so a per-char sum undercounts
+  // every variation-selector sequence. Measured before the fix: this string
+  // budgeted at 30 came back 59 cells wide.
+  let s = "*\u{FE0F}".repeat(20);
+  assert_eq!(painted(&s), 40, "the fixture must overflow the budget");
+  for max in 2..=30 {
+    let out = ellipsize_middle(&s, max);
+    assert!(
+      painted(&out) <= max,
+      "max={max} overspent: {out:?} is {} cells",
+      painted(&out)
+    );
+  }
+}
+
+#[test]
+fn ellipsize_middle_cuts_on_grapheme_boundaries() {
+  // Codex review on PR #561, second pass. Walking codepoints let the cut
+  // fall between a base and its combining mark: `("作作\u{0301}", 3)` came
+  // back as `"…\u{0301}"`, an accent landing on the ellipsis and not one
+  // character of the path kept.
+  let out = ellipsize_middle("作作\u{0301}", 3);
+  assert!(painted(&out) <= 3, "{out:?} is {} cells", painted(&out));
+  assert!(
+    !out.starts_with('…') || out.chars().nth(1) != Some('\u{0301}'),
+    "a combining mark must not be left to attach to the ellipsis: {out:?}"
+  );
+  // A tail that keeps the accented glyph keeps its base with it.
+  let out = ellipsize_middle("/tmp/a/e\u{0301}", 5);
+  assert!(painted(&out) <= 5, "{out:?} is {} cells", painted(&out));
+  assert!(
+    !out.contains('\u{0301}') || out.contains("e\u{0301}"),
+    "the mark travels with its base: {out:?}"
+  );
+}
+
+#[test]
+fn ellipsize_middle_budgets_the_cells_the_renderer_paints() {
+  // Codex review on PR #561, third pass, verified against `set_stringn`
+  // rather than taken on the report. `UnicodeWidthStr::width` on the whole
+  // string undercounts twice over, and both cases are real text:
+  //
+  //   "لالالا"   unicode-width 3, painted 6 (lam-alef reads as a ligature)
+  //   "ｶﾞｶﾞｶﾞ"   unicode-width 3, painted 6 (U+FF9E is Grapheme_Extend, but
+  //              terminals give the halfwidth dakuten its own cell)
+  //
+  // Either one sailed through the early return and overflowed the frame.
+  for s in ["لالالا", "ｶﾞｶﾞｶﾞ", "ﾊﾟﾊﾟﾊﾟﾊﾟ", "لا/tmp/لالا"] {
+    assert!(
+      painted(s) > s.width(),
+      "the fixture must be one unicode-width gets wrong: {s:?}"
+    );
+    for max in 2..=painted(s) {
+      let out = ellipsize_middle(s, max);
+      assert!(
+        painted(&out) <= max,
+        "{s:?} at max={max} came back {} painted cells: {out:?}",
+        painted(&out)
+      );
+    }
+  }
+}
+
+#[test]
+fn ellipsize_middle_survives_a_control_character() {
+  // Codex review on PR #561, fourth pass. `CellWidth::cell_width` carries a
+  // `debug_assert!` that a one-byte ASCII grapheme is not a control: ratatui
+  // filters controls in `set_stringn` before measuring, so the assert states
+  // the contract rather than leaving it implied. `ellipsize_middle` does not
+  // sanitise (that is `trunc`'s job, #506) and a Unix path may legally hold a
+  // newline, so measuring one directly panicked every debug build, this suite
+  // included.
+  let s = "/tmp/gwm\ttest/a\nb/一二三四五六七八九十/TAIL";
+  let out = ellipsize_middle(s, 20);
+  assert!(painted(&out) <= 20, "{out:?} paints {} cells", painted(&out));
+  assert!(out.ends_with("TAIL"), "keeps the tail: {out:?}");
+  // A control measures nothing, exactly as the renderer treats it, so it
+  // never spends budget a drawable glyph could have had.
+  assert_eq!(painted("a\tb"), painted("ab"));
+}
+
+#[test]
+fn pad_cells_pads_to_the_cells_the_renderer_paints() {
+  // Same measure on the padding side: `pad_cells` undercounting means the
+  // right-pinned size column of the `clean` report leaves the frame.
+  for s in ["لا", "ｶﾞ", "作業", "ab"] {
+    let out = pad_cells(s, 10);
+    assert_eq!(painted(&out), 10, "{s:?} padded to {:?}", out);
+  }
+}
+
+#[test]
+fn pad_cells_fills_a_row_by_cells_so_a_pinned_column_stays_put() {
+  // The other half of #554. A picker row and a reclaim row pad the
+  // ellipsized value to the column width; `{:<w$}` counts chars, so once
+  // the value is cell-measured a wide-glyph row got padded past its budget
+  // and pushed the right-pinned size column off the frame.
+  assert_eq!(painted(&pad_cells("ab", 5)), 5);
+  let wide = pad_cells("作業", 8);
+  assert_eq!(painted(&wide), 8, "4 cells of text, 4 of padding: {wide:?}");
+  // Never trims: a value already at or over the column keeps its cells.
+  assert_eq!(pad_cells("作業ディレクトリ", 4), "作業ディレクトリ");
 }
 
 #[test]
@@ -127,7 +285,7 @@ fn worktrees_pane_title_unfiltered_shows_total_with_focus_index() {
   // No filter (empty query, not active) → the `(N)` counter is the full
   // worktree count, and the pane carries the `[1]` focus mnemonic (focusable
   // with the `1` key). Casing is fixed to `Worktrees`.
-  let line = worktrees_pane_title("", false, 5, 5, Color::Yellow);
+  let line = worktrees_pane_title("", false, 5, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees (5) ");
 }
 
@@ -136,7 +294,7 @@ fn worktrees_pane_title_active_filter_shows_query_cursor_and_ratio() {
   // Issue #262: the live `/` filter renders in the pane title. While typing
   // (active), the title carries the `/query`, a block cursor, and the
   // `(visible/total)` ratio so the user sees how much the filter narrowed.
-  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow);
+  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees /au\u{2588} (3/5) ");
 }
 
@@ -145,7 +303,7 @@ fn worktrees_pane_title_sticky_filter_shows_query_without_cursor() {
   // Sticky (committed) filter: the query stays visible in the title for
   // context, but with no cursor (the bar is closed) and a compact form — no
   // oversized hint.
-  let line = worktrees_pane_title("au", false, 3, 5, Color::Yellow);
+  let line = worktrees_pane_title("au", false, 3, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees /au (3/5) ");
 }
 
@@ -153,7 +311,7 @@ fn worktrees_pane_title_sticky_filter_shows_query_without_cursor() {
 fn worktrees_pane_title_active_empty_query_shows_prompt_and_total() {
   // Just opened the bar with an empty buffer: the `/` prompt + cursor show,
   // but the counter stays the `(total)` form (an empty query matches all).
-  let line = worktrees_pane_title("", true, 5, 5, Color::Yellow);
+  let line = worktrees_pane_title("", true, 5, 5, Color::Yellow, false);
   assert_eq!(title_text(&line), " [1] Worktrees /\u{2588} (5) ");
 }
 
@@ -161,7 +319,7 @@ fn worktrees_pane_title_active_empty_query_shows_prompt_and_total() {
 fn worktrees_pane_title_paints_the_slash_in_the_filter_colour() {
   // The `/` prompt keeps its dedicated filter colour (historically the
   // `dirty` role) so it reads as an editable affordance, not chrome.
-  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow);
+  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow, false);
   let slash = line
     .spans
     .iter()
@@ -174,16 +332,140 @@ fn worktrees_pane_title_paints_the_slash_in_the_filter_colour() {
 fn status_pane_title_carries_the_focus_index() {
   // The sidebar reads as the `[2] Status` pane (focusable with `2`),
   // mirroring `[1] Worktrees`.
-  assert_eq!(status_pane_title(), " [2] Status ");
+  assert_eq!(status_pane_title(false), " [2] Status ");
+}
+
+#[test]
+fn compact_titles_keep_the_bracket_shape_and_shout_the_label() {
+  // Issue #545 + validation feedback on PR #546: compact only changes
+  // the *case*, never the shape. The chord stays bracketed and keeps its
+  // side — leading for a focusable pane (`[1]`, `[2]`), trailing for a
+  // sub-pane — because that is how every other surface in the TUI writes
+  // a key. Uppercase is what marks the line as chrome now that no rule
+  // delimits it.
+  let km = Keymap::defaults();
+  assert_eq!(status_pane_title(true), " [2] STATUS ");
+  assert_eq!(issue_pr_pane_title(&km, true), " ISSUE / PR [F] ");
+  assert_eq!(working_tree_pane_title(&km, true), " WORKING TREE [R] ");
+  assert_eq!(
+    recent_items_pane_title(SidebarMode::Commits, &km, true),
+    " RECENT COMMITS [L] "
+  );
+  assert_eq!(
+    recent_items_pane_title(SidebarMode::Stashes, &km, true),
+    " STASHES [L] "
+  );
+  // Same shape as the bordered form, case aside — the property the
+  // feedback asked for, stated as one assertion rather than five.
+  for (compact, bordered) in [
+    (issue_pr_pane_title(&km, true), issue_pr_pane_title(&km, false)),
+    (working_tree_pane_title(&km, true), working_tree_pane_title(&km, false)),
+  ] {
+    assert_eq!(
+      compact.to_uppercase(),
+      bordered.to_uppercase(),
+      "compact must not reorder or re-punctuate the title"
+    );
+  }
+}
+
+#[test]
+fn compact_header_line_fills_the_width_and_right_aligns_the_counter() {
+  // Issue #545: the counter moves out of the bottom rule (which no longer
+  // exists) onto the right of the header line, so a section spends one row
+  // on chrome instead of two. The line is padded to the full width because
+  // the fill has to reach the right edge — a header that stops at its text
+  // reads as a stray highlighted word, not as a section boundary.
+  let line = compact_header_line(
+    ratatui::text::Line::from(" 1 WORKTREES "),
+    Some(ratatui::text::Line::from(" 3 of 5 ")),
+    30,
+    Color::Cyan,
+  );
+  let text = title_text(&line);
+  assert_eq!(text.chars().count(), 30, "header must span the pane width: {text:?}");
+  assert!(text.starts_with(" 1 WORKTREES "), "title leads: {text:?}");
+  assert!(text.ends_with(" 3 of 5 "), "counter is flushed right: {text:?}");
+}
+
+#[test]
+fn compact_header_line_without_a_counter_still_spans_the_width() {
+  let line = compact_header_line(ratatui::text::Line::from(" 2 STATUS "), None, 18, Color::Cyan);
+  let text = title_text(&line);
+  assert_eq!(text.chars().count(), 18, "got {text:?}");
+  assert!(text.starts_with(" 2 STATUS "), "got {text:?}");
+}
+
+#[test]
+fn compact_header_line_drops_the_counter_before_the_title() {
+  // A narrow pane cannot show both. The title carries the focus mnemonic
+  // and says *what* the section is, so it is the half that survives; the
+  // counter is the first thing cut, then the title itself is truncated.
+  let line = compact_header_line(
+    ratatui::text::Line::from(" 1 WORKTREES "),
+    Some(ratatui::text::Line::from(" 3 of 5 ")),
+    14,
+    Color::Cyan,
+  );
+  let text = title_text(&line);
+  assert_eq!(text.chars().count(), 14, "got {text:?}");
+  assert!(
+    !text.contains("of"),
+    "counter dropped rather than overlapping: {text:?}"
+  );
+
+  let squeezed = compact_header_line(ratatui::text::Line::from(" 1 WORKTREES "), None, 6, Color::Cyan);
+  let text = title_text(&squeezed);
+  assert_eq!(text.chars().count(), 6, "never overflows the pane: {text:?}");
+}
+
+#[test]
+fn compact_header_line_paints_unstyled_spans_with_the_focus_accent() {
+  // Focus indication moves from the border colour to the header text —
+  // that is the whole signal once the rules are gone. Spans that already
+  // carry a colour (the filter `/` prompt) keep theirs: they encode
+  // something other than focus.
+  let title = ratatui::text::Line::from(vec![
+    ratatui::text::Span::raw(" 1 WORKTREES "),
+    ratatui::text::Span::styled("/", Style::default().fg(Color::Yellow)),
+  ]);
+  let line = compact_header_line(title, None, 30, Color::Magenta);
+  let plain = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("WORKTREES"))
+    .expect("title span");
+  assert_eq!(plain.style.fg, Some(Color::Magenta), "unstyled title wears the accent");
+  let slash = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "/")
+    .expect("slash span");
+  assert_eq!(
+    slash.style.fg,
+    Some(Color::Yellow),
+    "an already-coloured span is left alone"
+  );
+}
+
+#[test]
+fn compact_titles_still_track_a_rebound_chord() {
+  // The chord in a compact header is resolved live, exactly like the
+  // bracketed one — a user who rebinds `F` must see the new key lead
+  // the header rather than a stale literal.
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
+    .unwrap();
+  assert_eq!(issue_pr_pane_title(&km, true), " ISSUE / PR [Ctrl+g] ");
 }
 
 #[test]
 fn sidebar_subpane_titles_surface_live_bindings() {
   let mut km = Keymap::defaults();
-  assert_eq!(issue_pr_pane_title(&km), " Issue / PR [F] ");
-  assert_eq!(working_tree_pane_title(&km), " Working Tree [R] ");
+  assert_eq!(issue_pr_pane_title(&km, false), " Issue / PR [F] ");
+  assert_eq!(working_tree_pane_title(&km, false), " Working Tree [R] ");
   assert_eq!(
-    recent_items_pane_title(SidebarMode::Commits, &km),
+    recent_items_pane_title(SidebarMode::Commits, &km, false),
     " Recent Commits [L] "
   );
 
@@ -200,10 +482,10 @@ fn sidebar_subpane_titles_surface_live_bindings() {
   )
   .unwrap();
 
-  assert_eq!(issue_pr_pane_title(&km), " Issue / PR [Ctrl+g] ");
-  assert_eq!(working_tree_pane_title(&km), " Working Tree [Ctrl+r] ");
+  assert_eq!(issue_pr_pane_title(&km, false), " Issue / PR [Ctrl+g] ");
+  assert_eq!(working_tree_pane_title(&km, false), " Working Tree [Ctrl+r] ");
   assert_eq!(
-    recent_items_pane_title(SidebarMode::Commits, &km),
+    recent_items_pane_title(SidebarMode::Commits, &km, false),
     " Recent Commits [Ctrl+l] "
   );
 }
@@ -913,6 +1195,42 @@ fn centered_abs_caps_height_taller_than_the_area() {
   );
 }
 
+// ---- form_field_scroll (issue #553) ----------------------------------------
+
+#[test]
+fn form_field_scroll_stays_put_while_the_focused_row_fits() {
+  // The whole point of deriving the offset from focus: a form that fits its
+  // frame renders exactly as it did before #553, at offset 0. The last row a
+  // `height`-row viewport shows is `height - 1`, so that one still scrolls
+  // nothing.
+  for focus in 0..8usize {
+    assert_eq!(form_field_scroll(focus, 8), 0, "row {focus} fits an 8-row viewport");
+  }
+}
+
+#[test]
+fn form_field_scroll_pans_the_minimum_to_reveal_the_focused_row() {
+  // One row past the viewport pans by exactly one: the focused field lands on
+  // the last visible row, keeping as much of the form above it on screen as
+  // the frame allows.
+  assert_eq!(form_field_scroll(8, 8), 1);
+  assert_eq!(form_field_scroll(9, 8), 2);
+  // The rename form's own numbers: `Desc` sits on row 9 of 10, and a 120x16
+  // terminal leaves the body 8 rows.
+  assert_eq!(form_field_scroll(9, 8), 2, "rename at 120x16");
+  // ...and 4 rows at 120x12.
+  assert_eq!(form_field_scroll(9, 4), 6, "rename at 120x12");
+}
+
+#[test]
+fn form_field_scroll_survives_a_zero_row_viewport() {
+  // A frame so short the body layout resolves to nothing: `Constraint::Min(1)`
+  // still yields 0 rows once the four fixed rows have taken the space. There
+  // is nothing to reveal, and the arithmetic must not underflow.
+  assert_eq!(form_field_scroll(0, 0), 1);
+  assert_eq!(form_field_scroll(9, 0), 10);
+}
+
 // ---- working_tree_status_counts / footer (issue #287) ----------------------
 
 #[test]
@@ -1065,4 +1383,196 @@ fn overlay_modal_width_is_wider_but_clamped() {
   assert!(overlay_modal_width(300) <= 88);
   assert!(overlay_modal_width(40) <= 40);
   assert!(overlay_modal_width(50) >= 45, "narrow terminals still get a usable box");
+}
+
+#[test]
+fn a_modal_never_shrinks_when_the_terminal_grows() {
+  // #550. Both helpers used to branch on `term_width <= 80` to spend a bigger
+  // percentage on a small terminal, which made width NON-MONOTONIC: dragging
+  // a pane from 80 to 81 columns collapsed the link prompt by 16 columns and
+  // the exec/clean/detail overlay by 22. A modal may stop growing; it must
+  // never get narrower because the terminal got wider.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  for w in 20u16..300 {
+    for (name, f) in [
+      ("link_prompt_modal_width", link_prompt_modal_width as fn(u16) -> u16),
+      ("overlay_modal_width", overlay_modal_width as fn(u16) -> u16),
+    ] {
+      let (here, next) = (f(w), f(w + 1));
+      assert!(
+        next >= here,
+        "{name}: growing the terminal from {w} to {} cols shrank the modal from {here} to {next} cols",
+        w + 1
+      );
+    }
+  }
+}
+
+#[test]
+fn the_width_policy_is_monotonic_and_bounded_for_any_knobs() {
+  // Every one of the seven distinct knob sets in use, the two the wrappers
+  // above cover included. The property belongs to the policy, not to its
+  // callers: whatever (pct, min, max) a future overlay picks, its width must
+  // never shrink as the terminal grows, never break its ceiling, and never
+  // reach the frame edge.
+  use gwm::tui::modal_width;
+  for (pct, min_cols, max_cols) in [
+    (40, 40, 64), // confirm, nothing-selected fallback
+    (60, 64, 72), // open-menu / link prompt
+    (60, 64, 96), // help, config, command palette
+    (62, 64, 88), // confirm, destructive summary
+    (62, 72, 88), // exec picker, clean, detail
+    (70, 56, 72), // create, rename
+    (80, 64, 96), // bootstrap report
+  ] {
+    let mut previous = 0u16;
+    for w in 20u16..=300 {
+      let got = modal_width(w, pct, min_cols, max_cols);
+      assert!(
+        got >= previous,
+        "({pct}%, [{min_cols}, {max_cols}]): {w} cols gave {got}, narrower than the {previous} before it"
+      );
+      assert!(
+        got <= max_cols,
+        "({pct}%, [{min_cols}, {max_cols}]): {w} cols broke the ceiling with {got}"
+      );
+      assert!(
+        got <= w.saturating_sub(4),
+        "({pct}%, [{min_cols}, {max_cols}]): {w} cols gave {got}, under 2 columns of margin per side"
+      );
+      previous = got;
+    }
+  }
+}
+
+#[test]
+fn a_modal_always_leaves_a_margin_inside_the_frame() {
+  // #550: the floor that kills the seam above must not let a modal grow into
+  // the frame edge on a narrow terminal — the border would hug column 0.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  for w in 20u16..=300 {
+    for (name, f) in [
+      ("link_prompt_modal_width", link_prompt_modal_width as fn(u16) -> u16),
+      ("overlay_modal_width", overlay_modal_width as fn(u16) -> u16),
+    ] {
+      let got = f(w);
+      assert!(
+        got <= w.saturating_sub(4),
+        "{name}: at {w} cols the modal is {got} wide, leaving under 2 columns of margin per side"
+      );
+    }
+  }
+}
+
+#[test]
+fn compact_header_line_measures_in_terminal_cells_not_chars() {
+  // Codex review, PR #546: the header was padded with `chars().count()`,
+  // which counts one for a wide character that ratatui draws in two
+  // cells. A filter query containing CJK or an emoji therefore produced a
+  // line wider than the pane — the right-aligned counter fell off the
+  // edge — because the padding was computed against an undercount.
+  //
+  // Asserted against what `set_stringn` paints, not against `Line::width()`
+  // — that one sums `Span::width()`, the measure the helper itself uses, so
+  // it would agree with a wrong implementation (issue #562).
+  let title = ratatui::text::Line::from(" [1] WORKTREES /界 ");
+  let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Color::Cyan);
+  assert_eq!(
+    painted_line(&line),
+    40,
+    "the header must span exactly the pane width in cells, got {}: {:?}",
+    painted_line(&line),
+    title_text(&line)
+  );
+}
+
+#[test]
+fn compact_header_line_truncates_wide_glyphs_by_cell_budget() {
+  // Same measure on the narrow path: a title of wide glyphs alone must be
+  // cut to the cell budget, never past it. Cutting by char count would
+  // leave a line twice as wide as the pane.
+  let title = ratatui::text::Line::from("界界界界界界界界");
+  let line = compact_header_line(title, None, 9, Color::Cyan);
+  assert!(
+    painted_line(&line) <= 9,
+    "must never exceed the pane width in cells, got {}",
+    painted_line(&line)
+  );
+}
+
+/// Titles `unicode-width` reads narrower than the renderer paints them, with
+/// the two measures spelled out. CJK is deliberately absent: `UnicodeWidthStr`
+/// and `CellWidth` agree on it, which is why #546 shipped `Span::width()` and
+/// why every fixture above stays green either way.
+const UNDERCOUNTED: &[(&str, usize, usize)] = &[
+  // Lam-alef is a ligature to `unicode-width`; the renderer walks graphemes
+  // and paints both letters.
+  ("لالالالالا", 5, 10),
+  // U+FF9E carries `Grapheme_Extend`, so `unicode-width` gives it no cell,
+  // but a terminal draws the halfwidth dakuten in one and ratatui adds it back.
+  ("ｶﾞｶﾞｶﾞｶﾞｶﾞ", 5, 10),
+];
+
+#[test]
+fn compact_header_line_pads_against_the_cells_the_renderer_paints() {
+  for (title, narrow, wide) in UNDERCOUNTED {
+    assert_eq!(
+      (UnicodeWidthStr::width(*title), painted(title)),
+      (*narrow, *wide),
+      "{title:?} must be a case the two measures disagree on, or this proves nothing"
+    );
+    let counter = ratatui::text::Line::from(" 3 of 5 ");
+    let line = compact_header_line(
+      ratatui::text::Line::from(title.to_string()),
+      Some(counter),
+      20,
+      Color::Cyan,
+    );
+    // Padding computed against the undercount leaves the line wider than the
+    // pane, which pushes the right-aligned counter off it.
+    assert_eq!(
+      painted_line(&line),
+      20,
+      "{title:?}: header painted {} cells into a 20-cell pane: {:?}",
+      painted_line(&line),
+      title_text(&line)
+    );
+  }
+}
+
+#[test]
+fn compact_header_line_truncates_by_the_cells_the_renderer_paints() {
+  for (title, narrow, wide) in UNDERCOUNTED {
+    // Narrower than what gets painted, wider than what `unicode-width` reads:
+    // the truncation branch is only entered at all once the measure is right.
+    let width = (narrow + wide) / 2;
+    let line = compact_header_line(
+      ratatui::text::Line::from(title.to_string()),
+      None,
+      width as u16,
+      Color::Cyan,
+    );
+    assert!(
+      painted_line(&line) <= width,
+      "{title:?}: title painted {} cells into a {width}-cell pane: {:?}",
+      painted_line(&line),
+      title_text(&line)
+    );
+  }
+}
+
+#[test]
+fn compact_header_line_truncates_sequences_whole_not_char_by_char() {
+  // The truncation branch used to step `UnicodeWidthChar::width` per char. A
+  // variation selector reads 0 there while the sequence it completes paints 2,
+  // so every one of these was free and the whole title survived its budget.
+  let title = "*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}";
+  assert_eq!(painted(title), 10, "fixture must paint two cells per sequence");
+  let line = compact_header_line(ratatui::text::Line::from(title), None, 5, Color::Cyan);
+  assert!(
+    painted_line(&line) <= 5,
+    "title painted {} cells into a 5-cell pane: {:?}",
+    painted_line(&line),
+    title_text(&line)
+  );
 }

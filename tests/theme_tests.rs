@@ -42,6 +42,34 @@ fn default_theme_matches_pre_issue_33_scheme() {
   assert_eq!(t.staged, Color::Cyan, "staged role default → Cyan");
   assert_eq!(t.modified, Color::Yellow, "modified role default → Yellow");
   assert_eq!(t.untracked, Color::Green, "untracked role default → Green");
+  // #545: the compact-mode section header fill. Indexed rather than `Rgb`
+  // so it survives a terminal without truecolor — a translucent white
+  // does not exist in ANSI 256, which is the fill the mock-up asked for.
+  assert_eq!(
+    t.section_bg,
+    Color::Indexed(236),
+    "section_bg role default → indexed 236"
+  );
+}
+
+#[test]
+fn section_bg_never_collides_with_selection_bg() {
+  // #545 acceptance: row selection already paints a background. Once
+  // section headers gain one too, the two must stay tellable apart —
+  // otherwise a header reads as a selected row. Checked on the default
+  // theme *and* every shipped preset, because the pair is chosen
+  // per-palette and a copy-paste slip is exactly how they'd converge.
+  let mut themes = vec![("default", Theme::default())];
+  for name in preset_names() {
+    themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
+  }
+  for (name, t) in themes {
+    assert_ne!(
+      t.section_bg, t.selection_bg,
+      "theme {:?}: section header fill must differ from the selection background",
+      name
+    );
+  }
 }
 
 #[test]
@@ -59,6 +87,20 @@ fn apply_override_replaces_git_status_roles() {
   assert_eq!(t.accent, Color::Cyan, "accent untouched by staged override");
   assert_eq!(t.dirty, Color::Yellow, "dirty untouched by modified override");
   assert_eq!(t.clean, Color::Green, "clean untouched by untracked override");
+}
+
+#[test]
+fn apply_override_replaces_section_bg_role() {
+  // #545: users on an unusual terminal background need to retune the
+  // compact header fill without forking a preset.
+  let mut t = Theme::default();
+  t.apply_override("section_bg", "#1f2335").unwrap();
+  assert_eq!(t.section_bg, Color::Rgb(0x1f, 0x23, 0x35), "section_bg override wins");
+  assert_eq!(
+    t.selection_bg,
+    Color::DarkGray,
+    "selection_bg untouched by section_bg override"
+  );
 }
 
 #[test]
