@@ -5527,8 +5527,22 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
 /// exactly what `Buffer::set_stringn` calls. Reproducing the rule here instead
 /// would be a second copy of it, and #550 is the story of what a second copy
 /// of a sizing rule does.
+///
+/// Controls are skipped, which is the other half of matching the renderer:
+/// `set_stringn` filters them before measuring, and `cell_width` carries a
+/// `debug_assert!` saying so. A Unix path may legally hold a `\n`, and this
+/// helper does not sanitise (that is `trunc`'s job, #506), so measuring one
+/// directly panicked every debug build.
 fn cells(s: &str) -> usize {
-  s.graphemes(true).map(|g| usize::from(g.cell_width())).sum()
+  s.graphemes(true).map(grapheme_cells).sum()
+}
+
+fn grapheme_cells(g: &str) -> usize {
+  if g.chars().all(char::is_control) {
+    0
+  } else {
+    usize::from(g.cell_width())
+  }
 }
 
 /// Middle-ellipsize `s` to at most `max` terminal cells, keeping the head
@@ -5571,7 +5585,7 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   let mut head_end = 0usize;
   let mut used = 0usize;
   for (i, g) in s.grapheme_indices(true) {
-    let w = usize::from(g.cell_width());
+    let w = grapheme_cells(g);
     if used + w > head {
       break;
     }
@@ -5581,7 +5595,7 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   let mut tail_start = s.len();
   let mut used = 0usize;
   for (i, g) in s.grapheme_indices(true).rev() {
-    let w = usize::from(g.cell_width());
+    let w = grapheme_cells(g);
     if used + w > tail {
       break;
     }

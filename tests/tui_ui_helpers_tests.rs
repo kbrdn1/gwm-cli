@@ -169,6 +169,24 @@ fn ellipsize_middle_budgets_the_cells_the_renderer_paints() {
 }
 
 #[test]
+fn ellipsize_middle_survives_a_control_character() {
+  // Codex review on PR #561, fourth pass. `CellWidth::cell_width` carries a
+  // `debug_assert!` that a one-byte ASCII grapheme is not a control: ratatui
+  // filters controls in `set_stringn` before measuring, so the assert states
+  // the contract rather than leaving it implied. `ellipsize_middle` does not
+  // sanitise (that is `trunc`'s job, #506) and a Unix path may legally hold a
+  // newline, so measuring one directly panicked every debug build, this suite
+  // included.
+  let s = "/tmp/gwm\ttest/a\nb/一二三四五六七八九十/TAIL";
+  let out = ellipsize_middle(s, 20);
+  assert!(painted(&out) <= 20, "{out:?} paints {} cells", painted(&out));
+  assert!(out.ends_with("TAIL"), "keeps the tail: {out:?}");
+  // A control measures nothing, exactly as the renderer treats it, so it
+  // never spends budget a drawable glyph could have had.
+  assert_eq!(painted("a\tb"), painted("ab"));
+}
+
+#[test]
 fn pad_cells_pads_to_the_cells_the_renderer_paints() {
   // Same measure on the padding side: `pad_cells` undercounting means the
   // right-pinned size column of the `clean` report leaves the frame.
