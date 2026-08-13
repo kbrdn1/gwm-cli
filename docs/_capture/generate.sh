@@ -54,6 +54,14 @@ run() {
 }
 
 # One retry: the race above is the common cause and it does not repeat.
+#
+# A retry is only safe on a tape that can run twice against the same fixture,
+# and four of them mutate it. Three were already written that way: `demo` and
+# `first-worktree` destroy their own state in their opening `Hide` block (the
+# latter `rm -rf`s its whole sandbox), and `trust-ledger` answers `n` to the
+# TOFU prompt, so its `gwm create` never happens. `bootstrap` was the exception
+# and is now torn down at both ends. Any new tape that creates a worktree, a
+# branch or a commit owes the same pre-clean before it can go through here.
 run_checked() { run "$1" || { echo "  ↻ retrying $1"; run "$1"; }; }
 
 # ── still + animated captures that use the default (grey) theme ────────────
