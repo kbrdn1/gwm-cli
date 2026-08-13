@@ -108,6 +108,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget rather than exactly it. `unicode-segmentation`, already in the tree
   through crossterm, is now a direct dependency.
 
+- **The create and rename forms keep their focused field on screen**
+  ([#553](https://github.com/kbrdn1/gwm-cli/issues/553)). Both modals size
+  themselves to their content, and a content box taller than the terminal is
+  clamped to the frame: ratatui then cut the tail off with no indicator. The
+  rename form wants 18 rows, so a 16-row terminal lost its `Desc` row — the
+  field the modal opens focused on. It stayed reachable by `Tab` and typed into
+  blind; free-form mode lost its only input the same way at 12 rows.
+
+  The body now scrolls to whichever field has focus, derived from the focus
+  itself rather than kept as scroll state — the forms have no scroll cursor,
+  focus is the only thing that moves. A form that fits renders exactly as
+  before; one that does not gets the Settings panel's scrollbar, so the
+  overflow is visible instead of silent.
+
 - **Returning from a fullscreen surface no longer ends the session when the
   terminal is slow to answer** ([#548](https://github.com/kbrdn1/gwm-cli/issues/548)).
   Coming back from the PTY overlay, an `exec` run or a review launch, gwm could

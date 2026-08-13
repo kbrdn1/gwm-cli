@@ -10,10 +10,10 @@ use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, confirm_buttons_line,
-  create_buttons_line, ellipsize_middle, field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line,
-  pad_cells, pane_counter, recent_items_pane_title, status_pane_title, type_selector_line, working_tree_counts_footer,
-  working_tree_pane_title, working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON,
-  WT_DELETED_ICON, WT_MODIFIED_ICON,
+  create_buttons_line, ellipsize_middle, field_input_line, form_field_scroll, link_prompt_modal_width,
+  link_target_line, modal_hint_line, pad_cells, pane_counter, recent_items_pane_title, status_pane_title,
+  type_selector_line, working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts,
+  worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
@@ -1185,6 +1185,42 @@ fn centered_abs_caps_height_taller_than_the_area() {
       height: 40
     }
   );
+}
+
+// ---- form_field_scroll (issue #553) ----------------------------------------
+
+#[test]
+fn form_field_scroll_stays_put_while_the_focused_row_fits() {
+  // The whole point of deriving the offset from focus: a form that fits its
+  // frame renders exactly as it did before #553, at offset 0. The last row a
+  // `height`-row viewport shows is `height - 1`, so that one still scrolls
+  // nothing.
+  for focus in 0..8usize {
+    assert_eq!(form_field_scroll(focus, 8), 0, "row {focus} fits an 8-row viewport");
+  }
+}
+
+#[test]
+fn form_field_scroll_pans_the_minimum_to_reveal_the_focused_row() {
+  // One row past the viewport pans by exactly one: the focused field lands on
+  // the last visible row, keeping as much of the form above it on screen as
+  // the frame allows.
+  assert_eq!(form_field_scroll(8, 8), 1);
+  assert_eq!(form_field_scroll(9, 8), 2);
+  // The rename form's own numbers: `Desc` sits on row 9 of 10, and a 120x16
+  // terminal leaves the body 8 rows.
+  assert_eq!(form_field_scroll(9, 8), 2, "rename at 120x16");
+  // ...and 4 rows at 120x12.
+  assert_eq!(form_field_scroll(9, 4), 6, "rename at 120x12");
+}
+
+#[test]
+fn form_field_scroll_survives_a_zero_row_viewport() {
+  // A frame so short the body layout resolves to nothing: `Constraint::Min(1)`
+  // still yields 0 rows once the four fixed rows have taken the space. There
+  // is nothing to reveal, and the arithmetic must not underflow.
+  assert_eq!(form_field_scroll(0, 0), 1);
+  assert_eq!(form_field_scroll(9, 0), 10);
 }
 
 // ---- working_tree_status_counts / footer (issue #287) ----------------------

@@ -4522,27 +4522,40 @@ fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
 }
 
 /// One row per field the form presents, in the order the patterns write them
-/// (issue #418), blank-line separated.
+/// (issue #418), blank-line separated — plus the index of the **focused**
+/// field's row, which the caller needs to scroll it into view (issue #553).
 ///
 /// Both the create overlay and the rename modal draw from this, so they cannot
 /// come to disagree about which inputs exist — they used to hardcode the same
 /// `Type` / `Issue` / `Desc` triple twice, which is two places to forget a
-/// pattern that carries only some of them.
+/// pattern that carries only some of them. The focused row is reported from
+/// the same walk for the same reason: a caller recomputing it as
+/// `position * 2` would be a second copy of this function's blank-line layout.
 ///
 /// Visual order is focus order by construction, which is the property that
 /// makes a custom pattern legible: `{desc}-{issue}` reads top-to-bottom in the
 /// same order it writes left-to-right. That does move the type selector below
 /// the preview, where the old layout kept it above.
-fn form_field_lines(app: &App, type_str: &str, type_desc: &str, value_w: usize, label_w: usize) -> Vec<Line<'static>> {
+fn form_field_lines(
+  app: &App,
+  type_str: &str,
+  type_desc: &str,
+  value_w: usize,
+  label_w: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let surface = app.theme.selection_bg;
   let label = |s: &str| format!("{:<label_w$}", s);
 
   let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut focused_row = None;
   for field in app.create_form.fields() {
     if !lines.is_empty() {
       lines.push(Line::from(String::new()));
+    }
+    if *field == app.create_form.field {
+      focused_row = Some(lines.len());
     }
     lines.push(match field {
       Field::Type => type_selector_line(
@@ -4575,7 +4588,29 @@ fn form_field_lines(app: &App, type_str: &str, type_desc: &str, value_w: usize, 
       Field::Name => continue,
     });
   }
-  lines
+  (lines, focused_row)
+}
+
+/// The vertical scroll that keeps line `focus` inside a `height`-row viewport,
+/// panning as little as it must (issue #553).
+///
+/// Content-sized modals are clamped to the frame by [`centered_abs`], and
+/// ratatui then cuts the overflow with no indicator: a form taller than the
+/// terminal silently loses its tail, which for both form modals is an
+/// *editable* field the user can still Tab onto and type into blind.
+///
+/// Derived from the focused field rather than kept as scroll state, the way
+/// the Settings panel does it: the forms have no scroll cursor of their own —
+/// focus is the only thing that moves — so state would be a second source of
+/// truth for a value that is a pure function of it, and the renderers take
+/// `&App`.
+///
+/// Zero while the content fits, so a roomy terminal renders exactly what it
+/// rendered before. Never exceeds `focus + 1 - height`, which keeps the offset
+/// within the `content_len - viewport` bound [`scrollable_body_area`] assumes
+/// when it sizes the scrollbar thumb.
+pub fn form_field_scroll(focus: usize, height: u16) -> u16 {
+  (focus + 1).saturating_sub(height as usize) as u16
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
@@ -4634,7 +4669,11 @@ fn draw_create(f: &mut Frame, app: &App) {
     Span::styled(dirname, Style::default().fg(app.theme.dirty)),
   ]));
   lines.push(Line::from(String::new()));
+  // Which row carries the focused input, so a form taller than the terminal
+  // can scroll it into view rather than lose it off the bottom (issue #553).
+  let focused_row;
   if freeform {
+    focused_row = Some(lines.len());
     lines.push(field_input_line(
       &label("Name"),
       &app.create_form.name,
@@ -4645,7 +4684,10 @@ fn draw_create(f: &mut Frame, app: &App) {
       surface,
     ));
   } else {
-    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
+    let base = lines.len();
+    let (fields, focused) = form_field_lines(app, type_str, type_desc, value_w, label_w);
+    focused_row = focused.map(|row| base + row);
+    lines.extend(fields);
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
@@ -4663,7 +4705,7 @@ fn draw_create(f: &mut Frame, app: &App) {
 
   f.render_widget(Clear, area);
   f.render_widget(block, area);
-  f.render_widget(Paragraph::new(lines), inner[0]);
+  render_form_body(f, inner[0], lines, focused_row, &app.theme);
 
   if app.is_create_worktree_loading() {
     f.render_widget(
@@ -4699,6 +4741,20 @@ fn draw_create(f: &mut Frame, app: &App) {
       inner[4],
     );
   }
+}
+
+/// Paint a form modal's body, scrolled so the focused field is on screen.
+///
+/// Shared by the create and rename modals — the two content-sized modals whose
+/// content can outgrow the frame with an editable field in the tail (#553).
+/// The scrollbar comes from the Settings panel's helper, which paints nothing
+/// while the content fits, so a form that did not have to scroll looks exactly
+/// as it did and one that did says so instead of truncating in silence.
+fn render_form_body(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, focused_row: Option<usize>, theme: &Theme) {
+  let total = lines.len();
+  let offset = focused_row.map_or(0, |row| form_field_scroll(row, area.height));
+  let text_area = scrollable_body_area(f, area, offset, total, theme);
+  f.render_widget(Paragraph::new(lines).scroll((offset, 0)), text_area);
 }
 
 /// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).
@@ -6325,7 +6381,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   // same shape `draw_create` uses, and the reason #474 suppressed the toggle
   // here in the first place was that these rows did not exist. Which rows the
   // structured side needs comes from the patterns (#418).
+  let focused_row;
   if freeform {
+    focused_row = Some(lines.len());
     lines.push(field_input_line(
       &label("Name"),
       &app.create_form.name,
@@ -6336,7 +6394,10 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       surface,
     ));
   } else {
-    lines.extend(form_field_lines(app, type_str, type_desc, value_w, label_w));
+    let base = lines.len();
+    let (fields, focused) = form_field_lines(app, type_str, type_desc, value_w, label_w);
+    focused_row = focused.map(|row| base + row);
+    lines.extend(fields);
   }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
@@ -6354,7 +6415,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 
   f.render_widget(Clear, area);
   f.render_widget(block, area);
-  f.render_widget(Paragraph::new(lines), inner[0]);
+  render_form_body(f, inner[0], lines, focused_row, &app.theme);
 
   if app.is_edit_worktree_loading() {
     f.render_widget(

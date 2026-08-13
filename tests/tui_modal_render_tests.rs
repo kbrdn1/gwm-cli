@@ -35,7 +35,7 @@ mod common;
 
 use common::init_repo;
 use gwm::bootstrap::{BootstrapReport, StepResult};
-use gwm::tui::{draw, App, LinkTarget, TaskKind, View};
+use gwm::tui::{draw, App, Field, LinkTarget, TaskKind, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use std::path::PathBuf;
@@ -1748,6 +1748,162 @@ fn the_bootstrap_report_shows_a_long_hook_line_on_a_wide_terminal() {
   assert!(
     rows.iter().any(|r| r.contains("at the end")),
     "the tail of a long hook line must stay reachable on a wide terminal — modal rows:\n{}",
+    rows.join("\n")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Vertical overflow: a focused field must stay on screen (issue #553)
+// ---------------------------------------------------------------------------
+
+/// The modal's rows, with the frame proven *closed*.
+///
+/// `modal_rect` falls back to `y1 = y0` when it finds no bottom border, which
+/// collapses the rect to a single row — every "is this label on screen"
+/// assertion below would then fail for the wrong reason. On the short
+/// terminals this section renders, that fallback is exactly the plausible
+/// failure, so the oracle is checked before it is used.
+fn closed_modal_rows(buf: &Buffer, what: &str) -> Vec<String> {
+  let rows = modal_rows(buf);
+  assert!(
+    rows.last().is_some_and(|r| r.starts_with('╰')),
+    "{what}: the modal frame must be closed (bottom border found), \
+     otherwise `modal_rect` is describing the wrong rect — rows:\n{}",
+    rows.join("\n")
+  );
+  rows
+}
+
+/// How a form field's row starts: two columns of indent, the label padded to
+/// the 5-cell label column, then the two-column gap before the value. Precise
+/// enough that the footer hints — which name `field` and `type` as verbs —
+/// cannot satisfy it.
+fn field_row_needle(label: &str) -> String {
+  format!("  {:<5}  ", label)
+}
+
+fn field_label(field: Field) -> &'static str {
+  match field {
+    Field::Type => "Type",
+    Field::Issue => "Issue",
+    Field::Desc => "Desc",
+    Field::Name => "Name",
+  }
+}
+
+fn create_form_app() -> (tempfile::TempDir, App) {
+  let (d, mut a) = make_app();
+  a.enter_create();
+  (d, a)
+}
+
+fn rename_form_app() -> (tempfile::TempDir, App) {
+  let (d, mut a) = make_app();
+  a.worktrees.push(deletable_worktree("feat-553-rename"));
+  a.list_state.select(Some(a.worktrees.len() - 1));
+  a.enter_edit_worktree();
+  (d, a)
+}
+
+#[test]
+fn the_rename_form_keeps_its_desc_field_on_screen_at_16_rows() {
+  // The literal case from issue #553. The rename modal sizes to its content
+  // (18 rows: preview, blank, the field triple, buttons, hints) and
+  // `centered_abs` clamps that to the frame, so at 16 rows ratatui simply cut
+  // the tail off. What fell off was `Desc` — an *editable* field, and the one
+  // the modal opens focused on (`CreateForm::last_field`). The user types into
+  // a row that is not on screen.
+  let (_dir, mut app) = rename_form_app();
+  let buf = render_at(&mut app, 120, 16);
+  let rows = closed_modal_rows(&buf, "rename at 120x16");
+  let needle = field_row_needle("Desc");
+  assert!(
+    rows.iter().any(|r| r.contains(&needle)),
+    "the focused Desc field must be rendered at 120x16 — modal rows:\n{}",
+    rows.join("\n")
+  );
+}
+
+#[test]
+fn every_focused_form_field_stays_on_screen_on_a_short_terminal() {
+  // Written against the property (focused ⇒ visible) over the fields the
+  // repo's patterns actually present, not against a hand-typed list of cases:
+  // a pattern that drops a field must not be able to leave a hole here.
+  //
+  // 16 rows is where the rename modal first overflows, 12 is where both forms
+  // do by a wide margin.
+  for (name, setup) in [
+    ("create", create_form_app as fn() -> (tempfile::TempDir, App)),
+    ("rename", rename_form_app as fn() -> (tempfile::TempDir, App)),
+  ] {
+    for h in [16u16, 12] {
+      let (_dir, mut app) = setup();
+      let fields = app.create_form.fields().to_vec();
+      assert!(!fields.is_empty(), "{name}: the form must present at least one field");
+      for field in fields {
+        app.create_form.field = field;
+        let buf = render_at(&mut app, 120, h);
+        let rows = closed_modal_rows(&buf, &format!("{name} at 120x{h}"));
+        let needle = field_row_needle(field_label(field));
+        assert!(
+          rows.iter().any(|r| r.contains(&needle)),
+          "{name} at 120x{h}: the focused {field:?} field is off screen — \
+           the user edits a row they cannot see. Modal rows:\n{}",
+          rows.join("\n")
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn the_free_form_name_field_stays_on_screen_on_a_short_terminal() {
+  // Free-form mode renders one field instead of the triple, so it overflows
+  // later — but when it does, the row that falls off is the *only* input the
+  // mode has. `fields()` keeps reporting the structured triple in this mode
+  // (`toggle_mode` moves focus, not the field set), so the loop above never
+  // exercises `Field::Name`; it needs its own case.
+  for (name, setup) in [
+    ("create", create_form_app as fn() -> (tempfile::TempDir, App)),
+    ("rename", rename_form_app as fn() -> (tempfile::TempDir, App)),
+  ] {
+    for h in [16u16, 12] {
+      let (_dir, mut app) = setup();
+      app.create_form.toggle_mode();
+      assert_eq!(app.create_form.field, Field::Name, "{name}: free-form focuses Name");
+      let buf = render_at(&mut app, 120, h);
+      let rows = closed_modal_rows(&buf, &format!("{name} free-form at 120x{h}"));
+      let needle = field_row_needle("Name");
+      assert!(
+        rows.iter().any(|r| r.contains(&needle)),
+        "{name} free-form at 120x{h}: the Name field is off screen — it is the \
+         only input this mode has. Modal rows:\n{}",
+        rows.join("\n")
+      );
+    }
+  }
+}
+
+#[test]
+fn a_form_that_had_to_scroll_says_so() {
+  // Scrolling the focused field into view fixes the loss, but on its own it
+  // trades a silent truncation for a silent scroll. The forms borrow the
+  // Settings panel's scrollbar (`scrollable_body_area`), which paints a thumb
+  // only when the content outruns its viewport — so the indicator is also the
+  // assertion that the form is not scrolling when it does not need to.
+  let (_dir, mut app) = rename_form_app();
+
+  let rows = closed_modal_rows(&render_at(&mut app, 120, 12), "rename at 120x12");
+  assert!(
+    rows.iter().any(|r| r.contains('█')),
+    "a form whose fields do not fit must show a scrollbar — modal rows:\n{}",
+    rows.join("\n")
+  );
+
+  let rows = closed_modal_rows(&render_at(&mut app, 120, 40), "rename at 120x40");
+  assert!(
+    !rows.iter().any(|r| r.contains('█')),
+    "a form that fits must not show a scrollbar — modal rows:\n{}",
     rows.join("\n")
   );
 }
