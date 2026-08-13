@@ -201,10 +201,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 ///
 /// Priority when the terminal is narrow: the version chip survives (clipped
 /// only if it alone exceeds `width`), then the current-dir badge, then the
-/// picker chip, and the path is sacrificed first. Pure and measured with
-/// `chars().count()` so the contract is pinned by `tests/tui_header_tests.rs`
-/// without a ratatui backend; control chars are collapsed to spaces so a
-/// pathological path can never split the single row.
+/// picker chip, and the path is sacrificed first. Pure, so the contract is
+/// pinned by `tests/tui_header_tests.rs` without a ratatui backend; control
+/// chars are collapsed to spaces so a pathological path can never split the
+/// single row.
+///
+/// Its own arithmetic still counts `chars()`, which is a cell count only for
+/// the ASCII these segments carry in practice. The path is the one value a
+/// user can make wide, and an undercount there pushes the pinned version chip
+/// past the row. Tracked as #563 with the rest of the row arithmetic; the
+/// three truncators it calls into measure cells since #554 / #560 / #562.
 pub fn header_line(
   repo_name: &str,
   workdir_display: &str,
@@ -3156,8 +3162,12 @@ fn push_modal_hint(
 ///
 /// Pure and width-driven so the contract is pinned by
 /// `tests/tui_footer_tests.rs` without spinning up a ratatui backend. Widths
-/// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
-/// labels and the bracketed status are ASCII / single-width in practice).
+/// are measured with `chars().count()`, which is a cell count for the ASCII
+/// keys, labels and bracketed status this carries in practice. Not the rest
+/// of `ui.rs` any more: the three truncators measure cells since #554 / #560
+/// / #562, and the row arithmetic that has not followed is tracked as #563.
+/// The status message is an action log, so it is the segment that can arrive
+/// wide.
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
   let key_style = hint_key_style(theme);
   let label_style = hint_label_style(theme);
