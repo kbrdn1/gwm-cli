@@ -84,13 +84,21 @@ tracked separately — until then, treat regeneration as a maintainer task.
 - **`generate.sh`** orchestrates the above and drops each asset into the correct
   `docs/<section>/_assets/` directory.
 
-## the grey background
+## the dark background
 
 `gwm`'s default theme paints no background, so the TUI inherits the terminal's.
-Every tape sets a neutral grey vhs theme (`#2b2b2b`) so the default-theme
-captures read as grey, not the blue-tinted default of a bundled theme. The
+Every tape sets a neutral dark vhs theme (`#141414`) so the default-theme
+captures read as neutral, not the blue-tinted default of a bundled theme. The
 theme-gallery shots are the exception: each preset paints its own background on
 purpose.
+
+It was `#2b2b2b` until 1.8.0, a mid-grey that cost twice over. Compact paints
+its section headers with the `section_bg` role, a band only a few steps off the
+terminal background, and against a mid-grey the band barely read as one. On the
+docs site the frames also sat *in* the page rather than on it, which is the
+contrast half of the ratatui maintainer's feedback
+([#544](https://github.com/kbrdn1/gwm-cli/issues/544)). Going darker fixes both
+with one value, and the palette above it is unchanged.
 
 ## captured off the demo
 
@@ -105,10 +113,45 @@ purpose.
 - `docs/3.cli/3.multiplexer.md` (`gwm tmux --split`): vhs cannot host a tmux
   client (`open terminal failed: not a terminal`); this one needs a real
   terminal recording.
-- **the sidebar Agents pane at the standard `Set Height 680`.** After Status
-  and Issue/PR the sidebar has roughly eight rows left, and
+- **the sidebar Agents pane at the height the full-TUI tapes use.** After Status
+  and Issue/PR the sidebar has a handful of rows left, and
   `split_section_heights` serves an overflow in the order commits → working
   tree → agents, so the pane floors to zero. This is the documented triage, not
-  a missing fixture — the `a` overlay shows the same session lines and is what
-  `demo.tape` captures. A tape that specifically wants the sidebar pane needs
-  about three more rows (`Set Height 760`).
+  a missing fixture: the `a` overlay shows the same session lines, and that is
+  what `agents.tape` and `demo.tape` capture. A tape that specifically wants the
+  sidebar pane has to buy it about three more rows than its neighbours.
+
+## sizes
+
+Set per tape, not shared, and every one of them was arrived at by looking at
+the result. Two rules produced the current matrix
+([#544](https://github.com/kbrdn1/gwm-cli/issues/544)):
+
+**Width targets 800-1000px**, which is where a screenshot's text renders at
+roughly the size of the prose around it in a README. Columns do not follow from
+pixels by intuition, so measure rather than estimate: at `FontSize 15` and
+`Padding 22`, **800px is 81 columns, 1000px is 103, 1160px is 121, 1500px is
+159**. The way to check is a throwaway tape that runs
+`echo $(tput cols) x $(tput lines)` and screenshots itself.
+
+Four captures sit above the band because the surface does not fit inside it,
+and each is a measurement rather than a preference:
+
+| capture | width | floor it is clearing |
+|:--|--:|:--|
+| `side-by-side` | 1400 | `SIDEBAR_MIN_WIDTH` is 120, and `STATUS` only stops clipping around 148 |
+| `keybindings`, `keymap`, `config-panel`, `palette` | 1240 | those modals clamp to a 64-column floor, which cuts their descriptions |
+| `cli-list` | 1340 | `gwm list` prints 140 columns; below that the shell wraps |
+| `cli-agents` | 1220 | `gwm agents` prints 126 |
+
+**Height is cut to the content**, one blank row above the status bar. Do not
+eyeball it: read the pixels. A row is 19.5px and the padding is 44px, so a band
+of background rows between the last content and the status bar converts
+directly into rows to remove. Two cases defeat a naive scan and need an eye
+instead: `side-by-side`, whose separator paints every row, and `bordered`,
+whose box edges do the same.
+
+Changing a height changes what the TUI renders, so it takes a pass or two to
+settle. It is also the reason the compact and bordered captures differ: compact
+fits `9 of 9` commits in 620px where bordered needs 700 for `5 of 9`, which is
+the density argument stated in the pair rather than only in prose.

@@ -8,9 +8,9 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli, latest stable **`1.7.1`** (machine contracts frozen since 1.0.0, MSRV 1.95).
+Source: https://github.com/kbrdn1/gwm-cli, latest stable **`1.8.0`** (machine contracts frozen since 1.0.0, MSRV 1.95).
 
-**Unreleased on `dev`: multi-row selection + bulk delete (#484).** `Space` marks the highlighted worktree in the TUI and `d` deletes every marked row in one batch, behind one confirm that reports `N selected` rather than listing them, with `D` arming the branch deletion for the whole batch. Nothing marked means `d` is the single-row delete it has always been, and only `d` reads the mark set: every other verb keeps acting on the cursor row, which the pane footer makes visible by carrying the count. Marks are keyed by path, cleared by the filter and the manual `f`, and only pruned (never cleared) by the background auto-refresh. `cycle_sidebar_layout` moved off `Space` to `z` to make room; both old defaults are one `[tui.keys]` line away. The non-interactive half is `gwm remove a b c`, which resolves every pattern before touching anything, so an unknown or ambiguous one fails the whole command with nothing removed.
+**1.8.0 is the density line, and it changes a default.** The TUI is **compact** unless told otherwise: panes and sidebar sections carry no box rule, each is delimited by a filled one-line header (uppercase title with its bracketed key, counter pinned right on the same line), a `muted` rule separates the two panes, and the worktrees pane sizes itself to its row count instead of reserving a share of the split. That is two rows and two columns back per section. Focus reads on the header, which takes the `focus` role and the `selection_bg` fill, so the border is no longer the focus cue. `[tui] layout = "bordered"` restores gwm's pre-1.8 frames verbatim and is left untouched by the compact refinements. Two knobs ride along, both applying under either layout: `[tui] status_one_line` (**on by default**) folds the sidebar Status block onto one row joined by ` · `, leaving the path its own row; `[tui] dim_unfocused` (off) dims the inactive pane's body via the terminal's `DIM` attribute. A new theme role, `section_bg`, paints the compact header fill: an indexed colour, not a translucent white, so the mode holds up without truecolor, and distinct from `selection_bg` in every preset because that difference is what separates a focused header from an unfocused one. Overlays and modals keep their border either way, and their width now comes from one policy (`modal_width(term_width, pct, min, max)`) rather than the four it used to be, two of which got narrower as the terminal widened.
 
 **Unreleased on `dev`: per-worktree notes (#515).** `N` opens the selected worktree's note in an editable modal (`Esc` writes and closes; `Ctrl+e` hands the same file to `$EDITOR`: `editor_cmd`, then `$EDITOR`, then `vi`, the handoff `o` uses in `mode = "editor"`), and the table carries a binary `≡` marker on the rows that have one. Notes are plain Markdown at `<main-checkout>/.git/gwm/notes/<branch>.md`: greppable with gwm shut down, never committed, and they survive `gwm remove`, which is why they live in the main checkout rather than in the worktree. `gwm note show [slug]` prints one and exits 1 when there is none; the `--format=json` rows carry it in an additive `note` field. The note is keyed on the branch, so a detached row cannot carry one (and says so), a rename moves the file, and `gwm doctor` reports a note whose branch is gone (not `gwm clean`, whose `--yes` only ever removes directories git already ignores). Presence means non-blank, since `vi` over an empty buffer writes one byte. `N` was unbound before, so a `.gwm.toml` binding a chord starting with `N` is now a prefix conflict refused at load time.
 
@@ -347,7 +347,7 @@ category tabs (Theme / Worktree / TUI / Keys / All) with a per-layer selector
 
 ## Details sidebar
 
-When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `z` cycles `auto → side-by-side → stacked → auto` (`Space` before #484, `V` before #290); `v` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically: no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
+When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `z` cycles `auto → side-by-side → stacked → auto` (`Space` before #484, `V` before #290); `v` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent subsections** stacked vertically, with no outer `Details` frame and no inline `Label:` content headers. Under the default `compact` layout each subsection is delimited by a filled header line; under `layout = "bordered"` each carries a rounded border with its title on the rule, which is what the panel looked like up to 1.7.
 
 ```
 ╭─ Worktree ──────────────────────╮      ●  status dot tracks the linked PR / issue
@@ -584,8 +584,19 @@ trunks = ["master", "release-3.x", "release-4.x"]
 # Safety countdown (seconds) applied to the delete-confirm overlay when
 # `delete branch on remove` (`p` in the TUI) is armed. Range 0..=5;
 # above 5 is clamped on read; 0 disables the countdown. Default: 3.
+#
+# `layout` (issue #545) picks how panes and sidebar sections are framed:
+#   "compact"  (default) one filled header line per section, no box rule
+#   "bordered"           the lazygit-style boxes gwm drew up to 1.7
+# `status_one_line` (#547, default true) folds the sidebar Status block onto a
+# single row; false restores the labelled one-value-per-row block.
+# `dim_unfocused` (#545, default false) dims the body of the pane without
+# focus, under either layout.
 [tui]
 confirm_countdown_secs = 3
+layout          = "compact"
+status_one_line = true
+dim_unfocused   = false
 
 # --- `o: open` dispatch (issue #73) ------------------------------------------
 # Three modes: "shell" (default — $SHELL in the worktree), "editor"
