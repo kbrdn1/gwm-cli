@@ -492,7 +492,7 @@ impl WorktreeName {
     // flattened dirname has exactly the name's byte length.
     if name.len() > MAX_DIR_COMPONENT_BYTES {
       return reject(&format!(
-        "{} bytes long — a worktree directory is a single path component, capped at {}",
+        "{} bytes long: a worktree directory is a single path component, capped at {}",
         name.len(),
         MAX_DIR_COMPONENT_BYTES
       ));
@@ -506,7 +506,7 @@ impl WorktreeName {
     let last = name.rsplit('/').next().unwrap_or(name);
     if last.len() + GIT_REF_LOCK_SUFFIX_BYTES > MAX_DIR_COMPONENT_BYTES {
       return reject(&format!(
-        "its last segment is {} bytes — git writes `refs/heads/<name>.lock` first, leaving {} for it",
+        "its last segment is {} bytes: git writes `refs/heads/<name>.lock` first, leaving {} for it",
         last.len(),
         MAX_DIR_COMPONENT_BYTES - GIT_REF_LOCK_SUFFIX_BYTES
       ));
@@ -517,7 +517,7 @@ impl WorktreeName {
     // refuses and which would collide with the HEAD pseudo-ref.
     if !git2::Branch::name_is_valid(name).unwrap_or(false) {
       return reject(
-        "not a valid git branch name — git rejects spaces, `~ ^ : ? * [ \\`, `@{`, `..`, \
+        "not a valid git branch name: git rejects spaces, `~ ^ : ? * [ \\`, `@{`, `..`, \
          leading/trailing `/`, a trailing `.`, a `.lock` suffix and `HEAD`",
       );
     }
@@ -528,7 +528,7 @@ impl WorktreeName {
     // here is a name git already accepted.
     if let Some(ch) = name.chars().find(|c| WINDOWS_FORBIDDEN_CHARS.contains(c)) {
       return reject(&format!(
-        "`{}` cannot appear in a directory name on Windows — the branch would be \
+        "`{}` cannot appear in a directory name on Windows: the branch would be \
          unusable on a teammate's machine even though git accepts it",
         ch
       ));
@@ -545,7 +545,7 @@ impl WorktreeName {
       // to pass both `Branch::name_is_valid` and `git check-ref-format`.
       if segment.ends_with('.') {
         return reject(&format!(
-          "`{}` ends with `.`, which Windows refuses as a directory name — git only \
+          "`{}` ends with `.`, which Windows refuses as a directory name; git only \
            applies that rule to the last segment of a branch",
           segment
         ));
@@ -553,7 +553,7 @@ impl WorktreeName {
       if is_windows_reserved_segment(segment) {
         return reject(&format!(
           "`{}` is a reserved device name on Windows (`CON`, `PRN`, `AUX`, `NUL`, \
-           `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension) — no path \
+           `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension): no path \
            component may be one",
           segment
         ));
@@ -597,7 +597,7 @@ impl WorktreeName {
         if let Some(ph) = STRUCTURED_BASE_PLACEHOLDERS.iter().find(|ph| cfg.base.contains(**ph)) {
           return Err(GwmError::Config(format!(
             "worktree.base `{}` uses `{}`, which a free-form name has no value for \
-             (it would be left literal in the path) — drop it from base, or create \
+             (it would be left literal in the path): drop it from base, or create \
              the worktree with <type> <issue> <desc>",
             cfg.base, ph
           )));
@@ -741,7 +741,7 @@ impl BranchParser {
                 format!(
                   "worktree.branch_pattern `{}` puts `{{{}}}` straight after `{{{}}}` with nothing \
                    between them and both can hold the same characters, so a branch it writes cannot \
-                   be read back unambiguously — separate them with a literal (`-`, `_`, `/`, …)",
+                   be read back unambiguously: separate them with a literal (`-`, `_`, `/`, …)",
                   sanitise_for_terminal(pattern),
                   name,
                   left
@@ -749,8 +749,8 @@ impl BranchParser {
               } else {
                 format!(
                   "worktree.branch_pattern `{}` separates `{{{}}}` from `{{{}}}` with `{}`, which \
-                   could be read as part of either, so a branch it writes splits at the wrong place \
-                   — separate them with a character neither can contain (`/`, `_`, `#`, `.`, …)",
+                   could be read as part of either, so a branch it writes splits at the wrong place: \
+                   separate them with a character neither can contain (`/`, `_`, `#`, `.`, …)",
                   sanitise_for_terminal(pattern),
                   left,
                   name,
@@ -1472,7 +1472,7 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
       .map(|seg| format!("{} {}", segment_consumers(seg), segment_absent_verb(seg)))
       .collect::<Vec<_>>();
     parts.push(format!(
-      "it carries no {}, so {} — write {} into the pattern to get them back",
+      "it carries no {}, so {}: write {} into the pattern to get them back",
       tokens.join(" and "),
       losses.join("; "),
       tokens.join(" and ")
@@ -1480,7 +1480,7 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   }
   if let Some(example) = unparseable {
     parts.push(format!(
-      "{} of the {} branch shapes probed match nothing at all (e.g. `{}`), so issue auto-linking from the branch name, gitmoji / `gwm commit-prefix`, `gwm pr` template selection and placeholders, remove/bootstrap hook placeholders, the TUI rename and the branch-convention check are inactive on those (PR/MR detection is unaffected — it queries the forge with the full branch name)",
+      "{} of the {} branch shapes probed match nothing at all (e.g. `{}`), so issue auto-linking from the branch name, gitmoji / `gwm commit-prefix`, `gwm pr` template selection and placeholders, remove/bootstrap hook placeholders, the TUI rename and the branch-convention check are inactive on those (PR/MR detection is unaffected, it queries the forge with the full branch name)",
       unparsed,
       probes,
       sanitise_for_terminal(&example)

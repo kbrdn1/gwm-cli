@@ -74,7 +74,7 @@ fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>
   for d in dirs {
     if d.is_empty() {
       return Err(GwmError::Config(format!(
-        "clean: profile `{profile}` has an empty `dirs` entry — list single worktree-relative directory names"
+        "clean: profile `{profile}` has an empty `dirs` entry; list single worktree-relative directory names"
       )));
     }
     let mut comps = Path::new(d).components().filter(|c| !matches!(c, Component::CurDir));
@@ -94,7 +94,7 @@ fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>
       // `.` / `./.` collapse to nothing — they resolve to the worktree root.
       (None, _) => {
         return Err(GwmError::Config(format!(
-          "clean: profile `{profile}` dir `{d}` resolves to the worktree root — name a real subdirectory"
+          "clean: profile `{profile}` dir `{d}` resolves to the worktree root; name a real subdirectory"
         )));
       }
       // Two or more components — a nested path like `a/b`.
@@ -116,7 +116,7 @@ fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>
     // fine — the `--` delimiter in the git calls already neutralises it.
     if name.starts_with(':') || name.contains(['*', '?', '[', ']']) {
       return Err(GwmError::Config(format!(
-        "clean: profile `{profile}` dir `{d}` contains git pathspec metacharacters (`* ? [ ]` or a leading `:`) — name a literal directory"
+        "clean: profile `{profile}` dir `{d}` contains git pathspec metacharacters (`* ? [ ]` or a leading `:`); name a literal directory"
       )));
     }
     out.push(name);

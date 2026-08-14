@@ -1056,7 +1056,7 @@ const TUI_KEYS_MODAL_NAMESPACE: &str = "modal";
 fn as_chord_list(coord: &str, value: &toml::Value) -> Result<Vec<String>> {
   let arr = value
     .as_array()
-    .expect("as_chord_list called on a non-array — caller must match Value::Array first");
+    .expect("as_chord_list called on a non-array: caller must match Value::Array first");
   let mut out = Vec::with_capacity(arr.len());
   for v in arr {
     let s = v.as_str().ok_or_else(|| {
@@ -1103,7 +1103,7 @@ fn walk_modal_context(
       toml::Value::Array(_) => {
         let ctx = ctx.ok_or_else(|| {
           GwmError::Config(format!(
-            "tui.keys.modal.{path}: {path:?} is a context group, not a leaf — bind under a stage (e.g. {path}.<stage>)",
+            "tui.keys.modal.{path}: {path:?} is a context group, not a leaf; bind under a stage (e.g. {path}.<stage>)",
             path = ctx_path
           ))
         })?;
@@ -1943,7 +1943,7 @@ impl Config {
           // shape used by `validate_bootstrap_paths` (e.g.
           // "bootstrap.copy[0].to").
           GwmError::Config(format!(
-            "bootstrap.guard[{}].deny_patterns[{}] '{}': invalid pattern {:?} — regex: {}",
+            "bootstrap.guard[{}].deny_patterns[{}] '{}': invalid pattern {:?}; regex: {}",
             gi, pi, g.name, pat, e
           ))
         })?;
@@ -2016,13 +2016,13 @@ impl Config {
       if !name_re.is_match(&entry.name) {
         return Err(GwmError::Config(format!(
           "branch_types: invalid `name = \"{}\"`; must match ^[a-z]+$ to be a valid branch-prefix \
-           (lowercase letters only, no digits, no dashes — git refs and the branch parser rely on this)",
+           (lowercase letters only, no digits, no dashes; git refs and the branch parser rely on this)",
           entry.name
         )));
       }
       if !seen.insert(entry.name.as_str()) {
         return Err(GwmError::Config(format!(
-          "branch_types: duplicate entry for `name = \"{}\"` — each branch type must be declared at most once",
+          "branch_types: duplicate entry for `name = \"{}\"`; each branch type must be declared at most once",
           entry.name
         )));
       }
@@ -2180,7 +2180,7 @@ fn check_relative_no_traversal(value: &str, field: &str) -> Result<()> {
   let p = Path::new(value);
   if p.is_absolute() {
     return Err(GwmError::Config(format!(
-      "{}: {:?} is an absolute path — only relative paths under the base directory are allowed",
+      "{}: {:?} is an absolute path; only relative paths under the base directory are allowed",
       field, value
     )));
   }
@@ -2192,13 +2192,13 @@ fn check_relative_no_traversal(value: &str, field: &str) -> Result<()> {
     match comp {
       std::path::Component::ParentDir => {
         return Err(GwmError::Config(format!(
-          "{}: {:?} contains '..' traversal — only relative paths under the base directory are allowed",
+          "{}: {:?} contains '..' traversal; only relative paths under the base directory are allowed",
           field, value
         )));
       }
       std::path::Component::Prefix(_) => {
         return Err(GwmError::Config(format!(
-          "{}: {:?} contains a Windows drive prefix — only relative paths under the base directory are allowed",
+          "{}: {:?} contains a Windows drive prefix; only relative paths under the base directory are allowed",
           field, value
         )));
       }

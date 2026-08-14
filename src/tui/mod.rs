@@ -951,7 +951,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
   // active repo, so the write would hit the wrong repository. Navigation and
   // refresh stay live so the user can recover (a refresh drops the dead repo).
   if app.workspace_active_stale && action.is_repo_mutating() {
-    app.status = "workspace: selected repo is unavailable (moved/deleted?) — press r to refresh".into();
+    app.status = "workspace: selected repo is unavailable (moved/deleted?); press r to refresh".into();
     return Ok(());
   }
 
@@ -1211,7 +1211,7 @@ fn run_launcher(
   // binaries get a clean status-bar error instead of a flicker.
   if which::which(bin).is_err() {
     app.status = format!(
-      "`{}` not on $PATH — install it or change [review]/[git_tui] in .gwm.toml",
+      "`{}` not on $PATH: install it or change [review]/[git_tui] in .gwm.toml",
       bin
     );
     return Ok(());
@@ -1391,7 +1391,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.config.tui.macro2.clone()
   };
   let Some(macro_cfg) = cfg else {
-    app.status = format!("macro{} not configured — add [tui.macro{}] to .gwm.toml", n, n);
+    app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
   use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
@@ -1419,7 +1419,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
       Some(build_zellij_command(&label, &path, SpawnMode::Split))
     } else {
-      app.status = format!("macro{}: no multiplexer — falling back to PTY overlay", n);
+      app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
       None
     }
   } else {
@@ -1514,7 +1514,7 @@ fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
       // division renders 65_537 bytes as "64 KiB > 64 KiB", which reads as a
       // bug in the check rather than as a reason for the refusal.
       app.status = format!(
-        "too large for osc52 ({} KiB > {} KiB) — set [tui] clipboard = \"tools\"",
+        "too large for osc52 ({} KiB > {} KiB): set [tui] clipboard = \"tools\"",
         bytes.div_ceil(1024),
         crate::clipboard::MAX_OSC52_BYTES / 1024
       );

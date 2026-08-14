@@ -226,9 +226,8 @@ pub fn default_journal_path() -> Result<PathBuf> {
       return Ok(PathBuf::from(p).join("gwm").join("history.toml"));
     }
   }
-  let base = dirs::data_dir().ok_or_else(|| {
-    GwmError::Other("could not resolve user data directory — set GWM_HISTORY_FILE to override".into())
-  })?;
+  let base = dirs::data_dir()
+    .ok_or_else(|| GwmError::Other("could not resolve user data directory: set GWM_HISTORY_FILE to override".into()))?;
   Ok(base.join("gwm").join("history.toml"))
 }
 

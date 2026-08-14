@@ -883,7 +883,7 @@ impl App {
     // in one cross-repo bulk pass — see `refresh_linked_github_statuses_for_worktrees`.
     app.refresh_link();
     app.status = format!(
-      "workspace {} — {} repo(s), {} worktree(s) · press ? for help",
+      "workspace {}: {} repo(s), {} worktree(s) · press ? for help",
       root.display(),
       repo_count,
       wt_count
@@ -977,7 +977,7 @@ impl App {
       0 => "enter: submit".into(),
       1 => format!("enter on {}: submit", self.submit_field_label()),
       _ => format!(
-        "tab/shift-tab: switch field — enter on {}: submit",
+        "tab/shift-tab: switch field · enter on {}: submit",
         self.submit_field_label()
       ),
     }
@@ -1094,7 +1094,7 @@ impl App {
         // reachable row (or a refresh drops the dead repo) — #304.
         self.mark_workspace_stale();
         self.status = format!(
-          "workspace: repo '{}' is unavailable ({}) — press r to refresh",
+          "workspace: repo '{}' is unavailable ({}); press r to refresh",
           meta.name, e
         );
       }
@@ -1276,7 +1276,7 @@ impl App {
     let mut app = Self::new_at_layered(start, global_path)?;
     app.picker_mode = true;
     app.filter.open();
-    app.status = "switch picker — type to filter · enter selects · esc cancels".into();
+    app.status = "switch picker: type to filter · enter selects · esc cancels".into();
     Ok(app)
   }
 
@@ -1393,11 +1393,11 @@ impl App {
     }
     self.status = if spawned > 0 {
       format!(
-        "refreshed — {} worktree(s); fetching GitHub status…",
+        "refreshed: {} worktree(s); fetching GitHub status…",
         self.worktrees.len()
       )
     } else {
-      format!("refreshed — {} worktree(s)", self.worktrees.len())
+      format!("refreshed: {} worktree(s)", self.worktrees.len())
     };
   }
 
@@ -2456,7 +2456,7 @@ impl App {
   pub fn open_command_palette(&mut self) {
     self.palette.open();
     self.view = View::CommandPalette;
-    self.status = "command palette — type, Enter to run, Esc to cancel".into();
+    self.status = "command palette: type, Enter to run, Esc to cancel".into();
   }
 
   /// Close the palette without firing anything. Called on `Esc` from
@@ -2814,7 +2814,7 @@ impl App {
     // with a stale selection that path is the *previously* active repo, so
     // refuse rather than rebind keys in the wrong repo (#304).
     if self.workspace_active_stale && self.config_panel.layer == SettingsLayer::Project {
-      self.status = "workspace: selected repo is unavailable — can't edit its project keymap".into();
+      self.status = "workspace: selected repo is unavailable; can't edit its project keymap".into();
       return;
     }
     let path = match self.config_panel.layer {
@@ -2868,7 +2868,7 @@ impl App {
         // roll the file back to its prior state so the config is never left
         // broken on disk, and keep the previous live keymaps.
         Self::restore_file(&path, prior);
-        self.status = format!("keys: rebind rejected — would break the merged config: {}", e);
+        self.status = format!("keys: rebind rejected; would break the merged config: {}", e);
         return;
       }
     }
@@ -2904,7 +2904,7 @@ impl App {
     // it persisted. Warn instead of reporting a clean success (Codex #297
     // review).
     if !self.capture_took_effect(target, &cap.pending) {
-      status.push_str(" — shadowed (a higher layer or legacy alias still binds it)");
+      status.push_str("; shadowed (a higher layer or legacy alias still binds it)");
     }
     self.status = status;
   }
@@ -2994,7 +2994,7 @@ impl App {
     };
     let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
     if names.is_empty() {
-      self.status = "no [exec.profiles] configured — add one to .gwm.toml".into();
+      self.status = "no [exec.profiles] configured: add one to .gwm.toml".into();
       return;
     }
     // Capture the target worktree path AND the active repo's `[exec]` config
@@ -3160,7 +3160,7 @@ impl App {
     // checks. Refuse, the same contract as the project-layer keymap
     // editor (#304 / Codex review #455).
     if self.workspace_active_stale {
-      self.status = "workspace: selected repo is unavailable — can't open its CI checks".into();
+      self.status = "workspace: selected repo is unavailable; can't open its CI checks".into();
       return;
     }
     let checks = match self.pr_fetch_state() {
@@ -3169,8 +3169,8 @@ impl App {
         // Resolve the active fetch binding instead of hard-coding `F`
         // (Codex review #455); an unbound action drops the parenthetical.
         self.status = match self.keymap.primary_chord(Action::FetchGithub) {
-          Some(key) => format!("no CI checks to show — link a PR and fetch ({key}) first"),
-          None => "no CI checks to show — link a PR and fetch first".into(),
+          Some(key) => format!("no CI checks to show: link a PR and fetch ({key}) first"),
+          None => "no CI checks to show: link a PR and fetch first".into(),
         };
         return;
       }
@@ -3224,7 +3224,7 @@ impl App {
     // leaves the link and its cache pointing at the previously active
     // repo, and this view would then browse the OLD repo's PR.
     if self.workspace_active_stale {
-      self.status = "workspace: selected repo is unavailable — can't open its PR/issue view".into();
+      self.status = "workspace: selected repo is unavailable; can't open its PR/issue view".into();
       return;
     }
     let width = self.rich_view_width();
@@ -3249,8 +3249,8 @@ impl App {
     // Resolve the active binding rather than hard-coding `F`, the same way
     // `enter_ci_checks` does.
     self.status = match self.keymap.primary_chord(Action::FetchGithub) {
-      Some(key) => format!("nothing to show — link an issue or PR and fetch ({key}) first"),
-      None => "nothing to show — link an issue or PR and fetch first".into(),
+      Some(key) => format!("nothing to show: link an issue or PR and fetch ({key}) first"),
+      None => "nothing to show: link an issue or PR and fetch first".into(),
     };
   }
 
@@ -3351,7 +3351,7 @@ impl App {
   pub fn rich_view_refresh(&mut self) {
     if self.workspace_active_stale {
       self.close_detail_overlay();
-      self.status = "workspace: selected repo is unavailable — PR/issue view closed".into();
+      self.status = "workspace: selected repo is unavailable; PR/issue view closed".into();
       return;
     }
     self.refresh_github_status();
@@ -3403,7 +3403,7 @@ impl App {
   pub fn ci_checks_refresh(&mut self) {
     if self.workspace_active_stale {
       self.close_detail_overlay();
-      self.status = "workspace: selected repo is unavailable — CI checks closed".into();
+      self.status = "workspace: selected repo is unavailable; CI checks closed".into();
       return;
     }
     self.refresh_github_status();
@@ -3549,7 +3549,7 @@ impl App {
       // workspace mode `sync_active_repo` may swap `self.repo` under the
       // open overlay, which would write the pin into the wrong repo's
       // config (Codex review round B).
-      self.status = "agent pins are per-repo — not available in workspace mode".into();
+      self.status = "agent pins are per-repo: not available in workspace mode".into();
       return false;
     }
     let Some((path, _)) = self.detail_overlay_target.clone() else {
@@ -3629,7 +3629,7 @@ impl App {
       .unwrap_or_else(|| self.detail_overlay.input.trim().to_string());
     let known = candidates.iter().any(|s| s.id == sid);
     if sid.is_empty() || !known {
-      self.status = format!("no agent session matching '{sid}' — run gwm agents for ids");
+      self.status = format!("no agent session matching '{sid}': run gwm agents for ids");
       return;
     }
     if self.attach_agent_by_id(&sid) {
@@ -3643,7 +3643,7 @@ impl App {
   /// session's pin is removed, the others stay.
   pub fn detach_selected_agent(&mut self) {
     if self.is_workspace() {
-      self.status = "agent pins are per-repo — not available in workspace mode".into();
+      self.status = "agent pins are per-repo: not available in workspace mode".into();
       return;
     }
     let Some(sid) = self.detail_overlay.selected_meta().map(str::to_string) else {
@@ -3793,7 +3793,7 @@ impl App {
     match action {
       ConfirmKeyAction::Armed => {
         self.status = format!(
-          "armed — reclaiming {} in {}s",
+          "armed: reclaiming {} in {}s",
           crate::clean::human_size(self.clean_overlay.total_bytes()),
           total.as_secs()
         );
@@ -3931,7 +3931,7 @@ impl App {
     // refuse rather than write settings into the wrong repo (#304). Global-layer
     // edits are repo-independent and stay allowed.
     if self.workspace_active_stale && self.config_panel.layer == SettingsLayer::Project {
-      self.status = "workspace: selected repo is unavailable — can't edit its project config".into();
+      self.status = "workspace: selected repo is unavailable; can't edit its project config".into();
       return;
     }
     let path = match self.config_panel.layer {
@@ -4017,7 +4017,7 @@ impl App {
     if self.config_panel.layer == SettingsLayer::Global
       && self.config_panel.field_source(field) == Some(crate::config::ConfigSource::Repo)
     {
-      status.push_str(" — shadowed by .gwm.toml");
+      status.push_str("; shadowed by .gwm.toml");
     }
     self.status = status;
   }
@@ -4132,7 +4132,7 @@ impl App {
     let resolved = match self.config.review.resolved() {
       Some(r) => r,
       None => {
-        self.status = "review tool not configured — set [review] in .gwm.toml".into();
+        self.status = "review tool not configured: set [review] in .gwm.toml".into();
         return None;
       }
     };
@@ -4141,7 +4141,7 @@ impl App {
       return None;
     };
     let Some(head) = wt.branch.clone() else {
-      self.status = "selected worktree has no branch — cannot review".into();
+      self.status = "selected worktree has no branch: cannot review".into();
       return None;
     };
 
@@ -4164,7 +4164,7 @@ impl App {
     match launcher::expand_command(&resolved.command, &ctx) {
       Ok(expanded) => {
         if self.config.review.has_shadowed_tool() {
-          self.status = format!("review: command overrides tool — running {}", base);
+          self.status = format!("review: command overrides tool; running {}", base);
         } else {
           self.status = format!("review: {} vs {}", head, base);
         }
@@ -4237,13 +4237,13 @@ impl App {
       return None;
     };
     let Some(branch) = crate::github::pinnable_branch(selected.branch.as_deref()).map(str::to_string) else {
-      self.status = "detached HEAD — a note is keyed on the branch".into();
+      self.status = "detached HEAD: a note is keyed on the branch".into();
       return None;
     };
     match crate::notes::prepare(&self.repo, &branch) {
       Ok(Some(path)) => Some((branch, path)),
       Ok(None) => {
-        self.status = format!("`{branch}` cannot back a note file — the name is not a portable filename");
+        self.status = format!("`{branch}` cannot back a note file: the name is not a portable filename");
         None
       }
       // `prepare` writes its own message: the directory it could not create,
@@ -4630,7 +4630,7 @@ impl App {
       _ => spec.desc.is_empty(),
     }) {
       self.status = format!(
-        "'{}' carries {{{}}} only where this form cannot read it back (check worktree.base), so renaming would overwrite it — rename with git, or write {{{}}} into worktree.branch_pattern or worktree.path_pattern",
+        "'{}' carries {{{}}} only where this form cannot read it back (check worktree.base), so renaming would overwrite it: rename with git, or write {{{}}} into worktree.branch_pattern or worktree.path_pattern",
         crate::naming::sanitise_for_terminal(&branch),
         missing,
         missing
@@ -5096,7 +5096,7 @@ impl App {
     // writes no issue number, `Field::Issue` focused an input the renderer
     // does not draw, so the first keypress went nowhere at all.
     self.create_form.field = self.create_form.entry_field();
-    self.status = format!("{} — esc: cancel", self.structured_form_instruction());
+    self.status = format!("{} · esc: cancel", self.structured_form_instruction());
   }
 
   pub fn create_next_field(&mut self) {
@@ -5190,7 +5190,7 @@ impl App {
         let back = self
           .modal_keymap
           .primary_key(ModalAction::CreateToggleMode)
-          .map(|k| format!(" — {k}: "))
+          .map(|k| format!(" · {k}: "))
           .unwrap_or_default();
         self.status = match self.create_form.mode {
           Mode::Freeform if back.is_empty() => "free-form: name the worktree anything git accepts".into(),
@@ -5534,7 +5534,7 @@ impl App {
         // #219 review: name the live confirm key, and drop the clause entirely
         // when it is unbound — never advertise a key that no longer re-arms.
         self.status = match self.modal_keymap.primary_key(ModalAction::ConfirmConfirm) {
-          Some(c) => format!("countdown cancelled — press {c} to re-arm ({secs}s safety delay)"),
+          Some(c) => format!("countdown cancelled: press {c} to re-arm ({secs}s safety delay)"),
           None => format!("countdown cancelled ({secs}s safety delay)"),
         };
       }
@@ -5551,7 +5551,7 @@ impl App {
           (None, Some(x)) => format!(" · press {x} to cancel"),
           (None, None) => String::new(),
         };
-        self.status = format!("armed — auto-fires in {secs}s{tail}");
+        self.status = format!("armed: auto-fires in {secs}s{tail}");
       }
     }
     action
@@ -5605,7 +5605,7 @@ impl App {
     self.clear_marks();
     self.sidebar.focused = false;
     self.cancel_pending_motion();
-    self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
+    self.status = "/ filter: type to narrow · enter confirms · esc clears".into();
   }
 
   /// Close the filter bar but keep the query: `Enter` confirms the current
@@ -5741,7 +5741,7 @@ impl App {
         self.picker_should_exit = true;
       }
       None => {
-        self.status = "no worktree selected — adjust the filter and try again".into();
+        self.status = "no worktree selected: adjust the filter and try again".into();
       }
     }
   }
@@ -6071,13 +6071,13 @@ impl App {
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = format!(
-        "nothing linked — press {} to link an issue or PR",
+        "nothing linked: press {} to link an issue or PR",
         self.link_prompt_chord()
       );
       return;
     }
     let Some(slug) = slug else {
-      self.status = "no GitHub remote — cannot fetch status".into();
+      self.status = "no GitHub remote: cannot fetch status".into();
       return;
     };
     // Explicit user-initiated refresh: flush the cache (so the cold-cache
@@ -6265,7 +6265,7 @@ impl App {
       ),
       (false, true) => format!("pr fetch failed: {}", self.pr_error_message().unwrap_or("?".into())),
       (true, true) => format!(
-        "issue + pr fetch failed — issue: {} · pr: {}",
+        "issue + pr fetch failed · issue: {} · pr: {}",
         self.issue_error_message().unwrap_or("?".into()),
         self.pr_error_message().unwrap_or("?".into())
       ),
@@ -6544,7 +6544,7 @@ impl App {
   pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
     self.view = View::List;
     let Some(forge) = self.github.forge.clone() else {
-      self.status = "no forge remote — cannot build URL".into();
+      self.status = "no forge remote: cannot build URL".into();
       return None;
     };
     // Whether the URL was built locally rather than read off the server.
@@ -6560,7 +6560,7 @@ impl App {
           forge.issue_url(n)
         }),
         None => {
-          self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
+          self.status = format!("no issue linked: press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
@@ -6571,7 +6571,7 @@ impl App {
         }),
         None => {
           self.status = format!(
-            "no {} linked — press {} to link one",
+            "no {} linked: press {} to link one",
             forge.pr_noun(),
             self.link_prompt_chord()
           );
@@ -6580,7 +6580,7 @@ impl App {
       },
     };
     if inferred && !forge.origin_is_authoritative() {
-      self.status = format!("opening a guessed URL — the SSH origin names no web host: {url}");
+      self.status = format!("opening a guessed URL; the SSH origin names no web host: {url}");
     }
     Some(url)
   }
