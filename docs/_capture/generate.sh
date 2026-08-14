@@ -65,6 +65,17 @@ run() {
 run_checked() { run "$1" || { echo "  ↻ retrying $1"; run "$1"; }; }
 
 # ── still + animated captures that use the default (grey) theme ────────────
+#
+# Two tapes are deliberately absent from this list and neither is reported at
+# the end, so the closing tick covers a set that still holds them stale (#575):
+#
+#   demo.tape            the one long-form recording; run on its own, after the
+#                        fixture exists (see docs/_capture/README.md)
+#   github-linking.tape  needs a remote with an open PR, which the demo fixture
+#                        has not, so it cds to the real gwm-cli checkout and
+#                        photographs whatever state it is in. Not reproducible
+#                        by anyone but the maintainer, and only meaningful from
+#                        a branch whose PR is open.
 FAILED=()
 for t in hero sidebar side-by-side narrow  palette keymap keybindings \
          doctor trust-ledger bootstrap \
