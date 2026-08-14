@@ -33,6 +33,14 @@ repository = "https://github.com/kbrdn1/gwm-cli"
 readme = "README.md"
 keywords = ["git", "worktree", "tui", "cli", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
+# The doc tree is 9.2 MiB of a 14.7 MiB checkout, almost all of it vhs
+# captures, and none of it is needed to build or install the crate. Without
+# this the 1.8.0 tarball packaged at 9.8 MiB compressed against the 10 MiB
+# crates.io limit, so rendering the captures at 2x (#581) would have pushed
+# `cargo publish` over it at the next release. crates.io rewrites relative
+# image links in the README against `repository`, so the published page still
+# shows `docs/_capture/demo.gif`. Pinned by `tests/docs_assets_tests.rs`.
+exclude = ["docs/"]
 
 # cargo-binstall (#27): pull the prebuilt binary from the GitHub
 # Release instead of compiling git2/vendored-libgit2 from source.

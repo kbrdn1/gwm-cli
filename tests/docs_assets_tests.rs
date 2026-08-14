@@ -219,6 +219,34 @@ fn capture_basenames_are_unique_across_sections() {
   );
 }
 
+/// The captures stay out of the published crate.
+///
+/// `cargo package` on 1.8.0 measured **9.8 MiB compressed of the 10 MiB
+/// crates.io limit** (442 files, 14.7 MiB uncompressed), and `docs/` was
+/// 9.2 MiB of that tree with no `exclude` in sight. Doubling the captures
+/// pushes the tarball past the limit, so the release fails at `cargo publish`,
+/// long after this PR merged and with nothing in the diff pointing at it.
+///
+/// crates.io rewrites relative image links in a README against `repository`,
+/// so dropping `docs/` costs the published page nothing.
+#[test]
+fn the_published_crate_excludes_the_docs_tree() {
+  let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+  let raw = fs::read_to_string(&path).unwrap_or_else(|err| panic!("{} must be readable: {err}", path.display()));
+  let manifest: toml::Value = toml::from_str(&raw).expect("Cargo.toml is valid TOML");
+  let excluded: Vec<String> = manifest
+    .get("package")
+    .and_then(|p| p.get("exclude"))
+    .and_then(|e| e.as_array())
+    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+    .unwrap_or_default();
+  assert!(
+    excluded.iter().any(|pattern| pattern == "docs/" || pattern == "/docs/" || pattern == "docs"),
+    "[package] exclude must drop `docs/` from the published crate, or the 2x captures take the \
+     tarball over the crates.io size limit; found {excluded:?}"
+  );
+}
+
 /// The narrowest terminal any tape photographs is 800 logical px
 /// (`narrow.tape`), so at 2x no capture may ship narrower than this.
 ///
