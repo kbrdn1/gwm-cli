@@ -105,7 +105,7 @@ The full tree lives under [`docs/`](docs/): 39 pages in English, every one of th
 
 | Section                                                         | Read this when …                                                              |
 |:----------------------------------------------------------------|:------------------------------------------------------------------------------|
-| [Getting Started](docs/1.getting-started/index.md)              | you want to install gwm and create your first worktree                        |
+| [Getting started](docs/1.getting-started/index.md)              | you want to install gwm and create your first worktree                        |
 | [TUI](docs/2.tui/index.md)                                      | you live in the ratatui interface: keymap, sidebar, launchers, filter        |
 | [CLI](docs/3.cli/index.md)                                      | you script gwm from shells, CI jobs, or `gh` aliases                          |
 | [Configuration](docs/4.configuration/index.md)                  | you're writing or extending `.gwm.toml`: bootstrap, guards, predicates       |
