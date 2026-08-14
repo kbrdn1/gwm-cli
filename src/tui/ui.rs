@@ -2213,14 +2213,37 @@ fn tilde_compress(path: &str) -> String {
 /// `~ice/repo` (raised by PR #70 Copilot review).
 pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
   let home_s = home.display().to_string();
-  if let Some(rest) = path.strip_prefix(&home_s) {
+  if let Some(rest) = strip_home_prefix(path, &home_s) {
     // Accept exact-home (`rest.is_empty()`) and home-followed-by-separator
     // matches. Reject prefix matches that bleed into a longer dir name.
-    if rest.is_empty() || rest.starts_with('/') || rest.starts_with(std::path::MAIN_SEPARATOR) {
+    if rest.is_empty() || rest.starts_with(std::path::is_separator) {
       return format!("~{}", rest);
     }
   }
   path.to_string()
+}
+
+/// `str::strip_prefix` with the platform's separator spellings treated as one.
+///
+/// The two sources disagree on Windows and that is not cosmetic: a
+/// `WorktreeInfo::path` comes from libgit2, which emits `/` there, while
+/// [`dirs::home_dir`] returns `\`. A byte-for-byte prefix match therefore never
+/// fired on the platform, and the compression was a silent no-op for every
+/// surface that uses it, the header and the sidebar as much as the table.
+///
+/// [`std::path::is_separator`] carries the per-platform rule, so Unix behaviour
+/// is byte-identical to a plain `strip_prefix`: a backslash is an ordinary
+/// character in a directory name there, and accepting it as equivalent would
+/// reopen the slice the boundary check above exists to prevent (PR #70).
+fn strip_home_prefix<'a>(path: &'a str, home: &str) -> Option<&'a str> {
+  // `get` rather than `split_at`: a home length that lands mid-codepoint
+  // returns `None` here instead of panicking.
+  let head = path.get(..home.len())?;
+  head
+    .chars()
+    .zip(home.chars())
+    .all(|(a, b)| a == b || (std::path::is_separator(a) && std::path::is_separator(b)))
+    .then(|| &path[home.len()..])
 }
 
 /// How a worktree path is spelled on screen: tilde-compressed, then

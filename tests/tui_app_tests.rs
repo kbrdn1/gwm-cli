@@ -6138,6 +6138,31 @@ fn tilde_compress_falls_back_when_path_outside_home() {
   assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
 }
 
+#[cfg(windows)]
+#[test]
+fn tilde_compress_matches_across_the_two_windows_separators() {
+  // The two sources spell the same path differently, which is why a
+  // byte-for-byte prefix match never fired here: `WorktreeInfo::path` comes
+  // from libgit2, which emits `/` even on Windows, while `dirs::home_dir()`
+  // returns `\`. Compression was therefore a silent no-op on the platform,
+  // for the header and the sidebar as much as for the table's `PATH` column.
+  //
+  // `#[cfg(windows)]` rather than unconditional, because the behaviour under
+  // test *is* the platform's: on Unix a backslash is an ordinary character in
+  // a directory name, and accepting it as a boundary would reopen the slice
+  // PR #70 closed. The runner is the only oracle, so this one is proven by CI.
+  let home = std::path::Path::new(r"C:\Users\alice");
+  assert_eq!(tilde_compress_with_home("C:/Users/alice/repo", home), "~/repo");
+  assert_eq!(tilde_compress_with_home(r"C:\Users\alice\repo", home), r"~\repo");
+  assert_eq!(tilde_compress_with_home("C:/Users/alice", home), "~");
+  // The boundary guard still holds across spellings.
+  assert_eq!(
+    tilde_compress_with_home("C:/Users/alicent/x", home),
+    "C:/Users/alicent/x",
+    "a longer sibling must not be sliced just because the separators differ"
+  );
+}
+
 // ---- how a worktree path is spelled on screen (issue #568) ----------------
 
 use gwm::tui::display_path_with_home;
