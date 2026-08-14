@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: Chaque sous-commande gwm, avec sa synopsis, ses flags et des exemples prêts pour le shell.
+description: La face scriptable de gwm, de la référence des sous-commandes aux complétions de shell et à l'intégration tmux / zellij.
 navigation:
   title: CLI
 ---
