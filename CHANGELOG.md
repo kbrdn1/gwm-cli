@@ -195,6 +195,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gwm path --format=json` is unaffected and stays absolute: this is a rendering
   change in the TUI only.
 
+### Docs
+
+- **The frontmatter says what the published page should say**
+  ([#579](https://github.com/kbrdn1/gwm-cli/issues/579)). The frontmatter of
+  `docs/` is the source of the `<title>` and the `<meta name="description">` on
+  [gwm.kbrdn.dev](https://gwm.kbrdn.dev): the bridge carries it through
+  verbatim, so a defect there is only fixable here, and it ships green because
+  nothing in the build reads a description.
+
+  Three of them are closed. `3.cli/index.md` and `3.cli/1.reference.md` said
+  the same sentence to a word, in both locales, so two separately crawled URLs
+  competed for one snippet; the section landing now describes the section it
+  routes to rather than the reference it links. Both roadmap descriptions ran
+  to 297 and 307 characters by enumerating every version line since v1.0.0,
+  which put what is shipping now behind the truncation; they stop at the
+  current line. `Getting Started` was the only title-cased page in a
+  sentence-case tree and disagreed with the sidebar label and the OG card table
+  the site builds, both of which say `Getting started`; the title, the
+  `navigation.title`, the H1 and the ten cross-references that spell the page
+  name follow. The French `.gwm.toml` page also started on a lowercase
+  `schéma`, which the bridge was quietly capitalising on publish.
+
+  Two of the three are now pinned by `tests/docs_frontmatter_tests.rs`: a
+  description over 250 characters, and two pages of the same locale describing
+  themselves the same way. Title casing is left to the author, since separating
+  `Getting Started` from `GitHub issue / PR linking` needs a hand-written list
+  of proper nouns that goes stale on the first page named after something not
+  on it.
+
 ### Fixed
 
 - **Tilde compression fires on Windows, and with a trailing separator on
