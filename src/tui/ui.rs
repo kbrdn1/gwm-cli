@@ -1710,8 +1710,11 @@ fn worktree_identity_lines(
 fn identity_path_line(w: &WorktreeInfo, label_w: usize, label_style: Style, theme: &Theme) -> Line<'static> {
   Line::from(vec![
     Span::styled(format!("{:<label_w$}  ", "Path", label_w = label_w), label_style),
+    // Same treatment as the table's `PATH` cell (issue #568): this row is the
+    // other place a full `w.path` is spelled out, so it owes the terminal the
+    // same sink and gets it from the same helper.
     Span::styled(
-      tilde_compress(&w.path.display().to_string()),
+      display_path(&w.path.display().to_string()),
       Style::default().fg(theme.muted),
     ),
   ])
@@ -2220,33 +2223,42 @@ pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
   path.to_string()
 }
 
-/// The text the table's `PATH` cell renders for one row (issue #568).
+/// How a worktree path is spelled on screen: tilde-compressed, then
+/// sanitised (issue #568).
 ///
-/// The header and the sidebar's `Path` row already tilde-compress, so the
-/// table printing the same value raw put two renderings of one path on one
-/// screen — and spent `$HOME` again on every row of the one column that is
-/// `Fill(1)` and therefore vanishes first.
-fn table_path_text(path: &str) -> String {
+/// The single treatment for every surface that prints a `WorktreeInfo::path`
+/// in full — the table's `PATH` cell and the sidebar's `Path` row. Before
+/// this pair they each had half of it: the table sanitised without
+/// compressing, so it re-spent `$HOME` on every row of the one column that is
+/// `Fill(1)` and therefore vanishes first; the sidebar compressed without
+/// sanitising, which no guard caught because ratatui's grapheme-width
+/// filtering happens to swallow a zero-width `Cf` in a `Span` instead of
+/// painting it. Nothing leaked there, but the row showed a path the
+/// filesystem does not have.
+///
+/// Not the header (`app.workdir`, not a worktree-derived value) and not the
+/// delete-confirm modal, which funnels through `ellipsize_middle`.
+fn display_path(path: &str) -> String {
   match home_dir_cached() {
-    Some(home) => table_path_text_with_home(path, home),
-    // No home to strip: the cell still owes the terminal a sanitised value.
+    Some(home) => display_path_with_home(path, home),
+    // No home to strip: the surface still owes the terminal a sanitised value.
     None => crate::naming::sanitise_for_terminal(path),
   }
 }
 
-/// Pure variant of [`table_path_text`] that takes the home directory
-/// explicitly, mirroring the [`tilde_compress`] / [`tilde_compress_with_home`]
-/// pair it is built on. Exposed for tests.
+/// Pure variant of [`display_path`] that takes the home directory explicitly,
+/// mirroring the [`tilde_compress`] / [`tilde_compress_with_home`] pair it is
+/// built on. Exposed for tests.
 ///
 /// **The order is not interchangeable.** Compression matches the home prefix
 /// byte for byte, so it has to see the raw path: sanitising first rewrites
 /// whatever `$HOME` itself carries into `?`, the prefix stops matching the
-/// real [`dirs::home_dir`], and the column silently falls back to absolute for
-/// exactly the users whose home is hostile. Sanitising second costs nothing —
-/// `~` and the separators are not characters the sink rewrites — and still
-/// covers the tail, which is where a hostile worktree directory name actually
-/// arrives (issue #506).
-pub fn table_path_text_with_home(path: &str, home: &std::path::Path) -> String {
+/// real [`dirs::home_dir`], and compression silently stops firing for exactly
+/// the users whose home is hostile. Sanitising second costs nothing — `~` and
+/// the separators are not characters the sink rewrites — and still covers the
+/// tail, which is where a hostile worktree directory name actually arrives
+/// (issue #506).
+pub fn display_path_with_home(path: &str, home: &std::path::Path) -> String {
   crate::naming::sanitise_for_terminal(&tilde_compress_with_home(path, home))
 }
 
@@ -2508,10 +2520,10 @@ fn build_row(
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
   // Not width-constrained, so it does not pass through `trunc`'s funnel and
   // has to say so itself: a path carries the worktree directory name, which is
-  // as unvetted as the branch (issue #506). `table_path_text` carries both that
-  // sink and the tilde compression the header and sidebar already apply, in the
-  // one order that works (issue #568).
-  let path_cell = Cell::from(table_path_text(&w.path.to_string_lossy())).style(worktree_path_style(theme));
+  // as unvetted as the branch (issue #506). `display_path` carries both that
+  // sink and the tilde compression the header already applies, in the one order
+  // that works (issue #568).
+  let path_cell = Cell::from(display_path(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
   let mut cells = Vec::with_capacity(8);
   if let Some(marked) = mark {

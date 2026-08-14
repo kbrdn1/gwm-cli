@@ -907,3 +907,60 @@ fn dim_unfocused_dims_the_unfocused_pane_in_both_layouts() {
     }
   }
 }
+
+// --- the sidebar's `Path` row sanitises too (issue #568) --------------------
+
+/// A repo living in a directory whose own name carries `c`.
+///
+/// Mirrors the table's fixture in `tui_table_render_tests.rs`: a hostile
+/// segment has to arrive through the path, since the sidebar's `Path` row is
+/// the one place the raw `w.path` is spelled out in full.
+fn repo_under_segment(c: char) -> (TempDir, std::path::PathBuf) {
+  let outer = TempDir::new().unwrap();
+  let inner = outer.path().join(format!("wt{c}x"));
+  std::fs::create_dir(&inner).unwrap();
+  let repo = git2::Repository::init(&inner).unwrap();
+  repo.set_head("refs/heads/main").ok();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  std::fs::write(inner.join("file.txt"), "seed").unwrap();
+  repo.index().unwrap().add_path(Path::new("file.txt")).unwrap();
+  repo.index().unwrap().write().unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+  (outer, inner)
+}
+
+#[test]
+fn the_sidebar_path_row_replaces_a_bidi_control_rather_than_dropping_it() {
+  // The table's guard (`a_worktree_path_cannot_carry_a_bidi_control_into_the
+  // _table`) asserts no bidi control reaches the buffer, and it passes on this
+  // surface *vacuously*: the sidebar builds its `Path` row as a `Span`, and
+  // ratatui's grapheme-width filtering silently swallows a zero-width `Cf`
+  // rather than painting it. Nothing leaks, but nothing is sanitised either,
+  // and the row then shows a path the filesystem does not have — `wtx` for a
+  // directory actually named `wt<U+202E>x`.
+  //
+  // So the oracle here is the `?` being *present*, not the control being
+  // absent. That is what separates "went through the sink" from "ratatui
+  // happened to drop it".
+  for c in ['\u{202E}', '\u{200F}', '\u{2066}'] {
+    let (_outer, inner) = repo_under_segment(c);
+    let mut app = App::new_at_layered(Some(inner.as_path()), None).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(200, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    let path_row = (0..area.height)
+      .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+      .find(|line| line.trim_start().starts_with("Path "))
+      .expect("the sidebar must render its `Path` row");
+    assert!(
+      path_row.contains("wt?x"),
+      "U+{:04X}: the `Path` row must sanitise the segment, got {:?}",
+      c as u32,
+      path_row.trim_end()
+    );
+  }
+}

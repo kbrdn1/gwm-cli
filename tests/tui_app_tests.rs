@@ -6138,51 +6138,51 @@ fn tilde_compress_falls_back_when_path_outside_home() {
   assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
 }
 
-// ---- the table's PATH column text (issue #568) ---------------------------
+// ---- how a worktree path is spelled on screen (issue #568) ----------------
 
-use gwm::tui::table_path_text_with_home;
+use gwm::tui::display_path_with_home;
 
 #[test]
-fn the_table_path_compresses_home_like_the_header_does() {
-  // Issue #568: the header and the sidebar's `Path` row both tilde-compress,
-  // the table printed the same value raw, so `$HOME` was re-spent on every
-  // row of a column that is `Fill(1)` and vanishes first.
+fn a_displayed_path_compresses_home_like_the_header_does() {
+  // Issue #568: the header already tilde-compressed, the table printed the
+  // same value raw, so `$HOME` was re-spent on every row of a column that is
+  // `Fill(1)` and vanishes first.
   let home = std::path::Path::new("/home/alice");
   assert_eq!(
-    table_path_text_with_home("/home/alice/gwm-demo/worktrees/acme-api/", home),
+    display_path_with_home("/home/alice/gwm-demo/worktrees/acme-api/", home),
     // Trailing separator kept: `w.path` carries one in production, and the
     // column has no business rewriting the value beyond the prefix.
     "~/gwm-demo/worktrees/acme-api/"
   );
-  assert_eq!(table_path_text_with_home("/var/lib/acme", home), "/var/lib/acme");
+  assert_eq!(display_path_with_home("/var/lib/acme", home), "/var/lib/acme");
 }
 
 #[test]
-fn the_table_path_compresses_before_it_sanitises() {
+fn a_displayed_path_compresses_before_it_sanitises() {
   // The order is not interchangeable, which is the whole reason this pair
-  // exists rather than the two helpers being composed at the call site.
+  // exists rather than the two helpers being composed at each call site.
   // Compression matches the home prefix byte for byte, so it has to run on
   // the raw path: sanitising first rewrites whatever `$HOME` itself carries
-  // into `?`, the prefix stops matching the real `dirs::home_dir()`, and the
-  // column silently falls back to absolute for exactly the users whose home
-  // is hostile. Sanitise-first would yield `/home/al?ice/wt` here.
+  // into `?`, the prefix stops matching the real `dirs::home_dir()`, and
+  // compression silently stops firing for exactly the users whose home is
+  // hostile. Sanitise-first would yield `/home/al?ice/wt` here.
   let home = std::path::Path::new("/home/al\u{202E}ice");
-  assert_eq!(table_path_text_with_home("/home/al\u{202E}ice/wt", home), "~/wt");
+  assert_eq!(display_path_with_home("/home/al\u{202E}ice/wt", home), "~/wt");
 }
 
 #[test]
-fn the_table_path_still_sanitises_what_compression_leaves_behind() {
+fn a_displayed_path_still_sanitises_what_compression_leaves_behind() {
   // Compressing must not become a way past the sink: the tail the tilde does
   // not swallow is the part a hostile worktree directory name arrives in
-  // (issue #506), and it is still the one table cell outside `trunc`'s funnel.
+  // (issue #506), and the table cell is still outside `trunc`'s funnel.
   let home = std::path::Path::new("/home/alice");
   assert_eq!(
-    table_path_text_with_home("/home/alice/wt\u{202E}x", home),
+    display_path_with_home("/home/alice/wt\u{202E}x", home),
     "~/wt?x",
     "a bidi control below home must not ride the tilde into the cell"
   );
   assert_eq!(
-    table_path_text_with_home("/var/wt\u{202E}x", home),
+    display_path_with_home("/var/wt\u{202E}x", home),
     "/var/wt?x",
     "an uncompressed path must be sanitised exactly as before"
   );

@@ -12,26 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The table's `PATH` column tilde-compresses like the rest of the screen**
-  ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header and the
-  sidebar's `Path` row both rendered `$HOME` as `~`; the table printed the same
-  value raw, so one path appeared twice on one screen in two spellings. It also
-  cost the most: `PATH` is the `Fill(1)` column, the one that takes whatever the
-  others leave and vanishes first, and it spent 13 of its columns on the home
+- **One spelling for a worktree path, everywhere it is printed in full**
+  ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header rendered
+  `$HOME` as `~` and the table printed the same value raw, so one path appeared
+  twice on one screen in two spellings. The column paying for it is the one that
+  can least afford it: `PATH` is `Fill(1)`, it takes whatever the other columns
+  leave and by design vanishes first, and it spent 13 of its columns on the home
   directory on *every* row. Measured on the demo fixture at 103 columns the
-  column got about 22 cells and all five rows read `/Users/kbrdn1/gwm-demo`,
-  identical. They now read `~/gwm-demo/worktrees/a…`, which at least begins to
-  tell the rows apart.
+  column gets about 22 cells, and all five rows read `/Users/kbrdn1/gwm-demo`,
+  identical, hard-clipped mid-path with no ellipsis. They now start at
+  `~/gwm-demo/`, so what survives the clip is the part that differs per row.
 
   Compression runs before the terminal sanitiser, not after, and that order is
   load-bearing: the prefix is matched byte for byte against `dirs::home_dir()`,
-  so sanitising first would rewrite whatever `$HOME` itself carries and the
+  so sanitising first would rewrite whatever `$HOME` itself carries and
   compression would silently stop firing for exactly the users whose home is
   hostile. The tail is still sanitised, so a worktree directory name cannot ride
   the tilde into the cell.
 
+  The sidebar's `Path` row had the other half of the problem and now shares the
+  same helper: it compressed but never sanitised. Nothing leaked, because
+  ratatui drops a zero-width formatting character rather than painting it, but
+  the row silently showed a path the filesystem does not have.
+
   `gwm path --format=json` is unaffected and stays absolute: this is a rendering
-  change in the TUI table only.
+  change in the TUI only.
 
 ## Past releases
 
