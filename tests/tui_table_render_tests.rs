@@ -407,3 +407,62 @@ fn a_column_is_sized_on_the_text_that_reaches_the_terminal() {
     "the branch fits its column and must render whole: {row:?}"
   );
 }
+
+// --- the PATH cell is actually wired to the compression (issue #568) --------
+
+/// A repo under the real home directory.
+///
+/// The one fixture in this file that depends on ambient state, and it has to:
+/// the compression resolves `$HOME` through `dirs::home_dir()` behind a
+/// `OnceLock`, so no env var set from a test can steer it. Without a fixture
+/// that genuinely lives under home, nothing here can tell the compressed
+/// rendering from the raw one, and `build_row` could be reverted to the bare
+/// sanitiser with the whole suite still green.
+fn repo_under_home() -> TempDir {
+  let home = dirs::home_dir().expect("every platform in the CI matrix has a home directory");
+  let dir = TempDir::new_in(&home).unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  repo.set_head("refs/heads/main").ok();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  std::fs::write(dir.path().join("file.txt"), "seed").unwrap();
+  repo.index().unwrap().add_path(Path::new("file.txt")).unwrap();
+  repo.index().unwrap().write().unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+  dir
+}
+
+#[test]
+fn the_path_cell_renders_the_compressed_form_not_the_raw_one() {
+  let home = dirs::home_dir().expect("every platform in the CI matrix has a home directory");
+  let dir = repo_under_home();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  // Wide enough that the `Fill(1)` PATH column keeps the whole value: this
+  // column is hard-clipped with no ellipsis, so a narrow frame would cut the
+  // home prefix away and the negative assertion would pass for the wrong
+  // reason.
+  let backend = TestBackend::new(300, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  // The table row, not the header: both carry a path, and the header has
+  // compressed since long before this change, so matching the wrong line
+  // would make the test pass without `build_row` doing anything.
+  let row = rows(&terminal)
+    .into_iter()
+    .find(|line| line.contains("clean"))
+    .expect("the fixture's single worktree must render a row");
+  let raw = home.display().to_string();
+  assert!(
+    !row.contains(&raw),
+    "the PATH cell still spells $HOME out in full: {:?}",
+    row.trim_end()
+  );
+  let name = dir.path().file_name().unwrap().to_string_lossy();
+  assert!(
+    row.contains(&format!("~{}{}", std::path::MAIN_SEPARATOR, name)),
+    "the PATH cell must render the compressed path, got {:?}",
+    row.trim_end()
+  );
+}

@@ -6138,6 +6138,33 @@ fn tilde_compress_falls_back_when_path_outside_home() {
   assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
 }
 
+#[test]
+fn tilde_compress_tolerates_a_trailing_separator_on_home() {
+  // `HOME=/home/alice/` is legal, and `dirs::home_dir()` keeps the separator
+  // verbatim rather than normalising it away — measured, not assumed:
+  // `HOME=/home/alice/` yields `Some("/home/alice/")` and `HOME=/home/alice//`
+  // yields `Some("/home/alice//")`.
+  //
+  // Left in, the prefix strips `/home/alice/repo` down to `repo`, the boundary
+  // check then sees no leading separator and refuses, and every surface stays
+  // absolute for exactly those users.
+  for home in ["/home/alice/", "/home/alice//"] {
+    let home = std::path::Path::new(home);
+    assert_eq!(
+      tilde_compress_with_home("/home/alice/repo", home),
+      "~/repo",
+      "home={home:?}"
+    );
+    assert_eq!(tilde_compress_with_home("/home/alice", home), "~", "home={home:?}");
+    // The boundary guard survives the trim: a longer sibling is still refused.
+    assert_eq!(
+      tilde_compress_with_home("/home/alicent/x", home),
+      "/home/alicent/x",
+      "home={home:?}"
+    );
+  }
+}
+
 #[cfg(windows)]
 #[test]
 fn tilde_compress_matches_across_the_two_windows_separators() {

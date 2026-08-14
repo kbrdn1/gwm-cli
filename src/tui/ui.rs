@@ -2213,7 +2213,15 @@ fn tilde_compress(path: &str) -> String {
 /// `~ice/repo` (raised by PR #70 Copilot review).
 pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
   let home_s = home.display().to_string();
-  if let Some(rest) = strip_home_prefix(path, &home_s) {
+  // `HOME=/home/alice/` is legal and `dirs::home_dir()` hands the separator
+  // back verbatim (measured: it yields `Some("/home/alice/")`). Left in, the
+  // prefix would strip `/home/alice/repo` down to `repo`, the boundary check
+  // below would see no leading separator and refuse, and every surface would
+  // stay absolute for exactly those users. Trimming to the empty string is
+  // fine: `HOME=/` then compresses `/var` to `~/var`, which is what a home at
+  // the root means.
+  let home_s = home_s.trim_end_matches(std::path::is_separator);
+  if let Some(rest) = strip_home_prefix(path, home_s) {
     // Accept exact-home (`rest.is_empty()`) and home-followed-by-separator
     // matches. Reject prefix matches that bleed into a longer dir name.
     if rest.is_empty() || rest.starts_with(std::path::is_separator) {
