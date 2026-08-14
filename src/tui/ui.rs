@@ -2922,10 +2922,15 @@ impl HintContext {
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
       ],
-      // #515: no verbs beyond the exits — j/k are letters here, and the
-      // arrows are hard-coded for the same reason `Esc` is elsewhere.
+      // #515: no verbs beyond the exits and the #557 list chords — j/k are
+      // letters here, and the arrows are hard-coded for the same reason
+      // `Esc` is elsewhere. This bar is the only discovery surface the
+      // editor has: `?` is a printable, so the help overlay cannot be
+      // opened from inside it.
       HintContext::Note => &[
         Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "save & close"),
       ],
@@ -3883,6 +3888,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("Left/Right/Up/Down", "move the cursor"),
       fixed("Home/End", "start / end of line"),
       fixed("PgUp/PgDn", "page through the note"),
+      modal_entry(
+        ModalAction::NoteToggleBullet,
+        "make the line a list item, or plain again",
+      ),
+      modal_entry(
+        ModalAction::NoteToggleCheckbox,
+        "tick the box on the line, spawning one first",
+      ),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
       modal_entry(ModalAction::NoteClose, "save and close (empty the note to delete it)"),
       HelpRow::Blank,
@@ -5581,7 +5594,27 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.note_editor.as_ref() {
-    Some(editor) => format!("note · {}", crate::naming::sanitise_for_terminal(&editor.branch)),
+    Some(editor) => {
+      let branch = crate::naming::sanitise_for_terminal(&editor.branch);
+      // #557: the mode chip only exists behind `note_vim`. A mode the user
+      // cannot see is a mode they type verbs into by accident, and a chip
+      // for a mode that can never change is chrome nobody asked for.
+      //
+      // It sits AFTER the branch because a centred title that overflows is
+      // clipped from the LEFT (measured, not assumed: the guard in
+      // `tui_modal_render_tests` fails with the two halves the other way
+      // round). The chip is the half worth keeping, so it goes where the
+      // clip does not reach.
+      if app.config.tui.note_vim {
+        let mode = match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => "NORMAL",
+          crate::tui::state::note_editor::NoteMode::Insert => "INSERT",
+        };
+        format!("note · {branch} · {mode}")
+      } else {
+        format!("note · {branch}")
+      }
+    }
     None => "note".to_string(),
   };
   // Already rode the top rule before #549; routed through the shared

@@ -1907,3 +1907,68 @@ fn a_form_that_had_to_scroll_says_so() {
     rows.join("\n")
   );
 }
+
+// ── the note editor's mode indicator (#557) ────────────────────────────────
+
+#[test]
+fn the_note_title_names_the_mode_when_the_knob_is_on() {
+  // A mode the user cannot see is a mode they type verbs into by accident.
+  // The title is the one piece of chrome the editor already has.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the modal must say which mode it is in:\n{}",
+    row_strings(&buf).join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "INSERT"),
+    "and it must follow the mode:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_note_title_says_nothing_about_modes_with_the_knob_off() {
+  // The #515 title, unchanged, for everyone who never asked for a mode.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(!buffer_contains(&buf, "INSERT"), "no mode chip without the knob");
+  assert!(!buffer_contains(&buf, "NORMAL"));
+}
+
+#[test]
+fn a_long_branch_name_does_not_push_the_mode_chip_off_the_title() {
+  // The title is clipped from the right, so whichever half sits last is the
+  // half a long branch name costs. Whether the keys are text is worth more
+  // than the name of the branch the modal was opened from.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.note_editor = Some(gwm::tui::state::note_editor::NoteEditor::open(
+    "feat/#557-a-branch-name-long-enough-to-run-past-the-right-hand-edge-of-the-modal".into(),
+    PathBuf::from("/tmp/n.md"),
+    "",
+  ));
+  app.note_editor.as_mut().unwrap().enter_normal();
+  app.view = View::Note;
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the mode chip was clipped off by the branch name:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
