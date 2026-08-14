@@ -5594,7 +5594,21 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.note_editor.as_ref() {
-    Some(editor) => format!("note · {}", crate::naming::sanitise_for_terminal(&editor.branch)),
+    Some(editor) => {
+      let branch = crate::naming::sanitise_for_terminal(&editor.branch);
+      // #557: the mode chip only exists behind `note_vim`. A mode the user
+      // cannot see is a mode they type verbs into by accident, and a chip
+      // for a mode that can never change is chrome nobody asked for.
+      if app.config.tui.note_vim {
+        let mode = match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => "NORMAL",
+          crate::tui::state::note_editor::NoteMode::Insert => "INSERT",
+        };
+        format!("note · {branch} · {mode}")
+      } else {
+        format!("note · {branch}")
+      }
+    }
     None => "note".to_string(),
   };
   // Already rode the top rule before #549; routed through the shared

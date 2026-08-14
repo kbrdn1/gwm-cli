@@ -1907,3 +1907,45 @@ fn a_form_that_had_to_scroll_says_so() {
     rows.join("\n")
   );
 }
+
+// ── the note editor's mode indicator (#557) ────────────────────────────────
+
+#[test]
+fn the_note_title_names_the_mode_when_the_knob_is_on() {
+  // A mode the user cannot see is a mode they type verbs into by accident.
+  // The title is the one piece of chrome the editor already has.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the modal must say which mode it is in:\n{}",
+    row_strings(&buf).join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "INSERT"),
+    "and it must follow the mode:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_note_title_says_nothing_about_modes_with_the_knob_off() {
+  // The #515 title, unchanged, for everyone who never asked for a mode.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(!buffer_contains(&buf, "INSERT"), "no mode chip without the knob");
+  assert!(!buffer_contains(&buf, "NORMAL"));
+}
