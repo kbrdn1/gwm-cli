@@ -65,11 +65,17 @@ pkg-fmt = "zip"
 [package.metadata.deb]
 maintainer = "Kylian Bardini <onepiecekylian@gmail.com>"
 copyright = "2026 Kylian Bardini"
-# No `license-file`: it names a single file, and inlining one half of a
-# disjunction under a `License: MIT OR Apache-2.0` header in the generated
-# `copyright` would state something false. The SPDX expression from `[package]`
-# is the declaration; both texts travel as assets below, which is also what
-# the rpm block does.
+# `license-file` names `LICENSE-MIT` specifically, and the asymmetry is
+# deliberate rather than a leftover from the MIT-only manifest. cargo-deb
+# appends this file verbatim under the `License:` header of the generated
+# `/usr/share/doc/gwm-cli/copyright`, and Debian Policy §12.5 wants the license
+# text there: MIT is not one of the licenses shipped in
+# `/usr/share/common-licenses`, so it has to be inlined, while Apache-2.0 is,
+# so it does not. Dropping the key entirely (tried first) leaves `copyright`
+# carrying the bare expression and no text at all, which is a regression on
+# what the MIT-only manifest produced. Both texts additionally travel as assets
+# below, so the package carries them whole either way.
+license-file = ["LICENSE-MIT", "0"]
 extended-description = """
 git worktree manager — a terminal UI and CLI over git worktrees. Native
 libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle

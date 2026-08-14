@@ -113,7 +113,18 @@ fn the_mit_text_still_carries_the_copyright_line() {
 /// whereas `LICENSE-MIT` and `licenses/$pkgname` are followed by `-` and `s`.
 /// Without it every `install -Dm644 LICENSE-MIT …` row reads as a declaration
 /// that names only one half.
+///
+/// Comment lines are excluded, and that exclusion is what keeps the guard from
+/// answering itself. The comments explaining *why* each channel spells the
+/// disjunction the way it does necessarily quote both halves, so a file whose
+/// real declaration is deleted would still satisfy "declares both licenses"
+/// out of its own prose while the formula declares nothing at all.
 fn is_declaration(line: &str) -> bool {
+  let trimmed = line.trim_start();
+  if trimmed.starts_with('#') || trimmed.starts_with("//") {
+    return false;
+  }
+
   let lower = line.to_lowercase();
   let mut from = 0;
   while let Some(at) = lower[from..].find("licen") {
@@ -174,6 +185,35 @@ fn declaring_surfaces() -> Vec<String> {
 }
 
 #[test]
+fn a_comment_quoting_a_license_is_not_a_declaration() {
+  // Every line here is lifted from a comment this repo actually carries. Each
+  // one names both halves, so without the comment filter each would satisfy
+  // the walk on its own and let the file's real declaration be deleted
+  // unnoticed.
+  for comment in [
+    r#"  # `license "MIT OR Apache-2.0"` string is not an SPDX expression to brew,"#,
+    "# inlining one half under a `License: MIT OR Apache-2.0` header would state",
+    "// license = \"MIT OR Apache-2.0\"",
+  ] {
+    assert!(
+      !is_declaration(comment),
+      "a comment must not count as a declaration: {comment}"
+    );
+  }
+
+  // The real declarations still register, in every syntax the repo uses.
+  for real in [
+    r#"license = "MIT OR Apache-2.0""#,
+    r#"  "license": "MIT|Apache-2.0","#,
+    "license=('MIT OR Apache-2.0')",
+    r#"  license any_of: ["MIT", "Apache-2.0"]"#,
+    "            license = [ licenses.asl20 licenses.mit ];",
+  ] {
+    assert!(is_declaration(real), "a real declaration must register: {real}");
+  }
+}
+
+#[test]
 fn every_packaging_surface_declares_both_licenses() {
   let surfaces = declaring_surfaces();
 
@@ -218,7 +258,32 @@ fn the_crate_declares_the_spdx_disjunction() {
   );
   assert!(
     package.get("license-file").is_none(),
-    "`license-file` names a single file and would contradict the disjunction above"
+    "`license-file` at the [package] level names a single file and would contradict the disjunction above; the deb block carries its own, for a different reason"
+  );
+}
+
+#[test]
+fn the_deb_copyright_still_carries_a_license_text() {
+  // cargo-deb appends `license-file` verbatim under the `License:` header of
+  // the generated `/usr/share/doc/gwm-cli/copyright`. Without the key the
+  // header ships alone, with no text under it, which is what Debian Policy
+  // §12.5 asks for and what the MIT-only manifest used to provide. MIT is the
+  // half that has to be inlined: Apache-2.0 is in `/usr/share/common-licenses`
+  // on a Debian system and MIT is not.
+  let rel = deb()
+    .get("license-file")
+    .and_then(|v| v.as_array())
+    .and_then(|a| a.first().cloned())
+    .and_then(|v| v.as_str().map(str::to_string))
+    .expect("[package.metadata.deb] license-file names a file");
+
+  assert_eq!(
+    rel, "LICENSE-MIT",
+    "the inlined text must be the half that is not a Debian common license"
+  );
+  assert!(
+    root().join(&rel).is_file(),
+    "license-file points at {rel}, which is not a file at the repo root: the generated copyright would be empty"
   );
 }
 
