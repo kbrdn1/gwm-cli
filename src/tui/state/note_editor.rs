@@ -26,6 +26,87 @@
 
 use std::path::PathBuf;
 
+/// How a line opens, in Markdown terms (issue #557).
+///
+/// A note becomes a checklist after a day, and the three shapes below are
+/// the whole vocabulary of one: a bullet, a box, a ticked box. Anything
+/// else is prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListPrefix {
+  /// `- `
+  Bullet,
+  /// `- [ ] `
+  Unchecked,
+  /// `- [x] `, and `- [X] ` reads the same: notes are plain Markdown other
+  /// editors have written into.
+  Checked,
+}
+
+impl ListPrefix {
+  /// The marker a continued item is born with. A box is never born ticked:
+  /// ticking is an act.
+  fn continued(self) -> &'static str {
+    match self {
+      ListPrefix::Bullet => "- ",
+      ListPrefix::Unchecked | ListPrefix::Checked => "- [ ] ",
+    }
+  }
+}
+
+/// The list marker a line carries, measured in `char`s so the cursor (which
+/// counts `char`s) can be moved by the same amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ListLine {
+  /// Leading whitespace, in `char`s. Hand-written nesting lives here, so
+  /// every rewrite goes *after* it and a continued item copies it.
+  indent: usize,
+  kind: ListPrefix,
+  /// Chars from the start of the line to the item text: `indent` plus the
+  /// marker. Measured rather than derived from `kind`, because a line can
+  /// end right after `]` with no trailing space.
+  width: usize,
+}
+
+impl ListLine {
+  /// Read the marker off `line`, or `None` when the line is prose.
+  ///
+  /// A marker needs its space: `-foo` is prose and `--flag` is a flag, and
+  /// silently treating either as an item would rewrite text the user meant
+  /// literally.
+  fn parse(line: &str) -> Option<Self> {
+    let body = line.trim_start();
+    let indent = line[..line.len() - body.len()].chars().count();
+    let rest = body.strip_prefix('-')?;
+    let (kind, marker) = if let Some(after) = rest.strip_prefix(" [") {
+      let mut chars = after.chars();
+      let kind = match chars.next()? {
+        ' ' => ListPrefix::Unchecked,
+        'x' | 'X' => ListPrefix::Checked,
+        _ => return None,
+      };
+      if chars.next() != Some(']') {
+        return None;
+      }
+      match chars.next() {
+        Some(' ') => (kind, 6),
+        None => (kind, 5),
+        _ => return None,
+      }
+    } else if rest.is_empty() {
+      (ListPrefix::Bullet, 1)
+    } else if rest.starts_with(' ') {
+      (ListPrefix::Bullet, 2)
+    } else {
+      return None;
+    };
+    Some(Self {
+      indent,
+      kind,
+      width: indent + marker,
+    })
+  }
+}
+
 /// Buffer, cursor and viewport for one note.
 ///
 /// `lines` is never empty: an empty note is `[""]`, one empty line, so the
@@ -116,13 +197,105 @@ impl NoteEditor {
     self.dirty = true;
   }
 
-  /// Split the current line at the cursor.
+  /// Split the current line at the cursor, continuing the list the line is
+  /// part of (issue #557).
+  ///
+  /// An item whose text is empty ends the list instead: that second `Enter`
+  /// after the last item is how every Markdown editor breaks out, and
+  /// without it the only way out of a list is to backspace the bullet the
+  /// editor just wrote.
   pub fn newline(&mut self) {
+    let list = ListLine::parse(&self.lines[self.cursor_line]);
+    if let Some(l) = list {
+      let line = &self.lines[self.cursor_line];
+      let text_at = Self::byte_at(line, l.width);
+      if line[text_at..].trim().is_empty() {
+        self.lines[self.cursor_line].clear();
+        self.cursor_col = 0;
+        self.dirty = true;
+        return;
+      }
+    }
+    let prefix = match list {
+      Some(l) => {
+        let indent: String = self.lines[self.cursor_line].chars().take(l.indent).collect();
+        format!("{indent}{}", l.kind.continued())
+      }
+      None => String::new(),
+    };
     let at = Self::byte_at(&self.lines[self.cursor_line], self.cursor_col);
     let tail = self.lines[self.cursor_line].split_off(at);
-    self.lines.insert(self.cursor_line + 1, tail);
+    self.cursor_col = prefix.chars().count();
+    self.lines.insert(self.cursor_line + 1, format!("{prefix}{tail}"));
     self.cursor_line += 1;
-    self.cursor_col = 0;
+    self.dirty = true;
+  }
+
+  // -------------------------------------------------------------------
+  // Lists (issue #557)
+  // -------------------------------------------------------------------
+
+  /// Make the current line a list item, or take the marker back off it.
+  ///
+  /// `- [ ] ` *is* a bullet, so turning a checkbox line off removes the
+  /// whole marker rather than leaving a widowed `[ ]`.
+  pub fn toggle_bullet(&mut self) {
+    match ListLine::parse(&self.lines[self.cursor_line]) {
+      Some(l) => self.rewrite_marker(l.indent, l.width, ""),
+      None => {
+        let indent = self.indent_of(self.cursor_line);
+        self.rewrite_marker(indent, indent, "- ");
+      }
+    }
+  }
+
+  /// Tick the box under the caret, from anywhere on the line, spawning one
+  /// first if the line does not have it yet. One chord covers writing the
+  /// item and ticking it, which is the gesture a checklist exists for.
+  pub fn toggle_checkbox(&mut self) {
+    match ListLine::parse(&self.lines[self.cursor_line]) {
+      Some(l) => {
+        // A bullet gains an empty box rather than a ticked one: the first
+        // press writes the item, the second one ticks it.
+        let marker = if l.kind == ListPrefix::Unchecked {
+          "- [x] "
+        } else {
+          "- [ ] "
+        };
+        self.rewrite_marker(l.indent, l.width, marker);
+      }
+      None => {
+        let indent = self.indent_of(self.cursor_line);
+        self.rewrite_marker(indent, indent, "- [ ] ");
+      }
+    }
+  }
+
+  /// Leading whitespace of `index`, in `char`s.
+  fn indent_of(&self, index: usize) -> usize {
+    let line = &self.lines[index];
+    line.chars().take_while(|c| c.is_whitespace()).count()
+  }
+
+  /// Replace the chars in `indent..old` on the cursor line with `marker`,
+  /// carrying the caret along so it stays on the character it was on.
+  ///
+  /// A same-width rewrite (ticking a box) leaves the caret exactly where it
+  /// is; a caret standing inside a marker that shrinks lands on the item
+  /// text, since the column it pointed at no longer exists.
+  fn rewrite_marker(&mut self, indent: usize, old: usize, marker: &str) {
+    let line = &mut self.lines[self.cursor_line];
+    let from = Self::byte_at(line, indent);
+    let to = Self::byte_at(line, old);
+    line.replace_range(from..to, marker);
+    let new = indent + marker.chars().count();
+    self.cursor_col = if new == old {
+      self.cursor_col
+    } else if self.cursor_col >= old {
+      self.cursor_col - old + new
+    } else {
+      new
+    };
     self.dirty = true;
   }
 

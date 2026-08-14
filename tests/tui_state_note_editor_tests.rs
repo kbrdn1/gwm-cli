@@ -337,3 +337,209 @@ fn a_zero_height_viewport_does_not_divide_the_scroll_by_zero() {
   e.clamp_scroll(0);
   assert_eq!(e.scroll, 2, "a 0-row viewport is treated as 1 row, not as a panic");
 }
+
+// ---------------------------------------------------------------------------
+// Lists: bullets and checkboxes (issue #557)
+// ---------------------------------------------------------------------------
+//
+// A note becomes a checklist after a day ("what to check before opening the
+// PR"), and ticking an item used to mean arrowing onto the right column and
+// retyping a character by hand. Two verbs replace that, and both are
+// idempotent round trips: what a toggle writes, the same toggle takes back.
+
+#[test]
+fn a_plain_line_takes_a_bullet_and_gives_it_back() {
+  let mut e = editor("check the CI");
+  e.toggle_bullet();
+  assert_eq!(e.lines[0], "- check the CI");
+  e.toggle_bullet();
+  assert_eq!(e.lines[0], "check the CI", "the same key takes the bullet back");
+}
+
+#[test]
+fn the_bullet_lands_after_the_indentation() {
+  // Nested lists are written by hand with leading spaces; a prefix inserted
+  // at column 0 would break the nesting it was asked to mark.
+  let mut e = editor("  nested item");
+  e.toggle_bullet();
+  assert_eq!(e.lines[0], "  - nested item");
+}
+
+#[test]
+fn toggling_a_bullet_off_takes_the_checkbox_with_it() {
+  // `- [ ] ` IS a bullet, so "this line is no longer a list item" removes
+  // the whole prefix rather than leaving a widowed `[ ]`.
+  let mut e = editor("- [ ] ship it");
+  e.toggle_bullet();
+  assert_eq!(e.lines[0], "ship it");
+}
+
+#[test]
+fn a_plain_line_becomes_an_unchecked_box() {
+  let mut e = editor("run cargo test");
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [ ] run cargo test");
+}
+
+#[test]
+fn an_empty_line_becomes_an_empty_box() {
+  let mut e = editor("");
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [ ] ");
+  assert_eq!(at(&e), (0, 6), "the caret sits where the item text goes");
+}
+
+#[test]
+fn a_bullet_becomes_a_box_without_doubling_the_dash() {
+  let mut e = editor("- ship it");
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [ ] ship it");
+}
+
+#[test]
+fn toggling_a_box_flips_the_mark_and_back() {
+  let mut e = editor("- [ ] ship it");
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [x] ship it");
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [ ] ship it");
+}
+
+#[test]
+fn an_uppercase_mark_reads_as_ticked() {
+  // `- [X]` is what several editors write, and a note is plain Markdown
+  // other tools have written into.
+  let mut e = editor("- [X] ship it");
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [ ] ship it");
+}
+
+#[test]
+fn the_box_toggles_from_anywhere_on_the_line() {
+  // The gesture a checklist exists for: no navigation first.
+  for col in [0, 3, 6, 12] {
+    let mut e = editor("- [ ] ship it");
+    e.cursor_col = col;
+    e.toggle_checkbox();
+    assert_eq!(e.lines[0], "- [x] ship it", "toggling from column {col}");
+    assert_eq!(e.cursor_col, col, "flipping the mark does not move the caret");
+  }
+}
+
+#[test]
+fn the_caret_keeps_its_place_in_the_text_when_a_prefix_appears() {
+  let mut e = editor("ship it");
+  e.home();
+  e.toggle_checkbox();
+  assert_eq!(at(&e), (0, 6), "still on the `s`, which moved right by the prefix");
+  e.toggle_bullet();
+  assert_eq!(at(&e), (0, 0), "and back onto it when the prefix goes away");
+}
+
+#[test]
+fn a_caret_inside_a_removed_prefix_lands_at_the_start_of_the_text() {
+  let mut e = editor("- [ ] ship it");
+  e.cursor_col = 3;
+  e.toggle_bullet();
+  assert_eq!(at(&e), (0, 0), "the column it pointed at is gone, so it clamps");
+}
+
+#[test]
+fn a_toggle_on_an_accented_line_never_slices_a_codepoint() {
+  let mut e = editor("- [ ] vérifier la CI");
+  e.end();
+  e.toggle_checkbox();
+  assert_eq!(e.lines[0], "- [x] vérifier la CI");
+  e.toggle_bullet();
+  assert_eq!(e.lines[0], "vérifier la CI");
+}
+
+#[test]
+fn every_list_toggle_marks_the_buffer_dirty() {
+  // `flush_note` skips the write on a clean buffer, so a toggle that leaves
+  // `dirty` false is a tick the user watched happen and then lost on `Esc`.
+  for toggle in [NoteEditor::toggle_bullet, NoteEditor::toggle_checkbox] {
+    let mut e = editor("- [ ] ship it");
+    assert!(!e.dirty);
+    toggle(&mut e);
+    assert!(e.dirty, "a list toggle changed the buffer");
+  }
+}
+
+// ── Enter continues the list ───────────────────────────────────────────────
+
+#[test]
+fn enter_continues_a_bullet() {
+  let mut e = editor("- first");
+  e.newline();
+  assert_eq!(e.lines, vec!["- first", "- "]);
+  assert_eq!(at(&e), (1, 2), "the caret sits after the new bullet");
+}
+
+#[test]
+fn enter_continues_a_box_unchecked_whatever_the_current_mark() {
+  // Ticking is an act; a continued item is never born done.
+  let mut e = editor("- [x] first");
+  e.newline();
+  assert_eq!(e.lines, vec!["- [x] first", "- [ ] "]);
+  assert_eq!(at(&e), (1, 6));
+}
+
+#[test]
+fn enter_carries_the_indentation_of_the_item_it_continues() {
+  let mut e = editor("  - first");
+  e.newline();
+  assert_eq!(e.lines, vec!["  - first", "  - "]);
+}
+
+#[test]
+fn enter_on_an_empty_item_breaks_out_of_the_list() {
+  // What every Markdown editor does: the second Enter after the last item
+  // ends the list rather than nesting another empty one.
+  let mut e = editor("- first\n- ");
+  e.cursor_line = 1;
+  e.end();
+  e.newline();
+  assert_eq!(e.lines, vec!["- first", ""], "the empty item lost its bullet");
+  assert_eq!(at(&e), (1, 0), "and no line was added");
+  assert!(e.dirty);
+}
+
+#[test]
+fn enter_on_an_empty_box_breaks_out_too() {
+  let mut e = editor("- [ ] ");
+  e.end();
+  e.newline();
+  assert_eq!(e.lines, vec![""]);
+  assert_eq!(at(&e), (0, 0));
+}
+
+#[test]
+fn enter_mid_item_carries_the_prefix_onto_the_tail() {
+  let mut e = editor("- one two");
+  e.cursor_line = 0;
+  e.cursor_col = 6;
+  e.newline();
+  assert_eq!(e.lines, vec!["- one ", "- two"]);
+  assert_eq!(at(&e), (1, 2));
+}
+
+#[test]
+fn enter_on_a_plain_line_still_just_splits_it() {
+  let mut e = editor("plain");
+  e.end();
+  e.newline();
+  assert_eq!(e.lines, vec!["plain", ""]);
+  assert_eq!(at(&e), (1, 0));
+}
+
+#[test]
+fn a_line_that_only_looks_like_a_bullet_is_not_one() {
+  // `-foo` has no space, and `--` is a separator, not an item.
+  for text in ["-foo", "--flag"] {
+    let mut e = editor(text);
+    e.end();
+    e.newline();
+    assert_eq!(e.lines[1], "", "`{text}` is prose, not a list item");
+  }
+}
