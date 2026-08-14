@@ -13571,3 +13571,129 @@ fn a_ticked_box_survives_the_round_trip_to_disk() {
 
   assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] check the CI\n");
 }
+
+// ---- the note editor's normal mode (#557) --------------------------------
+
+use gwm::tui::state::note_editor::NoteMode;
+
+/// Open the note editor with `[tui] note_vim = true`, which is the only way
+/// normal mode is reachable at all.
+fn app_with_vim_note_open() -> (tempfile::TempDir, App) {
+  let (dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  (dir, app)
+}
+
+fn note_key(app: &mut App, c: char) {
+  app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+}
+
+#[test]
+fn the_knob_opens_the_note_in_normal_mode() {
+  let (_dir, app) = app_with_vim_note_open();
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+}
+
+#[test]
+fn with_the_knob_on_the_motion_keys_are_verbs_not_letters() {
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'j');
+  note_key(&mut app, 'l');
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["one", "two"], "nothing was typed");
+  assert_eq!((editor.cursor_line, editor.cursor_col), (1, 1));
+}
+
+#[test]
+fn with_the_knob_off_the_same_keys_are_still_letters() {
+  // The #515 editor, untouched: this is what the knob defends.
+  let (_dir, mut app) = app_with_note_open();
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Insert);
+  for c in "jkl".chars() {
+    note_key(&mut app, c);
+  }
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["jkl"]);
+}
+
+#[test]
+fn i_opens_insert_mode_and_the_next_keys_are_text_again() {
+  let (_dir, mut app) = app_with_vim_note_open();
+  note_key(&mut app, 'i');
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Insert);
+  for c in "done".chars() {
+    note_key(&mut app, c);
+  }
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["done"]);
+  assert_eq!(app.view, View::Note, "and no global verb fired on the `d`");
+}
+
+#[test]
+fn esc_leaves_insert_mode_before_it_leaves_the_note() {
+  // The whole reason the knob exists: with a mode, the first `Esc` is the
+  // one that leaves insert, so closing takes two.
+  let (_dir, mut app) = app_with_vim_note_open();
+  note_key(&mut app, 'i');
+  for c in "kept".chars() {
+    note_key(&mut app, c);
+  }
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert_eq!(app.view, View::Note, "the first Esc only left insert mode");
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert_eq!(app.view, View::List, "the second one closed it");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+}
+
+#[test]
+fn enter_and_backspace_are_motions_in_normal_mode() {
+  // They are text keys in insert mode, so in normal mode they must not
+  // edit: a Backspace that eats a character there is prose lost to a key
+  // the user pressed to move.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 2;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  app.handle_note_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["one", "two"], "the buffer is untouched");
+  assert_eq!((editor.cursor_line, editor.cursor_col), (1, 1));
+}
+
+#[test]
+fn the_list_chords_still_work_from_normal_mode() {
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["ship it".into()];
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- [ ] ship it"]);
+}
+
+#[test]
+fn the_mode_survives_a_trip_through_the_real_editor() {
+  // `Ctrl+e` re-reads the file into a fresh buffer; landing back in insert
+  // mode would leave the user typing verbs into their note.
+  let (_dir, mut app) = app_with_vim_note_open();
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+  std::fs::write(&path, "written outside\n").unwrap();
+
+  app.reload_note_after_editor();
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["written outside", ""]);
+  assert_eq!(editor.mode, NoteMode::Normal, "still in normal mode");
+}

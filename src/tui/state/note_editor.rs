@@ -107,6 +107,41 @@ impl ListLine {
   }
 }
 
+/// Which half of the vim split the buffer is in (issue #557).
+///
+/// Only reachable behind `[tui] note_vim = true`: with the knob off the
+/// editor is always [`Insert`](Self::Insert) and every printable is text,
+/// exactly as it shipped in #515.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoteMode {
+  /// Keys are text. The caret may sit one past the last char, which is
+  /// where the next character goes.
+  #[default]
+  Insert,
+  /// Keys are verbs. The caret sits ON a character, which is what makes
+  /// `x` at the end of a line delete something.
+  Normal,
+}
+
+/// Character class for the word motions, in vim's terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+  Blank,
+  /// A keyword char, or any non-blank when the motion is a `W` / `B` / `E`.
+  Word,
+  Punct,
+}
+
+fn class_of(c: char, big: bool) -> CharClass {
+  if c.is_whitespace() {
+    CharClass::Blank
+  } else if big || c.is_alphanumeric() || c == '_' {
+    CharClass::Word
+  } else {
+    CharClass::Punct
+  }
+}
+
 /// Buffer, cursor and viewport for one note.
 ///
 /// `lines` is never empty: an empty note is `[""]`, one empty line, so the
@@ -136,6 +171,13 @@ pub struct NoteEditor {
   /// close is skipped when it does not, so opening a note to read it does
   /// not touch its mtime.
   pub dirty: bool,
+  /// Insert or normal (issue #557). Stays [`NoteMode::Insert`] for the
+  /// whole life of the editor unless `[tui] note_vim = true`.
+  pub mode: NoteMode,
+  /// First half of a two-key normal-mode sequence (`gg`, `dd`), waiting for
+  /// its second. Dropped whole when the next key is not the pair, the way
+  /// vim drops an unfinished command.
+  pub pending: Option<char>,
 }
 
 impl NoteEditor {
@@ -157,6 +199,8 @@ impl NoteEditor {
       scroll: 0,
       viewport: 10,
       dirty: false,
+      mode: NoteMode::Insert,
+      pending: None,
     }
   }
 
@@ -216,13 +260,7 @@ impl NoteEditor {
         return;
       }
     }
-    let prefix = match list {
-      Some(l) => {
-        let indent: String = self.lines[self.cursor_line].chars().take(l.indent).collect();
-        format!("{indent}{}", l.kind.continued())
-      }
-      None => String::new(),
-    };
+    let prefix = self.continuation_prefix(self.cursor_line);
     let at = Self::byte_at(&self.lines[self.cursor_line], self.cursor_col);
     let tail = self.lines[self.cursor_line].split_off(at);
     self.cursor_col = prefix.chars().count();
@@ -268,6 +306,20 @@ impl NoteEditor {
         let indent = self.indent_of(self.cursor_line);
         self.rewrite_marker(indent, indent, "- [ ] ");
       }
+    }
+  }
+
+  /// The marker a line opened under `index` is born with: its indentation
+  /// plus the continued list marker, or nothing when `index` is prose.
+  /// Shared by `Enter` and by `o` / `O`, so one rule answers "what goes on
+  /// a new line under this one" whichever key asked.
+  fn continuation_prefix(&self, index: usize) -> String {
+    match ListLine::parse(&self.lines[index]) {
+      Some(l) => {
+        let indent: String = self.lines[index].chars().take(l.indent).collect();
+        format!("{indent}{}", l.kind.continued())
+      }
+      None => String::new(),
     }
   }
 
@@ -389,6 +441,237 @@ impl NoteEditor {
     let last = self.lines.len().saturating_sub(1);
     self.cursor_line = (self.cursor_line + height.max(1)).min(last);
     self.cursor_col = self.cursor_col.min(self.line_len(self.cursor_line));
+  }
+
+  // -------------------------------------------------------------------
+  // Normal mode (issue #557)
+  // -------------------------------------------------------------------
+
+  /// Leave insert mode. Pulls the caret back onto a character, because
+  /// normal mode sits on one rather than after it.
+  pub fn enter_normal(&mut self) {
+    self.mode = NoteMode::Normal;
+    self.pending = None;
+    self.clamp_normal();
+  }
+
+  /// Keep the caret on a character. Insert mode is allowed one past the
+  /// last one (that is where typing goes); normal mode is not, or `x` at
+  /// the end of a line would have nothing under it.
+  fn clamp_normal(&mut self) {
+    let last = self.line_len(self.cursor_line).saturating_sub(1);
+    self.cursor_col = self.cursor_col.min(last);
+  }
+
+  /// Route one printable while the buffer is in normal mode.
+  ///
+  /// The verbs are hard-coded rather than bindable, for the reason the
+  /// arrows are: a printable bound to a note verb is refused at load time
+  /// precisely so typing that letter keeps working, and normal mode does
+  /// not change what `[tui.keys.modal.note]` may hold.
+  ///
+  /// No counts (`3j`), no registers, and therefore no `p` or undo: this is
+  /// a scratch buffer three lines long, and `Ctrl+e` hands the file to the
+  /// real vim for anything that wants the rest.
+  pub fn normal_key(&mut self, c: char) {
+    if let Some(first) = self.pending.take() {
+      match (first, c) {
+        ('g', 'g') => {
+          self.cursor_line = 0;
+          self.clamp_normal();
+        }
+        ('d', 'd') => self.delete_line(),
+        // Anything else drops the whole sequence, the way vim drops an
+        // unfinished command rather than running its second half.
+        _ => {}
+      }
+      return;
+    }
+
+    match c {
+      'h' => self.cursor_col = self.cursor_col.saturating_sub(1),
+      'l' => {
+        let last = self.line_len(self.cursor_line).saturating_sub(1);
+        self.cursor_col = (self.cursor_col + 1).min(last);
+      }
+      'j' => self.down(),
+      'k' => self.up(),
+      '0' => self.cursor_col = 0,
+      '^' => self.cursor_col = self.indent_of(self.cursor_line),
+      '$' => self.end(),
+      'w' => self.word_forward(false),
+      'W' => self.word_forward(true),
+      'b' => self.word_backward(false),
+      'B' => self.word_backward(true),
+      'e' => self.word_end(false),
+      'E' => self.word_end(true),
+      'G' => self.cursor_line = self.lines.len() - 1,
+      'g' | 'd' => self.pending = Some(c),
+      'x' => self.delete_under(),
+      'i' => self.mode = NoteMode::Insert,
+      'I' => {
+        self.cursor_col = self.indent_of(self.cursor_line);
+        self.mode = NoteMode::Insert;
+      }
+      'a' => {
+        self.cursor_col = (self.cursor_col + 1).min(self.line_len(self.cursor_line));
+        self.mode = NoteMode::Insert;
+      }
+      'A' => {
+        self.end();
+        self.mode = NoteMode::Insert;
+      }
+      'o' => self.open_line(self.cursor_line + 1),
+      'O' => self.open_line(self.cursor_line),
+      _ => {}
+    }
+
+    // Insert mode is allowed past the end of the line, so `a` and `A` must
+    // not be clamped back onto the last char they just moved past.
+    if self.mode == NoteMode::Normal {
+      self.clamp_normal();
+    }
+  }
+
+  /// Delete the char under the caret. Unlike `Delete`, it never pulls the
+  /// next line up: at the end of a line there is nothing under the caret.
+  fn delete_under(&mut self) {
+    if self.cursor_col < self.line_len(self.cursor_line) {
+      let at = Self::byte_at(&self.lines[self.cursor_line], self.cursor_col);
+      self.lines[self.cursor_line].remove(at);
+      self.dirty = true;
+    }
+  }
+
+  /// `dd`. The buffer bottoms out at one empty line, the invariant every
+  /// other method indexes on.
+  fn delete_line(&mut self) {
+    if self.lines.len() == 1 {
+      if !self.lines[0].is_empty() {
+        self.lines[0].clear();
+        self.dirty = true;
+      }
+    } else {
+      self.lines.remove(self.cursor_line);
+      self.cursor_line = self.cursor_line.min(self.lines.len() - 1);
+      self.dirty = true;
+    }
+    self.cursor_col = 0;
+  }
+
+  /// `o` / `O`: insert a line at `index` and start typing on it, carrying
+  /// the list marker the way `Enter` does.
+  fn open_line(&mut self, index: usize) {
+    let prefix = self.continuation_prefix(self.cursor_line);
+    self.cursor_col = prefix.chars().count();
+    self.lines.insert(index, prefix);
+    self.cursor_line = index;
+    self.mode = NoteMode::Insert;
+    self.dirty = true;
+  }
+
+  /// `w` / `W`: the start of the next word, crossing lines. On the last
+  /// word of the buffer it parks on its last char rather than running off
+  /// the end.
+  fn word_forward(&mut self, big: bool) {
+    let mut line = self.cursor_line;
+    let mut col = self.cursor_col;
+    let mut chars: Vec<char> = self.lines[line].chars().collect();
+    if col < chars.len() {
+      let from = class_of(chars[col], big);
+      while from != CharClass::Blank && col < chars.len() && class_of(chars[col], big) == from {
+        col += 1;
+      }
+    }
+    loop {
+      if col >= chars.len() {
+        if line + 1 >= self.lines.len() {
+          self.cursor_line = line;
+          self.cursor_col = chars.len().saturating_sub(1);
+          return;
+        }
+        line += 1;
+        chars = self.lines[line].chars().collect();
+        col = 0;
+        // An empty line is a word of its own, which is how `w` walks
+        // through the blank lines between two paragraphs.
+        if chars.is_empty() {
+          break;
+        }
+        continue;
+      }
+      if class_of(chars[col], big) == CharClass::Blank {
+        col += 1;
+      } else {
+        break;
+      }
+    }
+    self.cursor_line = line;
+    self.cursor_col = col;
+  }
+
+  /// `b` / `B`: the start of the word before the caret, crossing lines.
+  fn word_backward(&mut self, big: bool) {
+    let mut line = self.cursor_line;
+    let mut col = self.cursor_col;
+    let mut chars: Vec<char> = self.lines[line].chars().collect();
+    loop {
+      if col == 0 {
+        if line == 0 {
+          self.cursor_line = 0;
+          self.cursor_col = 0;
+          return;
+        }
+        line -= 1;
+        chars = self.lines[line].chars().collect();
+        col = chars.len();
+        if chars.is_empty() {
+          self.cursor_line = line;
+          self.cursor_col = 0;
+          return;
+        }
+        continue;
+      }
+      col -= 1;
+      if class_of(chars[col], big) != CharClass::Blank {
+        break;
+      }
+    }
+    let from = class_of(chars[col], big);
+    while col > 0 && class_of(chars[col - 1], big) == from {
+      col -= 1;
+    }
+    self.cursor_line = line;
+    self.cursor_col = col;
+  }
+
+  /// `e` / `E`: the last char of the word the caret is heading into.
+  fn word_end(&mut self, big: bool) {
+    let mut line = self.cursor_line;
+    let mut col = self.cursor_col;
+    let mut chars: Vec<char> = self.lines[line].chars().collect();
+    loop {
+      col += 1;
+      if col >= chars.len() {
+        if line + 1 >= self.lines.len() {
+          self.cursor_line = line;
+          self.cursor_col = chars.len().saturating_sub(1);
+          return;
+        }
+        line += 1;
+        chars = self.lines[line].chars().collect();
+        col = 0;
+      }
+      if col < chars.len() && class_of(chars[col], big) != CharClass::Blank {
+        break;
+      }
+    }
+    let from = class_of(chars[col], big);
+    while col + 1 < chars.len() && class_of(chars[col + 1], big) == from {
+      col += 1;
+    }
+    self.cursor_line = line;
+    self.cursor_col = col;
   }
 
   /// Pull `scroll` just far enough that the cursor is inside a `height`-row

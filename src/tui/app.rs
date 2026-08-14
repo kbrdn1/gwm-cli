@@ -4220,7 +4220,13 @@ impl App {
       return;
     };
     let text = crate::notes::read(&self.repo, &branch).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    // #557: `note_vim` opens in normal mode, the way vim itself does. The
+    // knob is what keeps that off everyone else's `N`.
+    if self.config.tui.note_vim {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
     self.view = View::Note;
   }
 
@@ -4299,7 +4305,40 @@ impl App {
     use crate::tui::modal_keymap::{KeyContext, ModalAction};
     use crossterm::event::KeyCode as KC;
 
+    use crate::tui::state::note_editor::NoteMode;
+
     let stroke = crate::tui::keymap::KeyStroke::from_event(&key);
+
+    // #557: normal mode routes BEFORE the typing reservation, because that
+    // reservation is what makes `j` a letter. Only reachable behind
+    // `[tui] note_vim = true`, so with the knob off this block never sees
+    // a key and the #515 editor is untouched.
+    let normal = self.note_editor.as_ref().is_some_and(|e| e.mode == NoteMode::Normal);
+    if normal
+      && !stroke
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+    {
+      // Backspace, Enter and Delete are text in insert mode, so they must
+      // not edit here: a Backspace that ate a character would be prose
+      // lost to a key pressed to move. vim's own answers are `h`, `j`, `x`.
+      // Everything else (Esc, the arrows, the page keys) means the same in
+      // both modes and falls through to the blocks below.
+      let verb = match key.code {
+        KC::Char(c) => Some(c),
+        KC::Backspace => Some('h'),
+        KC::Enter => Some('j'),
+        KC::Delete => Some('x'),
+        _ => None,
+      };
+      if let Some(c) = verb {
+        if let Some(editor) = self.note_editor.as_mut() {
+          editor.normal_key(c);
+        }
+        return NoteKey::Handled;
+      }
+    }
+
     if KeyContext::Note.reserved_typing_stroke(&stroke) {
       if let Some(editor) = self.note_editor.as_mut() {
         match key.code {
@@ -4315,6 +4354,18 @@ impl App {
 
     match self.resolve_modal(KeyContext::Note, key) {
       Some(ModalAction::NoteClose) => {
+        // #557: with a mode, the first `Esc` is the one that leaves insert
+        // and closing takes two. That is exactly why the mode is opt-in:
+        // `Esc` writing and closing on the first press is a shipped
+        // default, and it stays the default for everyone else.
+        if self.config.tui.note_vim {
+          if let Some(editor) = self.note_editor.as_mut() {
+            if editor.mode == NoteMode::Insert {
+              editor.enter_normal();
+              return NoteKey::Handled;
+            }
+          }
+        }
         self.flush_note();
         self.note_editor = None;
         self.view = View::List;
@@ -4376,8 +4427,16 @@ impl App {
       return;
     };
     let (branch, path) = (editor.branch.clone(), editor.path.clone());
+    // #557: the buffer is rebuilt, so the mode has to be carried over by
+    // hand — coming back from `$EDITOR` into insert mode would leave a vim
+    // user typing verbs into their note.
+    let mode = editor.mode;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    if mode == crate::tui::state::note_editor::NoteMode::Normal {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
   }
 
   /// Re-read the selected row's note presence once the editor has exited
