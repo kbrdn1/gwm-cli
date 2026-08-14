@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The table's `PATH` column tilde-compresses like the rest of the screen**
+  ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header and the
+  sidebar's `Path` row both rendered `$HOME` as `~`; the table printed the same
+  value raw, so one path appeared twice on one screen in two spellings. It also
+  cost the most: `PATH` is the `Fill(1)` column, the one that takes whatever the
+  others leave and vanishes first, and it spent 13 of its columns on the home
+  directory on *every* row. Measured on the demo fixture at 103 columns the
+  column got about 22 cells and all five rows read `/Users/kbrdn1/gwm-demo`,
+  identical. They now read `~/gwm-demo/worktrees/a…`, which at least begins to
+  tell the rows apart.
+
+  Compression runs before the terminal sanitiser, not after, and that order is
+  load-bearing: the prefix is matched byte for byte against `dirs::home_dir()`,
+  so sanitising first would rewrite whatever `$HOME` itself carries and the
+  compression would silently stop firing for exactly the users whose home is
+  hostile. The tail is still sanitised, so a worktree directory name cannot ride
+  the tilde into the cell.
+
+  `gwm path --format=json` is unaffected and stays absolute: this is a rendering
+  change in the TUI table only.
+
 ## Past releases
 
 In reverse chronological order:
