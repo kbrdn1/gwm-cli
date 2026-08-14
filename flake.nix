@@ -1,5 +1,5 @@
 {
-  description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap";
+  description = "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -69,7 +69,7 @@
           doCheck = true;
 
           meta = with pkgs.lib; {
-            description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap";
+            description = "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap";
             homepage = "https://github.com/kbrdn1/gwm-cli";
             # A list is the nixpkgs idiom for a dual license; `asl20` is the
             # attribute whose `spdxId` is `Apache-2.0`.
@@ -117,7 +117,7 @@
           # `cargo test` output friendlier on failure.
           shellHook = ''
             export RUST_BACKTRACE=1
-            echo "gwm dev shell — $(rustc --version)"
+            echo "gwm dev shell: $(rustc --version)"
           '';
         };
       })

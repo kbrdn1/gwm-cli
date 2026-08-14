@@ -297,6 +297,48 @@ fn a_conjunction_is_not_the_grant_this_project_offers() {
 }
 
 #[test]
+fn no_packaging_surface_publishes_an_em_dash() {
+  // #567 swept the em dash out of `src/`, but its guard is scoped to `src/`
+  // and these files are not there, so the same one-line tagline kept one in
+  // eight published fields: the crates.io description, the deb
+  // `extended-description`, the rpm `summary`, both `flake.nix` descriptions,
+  // and the Homebrew / Scoop / AUR blurbs. A ninth sat in the flake's
+  // `shellHook`, which prints to whoever runs `nix develop`. Every one of them
+  // is read by a user in a package listing, which is exactly the surface #567
+  // argues is as published as the README.
+  //
+  // Comments are excluded, on the same reasoning #567 used: a comment is not
+  // published, and sweeping those belongs to that campaign, not to this file.
+  let surfaces = declaring_surfaces();
+  let mut published = 0usize;
+
+  for rel in &surfaces {
+    for (n, line) in read(rel).lines().enumerate() {
+      let trimmed = line.trim_start();
+      if trimmed.starts_with('#') || trimmed.starts_with("//") {
+        continue;
+      }
+      published += 1;
+      assert!(
+        !line.contains('\u{2014}'),
+        "{rel}:{} publishes an em dash: {}",
+        n + 1,
+        line.trim()
+      );
+    }
+  }
+
+  // Non-vacuity: a walk that read nothing, or a comment filter that swallowed
+  // every line, would pass the loop above without inspecting a single
+  // published string.
+  assert!(
+    published >= 100,
+    "only {published} non-comment line(s) inspected across {} surface(s): the walk or the comment filter is eating the file",
+    surfaces.len()
+  );
+}
+
+#[test]
 fn every_packaging_surface_declares_both_licenses() {
   let surfaces = declaring_surfaces();
 

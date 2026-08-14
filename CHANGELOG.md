@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A license change is worth seeing in the version, so the next release is a
   **minor**, not a patch.
 
+- **The one-line description reads without an em dash in every package
+  listing** ([#567](https://github.com/kbrdn1/gwm-cli/issues/567)). #567 swept
+  `src/`, and its guard is scoped there, so the same tagline kept its dash in
+  eight published fields no test could see: the crates.io description, the deb
+  `extended-description`, the rpm `summary`, both `flake.nix` descriptions, and
+  the Homebrew, Scoop and AUR blurbs. A ninth sat in the flake's `shellHook`,
+  printed to whoever runs `nix develop`. A package listing is read by a user,
+  which is the surface #567 is about. The connector is a colon: the dash was
+  introducing an expansion of the noun before it. Comments in those same files
+  keep theirs, which stays #567's to sweep.
+
 - **The Settings panel sizes to its active tab**
   ([#569](https://github.com/kbrdn1/gwm-cli/issues/569)). #550 gave every
   bounded overlay one width policy; height stayed a flat percentage of the

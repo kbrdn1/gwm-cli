@@ -1,5 +1,5 @@
 class Gwm < Formula
-  desc "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+  desc "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap"
   homepage "https://github.com/kbrdn1/gwm-cli"
   version "__VERSION__"
   # `any_of:` is the DSL's disjunction: the user picks a license. A plain

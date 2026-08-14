@@ -14,7 +14,7 @@
 pkgname=gwm-cli-bin
 pkgver=__VERSION__
 pkgrel=1
-pkgdesc="git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap (prebuilt binary)"
+pkgdesc="git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/kbrdn1/gwm-cli"
 # One array element holding one SPDX expression: Arch combines separate

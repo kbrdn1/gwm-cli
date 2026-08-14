@@ -1,6 +1,6 @@
 {
   "version": "__VERSION__",
-  "description": "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap",
+  "description": "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap",
   "homepage": "https://github.com/kbrdn1/gwm-cli",
   "license": "MIT|Apache-2.0",
   "architecture": {

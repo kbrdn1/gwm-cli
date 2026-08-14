@@ -26,7 +26,7 @@ edition = "2021"
 # declares no floor of its own. See `docs/6.development/3.stability.md`
 # §MSRV policy for the full story.
 rust-version = "1.95"
-description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+description = "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/kbrdn1/gwm-cli"
@@ -79,7 +79,7 @@ copyright = "2026 Kylian Bardini"
 # `tests/license_tests.rs` derives the MIT paragraph from `LICENSE-MIT`, so the
 # copy cannot drift from the original.
 extended-description = """
-git worktree manager — a terminal UI and CLI over git worktrees. Native
+git worktree manager: a terminal UI and CLI over git worktrees. Native
 libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle
 hooks), and a ratatui TUI. The installed command is `gwm`."""
 section = "utils"
@@ -112,7 +112,7 @@ assets = [
 # still pulls them. (No `gwm` window-manager package exists on Fedora, so no
 # rpm `conflicts` is needed.)
 [package.metadata.generate-rpm]
-summary = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+summary = "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap"
 license = "MIT OR Apache-2.0"
 auto-req = "no"
 requires = { glibc = ">= 2.34", git = "*" }
