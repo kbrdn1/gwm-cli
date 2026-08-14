@@ -1576,3 +1576,54 @@ fn compact_header_line_truncates_sequences_whole_not_char_by_char() {
     title_text(&line)
   );
 }
+
+// ---- the modal height policy (issue #569) ---------------------------------
+
+#[test]
+fn modal_height_sizes_to_content_between_its_bounds() {
+  use gwm::tui::modal_height;
+
+  // The counterpart of `modal_width`, and deliberately not its mirror: the
+  // input is the content's own row count, not a percentage. A short overlay
+  // is simply short, whereas a narrow one truncates its text, which is why
+  // width interpolates a percentage and height does not.
+  let term = 60;
+  assert_eq!(
+    modal_height(term, 14, 10, 30),
+    14,
+    "content between the bounds is taken as-is"
+  );
+  assert_eq!(modal_height(term, 3, 10, 30), 10, "a short tab still gets a usable box");
+  assert_eq!(modal_height(term, 200, 10, 30), 30, "a long one stops at the ceiling");
+}
+
+#[test]
+fn modal_height_never_reaches_the_frame_edge() {
+  use gwm::tui::modal_height;
+
+  // The one property that does carry over from `modal_width`: two rows of
+  // margin per side, so a modal reads as a modal instead of repainting the
+  // whole frame. `centered_abs` only clamps to the frame, which is why the
+  // create form painted its border on rows 0 and 13 of a 14-row terminal.
+  for term in 6..40u16 {
+    let h = modal_height(term, 200, 10, 30);
+    assert!(
+      h <= term.saturating_sub(4).max(1),
+      "term={term}: height {h} leaves no margin"
+    );
+    assert!(h >= 1, "term={term}: height must stay renderable");
+  }
+}
+
+#[test]
+fn modal_height_is_monotonic_in_its_content() {
+  // No seam: one more row of content never yields a shorter box. The width
+  // policy exists because its predecessors branched on `term_width <= 80`
+  // and lost that property (#550); this one starts with it.
+  let mut prev = 0;
+  for rows in 0..60u16 {
+    let h = gwm::tui::modal_height(80, rows, 10, 30);
+    assert!(h >= prev, "content {rows} produced {h} after {prev}");
+    prev = h;
+  }
+}

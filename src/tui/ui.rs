@@ -4527,12 +4527,13 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
+  let header_h = header_lines.len() as u16;
+
   let block = overlay_block_titled("Settings", accent);
   let inner = block.inner(area);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
 
-  let header_h = header_lines.len() as u16;
   let [header_area, body_area, footer_area] =
     Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
@@ -5033,6 +5034,30 @@ pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, m
 pub fn modal_width(term_width: u16, pct: u16, min_cols: u16, max_cols: u16) -> u16 {
   let ideal = term_width.saturating_mul(pct) / 100;
   ideal.clamp(min_cols, max_cols).min(term_width.saturating_sub(4).max(1))
+}
+
+/// **The** modal height policy (issue #569): the content's own row count,
+/// never below `min_rows`, never above `max_rows`, always leaving two rows of
+/// margin above and below.
+///
+/// Deliberately not the mirror of [`modal_width`], because the two axes do not
+/// fail the same way. A narrow modal truncates its text, so width interpolates
+/// a percentage of the terminal and a floor buys back readability. A short
+/// modal is simply short: the content is the right input, and a percentage is
+/// only ever a coincidence. `centered_viewport` spent 60% of the frame on the
+/// Settings panel whether its tab had 3 rows or 173.
+///
+/// Two properties, both pinned in `tests/tui_ui_helpers_tests.rs`:
+///
+/// - **Monotonic.** One more row of content never yields a shorter box.
+/// - **Margined.** [`centered_abs`] only clamps to the frame, which is how the
+///   create form came to paint its border on rows 0 and 13 of a 14-row
+///   terminal, repainting the frame rather than reading as a modal. The two
+///   rows per side come last so the floor can never push a box past the edge.
+pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows: u16) -> u16 {
+  content_rows
+    .clamp(min_rows, max_rows)
+    .min(term_height.saturating_sub(4).max(1))
 }
 
 /// Modal width for the Link / Open prompts: wide enough for an issue or PR
@@ -5662,6 +5687,11 @@ pub fn centered_abs(width: u16, height: u16, area: Rect) -> Rect {
 /// rules (issue #550): `centered_h`, a bare percentage with no ceiling, and
 /// `centered_box`, a percentage with a ceiling but no floor.
 fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect) -> Rect {
+  // No floor and no ceiling of its own: these callers already compute their
+  // exact content height, so the bounds would only fight them. What they take
+  // from the policy is its margin (issue #569) — before it, the create form
+  // painted its border on rows 0 and 13 of a 14-row terminal.
+  let height = modal_height(area.height, height, 0, u16::MAX);
   centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 
