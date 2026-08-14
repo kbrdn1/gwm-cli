@@ -50,6 +50,11 @@ package() {
   install -Dm755 gwm "$pkgdir/usr/bin/gwm"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  # libgit2 and zlib are compiled into the binary, so no dependency carries
+  # their terms (#577). Arch keeps third-party notices next to the package's
+  # own licenses.
+  install -Dm644 libgit2-COPYING "$pkgdir/usr/share/licenses/$pkgname/libgit2-COPYING"
+  install -Dm644 zlib-LICENSE "$pkgdir/usr/share/licenses/$pkgname/zlib-LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 
   # Shell completions, generated from the binary itself (native for $CARCH).

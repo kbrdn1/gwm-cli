@@ -10,7 +10,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The libraries compiled into the binary ship their notices**
+  ([#577](https://github.com/kbrdn1/gwm-cli/issues/577)). `git2` builds with
+  `vendored-libgit2` and `libz-sys` with `static`, so every binary distributed
+  here statically contains libgit2 and zlib, and no package dependency carries
+  their terms. libgit2 is GPLv2 **with a linking exception**, and that
+  exception is what makes a permissively licensed binary possible at all: it
+  is conditional on the notice travelling with the distribution. zlib's terms
+  say its notice may not be removed. Neither was shipping, and neither had
+  anything to do with the project's own license, which is why this is separate
+  from #573 rather than part of it: both were unmet under MIT-only too.
+
+  Both notices now live under `third-party/` and reach the release archives,
+  the `.deb`, the `.rpm`, the AUR package and the published crate. They are
+  taken from the crate source cargo actually built, not from the libraries'
+  upstream repositories, because those diverge: `libgit2-sys` vendors a pinned
+  tree while libgit2 `main` moves.
+
+  `third-party/README.md` records which crate version each came from, and that
+  record is checked against `Cargo.lock`. A dependency bump moves the vendored
+  library without touching a file anyone reads, so without the check the notice
+  would quietly go on describing a version the binary no longer contains.
+
 ### Changed
+
+- **The doc captures show what the binary actually prints**
+  ([#575](https://github.com/kbrdn1/gwm-cli/issues/575)). #567 rewrote 165
+  strings gwm prints and the captures predate it, so several showed text the
+  binary no longer says. They are images, so nothing in CI could notice. 21
+  moved, and they were behind on a second count the same regeneration fixes:
+  #568's tilde compression. `palette.png` shows it best. Its `PATH` column
+  read five near-identical `/Users/kbrdn1/gwm-demo/...` rows clipped mid-path,
+  and now starts at `~/gwm-demo/`, so what survives the clip is the part that
+  differs per row.
+
+  Five captures came back byte-identical, which is the correct answer rather
+  than a miss: `cli-list` and `cli-agents` are CLI output, where paths stay
+  absolute by design, and none of the five carries a rewritten string.
+
+  Two tapes `generate.sh` does not run are now named in the script and the
+  capture README, because neither absence was reported and a run therefore
+  ended with a tick over a set that still held them stale. `demo.tape` is the
+  documented one and was run separately here. `github-linking.tape` is the
+  other, and it is the one capture in the set that nobody but the maintainer
+  can reproduce: it needs a repo with an open PR, which the demo fixture has
+  not, so it points at a hardcoded checkout and photographs whatever it is
+  doing. The published shot was taken during the v1.8.0 release and shows a
+  dirty release branch and a live CI count. Left as is: making it
+  deterministic is a design question, not a regeneration.
+
+  **The version chip is not fixed by this.** It comes from
+  `CARGO_PKG_VERSION`, so all 24 TUI tapes bake the version into the image.
+  These read `1.8.0`, which is correct today and stops being correct the
+  moment the next version is cut. Regenerating captures is not part of the
+  release protocol, so the cut has to bump first and regenerate after, or the
+  published set advertises the previous release.
 
 - **gwm is now dual-licensed under MIT OR Apache-2.0**
   ([#573](https://github.com/kbrdn1/gwm-cli/issues/573)). Nothing is taken
