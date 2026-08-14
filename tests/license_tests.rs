@@ -369,7 +369,11 @@ fn the_aur_package_installs_only_files_the_release_archive_carries() {
     .map(str::trim)
     .filter(|l| l.starts_with("install -Dm"))
     .filter_map(|l| l.split_whitespace().nth(2).map(str::to_string))
-    .filter(|src| !template.contains(&format!(">{src}")))
+    // The trailing newline is load-bearing: without it `>gwm` matches inside
+    // `>gwm.bash`, so the binary reads as generated and its install line is
+    // never compared against anything. `read()` normalises CRLF, so `\n` is
+    // the end of a redirect on every runner.
+    .filter(|src| !template.contains(&format!(">{src}\n")))
     .collect();
 
   assert!(
