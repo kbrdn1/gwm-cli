@@ -39,6 +39,23 @@ description: <one-sentence teaser, used for SEO and search>
 ---
 ```
 
+Both fields reach the published site verbatim, as the `<title>` and the
+`<meta name="description">` of the page. Nothing in the build reads them, so a
+defect there ships green and is only visible in a search result. Two rules on
+`description`, pinned by `tests/docs_frontmatter_tests.rs`:
+
+- **250 characters at most.** Past that, no variant of the sentence comes out
+  of a search result cut intact, so lead with the current state and drop the
+  history.
+- **Distinct from every other page of the same locale.** Two URLs saying the
+  same sentence compete for one snippet, and an engine drops or rewrites one of
+  them. Section `index.md` files are where this happens: describe the section,
+  not the page it links to.
+
+Titles read in **sentence case** (`First worktree`, `Shell completions`), with
+proper nouns kept as they are spelled (`GitHub issue / PR linking`, `gwm
+doctor`). This one is on the author, not on a test.
+
 Optional fields:
 
 - `navigation.title`: short label for the sidebar when the full title is too long.
