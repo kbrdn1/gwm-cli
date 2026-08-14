@@ -4454,7 +4454,6 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
 /// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
 /// `config_panel.max_scroll` against the live body viewport.
 fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered_viewport(60, 64, 96, 60, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
@@ -4528,6 +4527,27 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
   let header_h = header_lines.len() as u16;
+
+  // Size the panel to the active tab rather than to 60% of the frame (issue
+  // #569): the header, the body's own rows, the footer hint, the rounded
+  // border and the shared interior padding, clamped by the height policy. The
+  // Worktree tab is three fields and used to sit in a 24-row box on a 40-row
+  // terminal, roughly six of them blank.
+  //
+  // The box therefore changes size as the user cycles tabs, which is the
+  // deliberate trade: the tabs are genuinely different lengths (3 rows for
+  // Worktree, 173 for Keys), and with the floor and ceiling in place it
+  // settles into two sizes rather than a continuum.
+  let content_rows =
+    header_h + body_lines.len() as u16 + 1 /* footer */ + 2 /* border */ + 2 /* padding */;
+  let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
+  let area = centered_content(
+    60,
+    64,
+    96,
+    modal_height(f.area().height, content_rows, min_rows, max_rows),
+    f.area(),
+  );
 
   let block = overlay_block_titled("Settings", accent);
   let inner = block.inner(area);
@@ -5059,6 +5079,17 @@ pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows
     .clamp(min_rows, max_rows)
     .min(term_height.saturating_sub(4).max(1))
 }
+
+/// Height bounds for the Settings panel (issue #569).
+///
+/// The floor is the shortest tab that carries a real form: Worktree, whose
+/// three fields make an 11-row box. Only Theme is shorter (one row), and it
+/// gains two blank rows rather than shrinking to a sliver. The ceiling leaves
+/// about 25 rows of body, which covers the resolved-config tab outright and
+/// gives the 173-row Keys tab a scroll window worth having without the panel
+/// swallowing the terminal. Both tabs scrolled before this change (#279), so
+/// a ceiling costs nothing they did not already handle.
+const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (11, 32);
 
 /// Modal width for the Link / Open prompts: wide enough for an issue or PR
 /// summary, capped so it stays a prompt rather than a page.
