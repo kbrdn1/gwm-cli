@@ -381,7 +381,7 @@ define_modal_actions! {
     RichViewOpen    => "open"        [ "Enter" ],
     RichViewRefresh => "refresh"     [ "f" ],
   }
-  // #515: two verbs, because everything else is text. `Esc` writes and
+  // #515: the verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see
   // `state::note_editor`). `Ctrl+e` hands the same file to `$EDITOR`,
   // which is what `N` itself used to do.
@@ -389,9 +389,16 @@ define_modal_actions! {
   // `Ctrl+e` is now spoken for. If line motions ever land here, the
   // readline `Ctrl+a` / `Ctrl+e` pair cannot have it — pick another key
   // rather than shadowing the way out to a real editor.
+  //
+  // #557: the two list verbs are Ctrl-modified for the reason the whole
+  // context exists — an unmodified printable is text here, and binding one
+  // to a verb is refused at load time. Neither is `Ctrl+b`: that is the
+  // tmux prefix, and a note written inside tmux would never see it.
   Note {
-    NoteClose      => "close"       [ "Esc" ],
-    NoteOpenEditor => "open_editor" [ "Ctrl+e" ],
+    NoteClose          => "close"           [ "Esc" ],
+    NoteOpenEditor     => "open_editor"     [ "Ctrl+e" ],
+    NoteToggleBullet   => "toggle_bullet"   [ "Ctrl+l" ],
+    NoteToggleCheckbox => "toggle_checkbox" [ "Ctrl+t" ],
   }
 }
 

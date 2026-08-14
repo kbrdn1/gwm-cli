@@ -2922,10 +2922,15 @@ impl HintContext {
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
       ],
-      // #515: no verbs beyond the exits — j/k are letters here, and the
-      // arrows are hard-coded for the same reason `Esc` is elsewhere.
+      // #515: no verbs beyond the exits and the #557 list chords — j/k are
+      // letters here, and the arrows are hard-coded for the same reason
+      // `Esc` is elsewhere. This bar is the only discovery surface the
+      // editor has: `?` is a printable, so the help overlay cannot be
+      // opened from inside it.
       HintContext::Note => &[
         Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "save & close"),
       ],
@@ -3883,6 +3888,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("Left/Right/Up/Down", "move the cursor"),
       fixed("Home/End", "start / end of line"),
       fixed("PgUp/PgDn", "page through the note"),
+      modal_entry(
+        ModalAction::NoteToggleBullet,
+        "make the line a list item, or plain again",
+      ),
+      modal_entry(
+        ModalAction::NoteToggleCheckbox,
+        "tick the box on the line, spawning one first",
+      ),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
       modal_entry(ModalAction::NoteClose, "save and close (empty the note to delete it)"),
       HelpRow::Blank,
