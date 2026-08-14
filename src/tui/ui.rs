@@ -4454,7 +4454,6 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
 /// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
 /// `config_panel.max_scroll` against the live body viewport.
 fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered_viewport(60, 64, 96, 60, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
@@ -4527,12 +4526,34 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
+  let header_h = header_lines.len() as u16;
+
+  // Size the panel to the active tab rather than to 60% of the frame (issue
+  // #569): the header, the body's own rows, the footer hint, the rounded
+  // border and the shared interior padding, clamped by the height policy. The
+  // Worktree tab is three fields and used to sit in a 24-row box on a 40-row
+  // terminal, roughly six of them blank.
+  //
+  // The box therefore changes size as the user cycles tabs, which is the
+  // deliberate trade: the tabs are genuinely different lengths (3 rows for
+  // Worktree, 173 for Keys), and with the floor and ceiling in place it
+  // settles into two sizes rather than a continuum.
+  let content_rows =
+    header_h + body_lines.len() as u16 + 1 /* footer */ + 2 /* border */ + 2 /* padding */;
+  let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
+  let area = centered_content(
+    60,
+    64,
+    96,
+    modal_height(f.area().height, content_rows, min_rows, max_rows),
+    f.area(),
+  );
+
   let block = overlay_block_titled("Settings", accent);
   let inner = block.inner(area);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
 
-  let header_h = header_lines.len() as u16;
   let [header_area, body_area, footer_area] =
     Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
@@ -5034,6 +5055,47 @@ pub fn modal_width(term_width: u16, pct: u16, min_cols: u16, max_cols: u16) -> u
   let ideal = term_width.saturating_mul(pct) / 100;
   ideal.clamp(min_cols, max_cols).min(term_width.saturating_sub(4).max(1))
 }
+
+/// **The** modal height policy (issue #569): the content's own row count,
+/// never below `min_rows`, never above `max_rows`, always leaving two rows of
+/// margin above and below.
+///
+/// Deliberately not the mirror of [`modal_width`], because the two axes do not
+/// fail the same way. A narrow modal truncates its text, so width interpolates
+/// a percentage of the terminal and a floor buys back readability. A short
+/// modal is simply short: the content is the right input, and a percentage is
+/// only ever a coincidence. `centered_viewport` spent 60% of the frame on the
+/// Settings panel whether its tab had 3 rows or 173.
+///
+/// Two properties, both pinned in `tests/tui_ui_helpers_tests.rs`:
+///
+/// - **Monotonic.** One more row of content never yields a shorter box.
+/// - **Margined.** Two rows above and below, so the overlay reads as an
+///   overlay instead of repainting the frame. It comes last so the floor can
+///   never push a box past the edge.
+///
+/// The margin is why this is **not** the policy for every overlay. It costs
+/// four rows of content on a terminal too short to grant them, which is only
+/// acceptable where the content can still be reached: a surface that scrolls
+/// absorbs it, a surface that does not simply loses those rows off the bottom.
+/// The exact-height modals therefore stay on [`centered_content`], which sizes
+/// without a margin; the reasoning is written out there.
+pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows: u16) -> u16 {
+  content_rows
+    .clamp(min_rows, max_rows)
+    .min(term_height.saturating_sub(4).max(1))
+}
+
+/// Height bounds for the Settings panel (issue #569).
+///
+/// The floor is the shortest tab that carries a real form: Worktree, whose
+/// three fields make an 11-row box. Only Theme is shorter (one row), and it
+/// gains two blank rows rather than shrinking to a sliver. The ceiling leaves
+/// about 25 rows of body, which covers the resolved-config tab outright and
+/// gives the 173-row Keys tab a scroll window worth having without the panel
+/// swallowing the terminal. Both tabs scrolled before this change (#279), so
+/// a ceiling costs nothing they did not already handle.
+const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (11, 32);
 
 /// Modal width for the Link / Open prompts: wide enough for an issue or PR
 /// summary, capped so it stays a prompt rather than a page.
@@ -5662,6 +5724,16 @@ pub fn centered_abs(width: u16, height: u16, area: Rect) -> Rect {
 /// rules (issue #550): `centered_h`, a bare percentage with no ceiling, and
 /// `centered_box`, a percentage with a ceiling but no floor.
 fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect) -> Rect {
+  // Height does **not** go through [`modal_height`], and the exception is the
+  // point rather than an oversight (issue #569, Codex review P2). Every caller
+  // here computes an exact content height and none of them scroll, so the
+  // policy's two rows of margin would not shrink a box, they would delete
+  // lines off the bottom of one: a delete confirmation for a target carrying a
+  // branch asks for 13 rows, and clamping it to 12 on a 16-row terminal drops
+  // the interactive `Delete Branch` row with no way to reach it.
+  //
+  // So these modals take the whole frame when they outgrow it. A border flush
+  // with the edge is cosmetic; a control the user cannot see is not.
   centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 

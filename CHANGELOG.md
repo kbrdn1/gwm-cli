@@ -12,6 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Settings panel sizes to its active tab**
+  ([#569](https://github.com/kbrdn1/gwm-cli/issues/569)). #550 gave every
+  bounded overlay one width policy; height stayed a flat percentage of the
+  frame, so the panel took 60% of the terminal whether the tab under it had 3
+  rows or 173. On a 40-row terminal that is a 24-row box for the Worktree tab's
+  three fields, roughly six rows of it blank.
+
+  The box is now the header, the body, the footer hint, the border and the
+  padding, clamped between a floor of 11 rows (the shortest tab that carries a
+  real form) and a ceiling that leaves about 25 rows of body. It therefore
+  changes size as tabs are cycled, which is the deliberate trade: the tabs are
+  genuinely different lengths, and the alternative was blank rows on three tabs
+  out of five.
+
+  The `?` overlay and the command palette keep their percentage. Measured, they
+  carry about 220 rows and 52 commands, so sizing to content would resolve to
+  the ceiling in every ordinary state and only ever engage on a heavily
+  filtered palette, where it becomes a live resize while typing.
+
+  The exact-height modals (create, rename, both delete dialogues) keep sizing
+  the way they did, border flush with the frame and all. They have no scroll
+  path, so the policy's two rows of margin would not shrink those boxes, it
+  would take rows off the bottom of them: a delete confirmation for a target
+  carrying a branch would lose its `Delete Branch` row on a 16-row terminal.
+
 - **One spelling for a worktree path, everywhere it is printed in full**
   ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header rendered
   `$HOME` as `~` and the table printed the same value raw, so one path appeared
