@@ -40,7 +40,7 @@ pub struct Cli {
   ///
   /// Equivalent to `GWM_ALLOW_BOOTSTRAP=1`. Use in non-interactive
   /// environments (CI runners, scripted workflows) where there is no
-  /// human to answer the prompt. Off by default — the threat model is
+  /// human to answer the prompt. Off by default: the threat model is
   /// arbitrary RCE via `[[bootstrap.command]]` lines from an untrusted
   /// remote, so the safe default is "prompt".
   #[arg(long, global = true)]
@@ -59,7 +59,7 @@ pub struct Cli {
   /// mode: `gwm --workspace ~/Projects` opens the TUI over every
   /// direct-child repo, and `gwm list --workspace ~/Projects` prints
   /// the merged worktree table with a leading `REPO` column.
-  /// `.gwm.toml` stays per-repo — there is no workspace-level config.
+  /// `.gwm.toml` stays per-repo; there is no workspace-level config.
   /// `global = true` so the flag is accepted before or after the
   /// subcommand.
   #[arg(long, global = true, value_name = "DIR")]
@@ -73,7 +73,7 @@ pub struct Cli {
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum AgentsAction {
   /// Pin session SESSION_ID to the worktree matching PATTERN. The pin
-  /// overlays auto-detection and ACCUMULATES — several sessions can be
+  /// overlays auto-detection and ACCUMULATES: several sessions can be
   /// pinned to one worktree.
   Attach {
     /// Worktree name (substring match), or `.` for the enclosing worktree.
@@ -95,7 +95,7 @@ pub enum AgentsAction {
 pub enum AgentsFormat {
   /// Human-readable listing (default).
   Table,
-  /// Machine-readable JSON — the same worktree rows as
+  /// Machine-readable JSON, the same worktree rows as
   /// `gwm list --format=json` (experimental `agents` field included).
   Json,
 }
@@ -104,7 +104,7 @@ pub enum AgentsFormat {
 pub enum ListFormat {
   /// Human-readable table (default).
   Table,
-  /// One worktree name per line — suitable for shell completion.
+  /// One worktree name per line, suitable for shell completion.
   Names,
   /// Machine-readable JSON array of worktrees (issue #38). Stable schema
   /// documented under `docs/schema/worktree-list.schema.json`.
@@ -153,7 +153,7 @@ pub enum Command {
     /// (writes nothing, needs no git repo).
     #[arg(long)]
     list_presets: bool,
-    /// Print the resolved preset to stdout instead of writing .gwm.toml —
+    /// Print the resolved preset to stdout instead of writing .gwm.toml;
     /// handy for diffing a preset against an existing config.
     #[arg(long)]
     show: bool,
@@ -172,7 +172,7 @@ pub enum Command {
   },
   /// Agent sessions per worktree (issue #408): list what detection found,
   /// or pin/unpin a session manually. Detection reads each agent's on-disk
-  /// session artefacts (Claude Code, Codex, opencode, Mistral Vibe) — a pin
+  /// session artefacts (Claude Code, Codex, opencode, Mistral Vibe); a pin
   /// overlays it for the cases the recorded directory cannot cover.
   Agents {
     #[command(subcommand)]
@@ -197,7 +197,7 @@ pub enum Command {
     /// becomes the branch verbatim; `branch_pattern` / `path_pattern` do not
     /// apply because it has no `{type}` / `{issue}` / `{desc}` to expand.
     /// Features that read the branch name back (issue auto-linking, gitmoji)
-    /// stay inactive on it — `gwm link` remains available.
+    /// stay inactive on it; `gwm link` remains available.
     ///
     /// Exclusive with the positional triple: the mode is chosen explicitly,
     /// never inferred from how many arguments were supplied.
@@ -207,7 +207,7 @@ pub enum Command {
     #[arg(long)]
     no_bootstrap: bool,
     /// Attach the new worktree to an already-existing local branch of the
-    /// same name instead of refusing (issue #99). Off by default — a
+    /// same name instead of refusing (issue #99). Off by default: a
     /// pre-existing branch ends `gwm create` with an error naming the
     /// stale tip so the user can audit it.
     #[arg(long)]
@@ -234,8 +234,8 @@ pub enum Command {
   ///
   /// Placeholders substituted by the template engine:
   ///   `{type}` `{issue}` `{desc}` `{base}` `{head}` `{repo}`
-  ///   `{commits}`        — `git log --pretty='- %s' base..head`
-  ///   `{files_changed}`  — `git diff --stat base..head`, capped 30 lines
+  ///   `{commits}`        = `git log --pretty='- %s' base..head`
+  ///   `{files_changed}`  = `git diff --stat base..head`, capped 30 lines
   Pr {
     /// Render the body to stdout instead of creating the PR. The output
     /// is suitable for piping into `gh pr create --body-file -`.
@@ -253,8 +253,8 @@ pub enum Command {
   /// Materialise an existing GitHub PR into an isolated worktree (issue #308).
   ///
   /// Resolves the PR head via `gh` and fetches origin's universal
-  /// `refs/pull/<N>/head` ref — cross-fork aware, and valid for PRs in any
-  /// state (open / draft / closed / merged) — into a local
+  /// `refs/pull/<N>/head` ref (cross-fork aware, and valid for PRs in any
+  /// state: open, draft, closed or merged) into a local
   /// `review/pr-<N>-<author>-<slug>` branch, attaches a worktree, and links
   /// the PR so the sidebar / CI indicator light up immediately. Tear down
   /// with `gwm remove <dir> --delete-branch` like any worktree.
@@ -262,7 +262,7 @@ pub enum Command {
   /// Safe-by-default: bootstrap and lifecycle hooks are NOT run, because a
   /// review worktree holds a contributor's (possibly fork) code and those
   /// steps execute commands against it (`npm install`, `composer install`,
-  /// `direnv allow`, `post_create` hooks …) — i.e. arbitrary code. Pass
+  /// `direnv allow`, `post_create` hooks …), i.e. arbitrary code. Pass
   /// `--bootstrap` to opt in once you trust the PR enough to set it up.
   Review {
     /// PR number to review (digits only).
@@ -274,7 +274,7 @@ pub enum Command {
     #[arg(long, value_name = "BRANCH")]
     name: Option<String>,
     /// Run bootstrap + lifecycle hooks against the PR's code after creation.
-    /// Off by default — these execute commands the PR can influence, so it's
+    /// Off by default: these execute commands the PR can influence, so it's
     /// opt-in (see the command help for the security rationale).
     #[arg(long)]
     bootstrap: bool,
@@ -314,7 +314,7 @@ pub enum Command {
     /// Print the resolved worktree (name + path + branch + would-delete-branch
     /// flag) without touching anything. Exit code 0. If the pattern is
     /// ambiguous, the same non-zero candidate-list error fires as in the
-    /// destructive form — `--dry-run` only suppresses *destruction*, not
+    /// destructive form: `--dry-run` only suppresses *destruction*, not
     /// resolution failures. Issue #31.
     #[arg(long)]
     dry_run: bool,
@@ -327,7 +327,7 @@ pub enum Command {
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   ///
-  /// Also available as `gwm cd <pattern>` — same semantics, framed for the
+  /// Also available as `gwm cd <pattern>`: same semantics, framed for the
   /// cd flow. Pair with `gwm shell-init <shell>` for a one-line wrapper.
   #[command(visible_alias = "cd")]
   Path {
@@ -354,7 +354,7 @@ pub enum Command {
   ///
   /// Resolves the target worktree (defaults to the CWD worktree when
   /// no pattern is given), runs `git fetch` for its upstream's remote,
-  /// then rebases the branch onto the upstream — or merges with
+  /// then rebases the branch onto the upstream, or merges with
   /// `--merge`. Reports the outcome with the same ✓ / ! / ✗ sigils as
   /// the rest of gwm.
   ///
@@ -380,7 +380,7 @@ pub enum Command {
   },
   /// Diagnose the gwm setup (config, env, worktree state).
   ///
-  /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
+  /// Exit code 0 if all green, 1 if any warning, 2 if any failure;
   /// suitable for CI / pre-commit hooks.
   Doctor {
     /// Output format. `json` emits the checks array plus aggregate
@@ -394,7 +394,7 @@ pub enum Command {
   ///
   /// Editors, statusbars, and tooling connect once and call `list` /
   /// `doctor` / `path`, or `subscribe` for pushed `worktrees.changed`
-  /// notifications — instead of spawning `gwm` per query (issue #38).
+  /// notifications, instead of spawning `gwm` per query (issue #38).
   /// Newline-delimited JSON, one request and one response per line.
   ///
   /// The transport is a unix domain socket on unix and a named pipe under
@@ -404,7 +404,7 @@ pub enum Command {
   Daemon {
     /// Where to bind. On unix: a socket path, defaulting to
     /// `$XDG_RUNTIME_DIR/gwm.sock`, falling back to `$TMPDIR`, then
-    /// `/tmp` — isolated in a per-user `<base>/gwm-<uid>/gwm.sock` when
+    /// `/tmp`, isolated in a per-user `<base>/gwm-<uid>/gwm.sock` when
     /// the base dir is not owner-only. On Windows: the pipe NAME under
     /// `\\.\pipe\` (not a filesystem path), defaulting to
     /// `gwm-<user>.sock`, restricted to the owner by its security
@@ -423,21 +423,21 @@ pub enum Command {
   ///
   /// The first real consumer of `gwm daemon`: it connects to the daemon's
   /// transport (unix socket, or a named pipe on Windows, issue #439), asks
-  /// for the worktree set, and renders a single line —
-  /// active branch, worktree count, dirty / ahead / behind, linked issue /
-  /// PR — suitable for a tmux / starship / zsh statusline. With `--watch`
+  /// for the worktree set, and renders a single line
+  /// (active branch, worktree count, dirty / ahead / behind, linked issue /
+  /// PR) suitable for a tmux / starship / zsh statusline. With `--watch`
   /// it subscribes to the daemon's `worktrees.changed` stream and reprints
   /// on every change (one line per update).
   ///
   /// Needs a running `gwm daemon` (one per repo). When none is reachable it
   /// prints an empty line and exits 0, so a prompt substitution degrades to
-  /// nothing instead of erroring. A CI rollup is intentionally not shown —
+  /// nothing instead of erroring. A CI rollup is intentionally not shown:
   /// it is not part of the daemon's stable schema.
   Statusline {
     /// Daemon socket path (unix) or pipe name (Windows). Defaults to the
     /// same resolution as `gwm daemon`: `$XDG_RUNTIME_DIR/gwm.sock`, then
-    /// `$TMPDIR`, then `/tmp` — isolated in a per-user
-    /// `<base>/gwm-<uid>/gwm.sock` when the base dir isn't owner-only —
+    /// `$TMPDIR`, then `/tmp`, isolated in a per-user
+    /// `<base>/gwm-<uid>/gwm.sock` when the base dir isn't owner-only,
     /// and `gwm-<user>.sock` under `\\.\pipe\` on Windows.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
@@ -455,21 +455,21 @@ pub enum Command {
   Types {
     /// Show the resolved emoji + shortcode for each branch type
     /// (issue #85). Without the flag, only `name` + `description`
-    /// are printed — matches the pre-#85 surface.
+    /// are printed; matches the pre-#85 surface.
     #[arg(long)]
     gitmoji: bool,
   },
   /// Print the Gitmoji + Conventional Commits prefix for the current
   /// (or named) branch (issue #85).
   ///
-  /// Output shape: `:sparkles: feat(#41):` — the canonical commit
+  /// Output shape: `:sparkles: feat(#41):`, the canonical commit
   /// prefix used across this repo (see CONTRIBUTING.md §Commits).
   /// `--unicode` substitutes the shortcode for the real emoji
   /// character (e.g. `✨` instead of `:sparkles:`); useful for shell
   /// prompts and the bundled `commit-msg` hook.
   ///
   /// Without `--branch`, reads the current branch from HEAD via
-  /// libgit2 — requires the CWD to be inside a git repo.
+  /// libgit2; requires the CWD to be inside a git repo.
   CommitPrefix {
     /// Branch name to resolve (e.g. `feat/#41-tui-search`). When
     /// omitted, defaults to HEAD of the current repo.
@@ -485,7 +485,7 @@ pub enum Command {
   /// Currently exposes a single hook: `commit-msg`, which
   /// auto-prepends the resolved Gitmoji + Conventional Commits
   /// prefix when the commit message doesn't already start with one.
-  /// Hooks are **opt-in** — `gwm` never installs them implicitly.
+  /// Hooks are **opt-in**: `gwm` never installs them implicitly.
   Hooks {
     #[command(subcommand)]
     action: HooksAction,
@@ -525,7 +525,7 @@ pub enum Command {
   Switch,
   /// Open the matched worktree in a new tmux window (current session).
   ///
-  /// Requires `$TMUX` to be set — i.e. gwm must be invoked from inside an
+  /// Requires `$TMUX` to be set, i.e. gwm must be invoked from inside an
   /// existing tmux session. Outside a tmux session the command exits
   /// non-zero with a clear error rather than spawning a stray server.
   /// Use `--split` to open in a horizontal split of the current pane
@@ -552,7 +552,7 @@ pub enum Command {
   /// Link the current (or named) worktree to a GitHub issue or pull request.
   ///
   /// The link is stored in `git config branch.<name>.gwm-issue` (or
-  /// `gwm-pr`) — local, per-branch, survives worktree moves. Issue
+  /// `gwm-pr`): local, per-branch, survives worktree moves. Issue
   /// numbers are auto-detected from the `<type>/#<N>-<slug>` convention
   /// when no explicit override is set; `gwm link issue <N>` overrides
   /// that. PR numbers are not auto-detected; link them explicitly with
@@ -570,7 +570,7 @@ pub enum Command {
   /// Remove the explicit issue / PR link on the current (or named) worktree.
   ///
   /// After `gwm unlink issue`, auto-detection from the branch name
-  /// resurfaces if the branch follows `<type>/#<N>-<slug>`. Idempotent —
+  /// resurfaces if the branch follows `<type>/#<N>-<slug>`. Idempotent:
   /// safe to run when nothing is linked.
   Unlink {
     /// What to unlink: `issue` or `pr`.
@@ -584,7 +584,7 @@ pub enum Command {
   ///
   /// Uses the OS opener (`open` on macOS, `xdg-open` on Linux,
   /// `explorer` on Windows). Pass `--print-url` to emit the URL on
-  /// stdout instead — useful for piping, testing, and headless shells.
+  /// stdout instead, useful for piping, testing, and headless shells.
   Open {
     /// What to open: `issue` or `pr`.
     #[arg(value_enum)]
@@ -633,12 +633,12 @@ pub enum Command {
   /// Manage the TOFU trust ledger for `.gwm.toml` files (issue #95).
   ///
   /// `gwm` runs `[[bootstrap.command]]` lines from `.gwm.toml` under
-  /// the user's privileges — equivalent to `curl … | sh` against the
+  /// the user's privileges, equivalent to `curl … | sh` against the
   /// repo author. The trust ledger at `~/.config/gwm/trust.toml`
   /// (override via `$GWM_TRUST_LEDGER`) records the `(origin URL,
   /// sha256 of .gwm.toml)` tuples the user has approved, so
   /// subsequent runs skip the prompt. Hash drift (any byte changes
-  /// in `.gwm.toml`) re-prompts — see the module-level comment in
+  /// in `.gwm.toml`) re-prompts; see the module-level comment in
   /// `src/trust.rs` for the threat model.
   Trust {
     #[command(subcommand)]
@@ -665,7 +665,7 @@ pub enum Command {
   /// (issue #29). One line per op, newest first, with timestamp,
   /// kind, and worktree name.
   ///
-  /// Defaults to the current repo only — pass `--all` to list ops
+  /// Defaults to the current repo only; pass `--all` to list ops
   /// across every repo in the journal. The journal file lives at
   /// `$GWM_HISTORY_FILE` if set, otherwise
   /// `$XDG_DATA_HOME/gwm/history.toml`.
@@ -684,7 +684,7 @@ pub enum Command {
   /// entry from the journal.
   ///
   /// Pass `--bootstrap` to re-run the per-worktree bootstrap after
-  /// the resurrection (off by default — bootstrap can be expensive
+  /// the resurrection (off by default, bootstrap can be expensive
   /// and the user often just wants the directory back).
   Undo {
     /// Re-run bootstrap after the worktree is re-added. Off by
@@ -694,7 +694,7 @@ pub enum Command {
   },
   /// TUI introspection / debugging subcommands (issue #87).
   ///
-  /// Today exposes a single child — `keys` — which prints the
+  /// Today exposes a single child, `keys`, which prints the
   /// resolved keymap (built-in defaults layered with `[tui.keys]`
   /// overrides from `.gwm.toml`). Reserved as a sub-tree so future
   /// TUI knobs (`gwm tui themes`, `gwm tui dump-state`, …) have a
@@ -719,7 +719,7 @@ pub enum Command {
   /// Prints a per-worktree ✓ / ✗ rollup and exits non-zero if any
   /// worktree's command failed. Everything after `--` is forwarded
   /// verbatim (flags and all). This is the user's own command against
-  /// their own worktrees — no bootstrap trust gate applies (#95).
+  /// their own worktrees: no bootstrap trust gate applies (#95).
   Exec {
     /// Worktree slugs to target (fuzzy match, before `--`). Empty = all
     /// non-main worktrees.
@@ -748,7 +748,7 @@ pub enum Command {
   /// and prints the reclaimable size per worktree. Report-only by default;
   /// pass `--yes` to actually delete. Scope to a subset with slug
   /// positionals: `gwm clean feat-1`. Deliberately not journaled into
-  /// `gwm history` (#29) — the artifacts are regenerable.
+  /// `gwm history` (#29): the artifacts are regenerable.
   ///
   /// Safety: `--yes` only deletes directories git treats as ignored. A
   /// non-ignored `dist/` / `build/` (tracked or hand-authored, hence
@@ -925,17 +925,17 @@ pub enum LabelsAction {
   /// still reads the remote via `gh label list` to compute the
   /// diff; only create / update / delete calls are skipped).
   /// `--prune` opt-in deletes labels on remote that aren't declared in
-  /// config (off by default — destructive). `--random-colors` picks a
+  /// config (off by default, destructive). `--random-colors` picks a
   /// random pastel for labels with no `color` field instead of the
   /// default deterministic hash.
   Push {
     /// Print the plan without mutating the remote. Still reads remote
-    /// labels via `gh label list` to compute the diff — only the
+    /// labels via `gh label list` to compute the diff; only the
     /// create / update / delete calls are skipped.
     #[arg(long)]
     dry_run: bool,
     /// Delete remote labels that aren't declared in `.gwm.toml`.
-    /// Destructive — off by default.
+    /// Destructive, off by default.
     #[arg(long)]
     prune: bool,
     /// Generate a random pastel for labels with no `color` field
@@ -955,7 +955,7 @@ pub enum TrustAction {
   ///
   /// The prompt on `gwm create` / `gwm bootstrap` only fires when the
   /// file has a bootstrap surface to run, so a `.gwm.toml` that only
-  /// names `forge` could never be approved that way — and since #419
+  /// names `forge` could never be approved that way, and since #419
   /// that key decides which host receives an authenticated call
   /// (Codex review #458). This is how you answer that question
   /// deliberately, without executing anything.
@@ -965,17 +965,17 @@ pub enum TrustAction {
   Add,
   /// List every recorded `(origin, hash)` pair in the active ledger.
   ///
-  /// Empty ledger prints a single line and exits 0 — the no-op fast
+  /// Empty ledger prints a single line and exits 0, the no-op fast
   /// path for fresh installs. The `trusted_at` timestamp is the
   /// audit anchor; revoke entries whose age looks suspicious with
   /// `gwm trust revoke <origin>`.
   List,
   /// Remove every entry whose `origin` matches verbatim. After revoke,
   /// the next `gwm create` / `gwm bootstrap` against that repo
-  /// re-prompts — use this when you change machines, rotate
+  /// re-prompts; use this when you change machines, rotate
   /// credentials, or no longer trust a previously approved repo.
   Revoke {
-    /// Origin URL to revoke (must match the recorded form verbatim —
+    /// Origin URL to revoke (must match the recorded form verbatim;
     /// SSH and HTTPS flavours of the same GitHub repo are recorded as
     /// distinct entries because they ARE distinct trust paths).
     origin: String,
@@ -985,7 +985,7 @@ pub enum TrustAction {
   /// Honours `$GWM_TRUST_LEDGER` if set, falls back to
   /// `$XDG_CONFIG_HOME/gwm/trust.toml` (or the platform-specific
   /// equivalent). Useful when triaging "why is gwm re-prompting?"
-  /// situations — eyeball the recorded hash vs. what `sha256sum
+  /// situations: eyeball the recorded hash vs. what `sha256sum
   /// .gwm.toml` produces.
   Show,
 }
@@ -1009,15 +1009,15 @@ pub enum MilestonesAction {
   /// still reads the remote via `gh api …/milestones` to compute the
   /// diff; only create / update / delete calls are skipped).
   /// `--prune` opt-in deletes milestones on remote that aren't
-  /// declared in config (off by default — destructive).
+  /// declared in config (off by default, destructive).
   Push {
     /// Print the plan without mutating the remote. Still reads remote
-    /// milestones via `gh api` to compute the diff — only the
+    /// milestones via `gh api` to compute the diff; only the
     /// create / update / delete calls are skipped.
     #[arg(long)]
     dry_run: bool,
     /// Delete remote milestones that aren't declared in `.gwm.toml`.
-    /// Destructive — off by default.
+    /// Destructive, off by default.
     #[arg(long)]
     prune: bool,
   },
