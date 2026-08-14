@@ -65,16 +65,26 @@ fn the_apache_text_is_the_upstream_one_verbatim() {
   let body = read("LICENSE-APACHE");
 
   // The upstream text at https://www.apache.org/licenses/LICENSE-2.0.txt is
-  // frozen: 11358 bytes with LF endings. Byte length is the actual verbatim
-  // check: a reflowed paragraph or a "helpfully" filled-in appendix changes
-  // it. The anchors below only make the failure legible.
+  // frozen, so its hash is a constant, and hashing the whole content is the
+  // only honest verbatim check: length plus the anchors below would pass a
+  // same-length edit that avoids them, and what is being pinned is a license
+  // text this project redistributes.
+  //
+  // The git blob id is the digest of choice here rather than a raw SHA-256:
+  // `git2` is already a direct dependency (a `sha2` dev-dependency does not
+  // even link, the graph carries both 0.10 and 0.11 and rustc cannot pick),
+  // the header git prepends folds the length into the hash, and the constant
+  // is checkable by anyone in one line: `git hash-object LICENSE-APACHE`.
+  let oid = git2::Oid::hash_object(git2::ObjectType::Blob, body.as_bytes()).expect("hash LICENSE-APACHE");
   assert_eq!(
-    body.len(),
-    11358,
-    "LICENSE-APACHE must be the upstream Apache-2.0 text byte for byte (expected 11358 bytes, got {})",
+    oid.to_string(),
+    "d645695673349e3947e8e5ae42332d0ac3164cd7",
+    "LICENSE-APACHE is not the upstream Apache-2.0 text (it is {} bytes; upstream is 11358)",
     body.len()
   );
 
+  // Kept for the failure message: the digest says "wrong", the anchors say
+  // which part went missing.
   for anchor in [
     "                                 Apache License\n",
     "                           Version 2.0, January 2004\n",
@@ -155,6 +165,32 @@ fn names_apache(line: &str) -> bool {
   line.contains("Apache-2.0") || line.contains("asl20")
 }
 
+/// Does the declaration grant a *choice* between the two, rather than imposing
+/// both at once?
+///
+/// Naming both halves is not enough, and the difference is not cosmetic: every
+/// one of these syntaxes also has a conjunction form, one character or one word
+/// away. `MIT AND Apache-2.0`, `all_of:`, and Scoop's `,` all say the user must
+/// comply with both licenses simultaneously, which is a materially different
+/// and strictly narrower grant than the one this project offers. A guard that
+/// only looks for the two names passes every one of them.
+fn grants_a_choice(line: &str) -> bool {
+  // Conjunctions are rejected outright rather than merely not matched, so a
+  // line carrying both an `OR` and an `AND` cannot squeak through.
+  if line.contains(" AND ") || line.contains("all_of") {
+    return false;
+  }
+  // Scoop separates alternatives with `|` and co-applying licenses with `,`.
+  if line.contains("\"license\"") {
+    return line.contains('|');
+  }
+  // nixpkgs has no operator: dual licensing is spelled as a list of attributes.
+  if line.contains("licenses.") {
+    return line.contains('[');
+  }
+  line.contains(" OR ") || line.contains("any_of")
+}
+
 /// Every file that declares a license for a distribution channel: the two
 /// manifests at the root, plus everything under `packaging/`, discovered by
 /// walking rather than by a list that a new channel would not appear in.
@@ -174,9 +210,19 @@ fn declaring_surfaces() -> Vec<String> {
       let rel = format!("{prefix}/{name}");
       if path.is_dir() {
         walk(&path, &rel, out);
-      } else {
-        out.push(rel);
+        continue;
       }
+      // A license *text* is not a channel declaring its license, and reading
+      // one as such is nonsense: DEP-5 gives every license its own
+      // `License: <name>` paragraph header, so a correct copyright file is
+      // full of lines naming exactly one half. These are pinned by
+      // `the_deb_copyright_describes_both_licenses` instead. The rule is
+      // structural rather than a path list, so a new channel still cannot slip
+      // past by being added here.
+      if name == "copyright" || name.starts_with("LICENSE") {
+        continue;
+      }
+      out.push(rel);
     }
   }
   walk(&root().join("packaging"), "packaging", &mut surfaces);
@@ -214,6 +260,43 @@ fn a_comment_quoting_a_license_is_not_a_declaration() {
 }
 
 #[test]
+fn a_conjunction_is_not_the_grant_this_project_offers() {
+  // Each of these is one word or one character away from the real declaration
+  // it shadows, names both halves, and says the opposite thing: comply with
+  // both licenses at once rather than pick one. Naming-only checks pass them
+  // all, which is why the operator is asserted separately.
+  for conjunction in [
+    r#"license = "MIT AND Apache-2.0""#,
+    r#"  "license": "MIT,Apache-2.0","#,
+    "license=('MIT AND Apache-2.0')",
+    r#"  license all_of: ["MIT", "Apache-2.0"]"#,
+    "            license = licenses.asl20;",
+  ] {
+    assert!(
+      names_mit(conjunction) || names_apache(conjunction),
+      "fixture must still name a license, else it proves nothing: {conjunction}"
+    );
+    assert!(
+      !grants_a_choice(conjunction),
+      "a conjunction must not read as the dual-license grant: {conjunction}"
+    );
+  }
+
+  for disjunction in [
+    r#"license = "MIT OR Apache-2.0""#,
+    r#"  "license": "MIT|Apache-2.0","#,
+    "license=('MIT OR Apache-2.0')",
+    r#"  license any_of: ["MIT", "Apache-2.0"]"#,
+    "            license = [ licenses.asl20 licenses.mit ];",
+  ] {
+    assert!(
+      grants_a_choice(disjunction),
+      "the real declaration must read as a choice: {disjunction}"
+    );
+  }
+}
+
+#[test]
 fn every_packaging_surface_declares_both_licenses() {
   let surfaces = declaring_surfaces();
 
@@ -239,7 +322,12 @@ fn every_packaging_surface_declares_both_licenses() {
     for line in declarations {
       assert!(
         names_mit(line) && names_apache(line),
-        "{rel} declares a license that is not the MIT OR Apache-2.0 disjunction: {}",
+        "{rel} declares a license that does not name both halves: {}",
+        line.trim()
+      );
+      assert!(
+        grants_a_choice(line),
+        "{rel} names both halves but does not grant a choice between them, which is a narrower license than this project offers: {}",
         line.trim()
       );
     }
@@ -262,28 +350,69 @@ fn the_crate_declares_the_spdx_disjunction() {
   );
 }
 
-#[test]
-fn the_deb_copyright_still_carries_a_license_text() {
-  // cargo-deb appends `license-file` verbatim under the `License:` header of
-  // the generated `/usr/share/doc/gwm-cli/copyright`. Without the key the
-  // header ships alone, with no text under it, which is what Debian Policy
-  // §12.5 asks for and what the MIT-only manifest used to provide. MIT is the
-  // half that has to be inlined: Apache-2.0 is in `/usr/share/common-licenses`
-  // on a Debian system and MIT is not.
-  let rel = deb()
-    .get("license-file")
-    .and_then(|v| v.as_array())
-    .and_then(|a| a.first().cloned())
-    .and_then(|v| v.as_str().map(str::to_string))
-    .expect("[package.metadata.deb] license-file names a file");
+/// One DEP-5 paragraph body, un-indented back to plain text.
+///
+/// DEP-5 indents a license body by one space and writes blank lines as ` .`,
+/// so the inverse of that transform is what has to match `LICENSE-MIT`.
+fn dep5_paragraph(copyright: &str, header: &str) -> Option<String> {
+  let after = copyright.split(&format!("\n{header}\n")).nth(1)?;
+  let body: Vec<&str> = after
+    .lines()
+    .take_while(|l| l.starts_with(' '))
+    .map(|l| if l.trim() == "." { "" } else { &l[1..] })
+    .collect();
+  Some(body.join("\n").trim_end().to_string())
+}
 
-  assert_eq!(
-    rel, "LICENSE-MIT",
-    "the inlined text must be the half that is not a Debian common license"
+#[test]
+fn the_deb_copyright_describes_both_licenses() {
+  // cargo-deb generates this file when it can, and neither shape it generates
+  // is right here: without `license-file` the `License:` header ships with no
+  // text under it, and with it, one file is pasted verbatim and the other half
+  // goes undescribed. An asset landing on the copyright path wins over the
+  // generator, so the file below is the one that ships.
+  let dests: Vec<String> = deb()["assets"]
+    .as_array()
+    .expect("deb assets is an array")
+    .iter()
+    .filter_map(|r| r.get(1).and_then(|v| v.as_str()).map(str::to_string))
+    .collect();
+  assert!(
+    dests.iter().any(|d| d == "usr/share/doc/gwm-cli/copyright"),
+    "the deb must ship its own copyright file, else cargo-deb generates one that describes a single half: {dests:?}"
   );
   assert!(
-    root().join(&rel).is_file(),
-    "license-file points at {rel}, which is not a file at the repo root: the generated copyright would be empty"
+    deb().get("license-file").is_none(),
+    "`license-file` would have cargo-deb generate a copyright that the asset then has to fight over"
+  );
+
+  let copyright = read("packaging/debian/copyright");
+
+  // The package-level grant, in the `Files: *` paragraph.
+  assert!(
+    copyright.contains("\nLicense: MIT or Apache-2.0\n"),
+    "the Files paragraph must offer the choice, not one half"
+  );
+
+  // MIT is inlined because it is not in `/usr/share/common-licenses`. Deriving
+  // the expected body from `LICENSE-MIT` rather than restating it is what
+  // makes the duplication safe: an edit to the license that is not carried
+  // across reddens here.
+  let mit = read("LICENSE-MIT");
+  let expected = mit.replacen("# MIT License\n\n", "", 1).trim().to_string();
+  let got = dep5_paragraph(&copyright, "License: MIT").expect("copyright carries a `License: MIT` paragraph");
+  assert_eq!(
+    got, expected,
+    "the MIT paragraph has drifted from LICENSE-MIT: the copyright file must be regenerated from it"
+  );
+
+  // Apache-2.0 is a Debian common license, so it is referenced rather than
+  // inlined, and the reference has to name the path a Debian system uses.
+  let apache =
+    dep5_paragraph(&copyright, "License: Apache-2.0").expect("copyright carries a `License: Apache-2.0` paragraph");
+  assert!(
+    apache.contains("/usr/share/common-licenses/Apache-2.0"),
+    "the Apache paragraph must point at the common-licenses copy: {apache}"
   );
 }
 

@@ -65,17 +65,19 @@ pkg-fmt = "zip"
 [package.metadata.deb]
 maintainer = "Kylian Bardini <onepiecekylian@gmail.com>"
 copyright = "2026 Kylian Bardini"
-# `license-file` names `LICENSE-MIT` specifically, and the asymmetry is
-# deliberate rather than a leftover from the MIT-only manifest. cargo-deb
-# appends this file verbatim under the `License:` header of the generated
-# `/usr/share/doc/gwm-cli/copyright`, and Debian Policy §12.5 wants the license
-# text there: MIT is not one of the licenses shipped in
-# `/usr/share/common-licenses`, so it has to be inlined, while Apache-2.0 is,
-# so it does not. Dropping the key entirely (tried first) leaves `copyright`
-# carrying the bare expression and no text at all, which is a regression on
-# what the MIT-only manifest produced. Both texts additionally travel as assets
-# below, so the package carries them whole either way.
-license-file = ["LICENSE-MIT", "0"]
+# No `license-file`: neither of the two shapes it can produce is right for a
+# dual license, so `packaging/debian/copyright` is shipped as an asset instead
+# (an asset landing on `usr/share/doc/<pkg>/copyright` wins, and cargo-deb then
+# generates nothing). Measured, both rejected shapes:
+#   - key absent  -> `License: MIT OR Apache-2.0` and no text under it at all,
+#                    a regression on what the MIT-only manifest produced and
+#                    short of what Debian Policy §12.5 asks for;
+#   - key present -> that same header followed by one file pasted verbatim, so
+#                    whichever half is named, the other is undescribed.
+# The DEP-5 file states both alternatives properly: MIT inlined, because it is
+# not in `/usr/share/common-licenses`, and Apache-2.0 by reference to it.
+# `tests/license_tests.rs` derives the MIT paragraph from `LICENSE-MIT`, so the
+# copy cannot drift from the original.
 extended-description = """
 git worktree manager — a terminal UI and CLI over git worktrees. Native
 libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle
@@ -93,6 +95,7 @@ conflicts = "gwm"
 assets = [
   ["target/release/gwm", "usr/bin/", "755"],
   ["README.md", "usr/share/doc/gwm-cli/README.md", "644"],
+  ["packaging/debian/copyright", "usr/share/doc/gwm-cli/copyright", "644"],
   ["LICENSE-MIT", "usr/share/doc/gwm-cli/LICENSE-MIT", "644"],
   ["LICENSE-APACHE", "usr/share/doc/gwm-cli/LICENSE-APACHE", "644"],
   ["CHANGELOG.md", "usr/share/doc/gwm-cli/CHANGELOG.md", "644"],
