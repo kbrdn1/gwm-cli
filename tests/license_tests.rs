@@ -118,11 +118,11 @@ fn the_mit_text_still_carries_the_copyright_line() {
 /// Does this line *assign* a license, as opposed to merely naming a license
 /// file or the `usr/share/licenses/` install directory?
 ///
-/// The distinction is the character right after the key: a declaration is
-/// `license` followed by an assignment token (`=`, `:`, `(`, `"`, `any_of`),
-/// whereas `LICENSE-MIT` and `licenses/$pkgname` are followed by `-` and `s`.
-/// Without it every `install -Dm644 LICENSE-MIT …` row reads as a declaration
-/// that names only one half.
+/// The distinction is what follows the key: a declaration is `license`
+/// followed by an assignment token (`=`, `:`, `(`, `":`, `any_of`), whereas
+/// `LICENSE-MIT` and `licenses/$pkgname` are followed by `-` and `s`. Without
+/// it every `install -Dm644 LICENSE-MIT …` row reads as a declaration that
+/// names only one half.
 ///
 /// Comment lines are excluded, and that exclusion is what keeps the guard from
 /// answering itself. The comments explaining *why* each channel spells the
@@ -142,7 +142,12 @@ fn is_declaration(line: &str) -> bool {
     let rest = &lower[start + "licen".len()..];
     if let Some(tail) = rest.strip_prefix("se").or_else(|| rest.strip_prefix("ce")) {
       let tail = tail.trim_start();
-      for token in ["=", ":", "(", "\"", "any_of", "all_of"] {
+      // `":` and not a bare `"`: Scoop's key is quoted (`"license": "..."`),
+      // so the closing quote is followed by the colon. A bare `"` also matched
+      // the *end* of any packaged path ending in the word, which is how
+      // `["third-party/zlib-LICENSE", ...]` read as a declaration naming one
+      // half (#577).
+      for token in ["=", ":", "(", "\":", "any_of", "all_of"] {
         if tail.starts_with(token) {
           return true;
         }
@@ -244,6 +249,20 @@ fn a_comment_quoting_a_license_is_not_a_declaration() {
     assert!(
       !is_declaration(comment),
       "a comment must not count as a declaration: {comment}"
+    );
+  }
+
+  // Nor does a packaged *path* that happens to end in the word. These are the
+  // asset rows #577 added; before the token was tightened from `"` to `":`,
+  // the closing quote of the path read as Scoop's quoted key and the row was
+  // judged a declaration naming a single half.
+  for path_row in [
+    r#"  ["third-party/zlib-LICENSE", "usr/share/doc/gwm-cli/zlib-LICENSE", "644"],"#,
+    r#"  { source = "third-party/zlib-LICENSE", dest = "/usr/share/doc/gwm-cli/zlib-LICENSE", mode = "644" },"#,
+  ] {
+    assert!(
+      !is_declaration(path_row),
+      "a packaged path is not a declaration: {path_row}"
     );
   }
 
@@ -617,10 +636,16 @@ fn the_aur_package_installs_only_files_the_release_archive_carries() {
     "no `install -Dm… <src>` row found in the PKGBUILD template: the extractor is not reading the package() body"
   );
 
+  // `cp a/b/c dist/STAGE/` writes `dist/STAGE/c`, so the archive is flat and
+  // the PKGBUILD names basenames. A staged entry carrying a directory (#577
+  // stages out of `third-party/`) has to be compared the same way, or the
+  // guard reports a mismatch the archive does not have.
+  let staged: BTreeSet<&str> = staged.iter().map(|p| p.rsplit('/').next().expect("basename")).collect();
+
   for src in &installed {
     // The binary is the archive's reason to exist and is not on the `cp` line.
     assert!(
-      src == "gwm" || staged.contains(src),
+      src == "gwm" || staged.contains(src.as_str()),
       "the AUR PKGBUILD installs `{src}` out of the release archive, but the release workflow never stages it: makepkg would fail at the next release, and nothing else here would notice"
     );
   }

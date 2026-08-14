@@ -81,7 +81,7 @@ jobs:
           STAGE="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "dist/${STAGE}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${STAGE}/"
-          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/${STAGE}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md third-party/libgit2-COPYING third-party/zlib-LICENSE "dist/${STAGE}/"
           tar -C dist -czf "dist/${STAGE}.tar.gz" "${STAGE}"
           shasum -a 256 "dist/${STAGE}.tar.gz" > "dist/${STAGE}.tar.gz.sha256"
 
@@ -96,7 +96,7 @@ jobs:
           $STAGE = "gwm-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$STAGE" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$BIN_NAME" "dist/$STAGE/"
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md "dist/$STAGE/"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md, third-party/libgit2-COPYING, third-party/zlib-LICENSE "dist/$STAGE/"
           Compress-Archive -Path "dist/$STAGE" -DestinationPath "dist/$STAGE.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash.ToLower()
           Set-Content -Path "dist/$STAGE.zip.sha256" -Encoding ascii -Value "$hash  $STAGE.zip"

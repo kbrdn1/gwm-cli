@@ -98,6 +98,11 @@ assets = [
   ["packaging/debian/copyright", "usr/share/doc/gwm-cli/copyright", "644"],
   ["LICENSE-MIT", "usr/share/doc/gwm-cli/LICENSE-MIT", "644"],
   ["LICENSE-APACHE", "usr/share/doc/gwm-cli/LICENSE-APACHE", "644"],
+  # libgit2 and zlib are compiled into the binary, so no package dependency
+  # carries their terms and they have to ship here (#577). See
+  # `third-party/README.md`.
+  ["third-party/libgit2-COPYING", "usr/share/doc/gwm-cli/libgit2-COPYING", "644"],
+  ["third-party/zlib-LICENSE", "usr/share/doc/gwm-cli/zlib-LICENSE", "644"],
   ["CHANGELOG.md", "usr/share/doc/gwm-cli/CHANGELOG.md", "644"],
 ]
 
@@ -121,6 +126,9 @@ assets = [
   { source = "README.md", dest = "/usr/share/doc/gwm-cli/README.md", mode = "644" },
   { source = "LICENSE-MIT", dest = "/usr/share/doc/gwm-cli/LICENSE-MIT", mode = "644" },
   { source = "LICENSE-APACHE", dest = "/usr/share/doc/gwm-cli/LICENSE-APACHE", mode = "644" },
+  # Same reason as the deb block above (#577).
+  { source = "third-party/libgit2-COPYING", dest = "/usr/share/doc/gwm-cli/libgit2-COPYING", mode = "644" },
+  { source = "third-party/zlib-LICENSE", dest = "/usr/share/doc/gwm-cli/zlib-LICENSE", mode = "644" },
   { source = "CHANGELOG.md", dest = "/usr/share/doc/gwm-cli/CHANGELOG.md", mode = "644" },
 ]
 
