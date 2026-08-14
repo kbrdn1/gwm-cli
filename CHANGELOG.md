@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **One spelling for a worktree path, everywhere it is printed in full**
+  ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header rendered
+  `$HOME` as `~` and the table printed the same value raw, so one path appeared
+  twice on one screen in two spellings. The column paying for it is the one that
+  can least afford it: `PATH` is `Fill(1)`, it takes whatever the other columns
+  leave and by design vanishes first, and it spent 13 of its columns on the home
+  directory on *every* row. Measured on the demo fixture at 103 columns the
+  column gets about 22 cells, and all five rows read `/Users/kbrdn1/gwm-demo`,
+  identical, hard-clipped mid-path with no ellipsis. They now start at
+  `~/gwm-demo/`, so what survives the clip is the part that differs per row.
+
+  Compression runs before the terminal sanitiser, not after, and that order is
+  load-bearing: the prefix is matched byte for byte against `dirs::home_dir()`,
+  so sanitising first would rewrite whatever `$HOME` itself carries and
+  compression would silently stop firing for exactly the users whose home is
+  hostile. The tail is still sanitised, so a worktree directory name cannot ride
+  the tilde into the cell.
+
+  The sidebar's `Path` row had the other half of the problem and now shares the
+  same helper: it compressed but never sanitised. Nothing leaked, because
+  ratatui drops a zero-width formatting character rather than painting it, but
+  the row silently showed a path the filesystem does not have.
+
+  `gwm path --format=json` is unaffected and stays absolute: this is a rendering
+  change in the TUI only.
+
+### Fixed
+
+- **Tilde compression fires on Windows, and with a trailing separator on
+  `$HOME`** ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The home
+  prefix was matched byte for byte, which failed in two ways that had been
+  silent since the helper was written, so the header and the sidebar rendered
+  absolute paths for the affected users rather than `~`.
+
+  On Windows the two sources spell the same path differently: a worktree path
+  comes from libgit2, which emits `/` there, while the home directory comes back
+  with `\`, so `C:/Users/alice/repo` never matched `C:\Users\alice`. Separator
+  spellings are now compared as equivalent, on Windows only, since a backslash
+  is an ordinary character in a Unix directory name.
+
+  `HOME=/home/alice/` is legal and is handed back with the separator intact,
+  which left the match ending mid-boundary and refused. Trailing separators are
+  now trimmed before the comparison.
+
 ## Past releases
 
 In reverse chronological order:

@@ -6138,6 +6138,108 @@ fn tilde_compress_falls_back_when_path_outside_home() {
   assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
 }
 
+#[test]
+fn tilde_compress_tolerates_a_trailing_separator_on_home() {
+  // `HOME=/home/alice/` is legal, and `dirs::home_dir()` keeps the separator
+  // verbatim rather than normalising it away — measured, not assumed:
+  // `HOME=/home/alice/` yields `Some("/home/alice/")` and `HOME=/home/alice//`
+  // yields `Some("/home/alice//")`.
+  //
+  // Left in, the prefix strips `/home/alice/repo` down to `repo`, the boundary
+  // check then sees no leading separator and refuses, and every surface stays
+  // absolute for exactly those users.
+  for home in ["/home/alice/", "/home/alice//"] {
+    let home = std::path::Path::new(home);
+    assert_eq!(
+      tilde_compress_with_home("/home/alice/repo", home),
+      "~/repo",
+      "home={home:?}"
+    );
+    assert_eq!(tilde_compress_with_home("/home/alice", home), "~", "home={home:?}");
+    // The boundary guard survives the trim: a longer sibling is still refused.
+    assert_eq!(
+      tilde_compress_with_home("/home/alicent/x", home),
+      "/home/alicent/x",
+      "home={home:?}"
+    );
+  }
+}
+
+#[cfg(windows)]
+#[test]
+fn tilde_compress_matches_across_the_two_windows_separators() {
+  // The two sources spell the same path differently, which is why a
+  // byte-for-byte prefix match never fired here: `WorktreeInfo::path` comes
+  // from libgit2, which emits `/` even on Windows, while `dirs::home_dir()`
+  // returns `\`. Compression was therefore a silent no-op on the platform,
+  // for the header and the sidebar as much as for the table's `PATH` column.
+  //
+  // `#[cfg(windows)]` rather than unconditional, because the behaviour under
+  // test *is* the platform's: on Unix a backslash is an ordinary character in
+  // a directory name, and accepting it as a boundary would reopen the slice
+  // PR #70 closed. The runner is the only oracle, so this one is proven by CI.
+  let home = std::path::Path::new(r"C:\Users\alice");
+  assert_eq!(tilde_compress_with_home("C:/Users/alice/repo", home), "~/repo");
+  assert_eq!(tilde_compress_with_home(r"C:\Users\alice\repo", home), r"~\repo");
+  assert_eq!(tilde_compress_with_home("C:/Users/alice", home), "~");
+  // The boundary guard still holds across spellings.
+  assert_eq!(
+    tilde_compress_with_home("C:/Users/alicent/x", home),
+    "C:/Users/alicent/x",
+    "a longer sibling must not be sliced just because the separators differ"
+  );
+}
+
+// ---- how a worktree path is spelled on screen (issue #568) ----------------
+
+use gwm::tui::display_path_with_home;
+
+#[test]
+fn a_displayed_path_compresses_home_like_the_header_does() {
+  // Issue #568: the header already tilde-compressed, the table printed the
+  // same value raw, so `$HOME` was re-spent on every row of a column that is
+  // `Fill(1)` and vanishes first.
+  let home = std::path::Path::new("/home/alice");
+  assert_eq!(
+    display_path_with_home("/home/alice/gwm-demo/worktrees/acme-api/", home),
+    // Trailing separator kept: `w.path` carries one in production, and the
+    // column has no business rewriting the value beyond the prefix.
+    "~/gwm-demo/worktrees/acme-api/"
+  );
+  assert_eq!(display_path_with_home("/var/lib/acme", home), "/var/lib/acme");
+}
+
+#[test]
+fn a_displayed_path_compresses_before_it_sanitises() {
+  // The order is not interchangeable, which is the whole reason this pair
+  // exists rather than the two helpers being composed at each call site.
+  // Compression matches the home prefix byte for byte, so it has to run on
+  // the raw path: sanitising first rewrites whatever `$HOME` itself carries
+  // into `?`, the prefix stops matching the real `dirs::home_dir()`, and
+  // compression silently stops firing for exactly the users whose home is
+  // hostile. Sanitise-first would yield `/home/al?ice/wt` here.
+  let home = std::path::Path::new("/home/al\u{202E}ice");
+  assert_eq!(display_path_with_home("/home/al\u{202E}ice/wt", home), "~/wt");
+}
+
+#[test]
+fn a_displayed_path_still_sanitises_what_compression_leaves_behind() {
+  // Compressing must not become a way past the sink: the tail the tilde does
+  // not swallow is the part a hostile worktree directory name arrives in
+  // (issue #506), and the table cell is still outside `trunc`'s funnel.
+  let home = std::path::Path::new("/home/alice");
+  assert_eq!(
+    display_path_with_home("/home/alice/wt\u{202E}x", home),
+    "~/wt?x",
+    "a bidi control below home must not ride the tilde into the cell"
+  );
+  assert_eq!(
+    display_path_with_home("/var/wt\u{202E}x", home),
+    "/var/wt?x",
+    "an uncompressed path must be sanitised exactly as before"
+  );
+}
+
 // ---- Issue / PR summary line width budgeting ----------------------------
 
 use gwm::tui::{issue_summary_line, pr_summary_line};

@@ -1710,8 +1710,11 @@ fn worktree_identity_lines(
 fn identity_path_line(w: &WorktreeInfo, label_w: usize, label_style: Style, theme: &Theme) -> Line<'static> {
   Line::from(vec![
     Span::styled(format!("{:<label_w$}  ", "Path", label_w = label_w), label_style),
+    // Same treatment as the table's `PATH` cell (issue #568): this row is the
+    // other place a full `w.path` is spelled out, so it owes the terminal the
+    // same sink and gets it from the same helper.
     Span::styled(
-      tilde_compress(&w.path.display().to_string()),
+      display_path(&w.path.display().to_string()),
       Style::default().fg(theme.muted),
     ),
   ])
@@ -2194,8 +2197,8 @@ pub fn author_initials(author: &str) -> String {
 /// the narrow sidebar. Falls back to the raw path if `$HOME` is unset or
 /// the path doesn't live under it.
 fn tilde_compress(path: &str) -> String {
-  if let Some(home) = dirs::home_dir() {
-    tilde_compress_with_home(path, &home)
+  if let Some(home) = home_dir_cached() {
+    tilde_compress_with_home(path, home)
   } else {
     path.to_string()
   }
@@ -2210,14 +2213,96 @@ fn tilde_compress(path: &str) -> String {
 /// `~ice/repo` (raised by PR #70 Copilot review).
 pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
   let home_s = home.display().to_string();
-  if let Some(rest) = path.strip_prefix(&home_s) {
+  // `HOME=/home/alice/` is legal and `dirs::home_dir()` hands the separator
+  // back verbatim (measured: it yields `Some("/home/alice/")`). Left in, the
+  // prefix would strip `/home/alice/repo` down to `repo`, the boundary check
+  // below would see no leading separator and refuse, and every surface would
+  // stay absolute for exactly those users. Trimming to the empty string is
+  // fine: `HOME=/` then compresses `/var` to `~/var`, which is what a home at
+  // the root means.
+  let home_s = home_s.trim_end_matches(std::path::is_separator);
+  if let Some(rest) = strip_home_prefix(path, home_s) {
     // Accept exact-home (`rest.is_empty()`) and home-followed-by-separator
     // matches. Reject prefix matches that bleed into a longer dir name.
-    if rest.is_empty() || rest.starts_with('/') || rest.starts_with(std::path::MAIN_SEPARATOR) {
+    if rest.is_empty() || rest.starts_with(std::path::is_separator) {
       return format!("~{}", rest);
     }
   }
   path.to_string()
+}
+
+/// `str::strip_prefix` with the platform's separator spellings treated as one.
+///
+/// The two sources disagree on Windows and that is not cosmetic: a
+/// `WorktreeInfo::path` comes from libgit2, which emits `/` there, while
+/// [`dirs::home_dir`] returns `\`. A byte-for-byte prefix match therefore never
+/// fired on the platform, and the compression was a silent no-op for every
+/// surface that uses it, the header and the sidebar as much as the table.
+///
+/// [`std::path::is_separator`] carries the per-platform rule, so Unix behaviour
+/// is byte-identical to a plain `strip_prefix`: a backslash is an ordinary
+/// character in a directory name there, and accepting it as equivalent would
+/// reopen the slice the boundary check above exists to prevent (PR #70).
+fn strip_home_prefix<'a>(path: &'a str, home: &str) -> Option<&'a str> {
+  // `get` rather than `split_at`: a home length that lands mid-codepoint
+  // returns `None` here instead of panicking.
+  let head = path.get(..home.len())?;
+  head
+    .chars()
+    .zip(home.chars())
+    .all(|(a, b)| a == b || (std::path::is_separator(a) && std::path::is_separator(b)))
+    .then(|| &path[home.len()..])
+}
+
+/// How a worktree path is spelled on screen: tilde-compressed, then
+/// sanitised (issue #568).
+///
+/// The single treatment for every surface that prints a `WorktreeInfo::path`
+/// in full — the table's `PATH` cell and the sidebar's `Path` row. Before
+/// this pair they each had half of it: the table sanitised without
+/// compressing, so it re-spent `$HOME` on every row of the one column that is
+/// `Fill(1)` and therefore vanishes first; the sidebar compressed without
+/// sanitising, which no guard caught because ratatui's grapheme-width
+/// filtering happens to swallow a zero-width `Cf` in a `Span` instead of
+/// painting it. Nothing leaked there, but the row showed a path the
+/// filesystem does not have.
+///
+/// Not the header (`app.workdir`, not a worktree-derived value) and not the
+/// delete-confirm modal, which funnels through `ellipsize_middle`.
+fn display_path(path: &str) -> String {
+  match home_dir_cached() {
+    Some(home) => display_path_with_home(path, home),
+    // No home to strip: the surface still owes the terminal a sanitised value.
+    None => crate::naming::sanitise_for_terminal(path),
+  }
+}
+
+/// Pure variant of [`display_path`] that takes the home directory explicitly,
+/// mirroring the [`tilde_compress`] / [`tilde_compress_with_home`] pair it is
+/// built on. Exposed for tests.
+///
+/// **The order is not interchangeable.** Compression matches the home prefix
+/// byte for byte, so it has to see the raw path: sanitising first rewrites
+/// whatever `$HOME` itself carries into `?`, the prefix stops matching the
+/// real [`dirs::home_dir`], and compression silently stops firing for exactly
+/// the users whose home is hostile. Sanitising second costs nothing — `~` and
+/// the separators are not characters the sink rewrites — and still covers the
+/// tail, which is where a hostile worktree directory name actually arrives
+/// (issue #506).
+pub fn display_path_with_home(path: &str, home: &std::path::Path) -> String {
+  crate::naming::sanitise_for_terminal(&tilde_compress_with_home(path, home))
+}
+
+/// `dirs::home_dir()` resolved once per process.
+///
+/// The table calls into it per row per frame, and on Windows the lookup is a
+/// `SHGetKnownFolderPath` call rather than an env read. The value cannot
+/// change under a running TUI, so it is resolved once and shared with the
+/// header, sidebar and confirm-modal callers that were already paying for it
+/// once a frame each.
+fn home_dir_cached() -> Option<&'static std::path::Path> {
+  static HOME: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+  HOME.get_or_init(dirs::home_dir).as_deref()
 }
 
 fn short_oid(oid: &str) -> String {
@@ -2466,9 +2551,10 @@ fn build_row(
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
   // Not width-constrained, so it does not pass through `trunc`'s funnel and
   // has to say so itself: a path carries the worktree directory name, which is
-  // as unvetted as the branch (issue #506).
-  let path_cell =
-    Cell::from(crate::naming::sanitise_for_terminal(&w.path.to_string_lossy())).style(worktree_path_style(theme));
+  // as unvetted as the branch (issue #506). `display_path` carries both that
+  // sink and the tilde compression the header already applies, in the one order
+  // that works (issue #568).
+  let path_cell = Cell::from(display_path(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
   let mut cells = Vec::with_capacity(8);
   if let Some(marked) = mark {
