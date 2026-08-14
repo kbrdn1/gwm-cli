@@ -4358,6 +4358,11 @@ impl App {
         // and closing takes two. That is exactly why the mode is opt-in:
         // `Esc` writing and closing on the first press is a shipped
         // default, and it stays the default for everyone else.
+        //
+        // This reads the knob where the block above reads the mode, and
+        // they are the same fact from two sides: normal mode is only ever
+        // entered behind the knob, but insert mode is where both worlds
+        // meet, so `Esc` cannot tell them apart without asking.
         if self.config.tui.note_vim {
           if let Some(editor) = self.note_editor.as_mut() {
             if editor.mode == NoteMode::Insert {

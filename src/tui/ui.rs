@@ -5599,6 +5599,12 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
       // #557: the mode chip only exists behind `note_vim`. A mode the user
       // cannot see is a mode they type verbs into by accident, and a chip
       // for a mode that can never change is chrome nobody asked for.
+      //
+      // It sits AFTER the branch because a centred title that overflows is
+      // clipped from the LEFT (measured, not assumed: the guard in
+      // `tui_modal_render_tests` fails with the two halves the other way
+      // round). The chip is the half worth keeping, so it goes where the
+      // clip does not reach.
       if app.config.tui.note_vim {
         let mode = match editor.mode {
           crate::tui::state::note_editor::NoteMode::Normal => "NORMAL",
