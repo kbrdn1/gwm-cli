@@ -2,7 +2,10 @@ class Gwm < Formula
   desc "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
   homepage "https://github.com/kbrdn1/gwm-cli"
   version "__VERSION__"
-  license "MIT"
+  # `any_of:` is the DSL's disjunction: the user picks a license. A plain
+  # `license "MIT OR Apache-2.0"` string is not an SPDX expression to brew,
+  # it is an unknown license name.
+  license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
