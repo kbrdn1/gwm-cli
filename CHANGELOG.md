@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and #543 finished the skills; neither reached `src/`, so a user hitting an
   `exec` error read a dash the documentation for that same feature no longer
   used. 165 of them across 161 string literals, in every error message, status
-  line and TUI hint the binary carries.
+  line and TUI hint the binary carries, and 49 more in `gwm --help`, which
+  `clap` builds out of the doc comments on the CLI types. The completion
+  scripts carried the same text and are fixed with it: `gwm completions zsh`
+  went from 23 to none.
 
   The connector was chosen at each call site rather than substituted. A colon
   where the dash introduced the remedy, a semicolon where the clause already
@@ -29,11 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create form hints and the loader detail now read the way the segments beside
   them already did.
 
-  Comments and doc comments are untouched, roughly 1900 of them: a doc comment
-  quoting a spec or a command's real output has to stay verbatim. A test
-  enforces the rule from here on, scanning `src/` with a Rust literal scanner
-  rather than a grep, since telling a literal from a doc comment is the whole
-  difference between a guard that holds and one nobody can keep green.
+  Comments are untouched, roughly 1900 of them: a doc comment quoting a spec
+  or a command's real output has to stay verbatim, and it is read in the source
+  rather than printed. Two tests hold the rule from here on. One scans `src/`
+  with a Rust literal scanner rather than a grep, since telling a literal from
+  a doc comment is the whole difference between a guard that holds and one
+  nobody can keep green. The other walks `gwm --help` and every subcommand's,
+  because that is where a doc comment stops being a comment, and no scanner
+  can answer that question as reliably as reading what the binary prints.
 
   Several doc captures still show the old wording and are tracked separately.
   The published site follows `main`, never `dev`, so they go stale at the next
