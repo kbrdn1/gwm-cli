@@ -72,6 +72,8 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// `docs/schema/README.md` and `docs/_capture/README.md` are working notes
 /// with no frontmatter at all; they are skipped rather than excluded by name.
+/// `docs/README.md` does carry frontmatter, so it is held to the same rules as
+/// a page: it is hidden from the sidebar, not from a crawler.
 ///
 /// Line endings are normalised because Windows runners check out with
 /// `core.autocrlf=true`, and a trailing `\r` would otherwise count as a
