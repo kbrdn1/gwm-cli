@@ -1949,3 +1949,26 @@ fn the_note_title_says_nothing_about_modes_with_the_knob_off() {
   assert!(!buffer_contains(&buf, "INSERT"), "no mode chip without the knob");
   assert!(!buffer_contains(&buf, "NORMAL"));
 }
+
+#[test]
+fn a_long_branch_name_does_not_push_the_mode_chip_off_the_title() {
+  // The title is clipped from the right, so whichever half sits last is the
+  // half a long branch name costs. Whether the keys are text is worth more
+  // than the name of the branch the modal was opened from.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.note_editor = Some(gwm::tui::state::note_editor::NoteEditor::open(
+    "feat/#557-a-branch-name-long-enough-to-run-past-the-right-hand-edge-of-the-modal".into(),
+    PathBuf::from("/tmp/n.md"),
+    "",
+  ));
+  app.note_editor.as_mut().unwrap().enter_normal();
+  app.view = View::Note;
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the mode chip was clipped off by the branch name:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
