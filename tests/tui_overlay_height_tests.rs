@@ -121,9 +121,28 @@ fn the_settings_panel_stops_at_its_ceiling_rather_than_filling_the_frame() {
 fn the_settings_panel_keeps_a_margin_on_a_short_terminal() {
   // The floor must never push the box past the frame: on a terminal shorter
   // than the floor, the margin wins.
+  //
+  // Which is only safe because the rows it costs are reachable. The same
+  // margin was removed from the exact-height modals for taking a control off
+  // the bottom of a delete dialogue (Codex review P2); here the footer hint is
+  // a fixed-length region and the body a flexible one that already scrolls, so
+  // the squeeze lands on the part that can be scrolled back. Asserted rather
+  // than assumed, because that is precisely what went wrong next door.
   let dir = repo();
   for frame_h in [12u16, 14, 16, 20] {
     let terminal = settings(&dir, SettingsTab::Keys, frame_h);
+    let painted = {
+      let buf = terminal.backend().buffer();
+      let area = *buf.area();
+      (0..area.height)
+        .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
+    assert!(
+      painted.contains("Esc"),
+      "frame_h={frame_h}: the footer hint must survive the squeeze"
+    );
     let (top, bottom) = box_rows(&terminal);
     assert!(
       top >= 1,
@@ -137,11 +156,18 @@ fn the_settings_panel_keeps_a_margin_on_a_short_terminal() {
 }
 
 #[test]
-fn a_content_sized_modal_keeps_a_margin_on_a_short_terminal() {
-  // Not the Settings panel: the create form already sized to its content and
-  // still painted its border on rows 0 and 13 of a 14-row terminal, because
-  // `centered_abs` clamps to the frame without reserving anything. Measured
-  // before the change: `top=0 bottom=13` at 14 rows, `top=0 bottom=15` at 16.
+fn a_modal_that_cannot_scroll_keeps_its_rows_rather_than_its_margin() {
+  // The margin is not free, and this is where it costs too much. The create
+  // form, the rename form and both delete dialogues compute an exact content
+  // height and have no scroll path, so reserving two rows per side does not
+  // shrink a box, it deletes lines off the bottom of one. Codex review, P2:
+  // a delete confirmation for a target carrying a branch asks for 13 rows,
+  // and clamping it to 12 on a 16-row terminal drops the interactive
+  // `Delete Branch` row entirely, with no way to reach it.
+  //
+  // So on these surfaces a modal that outgrows the frame takes the frame. The
+  // border sitting flush with the edge is a cosmetic cost; a control the user
+  // cannot see or reach is not.
   let dir = repo();
   for frame_h in [14u16, 16] {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
@@ -149,10 +175,10 @@ fn a_content_sized_modal_keeps_a_margin_on_a_short_terminal() {
     let mut terminal = Terminal::new(TestBackend::new(120, frame_h)).unwrap();
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     let (top, bottom) = box_rows(&terminal);
-    assert!(top >= 1, "frame_h={frame_h}: the create form starts flush on row {top}");
-    assert!(
-      bottom + 1 < frame_h as usize,
-      "frame_h={frame_h}: the create form ends flush on row {bottom}"
+    assert_eq!(
+      bottom - top + 1,
+      frame_h as usize,
+      "frame_h={frame_h}: a non-scrolling modal must spend the whole frame, not lose rows to a margin"
     );
   }
 }

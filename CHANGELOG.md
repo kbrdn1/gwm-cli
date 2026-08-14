@@ -31,10 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the ceiling in every ordinary state and only ever engage on a heavily
   filtered palette, where it becomes a live resize while typing.
 
-  A modal that outgrew a short terminal used to repaint it edge to edge, with
-  no margin at all: the create form drew its border on the first and last rows
-  of a 14-row terminal. Every content-sized overlay now keeps two rows above
-  and below.
+  The exact-height modals (create, rename, both delete dialogues) keep sizing
+  the way they did, border flush with the frame and all. They have no scroll
+  path, so the policy's two rows of margin would not shrink those boxes, it
+  would take rows off the bottom of them: a delete confirmation for a target
+  carrying a branch would lose its `Delete Branch` row on a 16-row terminal.
 
 - **One spelling for a worktree path, everywhere it is printed in full**
   ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header rendered

@@ -5070,10 +5070,16 @@ pub fn modal_width(term_width: u16, pct: u16, min_cols: u16, max_cols: u16) -> u
 /// Two properties, both pinned in `tests/tui_ui_helpers_tests.rs`:
 ///
 /// - **Monotonic.** One more row of content never yields a shorter box.
-/// - **Margined.** [`centered_abs`] only clamps to the frame, which is how the
-///   create form came to paint its border on rows 0 and 13 of a 14-row
-///   terminal, repainting the frame rather than reading as a modal. The two
-///   rows per side come last so the floor can never push a box past the edge.
+/// - **Margined.** Two rows above and below, so the overlay reads as an
+///   overlay instead of repainting the frame. It comes last so the floor can
+///   never push a box past the edge.
+///
+/// The margin is why this is **not** the policy for every overlay. It costs
+/// four rows of content on a terminal too short to grant them, which is only
+/// acceptable where the content can still be reached: a surface that scrolls
+/// absorbs it, a surface that does not simply loses those rows off the bottom.
+/// The exact-height modals therefore stay on [`centered_content`], which sizes
+/// without a margin; the reasoning is written out there.
 pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows: u16) -> u16 {
   content_rows
     .clamp(min_rows, max_rows)
@@ -5718,11 +5724,16 @@ pub fn centered_abs(width: u16, height: u16, area: Rect) -> Rect {
 /// rules (issue #550): `centered_h`, a bare percentage with no ceiling, and
 /// `centered_box`, a percentage with a ceiling but no floor.
 fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect) -> Rect {
-  // No floor and no ceiling of its own: these callers already compute their
-  // exact content height, so the bounds would only fight them. What they take
-  // from the policy is its margin (issue #569) — before it, the create form
-  // painted its border on rows 0 and 13 of a 14-row terminal.
-  let height = modal_height(area.height, height, 0, u16::MAX);
+  // Height does **not** go through [`modal_height`], and the exception is the
+  // point rather than an oversight (issue #569, Codex review P2). Every caller
+  // here computes an exact content height and none of them scroll, so the
+  // policy's two rows of margin would not shrink a box, they would delete
+  // lines off the bottom of one: a delete confirmation for a target carrying a
+  // branch asks for 13 rows, and clamping it to 12 on a 16-row terminal drops
+  // the interactive `Delete Branch` row with no way to reach it.
+  //
+  // So these modals take the whole frame when they outgrow it. A border flush
+  // with the edge is cosmetic; a control the user cannot see is not.
   centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 
