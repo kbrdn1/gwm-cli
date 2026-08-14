@@ -218,25 +218,25 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 pub fn validate_label_name(name: &str) -> Result<()> {
   if name.is_empty() {
     return Err(GwmError::Config(
-      "entry has empty `name` — GitHub label names must be non-empty".into(),
+      "entry has empty `name`: GitHub label names must be non-empty".into(),
     ));
   }
   if name.starts_with('-') {
     return Err(GwmError::Config(format!(
-      "name {:?} starts with '-' — would be parsed as a flag by `gh label create`; \
+      "name {:?} starts with '-': would be parsed as a flag by `gh label create`; \
        rename or remove the leading dash (issue #100)",
       name
     )));
   }
   if name.contains(',') {
     return Err(GwmError::Config(format!(
-      "name {:?} contains ',' — GitHub uses comma as a label-list separator; rename without commas",
+      "name {:?} contains ',': GitHub uses comma as a label-list separator; rename without commas",
       name
     )));
   }
   if let Some(bad) = name.chars().find(|c| c.is_ascii_control()) {
     return Err(GwmError::Config(format!(
-      "name {:?} contains ASCII control character {:?} — rename without control characters",
+      "name {:?} contains ASCII control character {:?}: rename without control characters",
       name, bad
     )));
   }

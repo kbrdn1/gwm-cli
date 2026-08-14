@@ -168,7 +168,7 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
         report.steps.push(StepResult::failed(
           label,
           format!(
-            "refusing to copy: destination {} is a symlink — would redirect the write outside the worktree (issue #93)",
+            "refusing to copy: destination {} is a symlink; would redirect the write outside the worktree (issue #93)",
             dst.display()
           ),
         ));
@@ -186,7 +186,7 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
         report.steps.push(StepResult::failed(
           label,
           format!(
-            "failed to stat destination {}: {} — refusing to proceed with unknown filesystem state",
+            "failed to stat destination {}: {}; refusing to proceed with unknown filesystem state",
             dst.display(),
             e
           ),
@@ -244,7 +244,7 @@ fn resolve_missing(step: &CopyStep, bs: &BootstrapConfig, dst: &Path) -> Option<
       match write_no_follow(dst, fb.content.as_bytes()) {
         Ok(()) => Some(StepResult::warning(
           "",
-          format!("source missing — wrote inline fallback to {}", dst.display()),
+          format!("source missing, wrote inline fallback to {}", dst.display()),
         )),
         Err(e) => Some(StepResult::failed("", format!("inline fallback write failed: {}", e))),
       }
@@ -294,7 +294,7 @@ fn guard_match(step: &CopyStep, bs: &BootstrapConfig, src: &Path) -> std::result
         }
         Err(e) => {
           return Err(format!(
-            "guard '{}' deny_pattern {:?} failed to compile at evaluation time — \
+            "guard '{}' deny_pattern {:?} failed to compile at evaluation time. \
              Config bypassed Config::load_for_repo (#96)? regex: {}",
             guard.name, pat, e
           ));
@@ -337,7 +337,7 @@ fn handle_guard_match(
           Ok(_) => report.steps.push(StepResult::warning(
             label,
             format!(
-              "guard '{}' tripped on {} — seeded {} from {} (edit before use)",
+              "guard '{}' tripped on {}, seeded {} from {} (edit before use)",
               guard.name,
               src.display(),
               dst.display(),
@@ -364,7 +364,7 @@ fn handle_guard_match(
       // abort
       report.steps.push(StepResult::failed(
         label,
-        format!("guard '{}' tripped on {} — abort", guard.name, src.display()),
+        format!("guard '{}' tripped on {}: abort", guard.name, src.display()),
       ));
     }
   }
@@ -732,7 +732,7 @@ fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidInput,
       format!(
-        "{:?} resolves outside {:?} — '..' traversal, absolute path, or symlinked intermediate component rejected (issue #94)",
+        "{:?} resolves outside {:?}: '..' traversal, absolute path, or symlinked intermediate component rejected (issue #94)",
         path, base_canon
       ),
     ));

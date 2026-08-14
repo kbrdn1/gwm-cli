@@ -525,7 +525,7 @@ impl ModalKeymap {
     for k in &keys {
       if action.reserved_typing_stroke(k) {
         return Err(GwmError::Config(format!(
-          "context {}: key {} is reserved for typing input there and cannot be bound to {} — \
+          "context {}: key {} is reserved for typing input there and cannot be bound to {}; \
            the dispatch routes it into the input before the modal resolution",
           ctx.config_path(),
           k,
@@ -552,7 +552,7 @@ impl ModalKeymap {
     for k in &keys {
       if let Some(prev) = map.get(k) {
         return Err(GwmError::Config(format!(
-          "context {}: key {} bound to both {:?} and {:?} — conflict",
+          "context {}: key {} bound to both {:?} and {:?} (conflict)",
           ctx.config_path(),
           k,
           prev.verb(),

@@ -135,7 +135,7 @@ impl<'a> LoaderWidget<'a> {
       LoaderWidgetState::Running { detail, .. } | LoaderWidgetState::Failed { detail, .. } => detail,
     };
     if let Some(detail) = detail {
-      spans.push(Span::styled(" — ", Style::default().fg(self.muted)));
+      spans.push(Span::styled(" · ", Style::default().fg(self.muted)));
       spans.push(Span::styled(detail.to_string(), Style::default().fg(self.muted)));
     }
     Line::from(spans)
@@ -3632,7 +3632,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   }
   rows.push(entry(
     Action::TerminalFullscreen,
-    "open per [tui.open] — shell / editor / finder",
+    "open per [tui.open]: shell / editor / finder",
   ));
   rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
   rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
@@ -3729,7 +3729,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     let open_desc = if open_picks.is_empty() {
       "open menu".to_string()
     } else {
-      format!("open menu — {}", open_picks.join(" · "))
+      format!("open menu: {}", open_picks.join(" · "))
     };
     rows.push(entry(Action::BrowseLinks, &open_desc));
 
@@ -3753,10 +3753,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       parts.push(format!("or {}", picks.join("/")));
     }
     parts.push("then digits".to_string());
-    rows.push(entry(
-      Action::LinkPrompt,
-      &format!("link prompt — {}", parts.join(", ")),
-    ));
+    rows.push(entry(Action::LinkPrompt, &format!("link prompt: {}", parts.join(", "))));
   }
   rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
@@ -3934,7 +3931,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
       modal_entry(
         ModalAction::ConfigActivate,
-        "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
+        "toggle / edit the selected setting (Keys tab: start a key capture; a modal verb commits on its first stroke)",
       ),
       modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
       modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
@@ -3947,7 +3944,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
       fixed(
         "any char",
-        "type the value — free text for text fields, digits for numeric ones",
+        "type the value: free text for text fields, digits for numeric ones",
       ),
       fixed(
         "Backspace",
@@ -3961,7 +3958,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       fixed(
         "Esc",
-        "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
+        "close the overlay; other keys pass through (any key but Ctrl-C closes a finished exec run)",
       ),
     ]);
     rows.extend([
@@ -4356,7 +4353,7 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
     // rather than silently no-op or hard-disable the field.
     if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
     {
-      spans.push(Span::styled("  — set in .gwm.toml; switch to Project", muted_style));
+      spans.push(Span::styled("  (set in .gwm.toml; switch to Project)", muted_style));
     }
     lines.push(Line::from(spans));
   }
@@ -4784,7 +4781,7 @@ fn draw_create(f: &mut Frame, app: &App) {
 
   let block = overlay_block_titled(
     if app.create_form.mode == Mode::Freeform {
-      "New Worktree — free-form"
+      "New Worktree (free-form)"
     } else {
       "New Worktree"
     },
@@ -5640,7 +5637,7 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
     Some((PtyKind::Review, _)) => "Review",
     Some((PtyKind::Exec, false)) => "Exec",
     // #325: once the one-shot command exits, the title invites dismissal.
-    Some((PtyKind::Exec, true)) => "Exec · done — press any key",
+    Some((PtyKind::Exec, true)) => "Exec · done · press any key",
     None => "Overlay",
   };
   // Already rode the top rule before #549; routed through the shared
@@ -6504,7 +6501,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   // Gate-preserved names — explain why a visible `target/` was not counted.
   for rel in app.clean_overlay.skipped() {
     lines.push(
-      Line::from(format!("skipped {rel} — not git-ignored / holds tracked files"))
+      Line::from(format!("skipped {rel}: not git-ignored / holds tracked files"))
         .style(Style::default().fg(muted))
         .centered(),
     );
@@ -6515,7 +6512,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   if armed {
     lines.push(Line::from(""));
     lines.push(
-      Line::from("⚠ armed — confirm again or cancel to abort")
+      Line::from("⚠ armed: confirm again or cancel to abort")
         .style(Style::default().fg(danger).add_modifier(Modifier::BOLD))
         .centered(),
     );
@@ -6751,7 +6748,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     .collect();
   if lines.is_empty() {
     lines.push(Line::from(Span::styled(
-      "  (no matching command — backspace to broaden)",
+      "  (no matching command, backspace to broaden)",
       Style::default().fg(app.theme.prunable),
     )));
   }

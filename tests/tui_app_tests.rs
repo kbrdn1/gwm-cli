@@ -4109,7 +4109,7 @@ fn a_simultaneous_refresh_keeps_its_status_over_the_github_report() {
   // Behaviour-preserving guard (issue #255): pre-spine the event loop drained
   // the GitHub channel before the task channel, so when a worktree refresh and
   // a GitHub fetch completed on the same tick, `apply_refreshed_worktrees`'
-  // "refreshed — N" message ran last and stood. Now both drain in one pass; the
+  // "refreshed: N" message ran last and stood. Now both drain in one pass; the
   // post-loop GitHub report is gated on `!refresh_applied` to preserve that.
   use gwm::tui::{TaskKind, TaskMsg};
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
@@ -4128,7 +4128,7 @@ fn a_simultaneous_refresh_keeps_its_status_over_the_github_report() {
   app.drain_task_results();
 
   assert!(
-    app.status.starts_with("refreshed —"),
+    app.status.starts_with("refreshed:"),
     "the refresh message must win a simultaneous completion (pre-#255 order), got {:?}",
     app.status
   );

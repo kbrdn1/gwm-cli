@@ -674,7 +674,7 @@ impl Keymap {
         if all[i].0 == all[j].0 {
           if all[i].1 != all[j].1 {
             return Err(GwmError::Config(format!(
-              "keymap: chord {:?} bound to both {:?} and {:?} — conflict",
+              "keymap: chord {:?} bound to both {:?} and {:?} (conflict)",
               format_chord(all[i].0),
               all[i].1.slug(),
               all[j].1.slug()
@@ -689,7 +689,7 @@ impl Keymap {
         };
         if all[short].0.len() < all[long].0.len() && all[long].0.starts_with(all[short].0) {
           return Err(GwmError::Config(format!(
-            "keymap: chord {:?} (action {:?}) is a prefix of {:?} (action {:?}) — refused at load time so the event loop never has to time out",
+            "keymap: chord {:?} (action {:?}) is a prefix of {:?} (action {:?}); refused at load time so the event loop never has to time out",
             format_chord(all[short].0),
             all[short].1.slug(),
             format_chord(all[long].0),

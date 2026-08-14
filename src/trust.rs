@@ -348,7 +348,7 @@ fn refusal_for(outcome: TrustOutcome, approve_hint: &str) -> Option<String> {
     TrustOutcome::Prompt { cfg_path, sha, .. } => {
       let short_sha: String = sha.chars().take(12).collect();
       Some(format!(
-        ".gwm.toml at {} not in trust ledger (hash {}) — {}",
+        ".gwm.toml at {} not in trust ledger (hash {}): {}",
         cfg_path.display(),
         short_sha,
         approve_hint
@@ -515,7 +515,7 @@ pub fn default_ledger_path() -> Result<PathBuf> {
     }
   }
   let base = dirs::config_dir().ok_or_else(|| {
-    GwmError::Other("could not resolve user config directory — set GWM_TRUST_LEDGER to override".into())
+    GwmError::Other("could not resolve user config directory: set GWM_TRUST_LEDGER to override".into())
   })?;
   Ok(base.join("gwm").join("trust.toml"))
 }
