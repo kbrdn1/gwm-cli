@@ -1952,7 +1952,7 @@ fn cmd_init(preset: Option<String>, list_presets: bool, show: bool) -> Result<()
   let name = preset.as_deref().unwrap_or("generic");
   let resolved = presets::lookup(name).ok_or_else(|| {
     GwmError::Config(format!(
-      "unknown preset {name:?} — run `gwm init --list-presets` to see the built-ins"
+      "unknown preset {name:?}: run `gwm init --list-presets` to see the built-ins"
     ))
   })?;
 
@@ -2069,7 +2069,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
       let target = resolve_agents_worktree(&trees, &pattern)?;
       let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
         return Err(GwmError::Config(format!(
-          "worktree '{}' has no branch (detached HEAD) — a pin lives in branch config",
+          "worktree '{}' has no branch (detached HEAD): a pin lives in branch config",
           target.name
         )));
       };
@@ -2089,7 +2089,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
         .is_some_and(|a| a.sessions.iter().any(|s| s.id == session_id));
       if !found {
         return Err(GwmError::Config(format!(
-          "no agent session with id '{session_id}' — run `gwm agents` to see the detected ids"
+          "no agent session with id '{session_id}': run `gwm agents` to see the detected ids"
         )));
       }
       github::add_agent_pin(&repo, &branch, &session_id)?;
@@ -2100,7 +2100,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
       let target = resolve_agents_worktree(&trees, &pattern)?;
       let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
         return Err(GwmError::Config(format!(
-          "worktree '{}' has no branch (detached HEAD) — nothing to detach",
+          "worktree '{}' has no branch (detached HEAD): nothing to detach",
           target.name
         )));
       };
@@ -2108,7 +2108,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
         Some(sid) => {
           if !github::remove_agent_pin(&repo, &branch, &sid)? {
             return Err(GwmError::Config(format!(
-              "no pin '{sid}' on {} — run `gwm agents` to see the pinned ids",
+              "no pin '{sid}' on {}: run `gwm agents` to see the pinned ids",
               target.name
             )));
           }
@@ -2941,7 +2941,7 @@ fn cmd_review(
       print_lifecycle_report(&reports.post_create);
     }
     None => {
-      println!("(skipped bootstrap + hooks — pass --bootstrap to run setup against the PR's code)");
+      println!("(skipped bootstrap + hooks; pass --bootstrap to run setup against the PR's code)");
     }
   }
   Ok(())
@@ -3377,7 +3377,7 @@ fn cmd_note_show(slug: Option<String>) -> Result<()> {
   // for the agent pin, restated here so the CLI says why instead of
   // printing nothing.
   let Some(branch) = github::pinnable_branch(branch.as_deref()) else {
-    eprintln!("no branch checked out (detached HEAD) — a note is keyed on the branch");
+    eprintln!("no branch checked out (detached HEAD): a note is keyed on the branch");
     std::process::exit(1);
   };
   match crate::notes::read(&repo, branch) {
@@ -3835,7 +3835,7 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
   let spec = parser.parse(&branch_name).ok_or_else(|| {
     GwmError::Other(format!(
       "branch '{}' does not match this repo's branch pattern `{}`, so it carries no branch type to \
-       read — a commit prefix is derived from one, and a free-form branch has none. Pass --branch \
+       read: a commit prefix is derived from one, and a free-form branch has none. Pass --branch \
        <name written by the pattern>, or write the prefix by hand",
       branch_name, pattern
     ))
@@ -3857,7 +3857,7 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
       _ => "`{issue}`",
     };
     return Err(GwmError::Other(format!(
-      "this repo's branch pattern `{}` carries no {}, so branch '{}' has none to read — a commit \
+      "this repo's branch pattern `{}` carries no {}, so branch '{}' has none to read: a commit \
        prefix is built from the branch type and issue number. Add {} to worktree.branch_pattern, \
        or write the prefix by hand",
       pattern, want, branch_name, want
@@ -3961,7 +3961,7 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()>
     // backslash escaping). Pre-fix this read `\\${env_name}` and
     // surfaced `\$TMUX` to the user — caught at PR #65 review.
     return Err(GwmError::Other(format!(
-      "{0} session not running (${1} unset) — run `gwm {0} <pattern>` from inside a {0} session",
+      "{0} session not running (${1} unset): run `gwm {0} <pattern>` from inside a {0} session",
       mux.binary(),
       env_name,
     )));
@@ -4374,7 +4374,7 @@ fn cmd_labels(action: LabelsAction) -> Result<()> {
 fn cmd_labels_list() -> Result<()> {
   let config = load_labels_config()?;
   if config.labels.is_empty() {
-    println!("0 labels declared in .gwm.toml — nothing to push.");
+    println!("0 labels declared in .gwm.toml; nothing to push.");
     return Ok(());
   }
   // Resolve (and validate colours) before touching the network, so a
@@ -4391,7 +4391,7 @@ fn cmd_labels_list() -> Result<()> {
 fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()> {
   let config = load_labels_config()?;
   if config.labels.is_empty() {
-    println!("0 labels declared in .gwm.toml — nothing to push.");
+    println!("0 labels declared in .gwm.toml; nothing to push.");
     return Ok(());
   }
   let declared = labels::resolve_labels(&config.labels, random_colors)?;
@@ -4411,7 +4411,7 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
           GwmError::Config(msg) => msg,
           other => other.to_string(),
         };
-        GwmError::Config(format!("labels (remote): {inner} — refusing to prune"))
+        GwmError::Config(format!("labels (remote): {inner}; refusing to prune"))
       })?;
     }
   }
@@ -4441,7 +4441,7 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
     }
   } else if !diff.extra_on_remote.is_empty() {
     println!(
-      "{} label(s) on remote not in config — pass --prune to delete",
+      "{} label(s) on remote not in config: pass --prune to delete",
       diff.extra_on_remote.len()
     );
   }
@@ -4487,7 +4487,7 @@ pub fn labels_diff_lines(slug: &str, declared: &[labels::LabelSpec], diff: &Labe
   let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
   let mut lines = vec![format!(
-    "declared in .gwm.toml: {} labels — diff against {}:",
+    "declared in .gwm.toml: {} labels; diff against {}:",
     declared.len(),
     clean(slug)
   )];
@@ -4528,7 +4528,7 @@ fn cmd_milestones(action: MilestonesAction) -> Result<()> {
 fn cmd_milestones_list() -> Result<()> {
   let config = load_milestones_config()?;
   if config.milestones.is_empty() {
-    println!("0 milestones declared in .gwm.toml — nothing to push.");
+    println!("0 milestones declared in .gwm.toml; nothing to push.");
     return Ok(());
   }
   // Resolve (and validate due_on / state) before touching the network,
@@ -4545,7 +4545,7 @@ fn cmd_milestones_list() -> Result<()> {
 fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
   let config = load_milestones_config()?;
   if config.milestones.is_empty() {
-    println!("0 milestones declared in .gwm.toml — nothing to push.");
+    println!("0 milestones declared in .gwm.toml; nothing to push.");
     return Ok(());
   }
   let declared = milestones::resolve_milestones(&config.milestones)?;
@@ -4589,7 +4589,7 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
     }
   } else if !diff.extra_on_remote.is_empty() {
     println!(
-      "{} milestone(s) on remote not in config — pass --prune to delete",
+      "{} milestone(s) on remote not in config: pass --prune to delete",
       diff.extra_on_remote.len()
     );
   }
@@ -4622,7 +4622,7 @@ pub fn milestones_diff_lines(slug: &str, declared: &[milestones::MilestoneSpec],
   let clean = crate::naming::sanitise_for_terminal;
   let (n_create, n_update, n_match, n_extra) = diff.counts();
   let mut lines = vec![format!(
-    "declared in .gwm.toml: {} milestones — diff against {}:",
+    "declared in .gwm.toml: {} milestones; diff against {}:",
     declared.len(),
     clean(slug)
   )];
@@ -4753,7 +4753,7 @@ fn cmd_trust_add() -> Result<()> {
       Ok(())
     }
     None => Err(GwmError::Other(format!(
-      "no .gwm.toml in {} — there is nothing to trust here",
+      "no .gwm.toml in {}: there is nothing to trust here",
       workdir.display()
     ))),
   }
@@ -4775,7 +4775,7 @@ fn cmd_trust_show() -> Result<()> {
       }
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      println!("(file does not exist yet — nothing has been trusted on this machine)");
+      println!("(file does not exist yet, nothing has been trusted on this machine)");
     }
     Err(e) => return Err(e.into()),
   }
@@ -4821,7 +4821,7 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
       use std::io::IsTerminal;
       if !std::io::stdin().is_terminal() {
         return Err(GwmError::Other(format!(
-          ".gwm.toml at {} is not in the trust ledger and stdin is not interactive — \
+          ".gwm.toml at {} is not in the trust ledger and stdin is not interactive: \
            pass --allow-bootstrap (or set GWM_ALLOW_BOOTSTRAP=1) to bypass, \
            or run interactively to approve",
           cfg_path.display()
@@ -4831,7 +4831,7 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
       let granted = prompt_user(&cfg_path, &body, &origin, &sha)?;
       if !granted {
         return Err(GwmError::Other(format!(
-          "trust prompt declined for {} — aborting bootstrap",
+          "trust prompt declined for {}, aborting bootstrap",
           cfg_path.display()
         )));
       }
@@ -4875,7 +4875,7 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result
   if let Some(cfg) = parsed.as_ref() {
     print_bootstrap_summary(cfg);
   } else {
-    println!("     (could not parse .gwm.toml for summary — see raw via `show` below)");
+    println!("     (could not parse .gwm.toml for summary, see raw via `show` below)");
   }
   println!();
 
@@ -5030,7 +5030,7 @@ fn cmd_aliases_list() -> Result<()> {
   // repo section -------------------------------------------------------
   println!("repo (.gwm.toml):");
   if repo_workdir.is_none() {
-    println!("  (not inside a git repository — repo aliases are read from <repo>/.gwm.toml)");
+    println!("  (not inside a git repository; repo aliases are read from <repo>/.gwm.toml)");
   } else if resolved.repo.is_empty() {
     println!("  (none declared)");
   } else {
@@ -5079,7 +5079,7 @@ pub fn shell_init_script(shell: InitShell) -> &'static str {
   }
 }
 
-const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
+const POSIX_SHELL_INIT: &str = r#"# gwm shell helper: wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: eval "$(gwm shell-init bash)"   # or zsh
 #
 # Two paths:
@@ -5106,7 +5106,7 @@ function gcd {
 unalias gcd 2>/dev/null || true
 "#;
 
-const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
+const FISH_SHELL_INIT: &str = r#"# gwm shell helper: wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
 #
 # Two paths:
@@ -5129,7 +5129,7 @@ function gcd --description 'cd into a gwm worktree (no arg = interactive picker)
 end
 "#;
 
-const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
+const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper: wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
 #
 # Two paths:
@@ -5247,7 +5247,7 @@ fn cmd_undo(run_bootstrap: bool, trust_mode: TrustMode) -> Result<()> {
 
   let Some(entry) = journal.pop_last_for_repo(&root) else {
     return Err(GwmError::Other(format!(
-      "nothing to undo for {} — the journal is empty for this repo",
+      "nothing to undo for {}: the journal is empty for this repo",
       root.display()
     )));
   };
@@ -5296,7 +5296,7 @@ fn cmd_undo(run_bootstrap: bool, trust_mode: TrustMode) -> Result<()> {
         &oid_hex[..oid_hex.len().min(8)]
       );
     } else {
-      println!("· branch {} already exists — skipping resurrection", branch_name);
+      println!("· branch {} already exists, skipping resurrection", branch_name);
     }
   }
 
@@ -5317,7 +5317,7 @@ fn cmd_undo(run_bootstrap: bool, trust_mode: TrustMode) -> Result<()> {
   //     (PR #155 Copilot review).
   let branch_name = entry.branch.as_deref().ok_or_else(|| {
     GwmError::Other(format!(
-      "cannot undo remove of detached-HEAD worktree {} — only branch-attached worktrees are supported today",
+      "cannot undo remove of detached-HEAD worktree {}: only branch-attached worktrees are supported today",
       entry.worktree
     ))
   })?;

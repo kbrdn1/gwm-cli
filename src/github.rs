@@ -1766,7 +1766,7 @@ fn validate_remote_label_name(name: &str) -> Result<()> {
       other => other.to_string(),
     };
     GwmError::Config(format!(
-      "labels (remote): {} — refusing to delete via `gh label delete`",
+      "labels (remote): {}; refusing to delete via `gh label delete`",
       inner
     ))
   })

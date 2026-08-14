@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 pub fn install_commit_msg(repo_root: &Path, force: bool) -> Result<PathBuf> {
   let repo = git2::Repository::discover(repo_root).map_err(|_| {
     GwmError::Other(format!(
-      "no git repository discovered from {} — `gwm hooks install` must be run from inside a git repo",
+      "no git repository discovered from {}: `gwm hooks install` must be run from inside a git repo",
       repo_root.display()
     ))
   })?;
@@ -73,7 +73,7 @@ pub fn install_commit_msg(repo_root: &Path, force: bool) -> Result<PathBuf> {
   let hook_path = hooks_dir.join("commit-msg");
   if hook_path.exists() && !force {
     return Err(GwmError::Other(format!(
-      "commit-msg hook already exists at {} — pass --force to overwrite",
+      "commit-msg hook already exists at {}: pass --force to overwrite",
       hook_path.display()
     )));
   }
@@ -164,18 +164,18 @@ pub fn commit_msg_script() -> String {
   // variable surfaces as a real bug (rather than silently producing
   // empty output).
   r#"#!/bin/sh
-# gwm commit-msg hook — auto-prepends the gitmoji + type prefix when
+# gwm commit-msg hook: auto-prepends the gitmoji + type prefix when
 # the commit message doesn't already start with one. Installed by
 # `gwm hooks install commit-msg` (issue #85). Re-running the installer
 # with --force overwrites this file.
 #
 # Best-effort by design: every filesystem step is guarded so a
 # transient failure (full /tmp, noexec mount, …) never blocks the
-# commit — the user just loses the auto-prefix for that one commit.
+# commit: the user just loses the auto-prefix for that one commit.
 
 set -u
 
-# Skip when `gwm` isn't on $PATH — never block a commit because of us.
+# Skip when `gwm` isn't on $PATH: never block a commit because of us.
 if ! command -v gwm >/dev/null 2>&1; then
   exit 0
 fi
@@ -189,13 +189,13 @@ msg_file="${1:-}"
 # a `#`-prefixed comment; we take the first match. Falling back to an
 # empty string lets the downstream check no-op cleanly when the buffer
 # only contains the git template (i.e. the user aborted with an empty
-# message — git itself will reject that commit, no need for us to).
+# message: git itself will reject that commit, no need for us to).
 first_line="$(grep -nvE '^([[:space:]]*#|[[:space:]]*$)' "$msg_file" 2>/dev/null | sed -n '1s/^[0-9]*://p')"
 [ -n "$first_line" ] || exit 0
 
 # Already-prefixed messages are passed through untouched. We detect
 # both the shortcode form (`:sparkles: feat(…)`) and the unicode form
-# (✨ feat(…)) — any non-space first byte that looks like an emoji
+# (✨ feat(…)). Any non-space first byte that looks like an emoji
 # fence covers the latter. The shortcode check is tighter so common
 # `:foo:` mentions in PR / issue subjects don't false-positive.
 case "$first_line" in

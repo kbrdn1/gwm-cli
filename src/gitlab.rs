@@ -997,7 +997,7 @@ fn parse_paginated_array<T: serde::de::DeserializeOwned>(s: &str, kind: &'static
   }
   if pages == 0 {
     return Err(GwmError::Other(format!(
-      "{kind}: glab returned no JSON at all — treating that as an empty \
+      "{kind}: glab returned no JSON at all; treating that as an empty \
        remote would let --prune run against a baseline it never read"
     )));
   }
@@ -1504,7 +1504,7 @@ impl Forge for GitLabForge {
         GwmError::Config(msg) => msg,
         other => other.to_string(),
       };
-      GwmError::Config(format!("labels (remote): {} — refusing to delete via `glab`", inner))
+      GwmError::Config(format!("labels (remote): {}; refusing to delete via `glab`", inner))
     })?;
     self.run_argv(label_delete_argv(self.repo_selector(), name))?;
     Ok(())

@@ -52,7 +52,7 @@ pub type CapturedRun = (ExecOutcome, Vec<u8>);
 pub fn resolve_exec_command(profile: Option<&str>, inline: &[String], cfg: &ExecConfig) -> Result<Vec<String>> {
   match (profile, inline.is_empty()) {
     (Some(_), false) => Err(GwmError::Other(
-      "exec: --profile and an inline `-- <cmd>` are mutually exclusive — the profile carries the command".into(),
+      "exec: --profile and an inline `-- <cmd>` are mutually exclusive; the profile carries the command".into(),
     )),
     (Some(name), true) => {
       let p = cfg
@@ -85,7 +85,7 @@ pub fn validate_exec_profile(profile: &str, entry: &ExecProfile) -> Result<()> {
   } = entry;
   if command.is_empty() {
     return Err(GwmError::Config(format!(
-      "exec: profile `{profile}` has an empty `command` — give it an argv array like `command = [\"cargo\", \"test\"]`"
+      "exec: profile `{profile}` has an empty `command`; give it an argv array like `command = [\"cargo\", \"test\"]`"
     )));
   }
   if let Some(c) = container {
@@ -111,12 +111,12 @@ pub fn validate_container(profile: &str, cfg: &ContainerConfig) -> Result<()> {
   } = cfg;
   if image.trim().is_empty() {
     return Err(GwmError::Config(format!(
-      "exec: profile `{profile}` has a `[container]` with an empty `image` — give it one like `image = \"rust:1.90\"`"
+      "exec: profile `{profile}` has a `[container]` with an empty `image`; give it one like `image = \"rust:1.90\"`"
     )));
   }
   if extra_args.iter().any(|a| a == "--name" || a.starts_with("--name=")) {
     return Err(GwmError::Config(format!(
-      "exec: profile `{profile}` sets `--name` in `[container] extra_args` — gwm owns that flag, \
+      "exec: profile `{profile}` sets `--name` in `[container] extra_args`; gwm owns that flag, \
        because the TUI overlay removes its container by name when it closes. Drop it."
     )));
   }
@@ -167,7 +167,7 @@ pub fn resolve_container_runtime(configured: Option<&str>, available: impl Fn(&s
     .map(|bin| (*bin).to_string())
     .ok_or_else(|| {
       GwmError::Config(format!(
-        "exec: no container runtime found on PATH (looked for {}) — install one or set `runtime` in the profile's `[container]`",
+        "exec: no container runtime found on PATH (looked for {}); install one or set `runtime` in the profile's `[container]`",
         CONTAINER_RUNTIMES.join(", ")
       ))
     })
@@ -202,7 +202,7 @@ impl ContainerPlan {
     // unable to answer — the one thing this feature exists to guarantee.
     if cfg!(windows) {
       return Err(GwmError::Config(
-        "exec: `[container]` is not supported on Windows — the wrapper mirrors host paths, \
+        "exec: `[container]` is not supported on Windows; the wrapper mirrors host paths, \
          and a `C:\\…` path is neither mountable nor resolvable inside a Linux container \
          (the worktree's `.git` file would still name a Windows path). Run the profile on \
          the host, or drive the container from a Linux/macOS checkout."
@@ -354,7 +354,7 @@ pub fn build_container_argv(
   }
   if let Some(bad) = mounted.iter().find(|p| p.contains(':')) {
     return Err(GwmError::Config(format!(
-      "exec: `[container]` cannot mount `{bad}` — a `:` in the path is the separator of \
+      "exec: `[container]` cannot mount `{bad}`; a `:` in the path is the separator of \
        `-v source:destination`, so the mount cannot be expressed. Move the worktree (or the \
        repository) to a path without a colon, or run the profile on the host."
     )));

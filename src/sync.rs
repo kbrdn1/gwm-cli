@@ -96,7 +96,7 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   })?;
   if !head.is_branch() {
     return Err(GwmError::UnbornHead {
-      reason: "sync: HEAD is detached — check out a branch first".into(),
+      reason: "sync: HEAD is detached; check out a branch first".into(),
     });
   }
   let branch_short = head

@@ -600,7 +600,7 @@ pub fn head_branch(path: &Path) -> HeadBranch {
 /// it identically whichever one catches the move.
 fn path_changed(name: &str, actual: &Path, expected: &Path) -> GwmError {
   GwmError::Other(format!(
-    "'{}' now points at {} instead of {} — it changed since it was confirmed, nothing removed",
+    "'{}' now points at {} instead of {}: it changed since it was confirmed, nothing removed",
     name,
     actual.display(),
     expected.display()
@@ -783,7 +783,7 @@ pub fn rename_worktree(
       // either (Codex review, PR #530, pass 4).
       if crate::notes::occupied_by(&repo, old_branch).is_some() && crate::notes::relative_path(new_branch).is_none() {
         return Err(GwmError::CommandFailed(format!(
-          "`{old_branch}` carries a note and `{new_branch}` cannot back a note file — \
+          "`{old_branch}` carries a note and `{new_branch}` cannot back a note file: \
            rename to a name a filesystem accepts, or move the note out of {} first",
           crate::notes::notes_dir(&repo).display()
         )));
@@ -799,7 +799,7 @@ pub fn rename_worktree(
       // its report (Codex review, PR #530, pass 5).
       if let Some(note) = crate::notes::move_conflict(&repo, old_branch, new_branch) {
         return Err(GwmError::CommandFailed(format!(
-          "a note already exists for `{new_branch}`: {} — move or delete it first",
+          "a note already exists for `{new_branch}`: {}; move or delete it first",
           note.display()
         )));
       }
