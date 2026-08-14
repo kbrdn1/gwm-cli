@@ -14,10 +14,14 @@
 pkgname=gwm-cli-bin
 pkgver=__VERSION__
 pkgrel=1
-pkgdesc="git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap (prebuilt binary)"
+pkgdesc="git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap (prebuilt binary)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/kbrdn1/gwm-cli"
-license=('MIT')
+# One array element holding one SPDX expression: Arch combines separate
+# elements with AND, so the disjunction has to live inside a single string
+# (RFC 0016). MIT is a license *family* and needs its text installed below
+# even though Apache-2.0 ships in the `licenses` package.
+license=('MIT OR Apache-2.0')
 # `git` is a runtime dependency: gwm shells out to `git` for sync, worktree
 # rename, clean, and TUI previews (not just the vendored libgit2). glibc +
 # gcc-libs cover the dynamic library deps.
@@ -44,7 +48,8 @@ package() {
   cd "$srcdir/gwm-v$pkgver-$triple"
 
   install -Dm755 gwm "$pkgdir/usr/bin/gwm"
-  install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 
   # Shell completions, generated from the binary itself (native for $CARCH).

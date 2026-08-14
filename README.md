@@ -12,7 +12,7 @@
 
 [![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![rust](https://img.shields.io/badge/rust-1.95%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![docs](https://img.shields.io/badge/docs-gwm.kbrdn.dev-d4825d)](https://gwm.kbrdn.dev/)
 
@@ -122,13 +122,25 @@ gwm started as a Rust rewrite of `tools/worktree-manager.sh`, a bash script tied
 
 ## sponsor
 
-gwm is MIT and built on personal time. If it saves you some of yours, you can support it through [GitHub Sponsors](https://github.com/sponsors/kbrdn1).
+gwm is permissively licensed and built on personal time. If it saves you some of yours, you can support it through [GitHub Sponsors](https://github.com/sponsors/kbrdn1).
 
 Sponsoring buys nothing in particular: no priority support, no roadmap influence, no private builds. It pays for the time that goes into the release pipeline, the docs tree and the issue queue. Reporting a bug, sending a PR or packaging gwm for a channel it does not reach yet helps just as much.
 
 ## license
 
-MIT, see [LICENSE.md](LICENSE.md).
+Dual-licensed under either
+
+- the MIT license ([`LICENSE-MIT`](LICENSE-MIT)), or
+- the Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)),
+
+at your option. You do not have to pick one up front and you never have to
+say which: take whichever fits your situation. The Apache half is the one
+that carries an express patent grant, which is usually what a legal review
+is looking for.
+
+Unless you state otherwise, any contribution you intentionally submit for
+inclusion in this project, as defined in the Apache-2.0 license, is dual-
+licensed as above, with no additional terms or conditions.
 
 ## related docs
 

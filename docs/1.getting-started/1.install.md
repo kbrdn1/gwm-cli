@@ -107,7 +107,7 @@ yay -S gwm-cli-bin
 >
 > Nothing suggests bad faith: the package is correct in shape, points at this repository, and declares the right dependencies. But it is a build produced by a third party, which is worth knowing before installing. For the current version on Arch, use `cargo binstall gwm-cli` or a prebuilt tarball. Tracked in [#430](https://github.com/kbrdn1/gwm-cli/issues/430).
 
-`gwm-cli-bin` is a **prebuilt-binary** package: it downloads the `x86_64` or `aarch64` linux-gnu tarball from the matching GitHub Release, verifies its `sha256`, and installs the `gwm` binary, the MIT license, and shell completions for bash/zsh/fish. No compilation, no Rust toolchain. It `provides`/`conflicts` both `gwm-cli` and `gwm` (it owns `/usr/bin/gwm`), so it won't co-install with a source build of the same tool.
+`gwm-cli-bin` is a **prebuilt-binary** package: it downloads the `x86_64` or `aarch64` linux-gnu tarball from the matching GitHub Release, verifies its `sha256`, and installs the `gwm` binary, both license texts, and shell completions for bash/zsh/fish. No compilation, no Rust toolchain. It `provides`/`conflicts` both `gwm-cli` and `gwm` (it owns `/usr/bin/gwm`), so it won't co-install with a source build of the same tool.
 
 This repository briefly shipped an `aur-publish` job meant to push a stable build on every release. It was removed: for the ownership reason above it could never push, so all it did was fail silently on every tag. The [`PKGBUILD` template](https://github.com/kbrdn1/gwm-cli/blob/main/packaging/aur/PKGBUILD.template) and its render script are still maintained and tested, and the AUR is now fed by hand like Nixpkgs and aqua.
 

@@ -26,9 +26,9 @@ edition = "2021"
 # declares no floor of its own. See `docs/6.development/3.stability.md`
 # §MSRV policy for the full story.
 rust-version = "1.95"
-description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+description = "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/kbrdn1/gwm-cli"
 readme = "README.md"
 keywords = ["git", "worktree", "tui", "cli", "ratatui"]
@@ -65,9 +65,21 @@ pkg-fmt = "zip"
 [package.metadata.deb]
 maintainer = "Kylian Bardini <onepiecekylian@gmail.com>"
 copyright = "2026 Kylian Bardini"
-license-file = ["LICENSE.md", "0"]
+# No `license-file`: neither of the two shapes it can produce is right for a
+# dual license, so `packaging/debian/copyright` is shipped as an asset instead
+# (an asset landing on `usr/share/doc/<pkg>/copyright` wins, and cargo-deb then
+# generates nothing). Measured, both rejected shapes:
+#   - key absent  -> `License: MIT OR Apache-2.0` and no text under it at all,
+#                    a regression on what the MIT-only manifest produced and
+#                    short of what Debian Policy §12.5 asks for;
+#   - key present -> that same header followed by one file pasted verbatim, so
+#                    whichever half is named, the other is undescribed.
+# The DEP-5 file states both alternatives properly: MIT inlined, because it is
+# not in `/usr/share/common-licenses`, and Apache-2.0 by reference to it.
+# `tests/license_tests.rs` derives the MIT paragraph from `LICENSE-MIT`, so the
+# copy cannot drift from the original.
 extended-description = """
-git worktree manager — a terminal UI and CLI over git worktrees. Native
+git worktree manager: a terminal UI and CLI over git worktrees. Native
 libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle
 hooks), and a ratatui TUI. The installed command is `gwm`."""
 section = "utils"
@@ -83,6 +95,9 @@ conflicts = "gwm"
 assets = [
   ["target/release/gwm", "usr/bin/", "755"],
   ["README.md", "usr/share/doc/gwm-cli/README.md", "644"],
+  ["packaging/debian/copyright", "usr/share/doc/gwm-cli/copyright", "644"],
+  ["LICENSE-MIT", "usr/share/doc/gwm-cli/LICENSE-MIT", "644"],
+  ["LICENSE-APACHE", "usr/share/doc/gwm-cli/LICENSE-APACHE", "644"],
   ["CHANGELOG.md", "usr/share/doc/gwm-cli/CHANGELOG.md", "644"],
 ]
 
@@ -97,14 +112,15 @@ assets = [
 # still pulls them. (No `gwm` window-manager package exists on Fedora, so no
 # rpm `conflicts` is needed.)
 [package.metadata.generate-rpm]
-summary = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
-license = "MIT"
+summary = "git worktree manager: TUI + CLI, native libgit2, per-repo bootstrap"
+license = "MIT OR Apache-2.0"
 auto-req = "no"
 requires = { glibc = ">= 2.34", git = "*" }
 assets = [
   { source = "target/release/gwm", dest = "/usr/bin/gwm", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/gwm-cli/README.md", mode = "644" },
-  { source = "LICENSE.md", dest = "/usr/share/doc/gwm-cli/LICENSE.md", mode = "644" },
+  { source = "LICENSE-MIT", dest = "/usr/share/doc/gwm-cli/LICENSE-MIT", mode = "644" },
+  { source = "LICENSE-APACHE", dest = "/usr/share/doc/gwm-cli/LICENSE-APACHE", mode = "644" },
   { source = "CHANGELOG.md", dest = "/usr/share/doc/gwm-cli/CHANGELOG.md", mode = "644" },
 ]
 

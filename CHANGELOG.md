@@ -12,6 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **gwm is now dual-licensed under MIT OR Apache-2.0**
+  ([#573](https://github.com/kbrdn1/gwm-cli/issues/573)). Nothing is taken
+  away: MIT stays, in full, under its own file. What is added is the option
+  of Apache-2.0, whose §3 is an express patent grant from every contributor.
+  MIT has no patent clause at all, and that gap is the one thing a corporate
+  legal review reliably stops on. It is also the ecosystem's default (rustc,
+  cargo, clap, serde, ratatui and git2 all ship this exact pair), so packagers
+  recognise the layout without asking.
+
+  `LICENSE.md` becomes `LICENSE-MIT`, copyright line untouched, and
+  `LICENSE-APACHE` joins it carrying the upstream Apache text verbatim,
+  appendix placeholders left unfilled. **Users pick either one, and never have
+  to say which.**
+
+  Both texts now travel in every artefact: the release tarballs and zips, the
+  `.deb` and `.rpm` payloads, the AUR package, and the published crate. The
+  declaration itself had to be written six times in six syntaxes, none of them
+  interchangeable: `MIT OR Apache-2.0` for crates.io and Arch, `any_of:` for
+  Homebrew, a `|` separator for Scoop, `[ licenses.asl20 licenses.mit ]` for
+  nixpkgs. A walk over `packaging/`, `Cargo.toml` and `flake.nix` now fails
+  the suite if any channel declares one half without the other, and a second
+  guard ties the files the release workflow stages into the tarball to the
+  files the AUR `PKGBUILD` installs back out of it.
+
+  The contribution terms are stated in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#license) and at the foot of the README:
+  a contribution is dual-licensed the same way unless its author says
+  otherwise. There is no CLA and nothing to sign.
+
+  A license change is worth seeing in the version, so the next release is a
+  **minor**, not a patch.
+
 - **A message gwm prints reads without an em dash**
   ([#567](https://github.com/kbrdn1/gwm-cli/issues/567)). The rule this
   project writes under is that published prose does not use the em dash, and
@@ -44,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Several doc captures still show the old wording and are tracked separately.
   The published site follows `main`, never `dev`, so they go stale at the next
   release cut and not before.
+
+- **The one-line description reads without an em dash in every package
+  listing** ([#567](https://github.com/kbrdn1/gwm-cli/issues/567)). #567 swept
+  `src/`, and its guard is scoped there, so the same tagline kept its dash in
+  eight published fields no test could see: the crates.io description, the deb
+  `extended-description`, the rpm `summary`, both `flake.nix` descriptions, and
+  the Homebrew, Scoop and AUR blurbs. A ninth sat in the flake's `shellHook`,
+  printed to whoever runs `nix develop`. A package listing is read by a user,
+  which is the surface #567 is about. The connector is a colon: the dash was
+  introducing an expansion of the noun before it. Comments in those same files
+  keep theirs, which stays #567's to sweep.
 
 - **The Settings panel sizes to its active tab**
   ([#569](https://github.com/kbrdn1/gwm-cli/issues/569)). #550 gave every
