@@ -876,6 +876,21 @@ pub struct TuiConfig {
   /// long enough that sharing a row with anything else would clip both.
   #[serde(default = "default_status_one_line")]
   pub status_one_line: bool,
+
+  /// Give the in-TUI note editor a vim normal mode (issue #557).
+  ///
+  /// Default `false`, and deliberately opt-in rather than the new
+  /// behaviour: with it on, `N` opens in normal mode, `i` / `I` / `a` /
+  /// `A` / `o` / `O` enter insert, `Esc` goes back to normal, and the
+  /// second `Esc` writes and closes. That last sentence is the reason for
+  /// the knob. `Esc` writing and closing on the FIRST press is a shipped
+  /// default people's fingers already know, and a mode is not something to
+  /// hand someone who never asked for one.
+  ///
+  /// Off, the editor is exactly the one #515 shipped: every printable is
+  /// text, and `Esc` writes and closes straight away.
+  #[serde(default)]
+  pub note_vim: bool,
 }
 
 /// How the TUI frames its panes and sidebar sections (issue #545).
@@ -934,6 +949,7 @@ impl Default for TuiConfig {
       layout: TuiLayout::Compact,
       dim_unfocused: false,
       status_one_line: default_status_one_line(),
+      note_vim: false,
     }
   }
 }
