@@ -13517,3 +13517,57 @@ fn every_panel_choice_survives_the_write_it_triggers() {
     }
   }
 }
+
+// ---- lists in the note editor (#557) -------------------------------------
+
+#[test]
+fn the_checkbox_chord_spawns_a_box_then_ticks_it() {
+  // Ctrl-modified on purpose: the note editor reserves every unmodified
+  // printable for the buffer, so a bare letter here would be swallowed
+  // mid-sentence.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "ship it".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- [ ] ship it"]);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- [x] ship it"]);
+}
+
+#[test]
+fn the_bullet_chord_marks_the_line_as_an_item() {
+  let (_dir, mut app) = app_with_note_open();
+  for c in "one".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- one"]);
+
+  // And Enter continues what the chord started, without a second chord.
+  app.handle_note_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  for c in "two".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- one", "- two"]);
+}
+
+#[test]
+fn a_ticked_box_survives_the_round_trip_to_disk() {
+  // The end of the gesture: tick, leave, and the file reads as a checklist
+  // in an editor that never saw gwm.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "check the CI".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] check the CI\n");
+}

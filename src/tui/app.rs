@@ -4332,6 +4332,20 @@ impl App {
         }
         return NoteKey::Handled;
       }
+      // #557: the two list verbs. Ctrl-modified, so they reach this far
+      // rather than being consumed as text above.
+      Some(ModalAction::NoteToggleBullet) => {
+        if let Some(editor) = self.note_editor.as_mut() {
+          editor.toggle_bullet();
+        }
+        return NoteKey::Handled;
+      }
+      Some(ModalAction::NoteToggleCheckbox) => {
+        if let Some(editor) = self.note_editor.as_mut() {
+          editor.toggle_checkbox();
+        }
+        return NoteKey::Handled;
+      }
       _ => {}
     }
 
