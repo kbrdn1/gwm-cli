@@ -2194,8 +2194,8 @@ pub fn author_initials(author: &str) -> String {
 /// the narrow sidebar. Falls back to the raw path if `$HOME` is unset or
 /// the path doesn't live under it.
 fn tilde_compress(path: &str) -> String {
-  if let Some(home) = dirs::home_dir() {
-    tilde_compress_with_home(path, &home)
+  if let Some(home) = home_dir_cached() {
+    tilde_compress_with_home(path, home)
   } else {
     path.to_string()
   }
@@ -2218,6 +2218,48 @@ pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
     }
   }
   path.to_string()
+}
+
+/// The text the table's `PATH` cell renders for one row (issue #568).
+///
+/// The header and the sidebar's `Path` row already tilde-compress, so the
+/// table printing the same value raw put two renderings of one path on one
+/// screen — and spent `$HOME` again on every row of the one column that is
+/// `Fill(1)` and therefore vanishes first.
+fn table_path_text(path: &str) -> String {
+  match home_dir_cached() {
+    Some(home) => table_path_text_with_home(path, home),
+    // No home to strip: the cell still owes the terminal a sanitised value.
+    None => crate::naming::sanitise_for_terminal(path),
+  }
+}
+
+/// Pure variant of [`table_path_text`] that takes the home directory
+/// explicitly, mirroring the [`tilde_compress`] / [`tilde_compress_with_home`]
+/// pair it is built on. Exposed for tests.
+///
+/// **The order is not interchangeable.** Compression matches the home prefix
+/// byte for byte, so it has to see the raw path: sanitising first rewrites
+/// whatever `$HOME` itself carries into `?`, the prefix stops matching the
+/// real [`dirs::home_dir`], and the column silently falls back to absolute for
+/// exactly the users whose home is hostile. Sanitising second costs nothing —
+/// `~` and the separators are not characters the sink rewrites — and still
+/// covers the tail, which is where a hostile worktree directory name actually
+/// arrives (issue #506).
+pub fn table_path_text_with_home(path: &str, home: &std::path::Path) -> String {
+  crate::naming::sanitise_for_terminal(&tilde_compress_with_home(path, home))
+}
+
+/// `dirs::home_dir()` resolved once per process.
+///
+/// The table calls into it per row per frame, and on Windows the lookup is a
+/// `SHGetKnownFolderPath` call rather than an env read. The value cannot
+/// change under a running TUI, so it is resolved once and shared with the
+/// header, sidebar and confirm-modal callers that were already paying for it
+/// once a frame each.
+fn home_dir_cached() -> Option<&'static std::path::Path> {
+  static HOME: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+  HOME.get_or_init(dirs::home_dir).as_deref()
 }
 
 fn short_oid(oid: &str) -> String {
@@ -2466,9 +2508,10 @@ fn build_row(
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
   // Not width-constrained, so it does not pass through `trunc`'s funnel and
   // has to say so itself: a path carries the worktree directory name, which is
-  // as unvetted as the branch (issue #506).
-  let path_cell =
-    Cell::from(crate::naming::sanitise_for_terminal(&w.path.to_string_lossy())).style(worktree_path_style(theme));
+  // as unvetted as the branch (issue #506). `table_path_text` carries both that
+  // sink and the tilde compression the header and sidebar already apply, in the
+  // one order that works (issue #568).
+  let path_cell = Cell::from(table_path_text(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
   let mut cells = Vec::with_capacity(8);
   if let Some(marked) = mark {

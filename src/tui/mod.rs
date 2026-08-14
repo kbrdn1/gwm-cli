@@ -81,11 +81,11 @@ pub use ui::{
   list_pane_counter, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
   overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
   pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
-  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
-  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
-  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
-  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  status_pane_title, table_marker, table_path_text_with_home, tilde_compress_with_home, type_selector_line,
+  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
