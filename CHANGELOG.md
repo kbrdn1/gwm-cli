@@ -38,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gwm path --format=json` is unaffected and stays absolute: this is a rendering
   change in the TUI only.
 
+### Fixed
+
+- **Tilde compression fires on Windows, and with a trailing separator on
+  `$HOME`** ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The home
+  prefix was matched byte for byte, which failed in two ways that had been
+  silent since the helper was written, so the header and the sidebar rendered
+  absolute paths for the affected users rather than `~`.
+
+  On Windows the two sources spell the same path differently: a worktree path
+  comes from libgit2, which emits `/` there, while the home directory comes back
+  with `\`, so `C:/Users/alice/repo` never matched `C:\Users\alice`. Separator
+  spellings are now compared as equivalent, on Windows only, since a backslash
+  is an ordinary character in a Unix directory name.
+
+  `HOME=/home/alice/` is legal and is handed back with the separator intact,
+  which left the match ending mid-boundary and refused. Trailing separators are
+  now trimmed before the comparison.
+
 ## Past releases
 
 In reverse chronological order:
