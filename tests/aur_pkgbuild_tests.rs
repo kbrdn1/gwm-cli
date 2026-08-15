@@ -152,7 +152,8 @@ fn renders_a_complete_pkgbuild() {
   // paths (acceptance criteria: installs gwm + license + completions).
   for line in [
     "install -Dm755 gwm \"$pkgdir/usr/bin/gwm\"",
-    "usr/share/licenses/$pkgname/LICENSE.md",
+    "usr/share/licenses/$pkgname/LICENSE-MIT",
+    "usr/share/licenses/$pkgname/LICENSE-APACHE",
     "usr/share/bash-completion/completions/gwm",
     "usr/share/zsh/site-functions/_gwm",
     "usr/share/fish/vendor_completions.d/gwm.fish",

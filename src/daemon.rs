@@ -1163,7 +1163,7 @@ mod server_win {
     options.security_descriptor = Some(owner_only_descriptor()?);
     let listener = options.create_duplex::<pipe_mode::Bytes>().map_err(|e| {
       GwmError::Other(format!(
-        "daemon: failed to bind pipe {} (a name that is already claimed is refused — first-instance guard): {e}",
+        "daemon: failed to bind pipe {} (a name that is already claimed is refused, first-instance guard): {e}",
         opts.socket.display()
       ))
     })?;

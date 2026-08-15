@@ -80,7 +80,7 @@ pub enum GwmError {
   /// stale ref or rename their request rather than ending up on
   /// whatever commit the stale branch resurrected.
   #[error(
-    "branch '{name}' already exists at {oid} — pass --reuse-branch to attach the worktree to it, or delete the stale branch first"
+    "branch '{name}' already exists at {oid}: pass --reuse-branch to attach the worktree to it, or delete the stale branch first"
   )]
   BranchExists { name: String, oid: String },
 
@@ -154,7 +154,7 @@ pub enum GwmError {
   /// it. Reject it elsewhere rather than silently ignoring it and acting on
   /// the current single repo — a wrong-target footgun for destructive
   /// commands like `gwm remove` (Codex review #303 P2).
-  #[error("--workspace is only supported with `gwm list`, `gwm create`, `gwm exec`, `gwm clean`, or bare `gwm` (the TUI) — refusing to run this subcommand against a single repo")]
+  #[error("--workspace is only supported with `gwm list`, `gwm create`, `gwm exec`, `gwm clean`, or bare `gwm` (the TUI): refusing to run this subcommand against a single repo")]
   WorkspaceUnsupportedCommand,
 
   #[error("{0}")]

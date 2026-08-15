@@ -15,6 +15,27 @@ set can be regenerated after a UI change with one command.
 GWM_KEEP_DEMO=1 ./docs/_capture/generate.sh
 ```
 
+⚠️ **"every tape" is two tapes short**, and neither is announced by the script,
+so a regeneration run finishes with a tick over a set that still holds two stale
+assets (#575):
+
+| Tape | Why it is out of the loop | How to run it |
+|---|---|---|
+| `demo.tape` | the one long-form recording, and it mutates the fixture | see below |
+| `github-linking.tape` | needs a repo with a **remote and an open PR**, which the demo fixture does not have, so it `cd`s to the real `gwm-cli` checkout | see below |
+
+`github-linking.tape` is the one capture in the set that is not deterministic
+and not reproducible by anyone else: it hardcodes the maintainer's checkout
+path and photographs whatever that repo happens to be doing. The published
+`github-linking.png` was taken during the v1.9.0 release, so it shows a dirty
+`chore/release-1.9.0` branch, the real commit history, and a live `CI running
+11/12`. Regenerating it means being on a branch whose PR is open, or it captures
+an empty pane. Tracked separately rather than papered over here.
+
+The Working Tree pane photographs whatever is uncommitted at that moment, so
+check `git status` before the shot: an untracked scratch directory left by some
+other tool lands in the published image and reads as part of the project.
+
 Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
 (`CaskaydiaCove Nerd Font Mono`, as set in each tape's `Set FontFamily`).
 

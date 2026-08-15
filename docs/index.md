@@ -28,7 +28,7 @@ Rust CLI + ratatui TUI to manage git worktrees across projects.
 
 | Section                                            | Read this when …                                                              |
 |:---------------------------------------------------|:------------------------------------------------------------------------------|
-| [Getting Started](/getting-started)                | you want to install gwm and create your first worktree                        |
+| [Getting started](/getting-started)                | you want to install gwm and create your first worktree                        |
 | [TUI](/tui)                                        | you live in the ratatui interface: keymap, sidebar, launchers, filter        |
 | [CLI](/cli)                                        | you script gwm from shells, CI jobs, or `gh` aliases                          |
 | [Configuration](/configuration)                    | you're writing or extending `.gwm.toml`: bootstrap, guards, predicates       |

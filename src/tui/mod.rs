@@ -73,19 +73,19 @@ pub use ui::{
   branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style,
   ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_line, config_capture_footer_hints,
   config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
-  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, ellipsize_middle,
-  field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll, format_status,
-  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
-  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
-  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
-  list_pane_counter, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
-  overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
-  pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
-  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
-  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
-  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
-  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, display_path_with_home,
+  ellipsize_middle, field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll,
+  format_status, freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line,
+  help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color,
+  issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys,
+  link_target_line, list_pane_counter, modal_height, modal_hint_for_context, modal_hint_for_context_with_fields,
+  modal_hint_line, modal_width, overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color,
+  picker_window, pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
+  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -951,7 +951,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
   // active repo, so the write would hit the wrong repository. Navigation and
   // refresh stay live so the user can recover (a refresh drops the dead repo).
   if app.workspace_active_stale && action.is_repo_mutating() {
-    app.status = "workspace: selected repo is unavailable (moved/deleted?) — press r to refresh".into();
+    app.status = "workspace: selected repo is unavailable (moved/deleted?); press r to refresh".into();
     return Ok(());
   }
 
@@ -1211,7 +1211,7 @@ fn run_launcher(
   // binaries get a clean status-bar error instead of a flicker.
   if which::which(bin).is_err() {
     app.status = format!(
-      "`{}` not on $PATH — install it or change [review]/[git_tui] in .gwm.toml",
+      "`{}` not on $PATH: install it or change [review]/[git_tui] in .gwm.toml",
       bin
     );
     return Ok(());
@@ -1391,7 +1391,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.config.tui.macro2.clone()
   };
   let Some(macro_cfg) = cfg else {
-    app.status = format!("macro{} not configured — add [tui.macro{}] to .gwm.toml", n, n);
+    app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
   use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
@@ -1419,7 +1419,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
       Some(build_zellij_command(&label, &path, SpawnMode::Split))
     } else {
-      app.status = format!("macro{}: no multiplexer — falling back to PTY overlay", n);
+      app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
       None
     }
   } else {
@@ -1514,7 +1514,7 @@ fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
       // division renders 65_537 bytes as "64 KiB > 64 KiB", which reads as a
       // bug in the check rather than as a reason for the refusal.
       app.status = format!(
-        "too large for osc52 ({} KiB > {} KiB) — set [tui] clipboard = \"tools\"",
+        "too large for osc52 ({} KiB > {} KiB): set [tui] clipboard = \"tools\"",
         bytes.div_ceil(1024),
         crate::clipboard::MAX_OSC52_BYTES / 1024
       );

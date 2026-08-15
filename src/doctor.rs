@@ -218,7 +218,7 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
   if !quit_has_user_binding {
     return Check::warning(
       name,
-      "`quit` has no binding — Ctrl+C still exits the TUI as a hard-coded fallback, but no discoverable key remains",
+      "`quit` has no binding: Ctrl+C still exits the TUI as a hard-coded fallback, but no discoverable key remains",
     )
     .with_hint("add `quit = [\"q\", \"Esc\"]` (or any other key) to `[tui.keys]`");
   }
@@ -245,7 +245,7 @@ fn check_config_parses(ctx: &DoctorCtx<'_>) -> Check {
   let name = ".gwm.toml parses";
 
   if !path.exists() {
-    return Check::ok(name, "no .gwm.toml present — defaults assumed");
+    return Check::ok(name, "no .gwm.toml present, defaults assumed");
   }
 
   let raw = match std::fs::read_to_string(&path) {
@@ -785,7 +785,7 @@ fn check_orphan_notes(ctx: &DoctorCtx<'_>) -> Check {
     ),
   )
   .with_hint(format!(
-    "the branch is gone — delete the file under {} when the work has landed",
+    "the branch is gone: delete the file under {} when the work has landed",
     crate::notes::notes_dir(ctx.repo).display()
   ))
 }

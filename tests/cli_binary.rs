@@ -1219,10 +1219,20 @@ fn path_format_json_emits_name_path_branch() {
   assert_eq!(obj.len(), 3, "exactly {{name, path, branch}}");
   assert_eq!(v["name"], serde_json::json!("feat-38-json-path"));
   assert_eq!(v["branch"], serde_json::json!("feat/#38-json-path"));
+  let path = v["path"].as_str().unwrap();
+  assert!(path.ends_with("feat-38-json-path"), "path points at the worktree dir");
+  // Issue #568 tripwire: the TUI table now tilde-compresses its `PATH`
+  // column, and the compression helper lives one module away from the code
+  // that renders this field. `--format=json` is a frozen contract whose
+  // consumers resolve the value, so it stays absolute and untilded. Honest
+  // about its reach: this fixture lives under a `TempDir`, i.e. outside
+  // `$HOME`, so compression could not fire here even if the two were wired
+  // together — this catches an unconditional rewrite, not a conditional one.
   assert!(
-    v["path"].as_str().unwrap().ends_with("feat-38-json-path"),
-    "path points at the worktree dir"
+    std::path::Path::new(path).is_absolute(),
+    "json path must stay absolute, got {path:?}"
   );
+  assert!(!path.starts_with('~'), "json path must not be tilde-compressed");
 }
 
 #[test]

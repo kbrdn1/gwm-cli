@@ -32,7 +32,8 @@ gwm-cli/
 ├── Cargo.toml
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
-├── LICENSE.md
+├── LICENSE-APACHE
+├── LICENSE-MIT
 ├── README.md
 ├── docs/                 # full documentation tree (README delegates here)
 ├── examples/
@@ -544,7 +545,7 @@ End users install with any AUR helper:
 yay -S gwm-cli-bin   # or: paru -S gwm-cli-bin
 ```
 
-`gwm-cli-bin` is a prebuilt-binary package (downloads the linux-gnu tarball, verifies its `sha256`, installs the binary + license + bash/zsh/fish completions).
+`gwm-cli-bin` is a prebuilt-binary package (downloads the linux-gnu tarball, verifies its `sha256`, installs the binary + both license texts + bash/zsh/fish completions).
 
 #### Refreshing the package after a stable release
 
@@ -640,4 +641,16 @@ gh workflow run sync-gwm.yml --ref main -R kbrdn1/kbrdn-docs   # or straight at 
 
 ---
 
-By contributing, you agree your changes are licensed under the MIT License (see `LICENSE.md`).
+## License
+
+This project is dual-licensed under either the MIT license (`LICENSE-MIT`) or
+the Apache License, Version 2.0 (`LICENSE-APACHE`), at the user's option.
+
+Unless you explicitly state otherwise, any contribution you intentionally
+submit for inclusion in this project, as defined in the Apache-2.0 license,
+shall be dual-licensed as above, with no additional terms or conditions.
+
+That sentence is the whole of it: there is no CLA to sign and nothing to
+send. It exists so the project cannot end up in the state where one file is
+under a narrower license than the rest, which is what makes a relicense
+impossible later.

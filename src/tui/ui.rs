@@ -135,7 +135,7 @@ impl<'a> LoaderWidget<'a> {
       LoaderWidgetState::Running { detail, .. } | LoaderWidgetState::Failed { detail, .. } => detail,
     };
     if let Some(detail) = detail {
-      spans.push(Span::styled(" — ", Style::default().fg(self.muted)));
+      spans.push(Span::styled(" · ", Style::default().fg(self.muted)));
       spans.push(Span::styled(detail.to_string(), Style::default().fg(self.muted)));
     }
     Line::from(spans)
@@ -1710,8 +1710,11 @@ fn worktree_identity_lines(
 fn identity_path_line(w: &WorktreeInfo, label_w: usize, label_style: Style, theme: &Theme) -> Line<'static> {
   Line::from(vec![
     Span::styled(format!("{:<label_w$}  ", "Path", label_w = label_w), label_style),
+    // Same treatment as the table's `PATH` cell (issue #568): this row is the
+    // other place a full `w.path` is spelled out, so it owes the terminal the
+    // same sink and gets it from the same helper.
     Span::styled(
-      tilde_compress(&w.path.display().to_string()),
+      display_path(&w.path.display().to_string()),
       Style::default().fg(theme.muted),
     ),
   ])
@@ -2194,8 +2197,8 @@ pub fn author_initials(author: &str) -> String {
 /// the narrow sidebar. Falls back to the raw path if `$HOME` is unset or
 /// the path doesn't live under it.
 fn tilde_compress(path: &str) -> String {
-  if let Some(home) = dirs::home_dir() {
-    tilde_compress_with_home(path, &home)
+  if let Some(home) = home_dir_cached() {
+    tilde_compress_with_home(path, home)
   } else {
     path.to_string()
   }
@@ -2210,14 +2213,96 @@ fn tilde_compress(path: &str) -> String {
 /// `~ice/repo` (raised by PR #70 Copilot review).
 pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
   let home_s = home.display().to_string();
-  if let Some(rest) = path.strip_prefix(&home_s) {
+  // `HOME=/home/alice/` is legal and `dirs::home_dir()` hands the separator
+  // back verbatim (measured: it yields `Some("/home/alice/")`). Left in, the
+  // prefix would strip `/home/alice/repo` down to `repo`, the boundary check
+  // below would see no leading separator and refuse, and every surface would
+  // stay absolute for exactly those users. Trimming to the empty string is
+  // fine: `HOME=/` then compresses `/var` to `~/var`, which is what a home at
+  // the root means.
+  let home_s = home_s.trim_end_matches(std::path::is_separator);
+  if let Some(rest) = strip_home_prefix(path, home_s) {
     // Accept exact-home (`rest.is_empty()`) and home-followed-by-separator
     // matches. Reject prefix matches that bleed into a longer dir name.
-    if rest.is_empty() || rest.starts_with('/') || rest.starts_with(std::path::MAIN_SEPARATOR) {
+    if rest.is_empty() || rest.starts_with(std::path::is_separator) {
       return format!("~{}", rest);
     }
   }
   path.to_string()
+}
+
+/// `str::strip_prefix` with the platform's separator spellings treated as one.
+///
+/// The two sources disagree on Windows and that is not cosmetic: a
+/// `WorktreeInfo::path` comes from libgit2, which emits `/` there, while
+/// [`dirs::home_dir`] returns `\`. A byte-for-byte prefix match therefore never
+/// fired on the platform, and the compression was a silent no-op for every
+/// surface that uses it, the header and the sidebar as much as the table.
+///
+/// [`std::path::is_separator`] carries the per-platform rule, so Unix behaviour
+/// is byte-identical to a plain `strip_prefix`: a backslash is an ordinary
+/// character in a directory name there, and accepting it as equivalent would
+/// reopen the slice the boundary check above exists to prevent (PR #70).
+fn strip_home_prefix<'a>(path: &'a str, home: &str) -> Option<&'a str> {
+  // `get` rather than `split_at`: a home length that lands mid-codepoint
+  // returns `None` here instead of panicking.
+  let head = path.get(..home.len())?;
+  head
+    .chars()
+    .zip(home.chars())
+    .all(|(a, b)| a == b || (std::path::is_separator(a) && std::path::is_separator(b)))
+    .then(|| &path[home.len()..])
+}
+
+/// How a worktree path is spelled on screen: tilde-compressed, then
+/// sanitised (issue #568).
+///
+/// The single treatment for every surface that prints a `WorktreeInfo::path`
+/// in full — the table's `PATH` cell and the sidebar's `Path` row. Before
+/// this pair they each had half of it: the table sanitised without
+/// compressing, so it re-spent `$HOME` on every row of the one column that is
+/// `Fill(1)` and therefore vanishes first; the sidebar compressed without
+/// sanitising, which no guard caught because ratatui's grapheme-width
+/// filtering happens to swallow a zero-width `Cf` in a `Span` instead of
+/// painting it. Nothing leaked there, but the row showed a path the
+/// filesystem does not have.
+///
+/// Not the header (`app.workdir`, not a worktree-derived value) and not the
+/// delete-confirm modal, which funnels through `ellipsize_middle`.
+fn display_path(path: &str) -> String {
+  match home_dir_cached() {
+    Some(home) => display_path_with_home(path, home),
+    // No home to strip: the surface still owes the terminal a sanitised value.
+    None => crate::naming::sanitise_for_terminal(path),
+  }
+}
+
+/// Pure variant of [`display_path`] that takes the home directory explicitly,
+/// mirroring the [`tilde_compress`] / [`tilde_compress_with_home`] pair it is
+/// built on. Exposed for tests.
+///
+/// **The order is not interchangeable.** Compression matches the home prefix
+/// byte for byte, so it has to see the raw path: sanitising first rewrites
+/// whatever `$HOME` itself carries into `?`, the prefix stops matching the
+/// real [`dirs::home_dir`], and compression silently stops firing for exactly
+/// the users whose home is hostile. Sanitising second costs nothing — `~` and
+/// the separators are not characters the sink rewrites — and still covers the
+/// tail, which is where a hostile worktree directory name actually arrives
+/// (issue #506).
+pub fn display_path_with_home(path: &str, home: &std::path::Path) -> String {
+  crate::naming::sanitise_for_terminal(&tilde_compress_with_home(path, home))
+}
+
+/// `dirs::home_dir()` resolved once per process.
+///
+/// The table calls into it per row per frame, and on Windows the lookup is a
+/// `SHGetKnownFolderPath` call rather than an env read. The value cannot
+/// change under a running TUI, so it is resolved once and shared with the
+/// header, sidebar and confirm-modal callers that were already paying for it
+/// once a frame each.
+fn home_dir_cached() -> Option<&'static std::path::Path> {
+  static HOME: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+  HOME.get_or_init(dirs::home_dir).as_deref()
 }
 
 fn short_oid(oid: &str) -> String {
@@ -2466,9 +2551,10 @@ fn build_row(
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
   // Not width-constrained, so it does not pass through `trunc`'s funnel and
   // has to say so itself: a path carries the worktree directory name, which is
-  // as unvetted as the branch (issue #506).
-  let path_cell =
-    Cell::from(crate::naming::sanitise_for_terminal(&w.path.to_string_lossy())).style(worktree_path_style(theme));
+  // as unvetted as the branch (issue #506). `display_path` carries both that
+  // sink and the tilde compression the header already applies, in the one order
+  // that works (issue #568).
+  let path_cell = Cell::from(display_path(&w.path.to_string_lossy())).style(worktree_path_style(theme));
 
   let mut cells = Vec::with_capacity(8);
   if let Some(marked) = mark {
@@ -3546,7 +3632,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   }
   rows.push(entry(
     Action::TerminalFullscreen,
-    "open per [tui.open] — shell / editor / finder",
+    "open per [tui.open]: shell / editor / finder",
   ));
   rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
   rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
@@ -3643,7 +3729,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     let open_desc = if open_picks.is_empty() {
       "open menu".to_string()
     } else {
-      format!("open menu — {}", open_picks.join(" · "))
+      format!("open menu: {}", open_picks.join(" · "))
     };
     rows.push(entry(Action::BrowseLinks, &open_desc));
 
@@ -3667,10 +3753,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       parts.push(format!("or {}", picks.join("/")));
     }
     parts.push("then digits".to_string());
-    rows.push(entry(
-      Action::LinkPrompt,
-      &format!("link prompt — {}", parts.join(", ")),
-    ));
+    rows.push(entry(Action::LinkPrompt, &format!("link prompt: {}", parts.join(", "))));
   }
   rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
@@ -3848,7 +3931,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
       modal_entry(
         ModalAction::ConfigActivate,
-        "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
+        "toggle / edit the selected setting (Keys tab: start a key capture; a modal verb commits on its first stroke)",
       ),
       modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
       modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
@@ -3861,7 +3944,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
       fixed(
         "any char",
-        "type the value — free text for text fields, digits for numeric ones",
+        "type the value: free text for text fields, digits for numeric ones",
       ),
       fixed(
         "Backspace",
@@ -3875,7 +3958,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       fixed(
         "Esc",
-        "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
+        "close the overlay; other keys pass through (any key but Ctrl-C closes a finished exec run)",
       ),
     ]);
     rows.extend([
@@ -4270,7 +4353,7 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
     // rather than silently no-op or hard-disable the field.
     if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
     {
-      spans.push(Span::styled("  — set in .gwm.toml; switch to Project", muted_style));
+      spans.push(Span::styled("  (set in .gwm.toml; switch to Project)", muted_style));
     }
     lines.push(Line::from(spans));
   }
@@ -4368,7 +4451,6 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
 /// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
 /// `config_panel.max_scroll` against the live body viewport.
 fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered_viewport(60, 64, 96, 60, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
@@ -4441,12 +4523,34 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
+  let header_h = header_lines.len() as u16;
+
+  // Size the panel to the active tab rather than to 60% of the frame (issue
+  // #569): the header, the body's own rows, the footer hint, the rounded
+  // border and the shared interior padding, clamped by the height policy. The
+  // Worktree tab is three fields and used to sit in a 24-row box on a 40-row
+  // terminal, roughly six of them blank.
+  //
+  // The box therefore changes size as the user cycles tabs, which is the
+  // deliberate trade: the tabs are genuinely different lengths (3 rows for
+  // Worktree, 173 for Keys), and with the floor and ceiling in place it
+  // settles into two sizes rather than a continuum.
+  let content_rows =
+    header_h + body_lines.len() as u16 + 1 /* footer */ + 2 /* border */ + 2 /* padding */;
+  let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
+  let area = centered_content(
+    60,
+    64,
+    96,
+    modal_height(f.area().height, content_rows, min_rows, max_rows),
+    f.area(),
+  );
+
   let block = overlay_block_titled("Settings", accent);
   let inner = block.inner(area);
   f.render_widget(Clear, area);
   f.render_widget(block, area);
 
-  let header_h = header_lines.len() as u16;
   let [header_area, body_area, footer_area] =
     Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
@@ -4677,7 +4781,7 @@ fn draw_create(f: &mut Frame, app: &App) {
 
   let block = overlay_block_titled(
     if app.create_form.mode == Mode::Freeform {
-      "New Worktree — free-form"
+      "New Worktree (free-form)"
     } else {
       "New Worktree"
     },
@@ -4948,6 +5052,47 @@ pub fn modal_width(term_width: u16, pct: u16, min_cols: u16, max_cols: u16) -> u
   let ideal = term_width.saturating_mul(pct) / 100;
   ideal.clamp(min_cols, max_cols).min(term_width.saturating_sub(4).max(1))
 }
+
+/// **The** modal height policy (issue #569): the content's own row count,
+/// never below `min_rows`, never above `max_rows`, always leaving two rows of
+/// margin above and below.
+///
+/// Deliberately not the mirror of [`modal_width`], because the two axes do not
+/// fail the same way. A narrow modal truncates its text, so width interpolates
+/// a percentage of the terminal and a floor buys back readability. A short
+/// modal is simply short: the content is the right input, and a percentage is
+/// only ever a coincidence. `centered_viewport` spent 60% of the frame on the
+/// Settings panel whether its tab had 3 rows or 173.
+///
+/// Two properties, both pinned in `tests/tui_ui_helpers_tests.rs`:
+///
+/// - **Monotonic.** One more row of content never yields a shorter box.
+/// - **Margined.** Two rows above and below, so the overlay reads as an
+///   overlay instead of repainting the frame. It comes last so the floor can
+///   never push a box past the edge.
+///
+/// The margin is why this is **not** the policy for every overlay. It costs
+/// four rows of content on a terminal too short to grant them, which is only
+/// acceptable where the content can still be reached: a surface that scrolls
+/// absorbs it, a surface that does not simply loses those rows off the bottom.
+/// The exact-height modals therefore stay on [`centered_content`], which sizes
+/// without a margin; the reasoning is written out there.
+pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows: u16) -> u16 {
+  content_rows
+    .clamp(min_rows, max_rows)
+    .min(term_height.saturating_sub(4).max(1))
+}
+
+/// Height bounds for the Settings panel (issue #569).
+///
+/// The floor is the shortest tab that carries a real form: Worktree, whose
+/// three fields make an 11-row box. Only Theme is shorter (one row), and it
+/// gains two blank rows rather than shrinking to a sliver. The ceiling leaves
+/// about 25 rows of body, which covers the resolved-config tab outright and
+/// gives the 173-row Keys tab a scroll window worth having without the panel
+/// swallowing the terminal. Both tabs scrolled before this change (#279), so
+/// a ceiling costs nothing they did not already handle.
+const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (11, 32);
 
 /// Modal width for the Link / Open prompts: wide enough for an issue or PR
 /// summary, capped so it stays a prompt rather than a page.
@@ -5492,7 +5637,7 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
     Some((PtyKind::Review, _)) => "Review",
     Some((PtyKind::Exec, false)) => "Exec",
     // #325: once the one-shot command exits, the title invites dismissal.
-    Some((PtyKind::Exec, true)) => "Exec · done — press any key",
+    Some((PtyKind::Exec, true)) => "Exec · done · press any key",
     None => "Overlay",
   };
   // Already rode the top rule before #549; routed through the shared
@@ -5576,6 +5721,16 @@ pub fn centered_abs(width: u16, height: u16, area: Rect) -> Rect {
 /// rules (issue #550): `centered_h`, a bare percentage with no ceiling, and
 /// `centered_box`, a percentage with a ceiling but no floor.
 fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect) -> Rect {
+  // Height does **not** go through [`modal_height`], and the exception is the
+  // point rather than an oversight (issue #569, Codex review P2). Every caller
+  // here computes an exact content height and none of them scroll, so the
+  // policy's two rows of margin would not shrink a box, they would delete
+  // lines off the bottom of one: a delete confirmation for a target carrying a
+  // branch asks for 13 rows, and clamping it to 12 on a 16-row terminal drops
+  // the interactive `Delete Branch` row with no way to reach it.
+  //
+  // So these modals take the whole frame when they outgrow it. A border flush
+  // with the edge is cosmetic; a control the user cannot see is not.
   centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 
@@ -6346,7 +6501,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   // Gate-preserved names — explain why a visible `target/` was not counted.
   for rel in app.clean_overlay.skipped() {
     lines.push(
-      Line::from(format!("skipped {rel} — not git-ignored / holds tracked files"))
+      Line::from(format!("skipped {rel}: not git-ignored / holds tracked files"))
         .style(Style::default().fg(muted))
         .centered(),
     );
@@ -6357,7 +6512,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   if armed {
     lines.push(Line::from(""));
     lines.push(
-      Line::from("⚠ armed — confirm again or cancel to abort")
+      Line::from("⚠ armed: confirm again or cancel to abort")
         .style(Style::default().fg(danger).add_modifier(Modifier::BOLD))
         .centered(),
     );
@@ -6593,7 +6748,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     .collect();
   if lines.is_empty() {
     lines.push(Line::from(Span::styled(
-      "  (no matching command — backspace to broaden)",
+      "  (no matching command, backspace to broaden)",
       Style::default().fg(app.theme.prunable),
     )));
   }

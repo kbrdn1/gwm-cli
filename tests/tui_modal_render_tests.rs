@@ -1234,7 +1234,7 @@ fn an_all_literal_pattern_set_names_no_field_at_all() {
   app.enter_create();
   assert!(app.create_form.fields().is_empty());
 
-  assert_eq!(app.status, "enter: submit — esc: cancel");
+  assert_eq!(app.status, "enter: submit · esc: cancel");
   let buf = render(&mut app);
   for absent in ["Type", "Issue", "Desc"] {
     assert!(

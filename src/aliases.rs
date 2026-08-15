@@ -439,14 +439,14 @@ pub fn validate_aliases(map: &BTreeMap<String, String>, source_label: &str) -> R
   for (name, value) in map {
     if built_ins.contains(name) {
       return Err(GwmError::Config(format!(
-        "{}: alias '{}' would shadow a built-in subcommand or alias — pick a different name",
+        "{}: alias '{}' would shadow a built-in subcommand or alias; pick a different name",
         source_label, name
       )));
     }
     let trimmed = value.trim();
     if trimmed.is_empty() {
       return Err(GwmError::Config(format!(
-        "{}: alias '{}' has an empty value — provide a subcommand to expand to",
+        "{}: alias '{}' has an empty value; provide a subcommand to expand to",
         source_label, name
       )));
     }
@@ -457,7 +457,7 @@ pub fn validate_aliases(map: &BTreeMap<String, String>, source_label: &str) -> R
     for pat in SHELL_METACHARS {
       if trimmed.contains(pat) {
         return Err(GwmError::Config(format!(
-          "{}: alias '{}' = {:?} contains shell metachar {:?} — \
+          "{}: alias '{}' = {:?} contains shell metachar {:?}: \
            gwm aliases are argv substitution only (no pipelines); use a shell alias instead",
           source_label, name, value, pat
         )));

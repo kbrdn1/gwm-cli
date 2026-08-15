@@ -252,7 +252,7 @@ pub fn prepare(repo: &git2::Repository, branch: &str) -> Result<Option<PathBuf>>
   };
   if let Some(rival) = case_fold_rival(repo, branch) {
     return Err(crate::error::GwmError::CommandFailed(format!(
-      "`{branch}` and `{rival}` differ only in case and would share one note file — \
+      "`{branch}` and `{rival}` differ only in case and would share one note file: \
        rename one of the two branches, the filesystem cannot tell their notes apart"
     )));
   }
@@ -267,7 +267,7 @@ pub fn prepare(repo: &git2::Repository, branch: &str) -> Result<Option<PathBuf>>
       .and_then(branch_from_relative)
       .unwrap_or_else(|| other.display().to_string());
     return Err(crate::error::GwmError::CommandFailed(format!(
-      "this filesystem opens `{branch}`'s note and `{owner}`'s as one file — \
+      "this filesystem opens `{branch}`'s note and `{owner}`'s as one file: \
        rename one of the two branches, editing either would rewrite the other"
     )));
   }
