@@ -7,8 +7,8 @@ on the latest minor line; older lines are not backported.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.8.x   | :white_check_mark: |
-| < 1.8   | :x:                |
+| 1.9.x   | :white_check_mark: |
+| < 1.9   | :x:                |
 
 Every version up to and including 1.5.0 carries
 [GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm)
