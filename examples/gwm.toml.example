@@ -328,23 +328,24 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # layout = "bordered"
 
 # --- TUI note editor: vim normal mode (issue #557) ---------------------------
-# `note_vim` gives the in-TUI note editor (`N`) a vim normal mode. OFF by
-# default, and the default is the feature: with a mode, the first `Esc` leaves
-# insert instead of writing and closing, and `Esc` writing and closing on the
-# first press is what the editor has always done.
+# `note_vim` gives the in-TUI note editor (`N`) a vim normal mode. ON by
+# default, and the cost is `Esc`: it leaves insert instead of writing and
+# closing, so saving takes two presses. Turn it off for the modeless editor,
+# where one `Esc` writes and closes.
 #
-# On, `N` opens in normal mode and the modal title carries a NORMAL / INSERT
-# chip. `i` / `I` / `a` / `A` / `o` / `O` enter insert; `hjkl`, `w` / `b` / `e`
-# (and `W` / `B` / `E`), `0` / `^` / `$`, `gg` / `G`, `x` and `dd` are the
-# motions. No counts, no registers, no undo: `Ctrl+e` hands the file to the
-# real vim for anything past that.
+# On, `N` opens in normal mode, the modal title carries a NORMAL / INSERT chip
+# and the statusbar under it lists that mode's keys. `i` / `I` / `a` / `A` /
+# `o` / `O` enter insert; `hjkl`, `w` / `b` / `e` (and `W` / `B` / `E`),
+# `0` / `^` / `$`, `gg` / `G`, `x` and `dd` are the motions. No counts, no
+# registers, no undo: `Ctrl+e` hands the file to the real vim for anything
+# past that.
 #
 # It changes no binding. `[tui.keys.modal.note]` holds the same four verbs
 # either way (`close`, `open_editor`, `toggle_bullet`, `toggle_checkbox`), and
 # an unmodified printable bound to one of them is still refused at load time.
 #
 # [tui]
-# note_vim = true
+# note_vim = false
 
 # --- TUI clipboard (issue #367) ----------------------------------------------
 # How yanked text (path / branch / worktree name / command logs) reaches the

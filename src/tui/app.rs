@@ -2591,7 +2591,17 @@ impl App {
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
-      View::Note => HintContext::Note,
+      // #557: the note bar follows the mode. With the knob off there is no
+      // mode to follow, and the #515 bar is what stays — a `NORMAL` chip on
+      // an editor that has no normal mode would name a state nobody can be
+      // in.
+      View::Note => match self.note_editor.as_ref() {
+        Some(editor) if self.config.tui.note_vim => match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => HintContext::NoteNormal,
+          crate::tui::state::note_editor::NoteMode::Insert => HintContext::NoteInsert,
+        },
+        _ => HintContext::Note,
+      },
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.

@@ -2734,9 +2734,19 @@ pub enum HintContext {
   /// PR's or issue's description, reviews and conversation — j/k select,
   /// Enter opens the row's URL, f re-fetches, Esc closes.
   RichView,
-  /// The in-TUI note editor (issue #515): every printable is text, so the
-  /// only verbs advertised are the two ways out.
+  /// The in-TUI note editor with `[tui] note_vim = false` (issue #515):
+  /// every printable is text, so the only verbs advertised are the two
+  /// ways out and the two list chords.
   Note,
+  /// The note editor in normal mode (issue #557). A separate context
+  /// because the two modes take different keys entirely: the letters are
+  /// verbs here and text next door, so one static hint list would lie in
+  /// whichever mode it was not written for.
+  NoteNormal,
+  /// The note editor in insert mode, with the mode enabled (issue #557).
+  /// Same keys as [`HintContext::Note`] except the one that matters:
+  /// `Esc` leaves the mode rather than writing and closing.
+  NoteInsert,
 }
 
 impl HintContext {
@@ -2763,6 +2773,11 @@ impl HintContext {
       HintContext::CiChecks => "checks",
       HintContext::RichView => "pr/issue",
       HintContext::Note => "note",
+      // #557: the mode belongs in the context slot, not in a hint — it is
+      // state, not a key. The title carries the same chip; this is the
+      // half the eye is already on when it reads the verbs.
+      HintContext::NoteNormal => "note · NORMAL",
+      HintContext::NoteInsert => "note · INSERT",
     }
   }
 
@@ -2934,6 +2949,32 @@ impl HintContext {
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "save & close"),
       ],
+      // #557: the motions are literals because they are hard-coded verbs,
+      // not modal bindings — the same reason the arrows are literals above.
+      // They lead: in normal mode the letters are the surface, and the bar
+      // is the only place the editor can say so (`?` is a printable here,
+      // so the help overlay cannot be opened from inside the modal).
+      HintContext::NoteNormal => &[
+        Hint::Lit("hjkl", "move"),
+        Hint::Lit("w/b/e", "word"),
+        Hint::Lit("gg/G", "doc"),
+        Hint::Lit("i/a/o", "insert"),
+        Hint::Lit("x/dd", "delete"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "save & close"),
+      ],
+      // The one verb whose meaning the mode changes: `Esc` leaves insert
+      // instead of writing and closing, so the bar must not promise the
+      // gesture it promises everywhere else.
+      HintContext::NoteInsert => &[
+        Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "normal mode"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -3056,7 +3097,7 @@ impl HintContext {
       HintContext::Detail => KeyContext::Detail,
       HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::RichView => KeyContext::RichView,
-      HintContext::Note => KeyContext::Note,
+      HintContext::Note | HintContext::NoteNormal | HintContext::NoteInsert => KeyContext::Note,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,

@@ -392,12 +392,17 @@ define_modal_actions! {
   //
   // #557: the two list verbs are Ctrl-modified for the reason the whole
   // context exists — an unmodified printable is text here, and binding one
-  // to a verb is refused at load time. Neither is `Ctrl+b`: that is the
-  // tmux prefix, and a note written inside tmux would never see it.
+  // to a verb is refused at load time. Which chord is left is decided by
+  // what tmux keeps for itself: `Ctrl+b` is the prefix, and `Ctrl+h` /
+  // `Ctrl+j` / `Ctrl+k` / `Ctrl+l` are the vim-tmux-navigator pane set that
+  // ships in tmux.nvim and every dotfiles repo that copied it. tmux only
+  // forwards those when the pane is running vim, so a note written inside
+  // tmux never sees them — measured on a real config, where `Ctrl+l` did
+  // nothing at all. `Ctrl+u` is free and reads as "unordered".
   Note {
     NoteClose          => "close"           [ "Esc" ],
     NoteOpenEditor     => "open_editor"     [ "Ctrl+e" ],
-    NoteToggleBullet   => "toggle_bullet"   [ "Ctrl+l" ],
+    NoteToggleBullet   => "toggle_bullet"   [ "Ctrl+u" ],
     NoteToggleCheckbox => "toggle_checkbox" [ "Ctrl+t" ],
   }
 }

@@ -15,31 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A worktree note can be a checklist**
   ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `Ctrl+t` in the note
   editor ticks the box on the line and spawns one when the line has none, from
-  anywhere on the line; `Ctrl+l` makes the line a list item or takes the marker
+  anywhere on the line; `Ctrl+u` makes the line a list item or takes the marker
   back off it; `Enter` continues the list and ends it on an empty item, the way
   every Markdown editor does. Both chords are Ctrl-modified because an
-  unmodified printable is text in that modal, and neither is `Ctrl+b`, which is
-  the tmux prefix and would never reach a note written inside tmux.
+  unmodified printable is text in that modal, and which chord is left over is
+  tmux's call: `Ctrl+b` is its prefix, and `Ctrl+h` / `Ctrl+j` / `Ctrl+k` /
+  `Ctrl+l` are the vim-tmux-navigator pane set that tmux forwards only to a
+  pane running vim.
 
   Ticking used to mean arrowing onto the right column and retyping a character
   by hand, which is what a note becomes after a day: "what to check before
   opening the PR" is a list you tick off.
 
-- **An opt-in vim normal mode for the note editor**
-  ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `[tui] note_vim =
-  true` opens `N` in normal mode: `hjkl`, `w` / `b` / `e` and their `W` / `B` /
-  `E`, `0` / `^` / `$`, `gg` / `G`, `x`, `dd`, and `i` / `I` / `a` / `A` / `o` /
-  `O` to enter insert. `o` and `O` carry the list marker the way `Enter` does,
-  and the modal title carries a `NORMAL` / `INSERT` chip.
+- **A vim normal mode for the note editor**
+  ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `N` opens in normal
+  mode: `hjkl`, `w` / `b` / `e` and their `W` / `B` / `E`, `0` / `^` / `$`,
+  `gg` / `G`, `x`, `dd`, and `i` / `I` / `a` / `A` / `o` / `O` to enter
+  insert. `o` and `O` carry the list marker the way `Enter` does, the modal
+  title carries a `NORMAL` / `INSERT` chip, and the statusbar under the modal
+  names the mode and lists the keys that mode takes.
 
-  **Off by default, and that is the feature.** With a mode, the first `Esc`
-  leaves insert rather than writing and closing, and `Esc` writing and closing
-  on the first press is a shipped default fingers already know. Nobody gets a
-  mode without asking for one. No counts, no registers, no undo: this is a
-  scratch buffer, and `Ctrl+e` still hands the file to the real vim. The verbs
-  are hard-coded rather than bindable, so `[tui.keys.modal.note]` holds the
-  same four verbs either way and an unmodified printable bound to one of them
-  is still refused at load time.
+  **The cost is `Esc`, so it gets its own line: it no longer writes and closes
+  on the first press.** It leaves insert, and the second press saves.
+  `[tui] note_vim = false` buys the single-press gesture back and returns the
+  editor to the modeless one, where every printable is text. No counts, no
+  registers, no undo: this is a scratch buffer, and `Ctrl+e` still hands the
+  file to the real vim. The verbs are hard-coded rather than bindable, so
+  `[tui.keys.modal.note]` holds the same four verbs either way and an
+  unmodified printable bound to one of them is still refused at load time.
 
 ## Past releases
 

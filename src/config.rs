@@ -879,17 +879,14 @@ pub struct TuiConfig {
 
   /// Give the in-TUI note editor a vim normal mode (issue #557).
   ///
-  /// Default `false`, and deliberately opt-in rather than the new
-  /// behaviour: with it on, `N` opens in normal mode, `i` / `I` / `a` /
-  /// `A` / `o` / `O` enter insert, `Esc` goes back to normal, and the
-  /// second `Esc` writes and closes. That last sentence is the reason for
-  /// the knob. `Esc` writing and closing on the FIRST press is a shipped
-  /// default people's fingers already know, and a mode is not something to
-  /// hand someone who never asked for one.
+  /// Default `true`: `N` opens in normal mode, `i` / `I` / `a` / `A` / `o`
+  /// / `O` enter insert, `Esc` goes back to normal, and the second `Esc`
+  /// writes and closes. The cost is that last sentence, so it is stated
+  /// twice: `Esc` no longer writes and closes on the FIRST press.
   ///
-  /// Off, the editor is exactly the one #515 shipped: every printable is
-  /// text, and `Esc` writes and closes straight away.
-  #[serde(default)]
+  /// Set it to `false` for exactly the editor #515 shipped: every
+  /// printable is text, no modes, and one `Esc` writes and closes.
+  #[serde(default = "default_note_vim")]
   pub note_vim: bool,
 }
 
@@ -949,7 +946,7 @@ impl Default for TuiConfig {
       layout: TuiLayout::Compact,
       dim_unfocused: false,
       status_one_line: default_status_one_line(),
-      note_vim: false,
+      note_vim: default_note_vim(),
     }
   }
 }
@@ -1299,6 +1296,13 @@ fn default_confirm_countdown_secs() -> u32 {
 /// (which yields `false` for a bool) would invert the contract for every
 /// config that does not spell the key out.
 fn default_status_one_line() -> bool {
+  true
+}
+
+/// `[tui] note_vim` defaults to `true` (issue #557), so a bare
+/// `#[serde(default)]` would hand every config that does not spell the key
+/// out the modeless editor instead of the mode.
+fn default_note_vim() -> bool {
   true
 }
 

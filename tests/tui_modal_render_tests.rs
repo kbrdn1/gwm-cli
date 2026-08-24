@@ -1940,8 +1940,9 @@ fn the_note_title_names_the_mode_when_the_knob_is_on() {
 
 #[test]
 fn the_note_title_says_nothing_about_modes_with_the_knob_off() {
-  // The #515 title, unchanged, for everyone who never asked for a mode.
+  // The #515 title, unchanged, for everyone who turns the mode back off.
   let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
   app.list_state.select(Some(0));
   app.open_note_editor();
 

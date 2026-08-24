@@ -611,3 +611,72 @@ fn a_bidi_control_in_the_action_log_never_reaches_the_row() {
     }
   }
 }
+
+// ── the note editor's mode line (#557, install pass) ───────────────────────
+
+#[test]
+fn the_note_footer_names_the_mode_it_is_in() {
+  // The bar under the modal is the context line: it already carries the
+  // pane name, so the mode belongs in the same slot rather than in a hint.
+  // With the mode turned off there is no state to name.
+  assert_eq!(HintContext::NoteNormal.label(), "note · NORMAL");
+  assert_eq!(HintContext::NoteInsert.label(), "note · INSERT");
+  assert_eq!(HintContext::Note.label(), "note");
+}
+
+#[test]
+fn the_normal_mode_footer_lists_the_motions() {
+  // `?` is a printable inside the editor, so the help overlay cannot be
+  // reached from it: this bar is the only place the vim verbs are ever
+  // spelled out.
+  use gwm::tui::keymap::Keymap;
+  let resolved = HintContext::NoteNormal.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
+  for (key, label) in [
+    ("hjkl", "move"),
+    ("w/b/e", "word"),
+    ("i/a/o", "insert"),
+    ("x/dd", "delete"),
+  ] {
+    assert!(
+      resolved.iter().any(|(k, l)| k == key && l == label),
+      "normal mode must advertise `{key} {label}`: {resolved:?}"
+    );
+  }
+  assert!(
+    resolved.iter().any(|(k, l)| k == "Esc" && l == "save & close"),
+    "and the way out, which is what `Esc` does from normal mode: {resolved:?}"
+  );
+}
+
+#[test]
+fn the_insert_mode_footer_does_not_promise_esc_saves() {
+  // The one verb whose meaning the mode changes. A bar that still said
+  // "save & close" here would send the user's first `Esc` somewhere it
+  // does not go.
+  use gwm::tui::keymap::Keymap;
+  let resolved = HintContext::NoteInsert.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
+  assert!(
+    resolved.iter().any(|(k, l)| k == "Esc" && l == "normal mode"),
+    "insert mode must say where `Esc` goes: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "save & close"),
+    "and must not promise the gesture it no longer performs: {resolved:?}"
+  );
+}
+
+#[test]
+fn the_note_bullet_hint_follows_the_chord_that_reaches_the_app() {
+  // `Ctrl+l` never arrives inside tmux (tmux.nvim binds the whole
+  // `Ctrl+h/j/k/l` pane set), so the advertised chord is the one gwm can
+  // actually receive.
+  use gwm::tui::keymap::Keymap;
+  for ctx in [HintContext::Note, HintContext::NoteNormal, HintContext::NoteInsert] {
+    let resolved = ctx.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
+    assert!(
+      resolved.iter().any(|(k, l)| k == "Ctrl+u" && l == "bullet"),
+      "{:?} must advertise `Ctrl+u bullet`: {resolved:?}",
+      ctx.label()
+    );
+  }
+}

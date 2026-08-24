@@ -12983,6 +12983,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Open the note editor on the main row, which always carries a branch.
 fn app_with_note_open() -> (tempfile::TempDir, App) {
   let (dir, mut app) = make_app();
+  // #557: the mode ships on, so the #515 editor is now the opt-out. These
+  // tests are the contract for `note_vim = false`, which is a supported
+  // config and not a leftover — every printable is text and one `Esc`
+  // writes and closes.
+  app.config.tui.note_vim = false;
   app.list_state.select(Some(0));
   app.open_note_editor();
   assert_eq!(app.view, View::Note, "the editor must be the active view");
@@ -13059,7 +13064,11 @@ fn clearing_the_buffer_removes_the_note_instead_of_writing_a_blank_file() {
   // The only way to discard, so it has to actually delete: a one-byte file
   // reads as "no note" everywhere but would still sit on disk and be found
   // by `gwm doctor` once the branch is gone.
+  //
+  // Backspace is the gesture with the mode off (#557); `dd` is its twin in
+  // the default mode, pinned by the test below.
   let (dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
   app.list_state.select(Some(0));
   let branch = app.selected().unwrap().branch.clone().unwrap();
   let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
@@ -13544,7 +13553,7 @@ fn the_bullet_chord_marks_the_line_as_an_item() {
     app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
   }
 
-  app.handle_note_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
   assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- one"]);
 
   // And Enter continues what the chord started, without a second chord.
@@ -13785,9 +13794,122 @@ fn a_chord_also_abandons_a_half_typed_sequence() {
   app.note_editor.as_mut().unwrap().cursor_col = 0;
 
   note_key(&mut app, 'd');
-  app.handle_note_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
   note_key(&mut app, 'd');
 
   let editor = app.note_editor.as_ref().unwrap();
   assert_eq!(editor.lines, vec!["- one", "two"], "the bullet landed, the line stayed");
+}
+
+// ---- the mode ships on, and the bullet chord moved (#557, install pass) ---
+
+#[test]
+fn the_note_editor_opens_in_normal_mode_out_of_the_box() {
+  // The knob flipped after the first install pass: `note_vim = false` is
+  // the opt-out now, not the default. An editor whose vim keys type
+  // themselves into the prose is the surface a vim user actually meets,
+  // and a knob nobody knows to set is a mode nobody gets.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+}
+
+#[test]
+fn esc_leaves_insert_before_it_closes_out_of_the_box() {
+  // The cost of the flip, pinned: `Esc` no longer writes and closes on the
+  // first press. It leaves insert, and the second press is the one that
+  // saves. `note_vim = false` buys the old gesture back.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  note_key(&mut app, 'i');
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert_eq!(app.view, View::Note, "the first Esc only leaves insert");
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert!(app.note_editor.is_none(), "the second one writes and closes");
+}
+
+#[test]
+fn the_bullet_chord_is_ctrl_u_because_tmux_eats_ctrl_l() {
+  // `Ctrl+h` / `j` / `k` / `l` are the tmux.nvim pane-navigation set: tmux
+  // consumes them unless the pane runs vim, so gwm never sees the key.
+  // Measured on a real config, same class as `Ctrl+b` being the prefix.
+  let (_dir, mut app) = app_with_note_open();
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- "]);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["- "],
+    "and the chord tmux steals no longer toggles anything"
+  );
+}
+
+#[test]
+fn appending_at_the_end_of_the_line_types_past_the_last_char() {
+  // `A` is the one verb that legally leaves the caret one past the end of
+  // the line: it enters insert before the normal-mode clamp runs, so the
+  // clamp does not pull it back onto the last character.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["abc".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'A');
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["abcX"]);
+}
+
+#[test]
+fn the_note_hint_context_follows_the_mode() {
+  // The bar is redrawn every frame from `hint_context()`, so the mode line
+  // is only ever as truthful as this mapping.
+  use gwm::tui::HintContext;
+
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  assert_eq!(app.hint_context(), HintContext::NoteNormal);
+
+  note_key(&mut app, 'i');
+  assert_eq!(app.hint_context(), HintContext::NoteInsert);
+
+  let (_dir, app) = app_with_note_open();
+  assert_eq!(
+    app.hint_context(),
+    HintContext::Note,
+    "with the mode off the #515 bar is what stays"
+  );
+}
+
+#[test]
+fn emptying_the_buffer_with_dd_removes_the_note_too() {
+  // The discard gesture in the mode that now ships by default: `dd` on the
+  // last line leaves an empty buffer, and an empty buffer is a deleted
+  // note rather than a one-byte file `gwm doctor` will report later.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let branch = app.selected().unwrap().branch.clone().unwrap();
+  let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
+    .unwrap()
+    .unwrap();
+  std::fs::write(&path, "old prose\n").unwrap();
+
+  app.open_note_editor();
+  // Twice: the file's trailing newline is a blank last line, and that is
+  // the line the caret opens on. Both go before the buffer reads empty.
+  for _ in 0..2 {
+    note_key(&mut app, 'd');
+    note_key(&mut app, 'd');
+  }
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert!(!path.exists(), "an emptied note is removed, not blanked");
 }
