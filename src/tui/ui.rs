@@ -3289,9 +3289,15 @@ pub fn modal_hint_for_context_within(
   modal: &ModalKeymap,
   theme: &Theme,
   width: usize,
+  lead: Option<(&str, Color)>,
 ) -> Line<'static> {
   let resolved = ctx.resolve(keymap, modal);
   let group_w = |key: &str, label: &str| cells(key) + 1 + cells(label);
+  // The leading badge is state, not a verb: it takes the reverse-video
+  // treatment the statusbar's context anchor has always had, so the mode
+  // reads as a block of colour from across the screen rather than as one
+  // more word in a list of keys.
+  let lead_w = lead.map_or(0, |(text, _)| cells(text) + 2);
   let full: usize = resolved
     .iter()
     .enumerate()
@@ -3301,16 +3307,17 @@ pub fn modal_hint_for_context_within(
   // the space held for a marker nothing needs. `Esc normal mode` is exactly
   // that group at 100 columns, and it is the one telling the user how to
   // leave the mode.
-  if full <= width {
+  if full + lead_w <= width {
     let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
-    return modal_hint_line(&hints, theme);
+    return with_lead(modal_hint_line(&hints, theme), lead);
   }
+  let budget = width.saturating_sub(lead_w);
   let mut kept: Vec<(&str, &str)> = Vec::new();
   let mut used = 0usize;
   for (key, label) in &resolved {
     let sep = if kept.is_empty() { 0 } else { 2 };
     // The ` …` costs two cells, and past this branch it is certain.
-    if used + sep + group_w(key, label) > width.saturating_sub(2) {
+    if used + sep + group_w(key, label) > budget.saturating_sub(2) {
       break;
     }
     used += sep + group_w(key, label);
@@ -3318,6 +3325,20 @@ pub fn modal_hint_for_context_within(
   }
   let mut line = modal_hint_line(&kept, theme);
   line.spans.push(Span::styled(" …", hint_label_style(theme)));
+  with_lead(line, lead)
+}
+
+/// Put `lead` at the head of a hint line as a reverse-video chip. The line
+/// stays centred as a whole, badge included: splitting the row into a
+/// left-pinned badge and centred hints would need two rects, and a modal
+/// footer that is one `Paragraph` is what every other modal already draws.
+fn with_lead(mut line: Line<'static>, lead: Option<(&str, Color)>) -> Line<'static> {
+  let Some((text, color)) = lead else {
+    return line;
+  };
+  let mut spans = vec![Span::styled(text.to_string(), chip_style(color)), Span::raw("  ")];
+  spans.append(&mut line.spans);
+  line.spans = spans;
   line
 }
 
@@ -5733,12 +5754,26 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   // from the box the keys are being pressed in.
   //
   // Resolved before the buffer is borrowed mutably, the way the title is.
+  // #557: the mode reads as a badge, the way vim's own statusline does.
+  // `focus` is the anchor colour the statusbar context chip wears, and
+  // `clean` is the theme's green, so insert stands apart at a glance
+  // without inventing a role. With the mode off there is no badge, because
+  // there is no state to be in.
+  let mode_chip = app
+    .note_editor
+    .as_ref()
+    .filter(|_| app.config.tui.note_vim)
+    .map(|editor| match editor.mode {
+      crate::tui::state::note_editor::NoteMode::Normal => (" NORMAL ", app.theme.focus),
+      crate::tui::state::note_editor::NoteMode::Insert => (" INSERT ", app.theme.clean),
+    });
   let hint = modal_hint_for_context_within(
     app.hint_context(),
     &app.keymap,
     &app.modal_keymap,
     &app.theme,
     inner.width as usize,
+    mode_chip,
   );
   let rows = Layout::default()
     .direction(Direction::Vertical)

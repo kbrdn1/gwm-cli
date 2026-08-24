@@ -33,8 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gg` / `G`, `x`, `dd`, and `i` / `I` / `a` / `A` / `o` / `O` to enter
   insert. `o` and `O` carry the list marker the way `Enter` does, the modal
   title carries a `NORMAL` / `INSERT` chip, and the modal's own last row
-  names the mode and lists the keys that mode takes, as does the statusbar
-  behind it. A list too long for the row is cut with a `…` rather than
+  leads with the mode as a reverse-video badge (the treatment the statusbar
+  context anchor already wears) before listing the keys that mode takes,
+  as does the statusbar behind it. A list too long for the row is cut with a `…` rather than
   clipped at the frame, which reads as a list that ends there.
 
   **The cost is `Esc`, so it gets its own line: it no longer writes and closes

@@ -2003,8 +2003,20 @@ fn the_note_modal_carries_the_mode_line_on_its_own_last_row() {
   let rows = closed_modal_rows(&buf, "note in insert at 100x40");
   let last_inner = rows[rows.len() - 3].clone();
   assert!(
-    last_inner.contains("normal mode") && !last_inner.contains("save & close"),
+    last_inner.contains("INSERT") && !last_inner.contains("hjkl"),
     "and it must follow the mode into insert, got:\n{last_inner}"
+  );
+
+  // Where the row has the width for the whole list, `Esc` names what it
+  // does in this mode rather than the gesture it performs in the other.
+  // At 100 columns the tail is what the truncation eats, which is the
+  // documented order and why the help overlay carries the same keys.
+  let buf = render_at(&mut app, 160, TERM_H);
+  let rows = closed_modal_rows(&buf, "note in insert at 160x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("Esc normal mode") && !last_inner.contains("save & close"),
+    "the full insert line must say where `Esc` goes, got:\n{last_inner}"
   );
 }
 
@@ -2027,4 +2039,64 @@ fn the_note_modal_still_renders_when_there_is_no_room_for_both() {
     let buf = render_at(&mut app, w, h);
     assert!(!row_strings(&buf).is_empty(), "the note modal must survive {w}x{h}");
   }
+}
+
+#[test]
+fn the_mode_badge_is_painted_not_just_spelled() {
+  // A word in a row of words is a word; the mode is state, and it reads as
+  // state when it is a block of colour. Same reverse-video treatment the
+  // statusbar's context anchor has always had.
+  use ratatui::style::Modifier;
+
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let (x, y, w, h) = modal_rect(&buf).expect("the note modal");
+  // The frame from the bottom: border, one row of block padding, the mode
+  // line.
+  let row = y + h - 3;
+  let painted: String = (x..x + w)
+    .filter(|col| buf[(*col, row)].modifier.contains(Modifier::REVERSED))
+    .map(|col| buf[(col, row)].symbol())
+    .collect();
+  assert_eq!(
+    painted.trim(),
+    "NORMAL",
+    "the mode badge must be the reverse-video run on the mode line, row:\n{}",
+    (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let painted: String = (x..x + w)
+    .filter(|col| buf[(*col, row)].modifier.contains(Modifier::REVERSED))
+    .map(|col| buf[(col, row)].symbol())
+    .collect();
+  assert_eq!(painted.trim(), "INSERT", "and it follows the mode");
+}
+
+#[test]
+fn the_mode_badge_is_absent_with_the_mode_off() {
+  // No badge for a state nobody can be in: with `note_vim = false` the
+  // editor has one mode and naming it would be chrome.
+  use ratatui::style::Modifier;
+
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let (x, y, w, h) = modal_rect(&buf).expect("the note modal");
+  let row = y + h - 3;
+  assert!(
+    (x..x + w).all(|col| !buf[(col, row)].modifier.contains(Modifier::REVERSED)),
+    "no badge without the mode, row:\n{}",
+    (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
+  );
 }
