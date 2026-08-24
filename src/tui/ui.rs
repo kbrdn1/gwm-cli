@@ -6360,6 +6360,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // aligned inside that bar, rendered muted. Its width is RESERVED
     // (Codex review #455): a long check name truncates with an ellipsis
     // instead of pushing the detail column past the clipping edge.
+    // A row with no label spans the whole inner width (issue #551). The
+    // agents and CI consumers label every row they emit, so this only ever
+    // fires for the rich view's prose, which is exactly the payload the
+    // reserved column was costing without giving anything back.
+    let gutter = if row.label.is_empty() { 0 } else { label_w + 2 };
     let mut extra: String = row.extra.as_deref().unwrap_or("").to_string();
     let mut extra_cols = extra.chars().count();
     // The detail column is bounded too (Codex review #455): on a narrow
@@ -6370,7 +6375,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // or its full width when shorter.
     if extra_cols > 0 {
       let reserve = row.value.chars().count().min(12);
-      let extra_budget = inner.saturating_sub(label_w + 2 + reserve + 2);
+      let extra_budget = inner.saturating_sub(gutter + reserve + 2);
       if extra_cols > extra_budget {
         if extra_budget == 0 {
           extra.clear();
@@ -6381,7 +6386,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         extra_cols = extra.chars().count();
       }
     }
-    let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
+    let value_budget = inner.saturating_sub(gutter + if extra_cols > 0 { extra_cols + 2 } else { 0 });
     let value: String = if row.value.chars().count() > value_budget {
       let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
       v.push('…');
@@ -6389,7 +6394,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     } else {
       row.value.clone()
     };
-    let text_cols = label_w + 2 + value.chars().count();
+    let text_cols = gutter + value.chars().count();
     let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
@@ -6404,12 +6409,14 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       pad_style = pad_style.bg(app.theme.selection_bg);
       extra_style = extra_style.bg(app.theme.selection_bg);
     }
-    lines.push(Line::from(vec![
-      Span::styled(format!("{:label_w$}  ", row.label), label_style),
-      Span::styled(value, value_style),
-      Span::styled(" ".repeat(pad), pad_style),
-      Span::styled(extra, extra_style),
-    ]));
+    let mut spans = Vec::with_capacity(4);
+    if gutter > 0 {
+      spans.push(Span::styled(format!("{:label_w$}  ", row.label), label_style));
+    }
+    spans.push(Span::styled(value, value_style));
+    spans.push(Span::styled(" ".repeat(pad), pad_style));
+    spans.push(Span::styled(extra, extra_style));
+    lines.push(Line::from(spans));
   }
   // #436 validation feedback: the CI checks consumer advertises ITS verbs,
   // not the agents' attach / detach — the hint context follows the kind.

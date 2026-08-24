@@ -2005,3 +2005,36 @@ fn a_wrapped_body_line_is_never_ellipsised_by_the_renderer() {
     rows.join("\n")
   );
 }
+
+#[test]
+fn a_body_row_starts_at_the_frame_edge_not_behind_an_empty_label_column() {
+  // Issue #551, question 2 of the issue body: does the label column earn
+  // its width on rows that are pure prose? It does not. The shell sizes one
+  // label column from the widest label it is handed and indents EVERY row
+  // by it, so each wrapped line of a description paid nine columns for a
+  // label it does not have — on top of wrapping against a budget nine
+  // columns short, which is the same nine columns spent twice.
+  let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+
+  let body = rows
+    .iter()
+    .find(|r| r.contains("lorem"))
+    .unwrap_or_else(|| panic!("the body must be on screen — rows:\n{}", rows.join("\n")));
+  let left_rule = body
+    .chars()
+    .position(|c| c == '│')
+    .expect("a body row sits inside the frame");
+  let text = body.chars().position(|c| c == 'l').expect("the body text");
+
+  // The frame's own inset: the rule, then the block's two padding columns.
+  // Anything past that is the empty label column.
+  assert_eq!(
+    text - left_rule,
+    3,
+    "a label-less row must start at the frame's padding, not {} columns in — row: {body:?}",
+    text - left_rule
+  );
+}

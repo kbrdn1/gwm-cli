@@ -91,9 +91,17 @@ fn sample_issue() -> IssueStatus {
   }
 }
 
-/// `label` + two padding columns + `value`, the shell's own layout.
+/// The shell's own layout, mirrored: a LABELLED row pays the label column
+/// and its two padding columns, a label-less row spans the whole inner
+/// width (issue #551). Getting this wrong in either direction makes every
+/// width assertion below meaningless, so it is the one thing
+/// `tests/tui_modal_render_tests.rs` asserts against the real renderer.
 fn row_width(r: &gwm::tui::state::detail_overlay::DetailRow) -> usize {
-  LABEL_W + 2 + r.value.chars().count()
+  if r.label.is_empty() {
+    r.value.chars().count()
+  } else {
+    LABEL_W + 2 + r.value.chars().count()
+  }
 }
 
 fn values(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Vec<String> {
@@ -426,9 +434,10 @@ fn a_wrapped_continuation_keeps_the_line_indent() {
   }
 }
 
-/// `row_width` for a bare value string.
+/// `row_width` for a bare value string. Every caller measures a BODY line,
+/// which carries no label and therefore no gutter.
 fn row_width_of(v: &str) -> usize {
-  LABEL_W + 2 + v.chars().count()
+  v.chars().count()
 }
 
 #[test]
@@ -686,7 +695,7 @@ fn every_thread_row_fits_the_budget() {
   );
 
   for row in rich_pr_rows(&sample_pr(), &state, W) {
-    let width = row.label.chars().count().max(LABEL_W) + 1 + row.value.chars().count();
+    let width = row_width(&row);
     assert!(width <= W, "row overflows the modal: {width} > {W} — {row:?}");
   }
 }

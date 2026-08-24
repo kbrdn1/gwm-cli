@@ -38,10 +38,12 @@ use crate::forge::{
 };
 use crate::naming::{sanitise_block_for_terminal, sanitise_for_terminal};
 
-/// Width reserved for the label column. Every label this module emits fits
-/// in it, so the wrap budget is knowable before the rows exist — the shell
-/// derives its own `label_w` from the widest label it is handed, which
-/// would otherwise be circular.
+/// Width the metadata block's label column is expected to need. The wrap
+/// budget no longer subtracts it (see [`wrap_budget`]), but the METADATA
+/// rows do carry labels, and the shell sizes its column from the widest one
+/// it is handed: a longer label added later would push those rows past the
+/// modal's inner width. Pinned by
+/// `tests/tui_rich_view_tests.rs::every_emitted_label_fits_the_reserved_column`.
 pub const LABEL_W: usize = 7;
 
 /// Diff-hunk lines kept, counted **from the end**: the forge puts the
@@ -143,11 +145,16 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
   rows
 }
 
-/// Columns available to a wrapped body line: the modal's inner width minus
-/// the label column and its two padding columns. Never zero — a zero
-/// budget would make the wrap loop unable to advance.
+/// Columns available to a wrapped body line: the modal's whole inner width.
+///
+/// Every row this module wraps is label-less, and the shell no longer
+/// indents a label-less row behind the label column (issue #551, question 2
+/// of the issue body). Reserving those columns here as well spent them
+/// twice: the line was wrapped nine columns short AND painted nine columns
+/// in. Never zero, a zero budget would make the wrap loop unable to
+/// advance.
 fn wrap_budget(width: usize) -> usize {
-  width.saturating_sub(LABEL_W + 2).max(8)
+  width.max(8)
 }
 
 fn pr_state_label(s: PrState) -> &'static str {
