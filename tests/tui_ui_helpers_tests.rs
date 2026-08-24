@@ -1678,6 +1678,11 @@ fn every_markdown_role_is_painted_differently_from_plain_text() {
     Emphasis::Heading,
     Emphasis::Quote,
     Emphasis::Marker,
+    Emphasis::Success,
+    Emphasis::Failure,
+    Emphasis::Running,
+    Emphasis::Notice,
+    Emphasis::Muted,
   ] {
     let style = markdown_style(role, &theme);
     match role {
@@ -1691,7 +1696,45 @@ fn every_markdown_role_is_painted_differently_from_plain_text() {
       | Emphasis::Link
       | Emphasis::Heading
       | Emphasis::Quote
-      | Emphasis::Marker => assert_ne!(style, plain, "{role:?} must not be painted exactly like plain prose"),
+      | Emphasis::Marker
+      | Emphasis::Success
+      | Emphasis::Failure
+      | Emphasis::Running
+      | Emphasis::Notice
+      | Emphasis::Muted => assert_ne!(style, plain, "{role:?} must not be painted exactly like plain prose"),
     }
+  }
+}
+
+#[test]
+fn the_metadata_roles_resolve_to_the_status_panes_own_colours() {
+  // The rich view's metadata block claims to colour a fact the way the
+  // Status pane colours it (issue #551). That claim is only true if both
+  // sides land on the SAME theme role — asserted against `pr_badge_color`
+  // and `issue_badge_color` themselves rather than against a colour spelled
+  // out twice, which would agree with a wrong implementation.
+  use gwm::github::{IssueState, PrState};
+  use gwm::tui::state::markdown::Emphasis;
+  use gwm::tui::{issue_badge_color, markdown_style, pr_badge_color};
+  let theme = gwm::tui::theme::Theme::default();
+  let fg = |e: Emphasis| markdown_style(e, &theme).fg.expect("a role paints a foreground");
+
+  for (state, role) in [
+    (PrState::Open, Emphasis::Success),
+    (PrState::Draft, Emphasis::Muted),
+    (PrState::Merged, Emphasis::Notice),
+    (PrState::Closed, Emphasis::Failure),
+  ] {
+    assert_eq!(
+      fg(role),
+      pr_badge_color(state, &theme),
+      "{state:?} reads as one colour in the pane and another in the overlay"
+    );
+  }
+  for (state, role) in [
+    (IssueState::Open, Emphasis::Success),
+    (IssueState::Closed, Emphasis::Notice),
+  ] {
+    assert_eq!(fg(role), issue_badge_color(state, &theme), "{state:?}");
   }
 }

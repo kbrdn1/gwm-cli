@@ -62,7 +62,11 @@ pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, wi
   let mut rows = Vec::new();
   let d = &pr.detail;
 
-  meta(&mut rows, "state", pr_state_label(pr.state));
+  meta_segments(
+    &mut rows,
+    "state",
+    vec![Segment::new(pr_state_label(pr.state), pr_state_role(pr.state))],
+  );
   if !d.author.is_empty() {
     meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
   }
@@ -81,19 +85,30 @@ pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, wi
   // never fills it), not a PR that changes nothing — so it is omitted
   // rather than rendered as a truthful-looking `+0 −0`.
   if d.additions > 0 || d.deletions > 0 {
-    meta(&mut rows, "diff", &format!("+{} −{}", d.additions, d.deletions));
+    meta_segments(
+      &mut rows,
+      "diff",
+      vec![
+        Segment::new(format!("+{}", d.additions), Emphasis::Success),
+        Segment::new(" ", Emphasis::Plain),
+        Segment::new(format!("−{}", d.deletions), Emphasis::Failure),
+      ],
+    );
   }
   if pr.checks_total > 0 {
-    let label = match pr.ci {
-      crate::forge::CiState::Passing => "passing",
-      crate::forge::CiState::Failing => "failing",
-      crate::forge::CiState::Running => "running",
-      crate::forge::CiState::None => "no checks",
+    let (label, role) = match pr.ci {
+      crate::forge::CiState::Passing => ("passing", Emphasis::Success),
+      crate::forge::CiState::Failing => ("failing", Emphasis::Failure),
+      crate::forge::CiState::Running => ("running", Emphasis::Running),
+      crate::forge::CiState::None => ("no checks", Emphasis::Muted),
     };
-    meta(
+    meta_segments(
       &mut rows,
       "checks",
-      &format!("{label} {}/{}", pr.checks_passed, pr.checks_total),
+      vec![Segment::new(
+        format!("{label} {}/{}", pr.checks_passed, pr.checks_total),
+        role,
+      )],
     );
   }
   if !pr.updated_at.is_empty() {
@@ -115,14 +130,13 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
   let mut rows = Vec::new();
   let d = &issue.detail;
 
-  meta(
-    &mut rows,
-    "state",
-    match issue.state {
-      crate::forge::IssueState::Open => "open",
-      crate::forge::IssueState::Closed => "closed",
-    },
-  );
+  // Following `ui::issue_badge_color`: a closed issue is `locked`, not
+  // `prunable`. It is resolved, where a closed PR is abandoned.
+  let (label, role) = match issue.state {
+    crate::forge::IssueState::Open => ("open", Emphasis::Success),
+    crate::forge::IssueState::Closed => ("closed", Emphasis::Notice),
+  };
+  meta_segments(&mut rows, "state", vec![Segment::new(label, role)]);
   if !d.author.is_empty() {
     meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
   }
@@ -175,14 +189,33 @@ fn day(ts: &str) -> &str {
 }
 
 fn meta(rows: &mut Vec<DetailRow>, label: &str, value: &str) {
+  meta_segments(rows, label, vec![Segment::new(value, Emphasis::Plain)]);
+}
+
+/// A metadata row whose value carries its own colours (issue #551).
+///
+/// The block used to read at one weight throughout, while the Status pane
+/// right behind the modal colours the same facts. The roles here are the
+/// pane's: `Success` is where `pr_badge_color` sends an open PR, `Notice`
+/// where it sends a merged one.
+fn meta_segments(rows: &mut Vec<DetailRow>, label: &str, segments: Vec<Segment>) {
   rows.push(DetailRow {
     label: label.into(),
-    value: value.into(),
+    value: segments.iter().map(|s| s.text.as_str()).collect(),
     role: DetailRole::Normal,
-    meta: None,
-    extra: None,
+    segments,
     ..Default::default()
   });
+}
+
+/// The colour a PR state takes, following `ui::pr_badge_color`.
+fn pr_state_role(s: PrState) -> Emphasis {
+  match s {
+    PrState::Open => Emphasis::Success,
+    PrState::Draft => Emphasis::Muted,
+    PrState::Merged => Emphasis::Notice,
+    PrState::Closed => Emphasis::Failure,
+  }
 }
 
 /// The one actionable row of the metadata block: Enter opens it.
@@ -195,8 +228,8 @@ fn url_row(rows: &mut Vec<DetailRow>, url: &str) {
     label: "url".into(),
     value: clean.clone(),
     role: DetailRole::Normal,
+    segments: vec![Segment::new(clean.clone(), Emphasis::Link)],
     meta: Some(clean),
-    extra: None,
     ..Default::default()
   });
 }

@@ -10,6 +10,7 @@ use gwm::forge::{ForgeComment, ForgeReview, IssueDetail, PrDetail, ReviewState};
 use gwm::forge::{ReviewThread, ReviewThreads};
 use gwm::github::{CheckOutcome, CiState, IssueState, IssueStatus, PrCheck, PrState, PrStatus};
 use gwm::tui::state::detail_overlay::DetailRole;
+use gwm::tui::state::markdown::Emphasis;
 use gwm::tui::state::rich_view::{rich_issue_rows, rich_pr_rows, LABEL_W};
 use gwm::tui::GitHubFetchState;
 
@@ -759,4 +760,70 @@ fn an_issue_view_has_no_threads_section() {
   let text = values(&rich_issue_rows(&sample_issue(), W)).join("\n").to_lowercase();
 
   assert!(!text.contains("inline comments"));
+}
+
+/// The roles used on the row labelled `label`.
+fn roles_for(rows: &[gwm::tui::state::detail_overlay::DetailRow], label: &str) -> Vec<(String, Emphasis)> {
+  rows
+    .iter()
+    .find(|r| r.label == label)
+    .map(|r| r.segments.iter().map(|s| (s.text.clone(), s.emphasis)).collect())
+    .unwrap_or_default()
+}
+
+#[test]
+fn the_metadata_block_is_coloured_the_way_the_status_pane_colours_it() {
+  // Issue #551. `state`, `checks` and `diff` all read at the same weight as
+  // the URL, while the Status pane right behind the modal colours the same
+  // facts. Same facts, same vocabulary: an open PR is `Success`, the way
+  // `pr_badge_color` sends it to `theme.clean`.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  assert_eq!(roles_for(&rows, "state"), vec![("open".to_string(), Emphasis::Success)]);
+  assert_eq!(
+    roles_for(&rows, "checks"),
+    vec![("passing 7/7".to_string(), Emphasis::Success)]
+  );
+  // The one row that carries two outcomes at once, which is why a role per
+  // ROW could never have expressed it.
+  assert_eq!(
+    roles_for(&rows, "diff"),
+    vec![
+      ("+1198".to_string(), Emphasis::Success),
+      (" ".to_string(), Emphasis::Plain),
+      ("−12".to_string(), Emphasis::Failure),
+    ]
+  );
+}
+
+#[test]
+fn every_pr_state_takes_the_status_panes_own_colour() {
+  // The mapping has to agree with `pr_badge_color`, or the same PR reads as
+  // one thing in the pane and another in the overlay one keypress away.
+  for (state, expected) in [
+    (PrState::Open, Emphasis::Success),
+    (PrState::Draft, Emphasis::Muted),
+    (PrState::Merged, Emphasis::Notice),
+    (PrState::Closed, Emphasis::Failure),
+  ] {
+    let mut pr = sample_pr();
+    pr.state = state;
+    let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+    assert_eq!(
+      roles_for(&rows, "state").first().map(|(_, e)| *e),
+      Some(expected),
+      "{state:?} must carry the colour the Status pane gives it"
+    );
+  }
+}
+
+#[test]
+fn a_closed_issue_is_not_painted_like_a_closed_pr() {
+  // `issue_badge_color` sends a closed issue to `locked`, not to `prunable`:
+  // a closed issue is resolved, a closed PR is abandoned.
+  let mut issue = sample_issue();
+  issue.state = gwm::github::IssueState::Closed;
+  assert_eq!(
+    roles_for(&rich_issue_rows(&issue, W), "state").first().map(|(_, e)| *e),
+    Some(Emphasis::Notice)
+  );
 }

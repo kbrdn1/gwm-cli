@@ -5132,6 +5132,15 @@ pub fn markdown_style(emphasis: crate::tui::state::markdown::Emphasis, theme: &T
     // The forge greys a quoted block whole, marker and text alike.
     Emphasis::Quote => Style::default().fg(theme.muted),
     Emphasis::Marker => Style::default().fg(theme.muted),
+    // The Status pane's own colours, so the same fact reads the same in the
+    // pane and in the overlay one keypress away. Written against the same
+    // theme roles `pr_badge_color`, `issue_badge_color` and `ci_indicator`
+    // resolve to rather than re-deciding them here.
+    Emphasis::Success => Style::default().fg(theme.clean),
+    Emphasis::Failure => Style::default().fg(theme.prunable),
+    Emphasis::Running => Style::default().fg(theme.dirty),
+    Emphasis::Notice => Style::default().fg(theme.locked),
+    Emphasis::Muted => Style::default().fg(theme.muted),
   }
 }
 

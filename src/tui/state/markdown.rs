@@ -51,6 +51,24 @@ pub enum Emphasis {
   /// A list bullet, a task checkbox, a horizontal rule: the structural
   /// glyphs this module inserts, which are not part of the author's text.
   Marker,
+
+  // The roles below carry no Markdown meaning. They are here because this
+  // enum is what styles a RUN of text, and the rich view's metadata block
+  // needs two outcomes on one line (`+1198 −12`), which a role-per-row
+  // cannot express. Their names and their theme colours are the Status
+  // pane's, so the same fact reads the same in both places (issue #551).
+  /// A good outcome: an open PR, a passing check. Theme `clean`, which is
+  /// where `pr_badge_color` sends an open PR.
+  Success,
+  /// A bad outcome: a closed PR, a failing check. Theme `prunable`.
+  Failure,
+  /// An in-flight outcome: a running check. Theme `dirty`.
+  Running,
+  /// A resolved-not-failed outcome: a merged PR, a closed issue. Theme
+  /// `locked`, again following `pr_badge_color` / `issue_badge_color`.
+  Notice,
+  /// De-emphasised: a draft PR. Theme `muted`.
+  Muted,
 }
 
 /// A run of text sharing one role.
