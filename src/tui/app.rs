@@ -3446,8 +3446,16 @@ impl App {
   }
 
   /// How far right the rich view is scrolled, in columns (issue #551).
+  ///
+  /// Clamped on READ rather than at each site that could invalidate it. The
+  /// bound moves whenever the rows or the modal width do: a wider terminal
+  /// is a wider modal, so the same row runs out of tail sooner, and a
+  /// refresh can return a body whose widest line is shorter. Past the bound
+  /// the renderer skips beyond the end of the line and paints a blank row
+  /// with nothing on screen to explain it. One clamp here means a path
+  /// added later inherits it instead of having to remember it.
   pub fn rich_h_offset(&self) -> usize {
-    self.rich_h_offset
+    self.rich_h_offset.min(self.rich_h_max())
   }
 
   /// The furthest right the view can usefully scroll: enough to bring the
@@ -3473,12 +3481,12 @@ impl App {
 
   /// `l` / `→` inside the rich view.
   pub fn rich_view_scroll_right(&mut self) {
-    self.rich_h_offset = (self.rich_h_offset + RICH_H_STEP).min(self.rich_h_max());
+    self.rich_h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
   }
 
   /// `h` / `←` inside the rich view.
   pub fn rich_view_scroll_left(&mut self) {
-    self.rich_h_offset = self.rich_h_offset.saturating_sub(RICH_H_STEP);
+    self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
   }
 
   /// The URL of the selected rich-view row, when it carries one — the

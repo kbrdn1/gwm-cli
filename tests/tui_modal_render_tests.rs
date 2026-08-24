@@ -1940,7 +1940,6 @@ fn app_with_the_rich_view_open(body: &str) -> (tempfile::TempDir, App) {
   };
   pr.detail.body = body.to_string();
   app.apply_pr_fetch_result(Ok(pr));
-  app.detail_overlay.rows.clear();
   app.enter_rich_view();
   (dir, app)
 }
@@ -2107,11 +2106,18 @@ fn dump_the_rich_view() {
   //   gh pr view 582 --json body -q .body > /tmp/body.md
   //   GWM_DUMP_BODY=/tmp/body.md cargo test --test tui_modal_render_tests \
   //     dump_the_rich_view -- --ignored --nocapture
+  //
+  // `GWM_DUMP_TABS=1` instead prints the two-tab case.
   let body = std::env::var("GWM_DUMP_BODY")
     .ok()
     .and_then(|p| std::fs::read_to_string(p).ok())
     .unwrap_or_else(|| "## Heading\n\nSome **bold** prose.".into());
-  let (_dir, mut app) = app_with_the_rich_view_open(&body);
+  // With `GWM_DUMP_TABS` set, both sides are linked so the tab bar shows.
+  let (_dir, mut app) = if std::env::var_os("GWM_DUMP_TABS").is_some() {
+    app_with_both_tabs()
+  } else {
+    app_with_the_rich_view_open(&body)
+  };
   let (w, h) = (160, 60);
   app.set_term_width(w);
   let buf = render_at(&mut app, w, h);
@@ -2200,15 +2206,6 @@ fn the_tab_bar_does_not_push_the_hint_row_out_of_the_frame() {
     inside.contains("close"),
     "and so must the rest of the hint bar — modal:\n{inside}"
   );
-}
-
-#[test]
-#[ignore = "not an assertion: prints the tabbed rich view"]
-fn dump_the_tabbed_rich_view() {
-  let (_dir, mut app) = app_with_both_tabs();
-  app.set_term_width(160);
-  let buf = render_at(&mut app, 160, 50);
-  println!("{}", row_strings(&buf).join("\n"));
 }
 
 #[test]

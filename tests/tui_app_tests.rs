@@ -13745,3 +13745,48 @@ fn switching_tab_or_closing_puts_the_offset_back_at_the_left_edge() {
   app.enter_rich_view();
   assert_eq!(app.rich_h_offset(), 0, "and so does closing the view");
 }
+
+#[test]
+fn widening_the_terminal_does_not_leave_the_offset_past_the_end() {
+  // Issue #551. The offset is bounded by what the widest preformatted row
+  // has left to show, and that bound MOVES: a wider terminal is a wider
+  // modal, so the same row runs out of tail sooner. Left where it was, the
+  // renderer skips past the end of the line and paints a blank row with
+  // nothing on screen to say why. Same class as the stale wrap
+  // `set_term_width` already exists to prevent, and a refresh that returns
+  // a shorter body gets there the same way.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(60);
+  app.enter_rich_view();
+
+  for _ in 0..100 {
+    app.rich_view_scroll_right();
+  }
+  let narrow = app.rich_h_offset();
+  assert!(narrow > 0, "precondition: it scrolled on the narrow terminal");
+
+  app.set_term_width(200);
+
+  let widest = app
+    .detail_overlay
+    .rows
+    .iter()
+    .filter(|r| r.preformatted)
+    .map(|r| r.value.chars().count())
+    .max()
+    .unwrap_or(0);
+  assert!(
+    app.rich_h_offset() < widest,
+    "the offset must still land inside the widest row, got {} of {widest}",
+    app.rich_h_offset()
+  );
+  assert!(
+    app.rich_h_offset() < narrow,
+    "and a wider modal leaves less to scroll, not the same"
+  );
+}
