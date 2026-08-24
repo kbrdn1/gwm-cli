@@ -1907,3 +1907,101 @@ fn a_form_that_had_to_scroll_says_so() {
     rows.join("\n")
   );
 }
+
+/// A PR whose description is one long paragraph, linked and fetched onto a
+/// freshly-initialised repo, with the rich view open (issue #551).
+fn app_with_the_rich_view_open(body: &str) -> (tempfile::TempDir, App) {
+  let (dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  gwm::github::link_pr(&repo, &branch, 551).unwrap();
+  app.refresh_link();
+  let mut pr = gwm::github::PrStatus {
+    number: 551,
+    title: "polish the rich PR / issue view".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pull/551".into(),
+    updated_at: "2026-08-24T10:00:00Z".into(),
+    checks_passed: 13,
+    checks_total: 13,
+    ci: gwm::github::CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: String::new(),
+      author: "kbrdn1".into(),
+      additions: 1,
+      deletions: 0,
+      base_ref: "dev".into(),
+      head_ref: branch,
+      reviews: vec![],
+      comments: vec![],
+    },
+  };
+  pr.detail.body = body.to_string();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.detail_overlay.rows.clear();
+  app.enter_rich_view();
+  (dir, app)
+}
+
+/// The horizontal span of the modal's frame, read off its top rule.
+fn frame_width(buf: &Buffer) -> usize {
+  let rows = row_strings(buf);
+  let rule = rows
+    .iter()
+    .find(|r| r.contains('╭') && r.contains('╮'))
+    .unwrap_or_else(|| panic!("no modal frame — rows:\n{}", rows.join("\n")));
+  let start = rule.chars().position(|c| c == '╭').unwrap();
+  let end = rule.chars().position(|c| c == '╮').unwrap();
+  end - start + 1
+}
+
+#[test]
+fn the_rich_view_is_painted_at_its_own_width_not_the_shared_overlays() {
+  // Issue #551. The width is decided TWICE: `App::rich_view_width` wraps the
+  // rows against it, `draw_detail_overlay` paints the frame at it. Nothing
+  // ties the two together but this pair of assertions — and the failure is
+  // silent in both directions. Painting narrower than the wrap ellipsises
+  // the tail of every line of prose; painting wider leaves a column of dead
+  // space the wrap already refused to use.
+  let (_dir, mut app) = app_with_the_rich_view_open("A description worth reading.");
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  assert_eq!(
+    frame_width(&buf),
+    gwm::tui::rich_view_modal_width(200) as usize,
+    "the frame must be painted at the rich view's own policy — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn a_wrapped_body_line_is_never_ellipsised_by_the_renderer() {
+  // The other half of the pair above, and the one that reads as the bug:
+  // the wrap already fitted every line to the inner width, so an ellipsis on
+  // a body row can only mean the paint budget was smaller than the wrap
+  // budget. Asserted on a body long enough to wrap several times at any
+  // plausible width.
+  let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+  // The negative assertion below is vacuous unless the body is on screen at
+  // all: an overlay that failed to open has no `lorem` row to ellipsise.
+  assert!(
+    rows.iter().any(|r| r.contains("lorem")),
+    "the body must be rendered before its ellipsis means anything — rows:\n{}",
+    rows.join("\n")
+  );
+  let culprit = rows.iter().find(|r| {
+    // A body row: inside the frame, carrying prose, cut with an ellipsis.
+    r.contains("lorem") && r.contains('…')
+  });
+  assert!(
+    culprit.is_none(),
+    "a body row was ellipsised, so the paint width is under the wrap width: {:?}\nrows:\n{}",
+    culprit,
+    rows.join("\n")
+  );
+}

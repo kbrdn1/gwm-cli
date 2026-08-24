@@ -3296,7 +3296,13 @@ impl App {
   /// The wrap budget handed to the row builders: the overlay modal's inner
   /// width for the terminal the App was last drawn at.
   fn rich_view_width(&self) -> usize {
-    crate::tui::ui::overlay_modal_width(self.term_width).saturating_sub(6) as usize
+    // Names the rich view's OWN policy (issue #551), not the routing the
+    // renderer goes through: `enter_rich_view` sizes the wrap before
+    // `open_rich_overlay` has set the kind, so routing on
+    // `self.detail_overlay.kind` here would budget the first open against
+    // whichever consumer used the overlay last. Both sides still resolve to
+    // `rich_view_modal_width`, which is the number that has to agree.
+    crate::tui::ui::rich_view_modal_width(self.term_width).saturating_sub(6) as usize
   }
 
   /// Stamp the terminal width and re-wrap an open rich view (issue #420).

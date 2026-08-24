@@ -5108,6 +5108,40 @@ pub fn overlay_modal_width(term_width: u16) -> u16 {
   modal_width(term_width, 62, 72, 88)
 }
 
+/// Modal width for the rich PR / issue view (issue #551).
+///
+/// A policy of its own rather than [`overlay_modal_width`], because the two
+/// boxes hold different payloads. The shared overlay's 88-column ceiling was
+/// picked for the clean report, whose rows are an icon and a directory name
+/// pinned left with a size pinned right: past a point, extra columns only
+/// stretch the gap between the two. This box holds PROSE, which keeps earning
+/// columns until it hits the line length prose stops being readable at.
+///
+/// So: a bigger share of the terminal (80%, against 62%) and a ceiling at 120
+/// rather than 88. The ceiling is the point where a paragraph gets hard to
+/// track back to the next line, not a frame budget — on a 200-column terminal
+/// this leaves the modal reading as a modal.
+///
+/// The floor stays the shared 72 on purpose. The two policies must not cross
+/// over on a narrow terminal, where neither has room to express a preference.
+pub fn rich_view_modal_width(term_width: u16) -> u16 {
+  modal_width(term_width, 80, 72, 120)
+}
+
+/// The width the detail overlay is drawn at, for a given consumer.
+///
+/// The one place the routing lives, so the renderer and the row builder
+/// cannot drift apart (issue #551). Exhaustive `match`, no `_` arm, for the
+/// reason [`DetailKind::is_forge_linked`] gives: a fourth consumer does not
+/// compile until someone answers the question for it.
+pub fn detail_overlay_width(kind: crate::tui::state::detail_overlay::DetailKind, term_width: u16) -> u16 {
+  use crate::tui::state::detail_overlay::DetailKind;
+  match kind {
+    DetailKind::RichIssue | DetailKind::RichPr => rich_view_modal_width(term_width),
+    DetailKind::Agents | DetailKind::CiChecks => overlay_modal_width(term_width),
+  }
+}
+
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
 pub fn help_section_style(section: Color) -> Style {
@@ -6130,7 +6164,13 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   use crate::tui::state::detail_overlay::{DetailMode, DetailRole};
   let accent = app.theme.accent;
   let term = f.area();
-  let width = overlay_modal_width(term.width);
+  // The width policy follows the consumer (issue #551): the rich view holds
+  // prose and gets the wider box, the agents and CI lists keep the shared
+  // one. It MUST agree with `App::rich_view_width`, which wraps the rows
+  // against the same number before they ever reach here — wrapping at one
+  // width and painting at another either ellipsises the tail of every line
+  // or leaves a column of dead space down the right edge.
+  let width = detail_overlay_width(app.detail_overlay.kind, term.width);
   let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
   let ov = &app.detail_overlay;
 
