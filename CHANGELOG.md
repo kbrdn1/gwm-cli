@@ -32,8 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode: `hjkl`, `w` / `b` / `e` and their `W` / `B` / `E`, `0` / `^` / `$`,
   `gg` / `G`, `x`, `dd`, and `i` / `I` / `a` / `A` / `o` / `O` to enter
   insert. `o` and `O` carry the list marker the way `Enter` does, the modal
-  title carries a `NORMAL` / `INSERT` chip, and the statusbar under the modal
-  names the mode and lists the keys that mode takes.
+  title carries a `NORMAL` / `INSERT` chip, and the modal's own last row
+  names the mode and lists the keys that mode takes, as does the statusbar
+  behind it. A list too long for the row is cut with a `…` rather than
+  clipped at the frame, which reads as a list that ends there.
 
   **The cost is `Esc`, so it gets its own line: it no longer writes and closes
   on the first press.** It leaves insert, and the second press saves.

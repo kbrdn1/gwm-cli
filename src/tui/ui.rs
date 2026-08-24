@@ -3273,6 +3273,54 @@ pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKe
   modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
 }
 
+/// As [`modal_hint_for_context`], bounded to `width` cells: whole hint
+/// groups are dropped from the end and a `…` marks that they were (issue
+/// #557).
+///
+/// `modal_hint_line` renders the list whatever it measures, and a
+/// `Paragraph` clips the overflow at the rect edge — which reads as a
+/// complete list that happens to end at `Ctrl+u bullet`. The statusbar has
+/// always truncated visibly; the note editor's mode line is the first modal
+/// footer long enough to need the same, because it spells out a whole
+/// keymap rather than two or three verbs.
+pub fn modal_hint_for_context_within(
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+  width: usize,
+) -> Line<'static> {
+  let resolved = ctx.resolve(keymap, modal);
+  let group_w = |key: &str, label: &str| cells(key) + 1 + cells(label);
+  let full: usize = resolved
+    .iter()
+    .enumerate()
+    .map(|(i, (k, l))| if i > 0 { 2 } else { 0 } + group_w(k, l))
+    .sum();
+  // Measured whole first: a list that fits must not lose its last group to
+  // the space held for a marker nothing needs. `Esc normal mode` is exactly
+  // that group at 100 columns, and it is the one telling the user how to
+  // leave the mode.
+  if full <= width {
+    let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+    return modal_hint_line(&hints, theme);
+  }
+  let mut kept: Vec<(&str, &str)> = Vec::new();
+  let mut used = 0usize;
+  for (key, label) in &resolved {
+    let sep = if kept.is_empty() { 0 } else { 2 };
+    // The ` …` costs two cells, and past this branch it is certain.
+    if used + sep + group_w(key, label) > width.saturating_sub(2) {
+      break;
+    }
+    used += sep + group_w(key, label);
+    kept.push((key.as_str(), label.as_str()));
+  }
+  let mut line = modal_hint_line(&kept, theme);
+  line.spans.push(Span::styled(" …", hint_label_style(theme)));
+  line
+}
+
 /// As [`modal_hint_for_context`], for the two footers whose form knows which
 /// fields it presents (issue #418). Every other modal keeps the plain call.
 pub fn modal_hint_for_context_with_fields(
@@ -5677,6 +5725,31 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   let block = overlay_block_titled(&title, app.theme.accent);
   let inner = block.inner(area);
   f.render_widget(block, area);
+
+  // #557: the modal carries its own mode line on its last row. The
+  // statusbar already says the same thing through the same
+  // `HintContext` (#418, so the two cannot disagree), but it sits at the
+  // bottom of the terminal — on a tall screen that is thirty rows away
+  // from the box the keys are being pressed in.
+  //
+  // Resolved before the buffer is borrowed mutably, the way the title is.
+  let hint = modal_hint_for_context_within(
+    app.hint_context(),
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+    inner.width as usize,
+  );
+  let rows = Layout::default()
+    .direction(Direction::Vertical)
+    // `Min(1)`, not `Min(0)`: the text pane is what the modal is for, and
+    // at the two-row inner height where they compete the buffer wins the
+    // row. The mode line then renders into a zero-height rect, which
+    // ratatui draws as nothing rather than as a panic.
+    .constraints([Constraint::Min(1), Constraint::Length(1)])
+    .split(inner);
+  let (inner, hint_row) = (rows[0], rows[1]);
+  f.render_widget(Paragraph::new(hint), hint_row);
 
   let Some(editor) = app.note_editor.as_mut() else {
     return;

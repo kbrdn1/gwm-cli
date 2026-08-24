@@ -1973,3 +1973,58 @@ fn a_long_branch_name_does_not_push_the_mode_chip_off_the_title() {
     row_strings(&buf).join("\n")
   );
 }
+
+#[test]
+fn the_note_modal_carries_the_mode_line_on_its_own_last_row() {
+  // The app footer says the same thing, but it sits at the bottom of the
+  // terminal: on a tall screen that is thirty rows away from the box the
+  // eye is in, which is where the keys are being pressed. Asserted on the
+  // modal's own last inner row, so the footer behind it cannot satisfy it.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  // Frame anatomy from the bottom: the border, the block's one row of
+  // bottom padding, then the mode line.
+  let rows = closed_modal_rows(&buf, "note at 100x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("hjkl"),
+    "the modal's last row must carry the normal-mode keys, got:\n{}",
+    rows.join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let rows = closed_modal_rows(&buf, "note in insert at 100x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("normal mode") && !last_inner.contains("save & close"),
+    "and it must follow the mode into insert, got:\n{last_inner}"
+  );
+}
+
+#[test]
+fn the_note_modal_still_renders_when_there_is_no_room_for_both() {
+  // The mode line takes a row off the buffer, so the smallest modal has to
+  // stay drawable: a layout whose text pane collapses to zero must not
+  // panic or lose the frame.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  for c in "note".chars() {
+    app.handle_note_key(crossterm::event::KeyEvent::new(
+      crossterm::event::KeyCode::Char(c),
+      crossterm::event::KeyModifiers::NONE,
+    ));
+  }
+
+  for (w, h) in [(40u16, 6u16), (30, 5), (20, 4)] {
+    let buf = render_at(&mut app, w, h);
+    assert!(!row_strings(&buf).is_empty(), "the note modal must survive {w}x{h}");
+  }
+}
