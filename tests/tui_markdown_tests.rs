@@ -308,3 +308,37 @@ fn an_html_comment_is_hidden_wherever_it_starts_on_the_line() {
   // A lone `-->` with no opener is not a comment; it is text.
   assert_eq!(plain("a --> b"), vec!["a --> b"]);
 }
+
+#[test]
+fn a_longer_fence_is_not_closed_by_a_shorter_one_inside_it() {
+  // Codex review, pass 2 (P2). Four backticks are how you show a
+  // three-backtick block, which is exactly what a PR about Markdown
+  // rendering contains. Matching on the opener's characters alone let the
+  // inner fence close the outer block, so the inner line vanished and the
+  // rest of the code was read as prose.
+  let got = plain("````\n```\ncode\n```\n````\nafter");
+  assert_eq!(
+    got,
+    vec!["```", "code", "```", "after"],
+    "the inner fence is content, only a fence at least as long closes"
+  );
+}
+
+#[test]
+fn an_html_comment_inside_inline_code_is_kept() {
+  // Codex review, pass 2 (P2), and the mirror of the pass-1 fix: the strip
+  // ran before the backtick scan, so a body documenting the delimiter lost
+  // it. The forge shows it as literal code, which is the whole point of
+  // putting it in backticks.
+  let got = roles("Use `<!-- marker -->` here");
+  assert_eq!(
+    got,
+    vec![
+      ("Use ".to_string(), Emphasis::Plain),
+      ("<!-- marker -->".to_string(), Emphasis::Code),
+      (" here".to_string(), Emphasis::Plain),
+    ]
+  );
+  // An unbacked comment on the same line still goes.
+  assert_eq!(plain("`<!-- kept -->` <!-- gone -->"), vec!["<!-- kept --> "]);
+}

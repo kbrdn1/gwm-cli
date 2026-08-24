@@ -13790,3 +13790,35 @@ fn widening_the_terminal_does_not_leave_the_offset_past_the_end() {
     "and a wider modal leaves less to scroll, not the same"
   );
 }
+
+#[test]
+fn the_tab_bar_survives_a_refresh_that_only_one_side_answers() {
+  // Codex review, pass 2 (P2). `rich_view_tabs` demanded BOTH caches be
+  // `Loaded`, but the overlay deliberately keeps its own source when a
+  // refresh fails. So a refresh where the displayed side errors and the
+  // other lands took the bar away and made `Tab` inert, stranding the
+  // reader on stale data with no way across until they closed the view.
+  //
+  // The active side comes from the overlay's own source, which survives;
+  // only the DESTINATION has to be loaded.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert_eq!(app.rich_view_tabs().len(), 2);
+
+  // The PR side fails, the issue side is still there.
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  assert_eq!(
+    app.rich_view_tabs().len(),
+    2,
+    "the bar must still offer the side that IS loaded: {:?}",
+    app.rich_view_tabs()
+  );
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "and Tab must still cross to it"
+  );
+}

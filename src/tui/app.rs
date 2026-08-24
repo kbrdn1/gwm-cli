@@ -3391,20 +3391,35 @@ impl App {
     if self.view != View::DetailOverlay {
       return Vec::new();
     }
-    let (GitHubFetchState::Loaded(issue), GitHubFetchState::Loaded(pr)) =
-      (self.issue_fetch_state(), self.pr_fetch_state())
-    else {
-      return Vec::new();
+    // The ACTIVE side is read off the overlay's own source, not off the
+    // fetch cache (Codex review, pass 2). The overlay deliberately keeps
+    // its source when a refresh fails, so requiring both caches to be
+    // `Loaded` took the bar away exactly when the reader most needed it:
+    // the displayed side errored, the other one landed, and `Tab` went
+    // inert with stale data on screen and no way across.
+    //
+    // Only the DESTINATION has to be loaded, since it is the one a switch
+    // has to render.
+    let (on_issue, active) = match (&self.rich_overlay_source, self.detail_overlay.kind) {
+      (Some(RichSource::Issue(i)), DetailKind::RichIssue) => (true, format!("Issue #{}", i.number)),
+      (Some(RichSource::Pr(p)), DetailKind::RichPr) => (false, format!("{} #{}", self.pr_noun_titlecase(), p.number)),
+      _ => return Vec::new(),
     };
-    match self.detail_overlay.kind {
-      DetailKind::RichIssue | DetailKind::RichPr => {
-        let on_issue = self.detail_overlay.kind == DetailKind::RichIssue;
-        vec![
-          (format!("Issue #{}", issue.number), on_issue),
-          (format!("{} #{}", self.pr_noun_titlecase(), pr.number), !on_issue),
-        ]
+    let other = if on_issue {
+      match self.pr_fetch_state() {
+        GitHubFetchState::Loaded(pr) => format!("{} #{}", self.pr_noun_titlecase(), pr.number),
+        _ => return Vec::new(),
       }
-      DetailKind::Agents | DetailKind::CiChecks => Vec::new(),
+    } else {
+      match self.issue_fetch_state() {
+        GitHubFetchState::Loaded(issue) => format!("Issue #{}", issue.number),
+        _ => return Vec::new(),
+      }
+    };
+    if on_issue {
+      vec![(active, true), (other, false)]
+    } else {
+      vec![(other, false), (active, true)]
     }
   }
 

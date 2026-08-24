@@ -6540,8 +6540,21 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         let drop = skip.saturating_sub(skipped);
         skipped += cols;
         let kept = &segment.text[skip_cells(&segment.text, drop)..];
-        let text: String = kept[..head_end(kept, left)].to_string();
+        let mut text: String = kept[..head_end(kept, left)].to_string();
         left -= cells(&text);
+        // The row ran out of budget mid-segment, or mid-list: say so
+        // (Codex review, pass 2). `value` above already carries an
+        // ellipsised copy, but this branch paints the RUNS, so it ignored
+        // it and cut silently — losing the end of a URL with no mark is the
+        // exact failure the ellipsis exists to prevent.
+        if left == 0 && cells(kept) > cells(&text) {
+          while cells(&text) + 1 > value_budget.max(1) {
+            if text.pop().is_none() {
+              break;
+            }
+          }
+          text.push('…');
+        }
         let mut style = markdown_style(segment.emphasis, &app.theme);
         // A badge run goes through the Status pane's own `chip_style`, so
         // the two surfaces cannot drift into resembling each other instead

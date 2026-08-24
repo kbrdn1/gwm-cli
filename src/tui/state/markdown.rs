@@ -148,7 +148,7 @@ pub fn render(body: &str, budget: usize) -> Vec<MdLine> {
   let budget = budget.max(1);
   let clean = sanitise_block_for_terminal(body).replace('\t', "    ");
   let mut out = Vec::new();
-  let mut fence: Option<String> = None;
+  let mut fence: Option<(char, usize)> = None;
   let mut in_comment = false;
 
   for raw in clean.lines() {
@@ -156,8 +156,8 @@ pub fn render(body: &str, budget: usize) -> Vec<MdLine> {
 
     // A fenced block runs until its own closing fence, and nothing inside it
     // is markdown. Checked before everything else for that reason.
-    if let Some(marker) = &fence {
-      if trimmed.starts_with(marker.as_str()) {
+    if let Some((marker, len)) = fence {
+      if fence_closes(trimmed, marker, len) {
         fence = None;
         continue;
       }
@@ -192,8 +192,8 @@ pub fn render(body: &str, budget: usize) -> Vec<MdLine> {
     let raw = visible.as_str();
     let trimmed = raw.trim_start();
 
-    if let Some(marker) = fence_opens(trimmed) {
-      fence = Some(marker);
+    if let Some(opener) = fence_opens(trimmed) {
+      fence = Some(opener);
       continue;
     }
 
@@ -202,15 +202,32 @@ pub fn render(body: &str, budget: usize) -> Vec<MdLine> {
   out
 }
 
-/// `Some(marker)` when the line opens a fenced block, carrying the fence
-/// characters so the closer has to match the opener's kind.
-fn fence_opens(trimmed: &str) -> Option<String> {
-  for marker in ["```", "~~~"] {
-    if trimmed.starts_with(marker) {
-      return Some(marker.to_string());
+/// `Some((char, len))` when the line opens a fenced block, carrying the
+/// fence character AND its length: a closer has to be at least as long as
+/// its opener (Codex review, pass 2).
+///
+/// Four backticks are how you show a three-backtick block, which is what a
+/// body about Markdown contains. Matching on the characters alone let the
+/// inner fence close the outer block, so the inner line vanished and the
+/// rest of the code was read as prose.
+fn fence_opens(trimmed: &str) -> Option<(char, usize)> {
+  for marker in ['`', '~'] {
+    let len = trimmed.chars().take_while(|c| *c == marker).count();
+    if len >= 3 {
+      return Some((marker, len));
     }
   }
   None
+}
+
+/// Whether `trimmed` closes a fence opened with `len` copies of `marker`.
+///
+/// CommonMark: at least as long as the opener, the same character, and
+/// nothing but whitespace after it. The trailing rule is what stops
+/// ` ```rust ` inside a block from closing it.
+fn fence_closes(trimmed: &str, marker: char, len: usize) -> bool {
+  let run = trimmed.chars().take_while(|c| *c == marker).count();
+  run >= len && trimmed[run..].trim().is_empty()
 }
 
 /// Remove every HTML comment from one line, returning what is left to show
@@ -232,19 +249,37 @@ fn strip_comments(line: &str, mut open: bool) -> (String, bool) {
         None => return (out, true),
       }
     } else {
-      match rest.find("<!--") {
-        Some(at) => {
+      // A backtick span is literal, delimiters included (Codex review,
+      // pass 2): a body writing `` `<!-- marker -->` `` is documenting the
+      // delimiter, and the forge shows it. Skipped whole, before looking
+      // for an opener, since the strip runs before the inline parse and is
+      // the only place that knows to leave it alone.
+      let opener = rest.find("<!--");
+      let code = code_span(rest);
+      match (opener, code) {
+        (Some(at), Some((start, end))) if start < at => {
+          out.push_str(&rest[..end]);
+          rest = &rest[end..];
+        }
+        (Some(at), _) => {
           out.push_str(&rest[..at]);
           rest = &rest[at + 4..];
           open = true;
         }
-        None => {
+        (None, _) => {
           out.push_str(rest);
           return (out, false);
         }
       }
     }
   }
+}
+
+/// The byte range of the first complete `` `…` `` span in `s`.
+fn code_span(s: &str) -> Option<(usize, usize)> {
+  let start = s.find('`')?;
+  let end = s[start + 1..].find('`')? + start + 2;
+  Some((start, end))
 }
 
 /// One source line as a block construct.

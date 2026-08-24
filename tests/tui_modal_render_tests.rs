@@ -2286,3 +2286,22 @@ fn scrolling_reaches_the_tail_of_a_line_of_wide_glyphs() {
     "the tail must be reachable — modal:\n{after}"
   );
 }
+
+#[test]
+fn a_segmented_row_too_wide_for_the_modal_is_ellipsised() {
+  // Codex review, pass 2 (P2): `value` carried the ellipsised text but the
+  // segment branch walked the original runs until the budget ran out, so a
+  // styled row was cut silently. The `url` row is the one that hits this
+  // first, and losing the end of a URL with no mark saying so is the exact
+  // failure the ellipsis exists to prevent.
+  let (_dir, mut app) = app_with_the_rich_view_open("body");
+  app.set_term_width(44);
+  let buf = render_at(&mut app, 44, 40);
+  let rows = modal_rows(&buf);
+  let url = rows
+    .iter()
+    .find(|r| r.contains("example.test"))
+    .unwrap_or_else(|| panic!("the url row must be on screen — modal:\n{}", rows.join("\n")));
+
+  assert!(url.contains('…'), "a row cut by the modal must say so: {url:?}");
+}
