@@ -380,6 +380,10 @@ define_modal_actions! {
     RichViewPrev    => "select_prev" [ "k", "Up" ],
     RichViewOpen    => "open"        [ "Enter" ],
     RichViewRefresh => "refresh"     [ "f" ],
+    // #551: the issue and the PR are two tabs of one view. `Tab` rather
+    // than `h`/`l`, which the horizontal offset wants for the rows that
+    // cannot wrap.
+    RichViewTab     => "next_tab"    [ "Tab" ],
   }
   // #515: two verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see

@@ -814,6 +814,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             None => app.status = "this row has nothing to open".into(),
           },
           Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
+          Some(ModalAction::RichViewTab) => app.rich_view_next_tab(),
           _ => {}
         }
       }

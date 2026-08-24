@@ -645,6 +645,15 @@ pub struct App {
   /// compared equal and left `Enter` pointing at the old host (Codex
   /// review #529).
   detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
+  /// Whether the reader CHOSE the rich view's current side (issue #551).
+  ///
+  /// The view opens on the PR whenever one is linked and lets a landing PR
+  /// promote an issue that was only standing in for it (#529). Tabs make
+  /// those two rules collide: an issue the reader tabbed to must not be
+  /// yanked away by the next fetch, while an issue the view opened on by
+  /// default still must be. This is the bit that tells them apart, and it
+  /// belongs to one open overlay — `close_detail_overlay` clears it.
+  rich_tab_pinned: bool,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
@@ -797,6 +806,7 @@ impl App {
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
       detail_overlay_link: None,
+      rich_tab_pinned: false,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
@@ -3344,6 +3354,76 @@ impl App {
     self.detail_overlay.set_rows(rows);
   }
 
+  /// The rich view's tabs as `(label, active)`, or empty when there is only
+  /// one side to show (issue #551).
+  ///
+  /// Empty is the signal the renderer keys off: a lone tab is not a tab, it
+  /// is a label, and drawing a one-entry bar would cost a row to say nothing
+  /// the title does not already say.
+  pub fn rich_view_tabs(&self) -> Vec<(String, bool)> {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay {
+      return Vec::new();
+    }
+    let (GitHubFetchState::Loaded(issue), GitHubFetchState::Loaded(pr)) =
+      (self.issue_fetch_state(), self.pr_fetch_state())
+    else {
+      return Vec::new();
+    };
+    match self.detail_overlay.kind {
+      DetailKind::RichIssue | DetailKind::RichPr => {
+        let on_issue = self.detail_overlay.kind == DetailKind::RichIssue;
+        vec![
+          (format!("Issue #{}", issue.number), on_issue),
+          (format!("{} #{}", self.pr_noun_titlecase(), pr.number), !on_issue),
+        ]
+      }
+      DetailKind::Agents | DetailKind::CiChecks => Vec::new(),
+    }
+  }
+
+  /// Switch the rich view to the other side, and remember that the reader
+  /// asked for it (issue #551).
+  ///
+  /// A no-op with only one side fetched: there is nothing to switch TO, and
+  /// blanking the overlay or closing it would both be worse than ignoring
+  /// the key.
+  pub fn rich_view_next_tab(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.rich_view_tabs().is_empty() {
+      return;
+    }
+    let width = self.rich_view_width();
+    let source = match self.detail_overlay.kind {
+      DetailKind::RichPr => {
+        let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() else {
+          return;
+        };
+        RichSource::Issue(issue.clone())
+      }
+      DetailKind::RichIssue => {
+        let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() else {
+          return;
+        };
+        RichSource::Pr(pr.clone())
+      }
+      DetailKind::Agents | DetailKind::CiChecks => return,
+    };
+    let title = match &source {
+      RichSource::Pr(pr) => format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+      RichSource::Issue(issue) => format!("Issue #{} · {}", issue.number, issue.title),
+    };
+    // Before the rows are built, so the inline-comments section opens as
+    // "loading" rather than appearing out of nowhere one landing later —
+    // the same order `enter_rich_view` uses.
+    if let RichSource::Pr(pr) = &source {
+      let number = pr.number;
+      self.spawn_github_pr_threads(number);
+    }
+    self.rich_tab_pinned = true;
+    self.open_rich_overlay(source, title, width);
+  }
+
   /// The URL of the selected rich-view row, when it carries one — the
   /// PR/issue permalink on the `url` row, a comment permalink on a
   /// comment header. Body rows are inert.
@@ -3706,6 +3786,7 @@ impl App {
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
     self.detail_overlay_link = None;
+    self.rich_tab_pinned = false;
     self.ci_overlay_checks.clear();
     self.rich_overlay_source = None;
     self.view = View::List;
@@ -6436,6 +6517,12 @@ impl App {
         // Only the linked PR may claim the view; another number landing is
         // a stale worker's result and must not retarget the overlay.
         if self.github.link.pr != Some(pr.number) {
+          return;
+        }
+        // The reader is on the issue tab because they asked to be (#551).
+        // Promoting here is right for an issue that was standing in for a
+        // PR that had not landed yet, and wrong for one that was chosen.
+        if self.rich_tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
           return;
         }
         (

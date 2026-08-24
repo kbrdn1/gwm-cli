@@ -2918,6 +2918,7 @@ impl HintContext {
       // #420: no filter verb — a rich view is prose, not a row set.
       HintContext::RichView => &[
         Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::RichViewTab, "issue/pr"),
         Hint::Modal(ModalAction::RichViewOpen, "open"),
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
@@ -3874,6 +3875,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       modal_entry(ModalAction::RichViewNext, "next row"),
       modal_entry(ModalAction::RichViewPrev, "previous row"),
+      modal_entry(ModalAction::RichViewTab, "switch between the issue and the PR"),
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
@@ -6380,6 +6382,29 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
 
   let label_w = ov.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
   let mut lines: Vec<Line<'static>> = Vec::new();
+  // The issue / PR tab bar (issue #551). Empty unless BOTH sides are
+  // fetched: a lone tab is a label, not a tab, and would cost two rows to
+  // say what the title already says.
+  let tabs = app.rich_view_tabs();
+  if !tabs.is_empty() {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (label, active) in &tabs {
+      if !spans.is_empty() {
+        spans.push(Span::styled("  ", Style::default().fg(app.theme.muted)));
+      }
+      let style = if *active {
+        Style::default()
+          .fg(app.theme.name)
+          .bg(app.theme.selection_bg)
+          .add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(app.theme.muted)
+      };
+      spans.push(Span::styled(format!(" {label} "), style));
+    }
+    lines.push(Line::from(spans));
+    lines.push(Line::from(String::new()));
+  }
   for (i, row) in ov.rows.iter().enumerate().take(end).skip(start) {
     let (label_color, value_color, value_bold) = match row.role {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
@@ -6484,12 +6509,12 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
   };
   push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
-  // `visible` rows + the hint's blank spacer and its line. The two title
-  // rows left this count in #549 — the title rides the top rule now, and
-  // keeping them here left the frame two rows too tall, so the hint row
-  // floated with dead space under it (validation feedback + Codex review,
-  // PR #546).
-  let height = (visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
+  // `visible` rows + the hint's blank spacer and its line, plus the tab bar
+  // and ITS spacer when there is one. A row added to `lines` that is not
+  // counted here leaves the frame short and the last row clipped; one
+  // counted but not added leaves dead space under the hint (#549 / PR #546).
+  let chrome = if tabs.is_empty() { 2 } else { 4 };
+  let height = (visible + chrome) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(
@@ -6502,7 +6527,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
-    y: area.y + 2, /* border + padding */
+    y: area.y + 2 /* border + padding */ + if tabs.is_empty() { 0 } else { 2 },
     width: area.width.saturating_sub(2),
     height: visible as u16,
   }

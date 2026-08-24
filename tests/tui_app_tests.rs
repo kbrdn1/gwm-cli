@@ -13517,3 +13517,154 @@ fn every_panel_choice_survives_the_write_it_triggers() {
     }
   }
 }
+
+/// A worktree with both an issue and a PR linked and fetched, the rich view
+/// open on the PR (issue #551).
+fn app_with_both_sides_linked() -> (tempfile::TempDir, git2::Repository, App) {
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  (dir, repo, app)
+}
+
+#[test]
+fn tab_reaches_the_issue_the_pr_was_standing_in_front_of() {
+  // Issue #551. The PR wins whenever one is linked, which is the right
+  // default and left the issue unreachable: a worktree in review had no way
+  // back to the thing it is solving without unlinking the PR.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+
+  app.rich_view_next_tab();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.iter().any(|v| v.contains("The issue body.")), "{vals:?}");
+  assert!(
+    app.detail_overlay.title.contains("Issue #42"),
+    "the title follows the tab: {}",
+    app.detail_overlay.title
+  );
+
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "and back again");
+}
+
+#[test]
+fn the_overlay_link_follows_the_active_tab() {
+  // The overlay is pinned to the link it renders so a disagreeing mutation
+  // closes it (#529). With tabs that pin has to follow the TAB, or switching
+  // to the issue would leave the overlay claiming to be the PR and a moved
+  // PR link would close the issue tab out from under the reader.
+  let (_dir, repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+
+  // The PR link moves. The issue tab has nothing to do with it.
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "a PR link change must not close the issue tab"
+  );
+}
+
+#[test]
+fn a_landing_pr_does_not_yank_the_reader_off_a_chosen_issue_tab() {
+  // The interaction the tabs create, and the one that would have shipped
+  // silently: `sync_rich_overlay` promotes the issue to the PR the moment
+  // the PR lands, which is right when the view opened on the issue only
+  // because the PR was not there yet, and wrong when the reader ASKED for
+  // the issue. Same class as the bug the promotion itself fixed (#529).
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  // A refresh lands the PR again while the reader is on the issue tab.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "the reader chose this tab; a landing fetch does not get to overrule it"
+  );
+}
+
+#[test]
+fn an_unchosen_issue_tab_is_still_promoted_when_the_pr_lands() {
+  // The other side of the pin, and the reason it is a pin rather than a
+  // switch: with no PR fetched yet the view opens on the issue because that
+  // is all there is, and the reader never asked for it. Promoting is exactly
+  // right there, and removing the promotion to make the test above pass
+  // would have re-broken #529.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn closing_the_view_forgets_which_tab_was_chosen() {
+  // The pin belongs to one open overlay. Left behind, it would silently
+  // change what the NEXT `I` opens on, which is a setting nobody set.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+  app.close_detail_overlay();
+
+  app.enter_rich_view();
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "a fresh open goes back to preferring the PR"
+  );
+}
+
+#[test]
+fn tab_is_inert_when_there_is_only_one_side() {
+  // No second tab to reach, so the key must do nothing rather than close the
+  // view or blank it.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+
+  app.rich_view_next_tab();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  assert_eq!(app.view, View::DetailOverlay);
+  assert!(
+    app.rich_view_tabs().is_empty(),
+    "and no tab bar is offered: {:?}",
+    app.rich_view_tabs()
+  );
+}
+
+#[test]
+fn the_tab_bar_names_both_sides_and_marks_the_active_one() {
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(
+    app.rich_view_tabs(),
+    vec![("Issue #42".to_string(), false), ("PR #61".to_string(), true)]
+  );
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.rich_view_tabs(),
+    vec![("Issue #42".to_string(), true), ("PR #61".to_string(), false)]
+  );
+}

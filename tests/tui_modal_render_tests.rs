@@ -2096,3 +2096,117 @@ fn an_emphasised_run_is_painted_in_its_own_style() {
   assert_ne!(code, plain, "inline code must not paint like plain prose");
   assert_ne!(code, bold, "code and emphasis are different things");
 }
+
+#[test]
+#[ignore = "not an assertion: prints the rich view so a human can look at it"]
+fn dump_the_rich_view() {
+  // Question 1 of issue #551: "screenshot the view against a real PR with a
+  // long body — that picture is the brief". `GWM_DUMP_BODY` points at a file
+  // holding one, so the picture can be retaken after any change here:
+  //
+  //   gh pr view 582 --json body -q .body > /tmp/body.md
+  //   GWM_DUMP_BODY=/tmp/body.md cargo test --test tui_modal_render_tests \
+  //     dump_the_rich_view -- --ignored --nocapture
+  let body = std::env::var("GWM_DUMP_BODY")
+    .ok()
+    .and_then(|p| std::fs::read_to_string(p).ok())
+    .unwrap_or_else(|| "## Heading\n\nSome **bold** prose.".into());
+  let (_dir, mut app) = app_with_the_rich_view_open(&body);
+  let (w, h) = (160, 60);
+  app.set_term_width(w);
+  let buf = render_at(&mut app, w, h);
+  println!("{}", row_strings(&buf).join("\n"));
+}
+
+/// The rich view with BOTH sides linked and fetched, so the tab bar renders.
+fn app_with_both_tabs() -> (tempfile::TempDir, App) {
+  let (dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  gwm::github::link_pr(&repo, &branch, 551).unwrap();
+  gwm::github::link_issue(&repo, &branch, 420).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::github::IssueStatus {
+    number: 420,
+    title: "the view itself".into(),
+    state: gwm::github::IssueState::Open,
+    url: "https://example.test/issues/420".into(),
+    labels: vec!["tui".into()],
+    updated_at: "2026-08-01T10:00:00Z".into(),
+    detail: gwm::forge::IssueDetail {
+      body: "The issue body.".into(),
+      author: "kbrdn1".into(),
+      comments: vec![],
+    },
+  }));
+  app.apply_pr_fetch_result(Ok(gwm::github::PrStatus {
+    number: 551,
+    title: "polish the rich view".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pull/551".into(),
+    updated_at: "2026-08-24T10:00:00Z".into(),
+    checks_passed: 13,
+    checks_total: 13,
+    ci: gwm::github::CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: "The PR body.".into(),
+      author: "kbrdn1".into(),
+      additions: 1,
+      deletions: 0,
+      base_ref: "dev".into(),
+      head_ref: branch,
+      reviews: vec![],
+      comments: vec![],
+    },
+  }));
+  app.enter_rich_view();
+  (dir, app)
+}
+
+#[test]
+fn the_tab_bar_is_on_screen_when_both_sides_are_linked() {
+  // Issue #551: the PR wins whenever one is linked, which left the issue
+  // with no way back. The bar is what says the other side is one key away.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  let inside = modal_rows(&buf).join("\n");
+
+  assert!(inside.contains("Issue #420"), "the issue tab — modal:\n{inside}");
+  assert!(inside.contains("PR #551"), "the PR tab — modal:\n{inside}");
+}
+
+#[test]
+fn the_tab_bar_does_not_push_the_hint_row_out_of_the_frame() {
+  // Two rows were added to `lines`, so two rows had to be added to the
+  // height. Under-count them and `Paragraph` simply drops the tail: the hint
+  // bar, which is the row that tells the reader `Tab` exists at all.
+  //
+  // Asserted inside the frame. The footer at the bottom of the screen
+  // advertises the very same verbs, so a whole-buffer search passes with the
+  // hint bar missing — which is exactly what it did.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  let inside = modal_rows(&buf).join("\n");
+
+  assert!(
+    inside.contains("issue/pr"),
+    "the tab hint must survive the frame — modal:\n{inside}"
+  );
+  assert!(
+    inside.contains("close"),
+    "and so must the rest of the hint bar — modal:\n{inside}"
+  );
+}
+
+#[test]
+#[ignore = "not an assertion: prints the tabbed rich view"]
+fn dump_the_tabbed_rich_view() {
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  println!("{}", row_strings(&buf).join("\n"));
+}
