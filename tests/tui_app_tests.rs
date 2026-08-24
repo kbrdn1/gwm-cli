@@ -13697,3 +13697,97 @@ fn the_mode_survives_a_trip_through_the_real_editor() {
   assert_eq!(editor.lines, vec!["written outside", ""]);
   assert_eq!(editor.mode, NoteMode::Normal, "still in normal mode");
 }
+
+#[test]
+fn a_shifted_letter_reaches_normal_mode_as_its_uppercase_verb() {
+  // Terminals disagree on how they report a shifted letter: legacy sends
+  // `Char('G')` bare, many modern ones `Char('G')` + SHIFT, the kitty
+  // protocol the base key `Char('g')` + SHIFT. `KeyStroke::new` folds all
+  // three to `Char('G')` (PR #192) — routing `key.code` instead would turn
+  // `G` into `g` and take every uppercase verb (`G W B E I A O`) with it.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT));
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.cursor_line, 1, "`Shift+g` is `G`, the last-line verb");
+  assert!(editor.pending.is_none(), "and not a half-typed `gg`");
+}
+
+#[test]
+fn the_arrows_keep_the_caret_on_a_character_in_normal_mode() {
+  // The arrows are insert-mode movement: `End` parks one past the last
+  // char, which is where typing goes. In normal mode that position has no
+  // character under it, so `x` would delete nothing and `i` would insert
+  // past the end of the line.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["abc".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+  assert_eq!(app.note_editor.as_ref().unwrap().cursor_col, 2, "on `c`, not past it");
+
+  note_key(&mut app, 'x');
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["ab"],
+    "so `x` has something to delete"
+  );
+}
+
+#[test]
+fn a_list_chord_leaves_the_caret_on_a_character_in_normal_mode() {
+  // `Ctrl+t` on an empty line writes `- [ ] ` and parks the caret where the
+  // item text goes, which is past the end. Same invariant, same fix.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec![String::new()];
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["- [ ] "]);
+  assert_eq!(editor.cursor_col, 5, "the caret sits on the last char, not after it");
+}
+
+#[test]
+fn a_key_that_is_not_the_pair_abandons_a_half_typed_sequence() {
+  // `d` then an arrow then `d`: the second `d` must open a fresh sequence,
+  // not complete the first one on the line the arrow landed on. There is no
+  // undo here, so a `dd` the user did not type is prose gone for good.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into(), "three".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'd');
+  app.handle_note_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  note_key(&mut app, 'd');
+
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["one", "two", "three"],
+    "the arrow dropped the pending `d`"
+  );
+}
+
+#[test]
+fn a_chord_also_abandons_a_half_typed_sequence() {
+  // Same contract for the Ctrl-modified verbs, which route past
+  // `normal_key` entirely.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'd');
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+  note_key(&mut app, 'd');
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["- one", "two"], "the bullet landed, the line stayed");
+}

@@ -4314,28 +4314,49 @@ impl App {
     // `[tui] note_vim = true`, so with the knob off this block never sees
     // a key and the #515 editor is untouched.
     let normal = self.note_editor.as_ref().is_some_and(|e| e.mode == NoteMode::Normal);
-    if normal
-      && !stroke
-        .modifiers
-        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
-    {
+    if normal {
       // Backspace, Enter and Delete are text in insert mode, so they must
       // not edit here: a Backspace that ate a character would be prose
       // lost to a key pressed to move. vim's own answers are `h`, `j`, `x`.
-      // Everything else (Esc, the arrows, the page keys) means the same in
-      // both modes and falls through to the blocks below.
-      let verb = match key.code {
-        KC::Char(c) => Some(c),
-        KC::Backspace => Some('h'),
-        KC::Enter => Some('j'),
-        KC::Delete => Some('x'),
-        _ => None,
-      };
-      if let Some(c) = verb {
-        if let Some(editor) = self.note_editor.as_mut() {
-          editor.normal_key(c);
+      // Everything else (Esc, the arrows, the page keys, the Ctrl chords)
+      // means the same in both modes and falls through to the blocks below.
+      //
+      // The letter comes off `stroke`, not off `key`: terminals disagree on
+      // how they report a shifted letter (bare `Char('G')`, `Char('G')` +
+      // SHIFT, or the kitty protocol's `Char('g')` + SHIFT), and
+      // `KeyStroke::new` is what folds all three to `Char('G')` (PR #192).
+      // Routing the raw code would turn `G` into `g` and take every
+      // uppercase verb with it (Codex review #582, first pass).
+      let verb = if stroke
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+      {
+        None
+      } else {
+        match stroke.code {
+          KC::Char(c) => Some(c),
+          KC::Backspace => Some('h'),
+          KC::Enter => Some('j'),
+          KC::Delete => Some('x'),
+          _ => None,
         }
-        return NoteKey::Handled;
+      };
+      match verb {
+        Some(c) => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.normal_key(c);
+          }
+          return NoteKey::Handled;
+        }
+        // Any other key abandons a half-typed sequence, which is what
+        // `pending` promises: `d`, `Down`, `d` must open a fresh `dd`
+        // rather than delete the line the arrow landed on. There is no
+        // undo here, so a `dd` nobody typed is prose gone for good.
+        None => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.pending = None;
+          }
+        }
       }
     }
 
@@ -4391,15 +4412,11 @@ impl App {
       // #557: the two list verbs. Ctrl-modified, so they reach this far
       // rather than being consumed as text above.
       Some(ModalAction::NoteToggleBullet) => {
-        if let Some(editor) = self.note_editor.as_mut() {
-          editor.toggle_bullet();
-        }
+        self.edit_note_buffer(|editor| editor.toggle_bullet());
         return NoteKey::Handled;
       }
       Some(ModalAction::NoteToggleCheckbox) => {
-        if let Some(editor) = self.note_editor.as_mut() {
-          editor.toggle_checkbox();
-        }
+        self.edit_note_buffer(|editor| editor.toggle_checkbox());
         return NoteKey::Handled;
       }
       _ => {}
@@ -4409,20 +4426,36 @@ impl App {
     // module note gives for `Esc` / `Enter`: an arrow key means one thing
     // in a text buffer and rebinding it would only take it away.
     let height = self.note_editor.as_ref().map_or(10, |e| e.viewport);
+    self.edit_note_buffer(|editor| match key.code {
+      KC::Left => editor.left(),
+      KC::Right => editor.right(),
+      KC::Up => editor.up(),
+      KC::Down => editor.down(),
+      KC::Home => editor.home(),
+      KC::End => editor.end(),
+      KC::PageUp => editor.page_up(height),
+      KC::PageDown => editor.page_down(height),
+      _ => {}
+    });
+    NoteKey::Handled
+  }
+
+  /// Run `f` on the open note buffer, then restore the normal-mode caret
+  /// invariant (issue #557, Codex review #582).
+  ///
+  /// Movement and the list toggles are written for insert mode, where the
+  /// caret may sit one past the last char. In normal mode it may not, or
+  /// `x` deletes nothing and `i` inserts past the end of the line. Whoever
+  /// moves the caret restores the invariant, rather than every reader of
+  /// `cursor_col` having to distrust it.
+  fn edit_note_buffer(&mut self, f: impl FnOnce(&mut crate::tui::state::note_editor::NoteEditor)) {
+    use crate::tui::state::note_editor::NoteMode;
     if let Some(editor) = self.note_editor.as_mut() {
-      match key.code {
-        KC::Left => editor.left(),
-        KC::Right => editor.right(),
-        KC::Up => editor.up(),
-        KC::Down => editor.down(),
-        KC::Home => editor.home(),
-        KC::End => editor.end(),
-        KC::PageUp => editor.page_up(height),
-        KC::PageDown => editor.page_down(height),
-        _ => {}
+      f(editor);
+      if editor.mode == NoteMode::Normal {
+        editor.clamp_normal();
       }
     }
-    NoteKey::Handled
   }
 
   /// Re-read the note after `$EDITOR` exited (issue #515), so the modal

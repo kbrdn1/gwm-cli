@@ -458,7 +458,13 @@ impl NoteEditor {
   /// Keep the caret on a character. Insert mode is allowed one past the
   /// last one (that is where typing goes); normal mode is not, or `x` at
   /// the end of a line would have nothing under it.
-  fn clamp_normal(&mut self) {
+  ///
+  /// Public because the invariant is broken from outside as well: the
+  /// arrows, `Home` / `End` and the page keys are insert-mode movement
+  /// shared with normal mode, and a list toggle parks the caret where the
+  /// item text goes. Whoever moves the caret restores it (Codex review
+  /// #582, first pass).
+  pub fn clamp_normal(&mut self) {
     let last = self.line_len(self.cursor_line).saturating_sub(1);
     self.cursor_col = self.cursor_col.min(last);
   }
