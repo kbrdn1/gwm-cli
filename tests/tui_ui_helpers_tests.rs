@@ -1651,3 +1651,47 @@ fn the_rich_view_gets_a_wider_box_than_the_shared_overlay() {
   // its own — the two policies must not cross over.
   assert!(rich_view_modal_width(60) >= overlay_modal_width(60));
 }
+
+#[test]
+fn every_markdown_role_is_painted_differently_from_plain_text() {
+  // The other half of `tests/tui_markdown_tests.rs` (issue #551). That file
+  // asserts the parse produces the right roles; this one asserts the roles
+  // reach the screen as something the eye can tell apart. A parse that
+  // produces perfect segments nobody colours differently is a feature that
+  // is dead on screen with the suite green.
+  //
+  // Written as an exhaustive `match` with no `_` arm so a role added later
+  // does not compile until someone decides how it is painted.
+  use gwm::tui::markdown_style;
+  use gwm::tui::state::markdown::Emphasis;
+  let theme = gwm::tui::theme::Theme::default();
+  let plain = markdown_style(Emphasis::Plain, &theme);
+
+  for role in [
+    Emphasis::Plain,
+    Emphasis::Bold,
+    Emphasis::Italic,
+    Emphasis::BoldItalic,
+    Emphasis::Code,
+    Emphasis::Strike,
+    Emphasis::Link,
+    Emphasis::Heading,
+    Emphasis::Quote,
+    Emphasis::Marker,
+  ] {
+    let style = markdown_style(role, &theme);
+    match role {
+      // Plain text is the baseline it is measured against.
+      Emphasis::Plain => assert_eq!(style, plain),
+      Emphasis::Bold
+      | Emphasis::Italic
+      | Emphasis::BoldItalic
+      | Emphasis::Code
+      | Emphasis::Strike
+      | Emphasis::Link
+      | Emphasis::Heading
+      | Emphasis::Quote
+      | Emphasis::Marker => assert_ne!(style, plain, "{role:?} must not be painted exactly like plain prose"),
+    }
+  }
+}

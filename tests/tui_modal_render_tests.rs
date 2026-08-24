@@ -2038,3 +2038,61 @@ fn a_body_row_starts_at_the_frame_edge_not_behind_an_empty_label_column() {
     text - left_rule
   );
 }
+
+#[test]
+fn markdown_reaches_the_terminal_rendered_not_as_source() {
+  // Issue #551, the complaint in one assertion: `## Description` and
+  // `**bold**` were painted with their markers, because the body reached the
+  // renderer as the Markdown source it arrived as.
+  let (_dir, mut app) = app_with_the_rich_view_open(
+    "## Description\n\nA **bold** claim and `some_code` and a [link](https://example.test/x).\n\n- one\n- [x] done\n\n<!-- hidden -->",
+  );
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+  let all = rows.join("\n");
+
+  assert!(all.contains("Description"), "the heading text is there — rows:\n{all}");
+  assert!(
+    !all.contains("## Description"),
+    "and it is a heading, not its source — rows:\n{all}"
+  );
+  assert!(all.contains("bold"), "the emphasised word is there");
+  assert!(!all.contains("**bold**"), "without its markers — rows:\n{all}");
+  assert!(all.contains("• one"), "a list item gets a bullet — rows:\n{all}");
+  assert!(all.contains("☑ done"), "a task gets its box — rows:\n{all}");
+  assert!(!all.contains("hidden"), "an HTML comment is not shown — rows:\n{all}");
+  assert!(all.contains("link"), "a link shows its text");
+  assert!(!all.contains("https://example.test/x"), "not its URL — rows:\n{all}");
+}
+
+#[test]
+fn an_emphasised_run_is_painted_in_its_own_style() {
+  // The needle the assertions above cannot reach: the text can be correct
+  // while every run is painted identically, which is the same view with
+  // extra steps. Read off the real cells.
+  let (_dir, mut app) = app_with_the_rich_view_open("plainword **boldword** `codeword`");
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+
+  let cell_style = |needle: &str| {
+    let area = *buf.area();
+    for y in 0..area.height {
+      let row: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+      if let Some(at) = row.find(needle) {
+        // `find` is a byte offset and every character here is ASCII.
+        let cell = &buf[(at as u16, y)];
+        return Some((cell.fg, cell.modifier));
+      }
+    }
+    None
+  };
+
+  let plain = cell_style("plainword").expect("plain prose on screen");
+  let bold = cell_style("boldword").expect("the emphasised run on screen");
+  let code = cell_style("codeword").expect("the code run on screen");
+
+  assert_ne!(bold, plain, "an emphasised run must not paint like plain prose");
+  assert_ne!(code, plain, "inline code must not paint like plain prose");
+  assert_ne!(code, bold, "code and emphasis are different things");
+}

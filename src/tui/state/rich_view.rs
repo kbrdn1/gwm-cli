@@ -33,6 +33,7 @@
 
 use super::detail_overlay::{DetailRole, DetailRow};
 use super::github_fetch::GitHubFetchState;
+use super::markdown::{self, Emphasis, Segment};
 use crate::forge::{
   ForgeComment, ForgeReview, IssueStatus, PrState, PrStatus, ReviewState, ReviewThread, ReviewThreads,
 };
@@ -180,6 +181,7 @@ fn meta(rows: &mut Vec<DetailRow>, label: &str, value: &str) {
     role: DetailRole::Normal,
     meta: None,
     extra: None,
+    ..Default::default()
   });
 }
 
@@ -195,6 +197,7 @@ fn url_row(rows: &mut Vec<DetailRow>, url: &str) {
     role: DetailRole::Normal,
     meta: Some(clean),
     extra: None,
+    ..Default::default()
   });
 }
 
@@ -205,6 +208,7 @@ fn blank(rows: &mut Vec<DetailRow>) {
     role: DetailRole::Muted,
     meta: None,
     extra: None,
+    ..Default::default()
   });
 }
 
@@ -218,6 +222,7 @@ fn heading(rows: &mut Vec<DetailRow>, text: String) {
     role: DetailRole::Active,
     meta: None,
     extra: None,
+    ..Default::default()
   });
 }
 
@@ -257,6 +262,7 @@ fn reviews_section(rows: &mut Vec<DetailRow>, reviews: &[ForgeReview], budget: u
       role,
       meta: None,
       extra: None,
+      ..Default::default()
     });
     // A bare approval carries no body, which is the common case.
     push_body(rows, &r.body, budget.saturating_sub(2).max(8), "  ");
@@ -279,6 +285,7 @@ fn comments_section(rows: &mut Vec<DetailRow>, comments: &[ForgeComment], budget
       // The permalink, so Enter opens the thread on the forge.
       meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
       extra: None,
+      ..Default::default()
     });
     push_body(rows, &c.body, budget.saturating_sub(2).max(8), "  ");
   }
@@ -309,6 +316,7 @@ fn threads_section(rows: &mut Vec<DetailRow>, state: &GitHubFetchState<ReviewThr
         role: DetailRole::Failure,
         meta: None,
         extra: None,
+        ..Default::default()
       });
       return;
     }
@@ -371,6 +379,7 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
     },
     meta: None,
     extra: None,
+    ..Default::default()
   });
 
   hunk_rows(rows, &t.diff_hunk, budget);
@@ -386,6 +395,7 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
       // The permalink to this very comment, so Enter opens it on the forge.
       meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
       extra: None,
+      ..Default::default()
     });
     push_body(rows, &c.body, budget.saturating_sub(2).max(8), "      ");
   }
@@ -421,23 +431,34 @@ fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
       role: DetailRole::Muted,
       meta: None,
       extra: None,
+      ..Default::default()
     });
   }
 }
 
-/// Wrap `body` and push it whole. `indent` prefixes every line (review and
-/// comment bodies sit one step in from their header).
+/// Render `body` as Markdown and push it whole (issue #551). `indent`
+/// prefixes every line (review and comment bodies sit one step in from their
+/// header).
+///
+/// The rows carry both forms: `value` is what the reader sees as one plain
+/// string, which is what measuring, filtering and the row tests work
+/// against, and `segments` is the same text split into styled runs for the
+/// renderer.
 fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, indent: &str) {
   if body.trim().is_empty() {
     return;
   }
-  for line in wrap_block(body, budget.saturating_sub(indent.len()).max(8)) {
+  for line in markdown::render(body, budget.saturating_sub(indent.len()).max(8)) {
+    let mut segments = line.segments;
+    if !indent.is_empty() {
+      segments.insert(0, Segment::new(indent.to_string(), Emphasis::Plain));
+    }
     rows.push(DetailRow {
       label: String::new(),
-      value: format!("{indent}{line}"),
+      value: segments.iter().map(|s| s.text.as_str()).collect(),
       role: DetailRole::Normal,
-      meta: None,
-      extra: None,
+      segments,
+      ..Default::default()
     });
   }
 }
@@ -449,107 +470,8 @@ fn more(rows: &mut Vec<DetailRow>, text: String) {
     role: DetailRole::Muted,
     meta: None,
     extra: None,
+    ..Default::default()
   });
-}
-
-/// Sanitise, then wrap a multi-line block to `budget` columns.
-///
-/// Sanitising first is deliberate: a body comes from a remote forge, so it
-/// can carry a bidi override that reorders how the terminal paints the row
-/// (issue #502) or a lone CR that repaints over the line already there.
-/// Both are neutralised at this boundary, before any width is measured —
-/// a `?` is one column, the character it replaced may not have been.
-fn wrap_block(body: &str, budget: usize) -> Vec<String> {
-  let clean = sanitise_block_for_terminal(body).replace('\t', "    ");
-  let mut out = Vec::new();
-  for line in clean.lines() {
-    if line.trim().is_empty() {
-      out.push(String::new());
-      continue;
-    }
-    out.extend(wrap_line(line, budget));
-  }
-  out
-}
-
-/// Word-wrap one line, hard-splitting any single word wider than the
-/// budget. A URL or a base64 blob has no break opportunity, and a
-/// word-only wrap would emit an over-wide row the renderer then ellipsises
-/// — losing exactly the tail the user was after.
-///
-/// **A line that already fits is returned untouched** (Codex review #529).
-/// The word loop below runs on `split_whitespace`, which drops the leading
-/// indent and collapses runs of spaces, and that is not cosmetic: a PR
-/// description almost always carries a fenced block, and for YAML or
-/// Python the indentation *is* the meaning. Since preformatted lines are
-/// short by nature, passing short lines through verbatim preserves them
-/// while prose still wraps. A preformatted line long enough to need
-/// wrapping is re-spaced anyway, but its continuations are re-indented to
-/// the original column so the block keeps its shape.
-fn wrap_line(line: &str, budget: usize) -> Vec<String> {
-  let budget = budget.max(1);
-  if line.chars().count() <= budget {
-    return vec![line.to_string()];
-  }
-  let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-  // An indent wider than the budget would leave no room to make progress.
-  let indent = if indent.chars().count() + 8 <= budget {
-    indent
-  } else {
-    String::new()
-  };
-  let mut out = Vec::new();
-  let mut cur = String::new();
-  let mut cur_cols = 0usize;
-  let budget = budget - indent.chars().count();
-  for word in line.split_whitespace() {
-    let word_cols = word.chars().count();
-    if word_cols > budget {
-      if cur_cols > 0 {
-        out.push(std::mem::take(&mut cur));
-        cur_cols = 0;
-      }
-      let mut chunk = String::new();
-      for c in word.chars() {
-        chunk.push(c);
-        if chunk.chars().count() == budget {
-          out.push(std::mem::take(&mut chunk));
-        }
-      }
-      if !chunk.is_empty() {
-        cur = chunk;
-        cur_cols = cur.chars().count();
-      }
-      continue;
-    }
-    let need = if cur_cols == 0 {
-      word_cols
-    } else {
-      cur_cols + 1 + word_cols
-    };
-    if need > budget {
-      out.push(std::mem::take(&mut cur));
-      cur.push_str(word);
-      cur_cols = word_cols;
-    } else {
-      if cur_cols > 0 {
-        cur.push(' ');
-      }
-      cur.push_str(word);
-      cur_cols = need;
-    }
-  }
-  if !cur.is_empty() {
-    out.push(cur);
-  }
-  if out.is_empty() {
-    out.push(String::new());
-  }
-  if indent.is_empty() {
-    out
-  } else {
-    out.into_iter().map(|l| format!("{indent}{l}")).collect()
-  }
 }
 
 /// Single-line ellipsis for the header rows, which are built from short

@@ -5108,6 +5108,33 @@ pub fn overlay_modal_width(term_width: u16) -> u16 {
   modal_width(term_width, 62, 72, 88)
 }
 
+/// The style one Markdown role is painted in (issue #551).
+///
+/// The other half of the parse: [`Emphasis`] is a semantic role precisely so
+/// that this mapping lives here, where the theme is, and the parser stays a
+/// pure function. Kept public and pure so the pairing is pinned by a test —
+/// a parse that produces perfect segments nobody paints differently is a
+/// feature that is dead on screen with the suite green.
+pub fn markdown_style(emphasis: crate::tui::state::markdown::Emphasis, theme: &Theme) -> Style {
+  use crate::tui::state::markdown::Emphasis;
+  let plain = Style::default().fg(theme.name);
+  match emphasis {
+    Emphasis::Plain => plain,
+    Emphasis::Bold => plain.add_modifier(Modifier::BOLD),
+    Emphasis::Italic => plain.add_modifier(Modifier::ITALIC),
+    Emphasis::BoldItalic => plain.add_modifier(Modifier::BOLD | Modifier::ITALIC),
+    // `staged` rather than `accent`: a literal reads as its own thing, and
+    // `accent` is already the overlay's border and its key hints.
+    Emphasis::Code => Style::default().fg(theme.staged),
+    Emphasis::Strike => Style::default().fg(theme.muted).add_modifier(Modifier::CROSSED_OUT),
+    Emphasis::Link => Style::default().fg(theme.accent).add_modifier(Modifier::UNDERLINED),
+    Emphasis::Heading => Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+    // The forge greys a quoted block whole, marker and text alike.
+    Emphasis::Quote => Style::default().fg(theme.muted),
+    Emphasis::Marker => Style::default().fg(theme.muted),
+  }
+}
+
 /// Modal width for the rich PR / issue view (issue #551).
 ///
 /// A policy of its own rather than [`overlay_modal_width`], because the two
@@ -6413,7 +6440,28 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     if gutter > 0 {
       spans.push(Span::styled(format!("{:label_w$}  ", row.label), label_style));
     }
-    spans.push(Span::styled(value, value_style));
+    // A row that carries Markdown segments is painted run by run (issue
+    // #551); every other row keeps the single-span path it always had. The
+    // segments concatenate to `value`, so the truncation above still decides
+    // how many columns get painted.
+    if row.segments.is_empty() {
+      spans.push(Span::styled(value, value_style));
+    } else {
+      let mut left = value.chars().count();
+      for segment in &row.segments {
+        if left == 0 {
+          break;
+        }
+        let take = segment.text.chars().count().min(left);
+        left -= take;
+        let text: String = segment.text.chars().take(take).collect();
+        let mut style = markdown_style(segment.emphasis, &app.theme);
+        if i == ov.selected {
+          style = style.bg(app.theme.selection_bg);
+        }
+        spans.push(Span::styled(text, style));
+      }
+    }
     spans.push(Span::styled(" ".repeat(pad), pad_style));
     spans.push(Span::styled(extra, extra_style));
     lines.push(Line::from(spans));
