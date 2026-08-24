@@ -79,6 +79,7 @@ impl SettingsTab {
         SettingField::Layout,
         SettingField::DimUnfocused,
         SettingField::StatusOneLine,
+        SettingField::NoteVim,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::Clipboard,
@@ -309,6 +310,8 @@ pub enum SettingField {
   DimUnfocused,
   /// `tui.status_one_line` — fold the sidebar Status block (issue #547).
   StatusOneLine,
+  /// `tui.note_vim` — the note editor's vim normal mode (issue #557).
+  NoteVim,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,
   /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
@@ -339,6 +342,7 @@ impl SettingField {
       SettingField::Layout => "layout",
       SettingField::DimUnfocused => "dim unfocused pane",
       SettingField::StatusOneLine => "status on one line",
+      SettingField::NoteVim => "note vim mode",
       SettingField::SidebarOrientation => "sidebar layout",
       SettingField::Clipboard => "clipboard",
       SettingField::OpenMode => "open mode",
@@ -360,6 +364,7 @@ impl SettingField {
       SettingField::Layout => "tui.layout",
       SettingField::DimUnfocused => "tui.dim_unfocused",
       SettingField::StatusOneLine => "tui.status_one_line",
+      SettingField::NoteVim => "tui.note_vim",
       SettingField::SidebarOrientation => "tui.sidebar_orientation",
       SettingField::Clipboard => "tui.clipboard",
       SettingField::OpenMode => "tui.open.mode",
@@ -379,7 +384,7 @@ impl SettingField {
       | SettingField::SidebarOrientation
       | SettingField::Clipboard
       | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::DimUnfocused | SettingField::StatusOneLine => FieldKind::Bool,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
@@ -404,7 +409,7 @@ impl SettingField {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
       SettingField::Layout => LAYOUT_CHOICES,
-      SettingField::DimUnfocused | SettingField::StatusOneLine => BOOL_CHOICES,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => BOOL_CHOICES,
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
@@ -423,6 +428,7 @@ impl SettingField {
       SettingField::Layout => cfg.tui.layout.label().into(),
       SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
       SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
+      SettingField::NoteVim => cfg.tui.note_vim.to_string(),
       SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
       SettingField::Clipboard => cfg.tui.clipboard.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {

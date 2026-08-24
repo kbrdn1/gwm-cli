@@ -876,6 +876,18 @@ pub struct TuiConfig {
   /// long enough that sharing a row with anything else would clip both.
   #[serde(default = "default_status_one_line")]
   pub status_one_line: bool,
+
+  /// Give the in-TUI note editor a vim normal mode (issue #557).
+  ///
+  /// Default `true`: `N` opens in normal mode, `i` / `I` / `a` / `A` / `o`
+  /// / `O` enter insert, `Esc` goes back to normal, and the second `Esc`
+  /// writes and closes. The cost is that last sentence, so it is stated
+  /// twice: `Esc` no longer writes and closes on the FIRST press.
+  ///
+  /// Set it to `false` for exactly the editor #515 shipped: every
+  /// printable is text, no modes, and one `Esc` writes and closes.
+  #[serde(default = "default_note_vim")]
+  pub note_vim: bool,
 }
 
 /// How the TUI frames its panes and sidebar sections (issue #545).
@@ -934,6 +946,7 @@ impl Default for TuiConfig {
       layout: TuiLayout::Compact,
       dim_unfocused: false,
       status_one_line: default_status_one_line(),
+      note_vim: default_note_vim(),
     }
   }
 }
@@ -1283,6 +1296,13 @@ fn default_confirm_countdown_secs() -> u32 {
 /// (which yields `false` for a bool) would invert the contract for every
 /// config that does not spell the key out.
 fn default_status_one_line() -> bool {
+  true
+}
+
+/// `[tui] note_vim` defaults to `true` (issue #557), so a bare
+/// `#[serde(default)]` would hand every config that does not spell the key
+/// out the modeless editor instead of the mode.
+fn default_note_vim() -> bool {
   true
 }
 

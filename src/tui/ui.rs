@@ -2734,9 +2734,19 @@ pub enum HintContext {
   /// PR's or issue's description, reviews and conversation — j/k select,
   /// Enter opens the row's URL, f re-fetches, Esc closes.
   RichView,
-  /// The in-TUI note editor (issue #515): every printable is text, so the
-  /// only verbs advertised are the two ways out.
+  /// The in-TUI note editor with `[tui] note_vim = false` (issue #515):
+  /// every printable is text, so the only verbs advertised are the two
+  /// ways out and the two list chords.
   Note,
+  /// The note editor in normal mode (issue #557). A separate context
+  /// because the two modes take different keys entirely: the letters are
+  /// verbs here and text next door, so one static hint list would lie in
+  /// whichever mode it was not written for.
+  NoteNormal,
+  /// The note editor in insert mode, with the mode enabled (issue #557).
+  /// Same keys as [`HintContext::Note`] except the one that matters:
+  /// `Esc` leaves the mode rather than writing and closing.
+  NoteInsert,
 }
 
 impl HintContext {
@@ -2763,6 +2773,11 @@ impl HintContext {
       HintContext::CiChecks => "checks",
       HintContext::RichView => "pr/issue",
       HintContext::Note => "note",
+      // #557: the mode belongs in the context slot, not in a hint — it is
+      // state, not a key. The title carries the same chip; this is the
+      // half the eye is already on when it reads the verbs.
+      HintContext::NoteNormal => "note · NORMAL",
+      HintContext::NoteInsert => "note · INSERT",
     }
   }
 
@@ -2922,12 +2937,43 @@ impl HintContext {
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
       ],
-      // #515: no verbs beyond the exits — j/k are letters here, and the
-      // arrows are hard-coded for the same reason `Esc` is elsewhere.
+      // #515: no verbs beyond the exits and the #557 list chords — j/k are
+      // letters here, and the arrows are hard-coded for the same reason
+      // `Esc` is elsewhere. This bar is the only discovery surface the
+      // editor has: `?` is a printable, so the help overlay cannot be
+      // opened from inside it.
       HintContext::Note => &[
         Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "save & close"),
+      ],
+      // #557: the motions are literals because they are hard-coded verbs,
+      // not modal bindings — the same reason the arrows are literals above.
+      // They lead: in normal mode the letters are the surface, and the bar
+      // is the only place the editor can say so (`?` is a printable here,
+      // so the help overlay cannot be opened from inside the modal).
+      HintContext::NoteNormal => &[
+        Hint::Lit("hjkl", "move"),
+        Hint::Lit("w/b/e", "word"),
+        Hint::Lit("gg/G", "doc"),
+        Hint::Lit("i/a/o", "insert"),
+        Hint::Lit("x/dd", "delete"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "save & close"),
+      ],
+      // The one verb whose meaning the mode changes: `Esc` leaves insert
+      // instead of writing and closing, so the bar must not promise the
+      // gesture it promises everywhere else.
+      HintContext::NoteInsert => &[
+        Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "normal mode"),
       ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
@@ -3051,7 +3097,7 @@ impl HintContext {
       HintContext::Detail => KeyContext::Detail,
       HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::RichView => KeyContext::RichView,
-      HintContext::Note => KeyContext::Note,
+      HintContext::Note | HintContext::NoteNormal | HintContext::NoteInsert => KeyContext::Note,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -3225,6 +3271,75 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
 
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
+}
+
+/// As [`modal_hint_for_context`], bounded to `width` cells: whole hint
+/// groups are dropped from the end and a `…` marks that they were (issue
+/// #557).
+///
+/// `modal_hint_line` renders the list whatever it measures, and a
+/// `Paragraph` clips the overflow at the rect edge — which reads as a
+/// complete list that happens to end at `Ctrl+u bullet`. The statusbar has
+/// always truncated visibly; the note editor's mode line is the first modal
+/// footer long enough to need the same, because it spells out a whole
+/// keymap rather than two or three verbs.
+pub fn modal_hint_for_context_within(
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+  width: usize,
+  lead: Option<(&str, Color)>,
+) -> Line<'static> {
+  let resolved = ctx.resolve(keymap, modal);
+  let group_w = |key: &str, label: &str| cells(key) + 1 + cells(label);
+  // The leading badge is state, not a verb: it takes the reverse-video
+  // treatment the statusbar's context anchor has always had, so the mode
+  // reads as a block of colour from across the screen rather than as one
+  // more word in a list of keys.
+  let lead_w = lead.map_or(0, |(text, _)| cells(text) + 2);
+  let full: usize = resolved
+    .iter()
+    .enumerate()
+    .map(|(i, (k, l))| if i > 0 { 2 } else { 0 } + group_w(k, l))
+    .sum();
+  // Measured whole first: a list that fits must not lose its last group to
+  // the space held for a marker nothing needs. `Esc normal mode` is exactly
+  // that group at 100 columns, and it is the one telling the user how to
+  // leave the mode.
+  if full + lead_w <= width {
+    let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+    return with_lead(modal_hint_line(&hints, theme), lead);
+  }
+  let budget = width.saturating_sub(lead_w);
+  let mut kept: Vec<(&str, &str)> = Vec::new();
+  let mut used = 0usize;
+  for (key, label) in &resolved {
+    let sep = if kept.is_empty() { 0 } else { 2 };
+    // The ` …` costs two cells, and past this branch it is certain.
+    if used + sep + group_w(key, label) > budget.saturating_sub(2) {
+      break;
+    }
+    used += sep + group_w(key, label);
+    kept.push((key.as_str(), label.as_str()));
+  }
+  let mut line = modal_hint_line(&kept, theme);
+  line.spans.push(Span::styled(" …", hint_label_style(theme)));
+  with_lead(line, lead)
+}
+
+/// Put `lead` at the head of a hint line as a reverse-video chip. The line
+/// stays centred as a whole, badge included: splitting the row into a
+/// left-pinned badge and centred hints would need two rects, and a modal
+/// footer that is one `Paragraph` is what every other modal already draws.
+fn with_lead(mut line: Line<'static>, lead: Option<(&str, Color)>) -> Line<'static> {
+  let Some((text, color)) = lead else {
+    return line;
+  };
+  let mut spans = vec![Span::styled(text.to_string(), chip_style(color)), Span::raw("  ")];
+  spans.append(&mut line.spans);
+  line.spans = spans;
+  line
 }
 
 /// As [`modal_hint_for_context`], for the two footers whose form knows which
@@ -3883,8 +3998,37 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("Left/Right/Up/Down", "move the cursor"),
       fixed("Home/End", "start / end of line"),
       fixed("PgUp/PgDn", "page through the note"),
+      modal_entry(
+        ModalAction::NoteToggleBullet,
+        "make the line a list item, or plain again",
+      ),
+      modal_entry(
+        ModalAction::NoteToggleCheckbox,
+        "tick the box on the line, spawning one first",
+      ),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
-      modal_entry(ModalAction::NoteClose, "save and close (empty the note to delete it)"),
+      modal_entry(ModalAction::NoteClose, "save and close (empty it to delete)"),
+      HelpRow::Blank,
+      // #557: the normal-mode verbs are hard-coded, so they are `fixed`
+      // rows. They belong here rather than only in the modal's own bar
+      // because `?` is a printable inside the editor: this overlay is the
+      // one place they can be read at leisure.
+      //
+      // Their own section, and the heading names the knob: `help_rows` has
+      // no config to read, and `note_vim = false` is a supported config
+      // where none of these letters is a verb — under a heading that says
+      // so, the rows stay true for both. Same reason the close row above
+      // stops at "save and close": with the mode on, the press that leaves
+      // insert is documented here instead (Codex review #582, second pass).
+      HelpRow::Section("Note Editor · normal mode ([tui] note_vim, on by default)".to_string()),
+      HelpRow::Blank,
+      fixed("h j k l", "move"),
+      fixed("w b e", "word forward / back / end (W B E: blank-separated)"),
+      fixed("0 ^ $", "first column / first non-blank / last char"),
+      fixed("gg G", "first / last line"),
+      fixed("x dd", "delete the char under the caret / the line"),
+      fixed("i I a A o O", "enter insert (o / O open a line, carrying the marker)"),
+      fixed("Esc", "insert to normal; from normal, save and close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -5581,7 +5725,27 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.note_editor.as_ref() {
-    Some(editor) => format!("note · {}", crate::naming::sanitise_for_terminal(&editor.branch)),
+    Some(editor) => {
+      let branch = crate::naming::sanitise_for_terminal(&editor.branch);
+      // #557: the mode chip only exists behind `note_vim`. A mode the user
+      // cannot see is a mode they type verbs into by accident, and a chip
+      // for a mode that can never change is chrome nobody asked for.
+      //
+      // It sits AFTER the branch because a centred title that overflows is
+      // clipped from the LEFT (measured, not assumed: the guard in
+      // `tui_modal_render_tests` fails with the two halves the other way
+      // round). The chip is the half worth keeping, so it goes where the
+      // clip does not reach.
+      if app.config.tui.note_vim {
+        let mode = match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => "NORMAL",
+          crate::tui::state::note_editor::NoteMode::Insert => "INSERT",
+        };
+        format!("note · {branch} · {mode}")
+      } else {
+        format!("note · {branch}")
+      }
+    }
     None => "note".to_string(),
   };
   // Already rode the top rule before #549; routed through the shared
@@ -5589,6 +5753,45 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   let block = overlay_block_titled(&title, app.theme.accent);
   let inner = block.inner(area);
   f.render_widget(block, area);
+
+  // #557: the modal carries its own mode line on its last row. The
+  // statusbar already says the same thing through the same
+  // `HintContext` (#418, so the two cannot disagree), but it sits at the
+  // bottom of the terminal — on a tall screen that is thirty rows away
+  // from the box the keys are being pressed in.
+  //
+  // Resolved before the buffer is borrowed mutably, the way the title is.
+  // #557: the mode reads as a badge, the way vim's own statusline does.
+  // `focus` is the anchor colour the statusbar context chip wears, and
+  // `clean` is the theme's green, so insert stands apart at a glance
+  // without inventing a role. With the mode off there is no badge, because
+  // there is no state to be in.
+  let mode_chip = app
+    .note_editor
+    .as_ref()
+    .filter(|_| app.config.tui.note_vim)
+    .map(|editor| match editor.mode {
+      crate::tui::state::note_editor::NoteMode::Normal => (" NORMAL ", app.theme.focus),
+      crate::tui::state::note_editor::NoteMode::Insert => (" INSERT ", app.theme.clean),
+    });
+  let hint = modal_hint_for_context_within(
+    app.hint_context(),
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+    inner.width as usize,
+    mode_chip,
+  );
+  let rows = Layout::default()
+    .direction(Direction::Vertical)
+    // `Min(1)`, not `Min(0)`: the text pane is what the modal is for, and
+    // at the two-row inner height where they compete the buffer wins the
+    // row. The mode line then renders into a zero-height rect, which
+    // ratatui draws as nothing rather than as a panic.
+    .constraints([Constraint::Min(1), Constraint::Length(1)])
+    .split(inner);
+  let (inner, hint_row) = (rows[0], rows[1]);
+  f.render_widget(Paragraph::new(hint), hint_row);
 
   let Some(editor) = app.note_editor.as_mut() else {
     return;

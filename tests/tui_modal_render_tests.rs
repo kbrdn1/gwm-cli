@@ -1907,3 +1907,196 @@ fn a_form_that_had_to_scroll_says_so() {
     rows.join("\n")
   );
 }
+
+// ── the note editor's mode indicator (#557) ────────────────────────────────
+
+#[test]
+fn the_note_title_names_the_mode_when_the_knob_is_on() {
+  // A mode the user cannot see is a mode they type verbs into by accident.
+  // The title is the one piece of chrome the editor already has.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the modal must say which mode it is in:\n{}",
+    row_strings(&buf).join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "INSERT"),
+    "and it must follow the mode:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_note_title_says_nothing_about_modes_with_the_knob_off() {
+  // The #515 title, unchanged, for everyone who turns the mode back off.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(!buffer_contains(&buf, "INSERT"), "no mode chip without the knob");
+  assert!(!buffer_contains(&buf, "NORMAL"));
+}
+
+#[test]
+fn a_long_branch_name_does_not_push_the_mode_chip_off_the_title() {
+  // The title is clipped from the right, so whichever half sits last is the
+  // half a long branch name costs. Whether the keys are text is worth more
+  // than the name of the branch the modal was opened from.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.note_editor = Some(gwm::tui::state::note_editor::NoteEditor::open(
+    "feat/#557-a-branch-name-long-enough-to-run-past-the-right-hand-edge-of-the-modal".into(),
+    PathBuf::from("/tmp/n.md"),
+    "",
+  ));
+  app.note_editor.as_mut().unwrap().enter_normal();
+  app.view = View::Note;
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the mode chip was clipped off by the branch name:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_note_modal_carries_the_mode_line_on_its_own_last_row() {
+  // The app footer says the same thing, but it sits at the bottom of the
+  // terminal: on a tall screen that is thirty rows away from the box the
+  // eye is in, which is where the keys are being pressed. Asserted on the
+  // modal's own last inner row, so the footer behind it cannot satisfy it.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  // Frame anatomy from the bottom: the border, the block's one row of
+  // bottom padding, then the mode line.
+  let rows = closed_modal_rows(&buf, "note at 100x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("hjkl"),
+    "the modal's last row must carry the normal-mode keys, got:\n{}",
+    rows.join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let rows = closed_modal_rows(&buf, "note in insert at 100x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("INSERT") && !last_inner.contains("hjkl"),
+    "and it must follow the mode into insert, got:\n{last_inner}"
+  );
+
+  // Where the row has the width for the whole list, `Esc` names what it
+  // does in this mode rather than the gesture it performs in the other.
+  // At 100 columns the tail is what the truncation eats, which is the
+  // documented order and why the help overlay carries the same keys.
+  let buf = render_at(&mut app, 160, TERM_H);
+  let rows = closed_modal_rows(&buf, "note in insert at 160x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("Esc normal mode") && !last_inner.contains("save & close"),
+    "the full insert line must say where `Esc` goes, got:\n{last_inner}"
+  );
+}
+
+#[test]
+fn the_note_modal_still_renders_when_there_is_no_room_for_both() {
+  // The mode line takes a row off the buffer, so the smallest modal has to
+  // stay drawable: a layout whose text pane collapses to zero must not
+  // panic or lose the frame.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  for c in "note".chars() {
+    app.handle_note_key(crossterm::event::KeyEvent::new(
+      crossterm::event::KeyCode::Char(c),
+      crossterm::event::KeyModifiers::NONE,
+    ));
+  }
+
+  for (w, h) in [(40u16, 6u16), (30, 5), (20, 4)] {
+    let buf = render_at(&mut app, w, h);
+    assert!(!row_strings(&buf).is_empty(), "the note modal must survive {w}x{h}");
+  }
+}
+
+#[test]
+fn the_mode_badge_is_painted_not_just_spelled() {
+  // A word in a row of words is a word; the mode is state, and it reads as
+  // state when it is a block of colour. Same reverse-video treatment the
+  // statusbar's context anchor has always had.
+  use ratatui::style::Modifier;
+
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let (x, y, w, h) = modal_rect(&buf).expect("the note modal");
+  // The frame from the bottom: border, one row of block padding, the mode
+  // line.
+  let row = y + h - 3;
+  let painted: String = (x..x + w)
+    .filter(|col| buf[(*col, row)].modifier.contains(Modifier::REVERSED))
+    .map(|col| buf[(col, row)].symbol())
+    .collect();
+  assert_eq!(
+    painted.trim(),
+    "NORMAL",
+    "the mode badge must be the reverse-video run on the mode line, row:\n{}",
+    (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let painted: String = (x..x + w)
+    .filter(|col| buf[(*col, row)].modifier.contains(Modifier::REVERSED))
+    .map(|col| buf[(col, row)].symbol())
+    .collect();
+  assert_eq!(painted.trim(), "INSERT", "and it follows the mode");
+}
+
+#[test]
+fn the_mode_badge_is_absent_with_the_mode_off() {
+  // No badge for a state nobody can be in: with `note_vim = false` the
+  // editor has one mode and naming it would be chrome.
+  use ratatui::style::Modifier;
+
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let (x, y, w, h) = modal_rect(&buf).expect("the note modal");
+  let row = y + h - 3;
+  assert!(
+    (x..x + w).all(|col| !buf[(col, row)].modifier.contains(Modifier::REVERSED)),
+    "no badge without the mode, row:\n{}",
+    (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
+  );
+}

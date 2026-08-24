@@ -2983,3 +2983,34 @@ fn handed_repo_bytes_go_through_the_same_validators() {
     "the semantic validator has to run on handed bytes too, got: {err}"
   );
 }
+
+#[test]
+fn tui_note_vim_is_on_unless_turned_off() {
+  // #557: the mode ships on. A `#[serde(default)]` on a bool yields
+  // `false`, so the serde default has to be spelled out — miss it and
+  // every config that does not name the key silently gets the modeless
+  // editor while `Config::default()` says otherwise.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(cfg.tui.note_vim, "note_vim must default to true");
+  assert!(
+    Config::default().tui.note_vim,
+    "`Config::default()` must agree with the serde default"
+  );
+}
+
+#[test]
+fn tui_note_vim_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+note_vim = false
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(!cfg.tui.note_vim, "the opt-out is the value worth round-tripping now");
+}

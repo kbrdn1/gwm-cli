@@ -2591,7 +2591,17 @@ impl App {
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
-      View::Note => HintContext::Note,
+      // #557: the note bar follows the mode. With the knob off there is no
+      // mode to follow, and the #515 bar is what stays — a `NORMAL` chip on
+      // an editor that has no normal mode would name a state nobody can be
+      // in.
+      View::Note => match self.note_editor.as_ref() {
+        Some(editor) if self.config.tui.note_vim => match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => HintContext::NoteNormal,
+          crate::tui::state::note_editor::NoteMode::Insert => HintContext::NoteInsert,
+        },
+        _ => HintContext::Note,
+      },
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
@@ -4220,7 +4230,13 @@ impl App {
       return;
     };
     let text = crate::notes::read(&self.repo, &branch).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    // #557: `note_vim` opens in normal mode, the way vim itself does. The
+    // knob is what keeps that off everyone else's `N`.
+    if self.config.tui.note_vim {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
     self.view = View::Note;
   }
 
@@ -4299,7 +4315,61 @@ impl App {
     use crate::tui::modal_keymap::{KeyContext, ModalAction};
     use crossterm::event::KeyCode as KC;
 
+    use crate::tui::state::note_editor::NoteMode;
+
     let stroke = crate::tui::keymap::KeyStroke::from_event(&key);
+
+    // #557: normal mode routes BEFORE the typing reservation, because that
+    // reservation is what makes `j` a letter. Only reachable behind
+    // `[tui] note_vim = true`, so with the knob off this block never sees
+    // a key and the #515 editor is untouched.
+    let normal = self.note_editor.as_ref().is_some_and(|e| e.mode == NoteMode::Normal);
+    if normal {
+      // Backspace, Enter and Delete are text in insert mode, so they must
+      // not edit here: a Backspace that ate a character would be prose
+      // lost to a key pressed to move. vim's own answers are `h`, `j`, `x`.
+      // Everything else (Esc, the arrows, the page keys, the Ctrl chords)
+      // means the same in both modes and falls through to the blocks below.
+      //
+      // The letter comes off `stroke`, not off `key`: terminals disagree on
+      // how they report a shifted letter (bare `Char('G')`, `Char('G')` +
+      // SHIFT, or the kitty protocol's `Char('g')` + SHIFT), and
+      // `KeyStroke::new` is what folds all three to `Char('G')` (PR #192).
+      // Routing the raw code would turn `G` into `g` and take every
+      // uppercase verb with it (Codex review #582, first pass).
+      let verb = if stroke
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+      {
+        None
+      } else {
+        match stroke.code {
+          KC::Char(c) => Some(c),
+          KC::Backspace => Some('h'),
+          KC::Enter => Some('j'),
+          KC::Delete => Some('x'),
+          _ => None,
+        }
+      };
+      match verb {
+        Some(c) => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.normal_key(c);
+          }
+          return NoteKey::Handled;
+        }
+        // Any other key abandons a half-typed sequence, which is what
+        // `pending` promises: `d`, `Down`, `d` must open a fresh `dd`
+        // rather than delete the line the arrow landed on. There is no
+        // undo here, so a `dd` nobody typed is prose gone for good.
+        None => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.pending = None;
+          }
+        }
+      }
+    }
+
     if KeyContext::Note.reserved_typing_stroke(&stroke) {
       if let Some(editor) = self.note_editor.as_mut() {
         match key.code {
@@ -4315,6 +4385,22 @@ impl App {
 
     match self.resolve_modal(KeyContext::Note, key) {
       Some(ModalAction::NoteClose) => {
+        // #557: with a mode, the first `Esc` is the one that leaves insert
+        // and closing takes two. That is the cost of shipping the mode on,
+        // and `note_vim = false` is what buys the single press back.
+        //
+        // This reads the knob where the block above reads the mode, and
+        // they are the same fact from two sides: normal mode is only ever
+        // entered with the knob on, but insert mode is where both worlds
+        // meet, so `Esc` cannot tell them apart without asking.
+        if self.config.tui.note_vim {
+          if let Some(editor) = self.note_editor.as_mut() {
+            if editor.mode == NoteMode::Insert {
+              editor.enter_normal();
+              return NoteKey::Handled;
+            }
+          }
+        }
         self.flush_note();
         self.note_editor = None;
         self.view = View::List;
@@ -4332,6 +4418,16 @@ impl App {
         }
         return NoteKey::Handled;
       }
+      // #557: the two list verbs. Ctrl-modified, so they reach this far
+      // rather than being consumed as text above.
+      Some(ModalAction::NoteToggleBullet) => {
+        self.edit_note_buffer(|editor| editor.toggle_bullet());
+        return NoteKey::Handled;
+      }
+      Some(ModalAction::NoteToggleCheckbox) => {
+        self.edit_note_buffer(|editor| editor.toggle_checkbox());
+        return NoteKey::Handled;
+      }
       _ => {}
     }
 
@@ -4339,20 +4435,36 @@ impl App {
     // module note gives for `Esc` / `Enter`: an arrow key means one thing
     // in a text buffer and rebinding it would only take it away.
     let height = self.note_editor.as_ref().map_or(10, |e| e.viewport);
+    self.edit_note_buffer(|editor| match key.code {
+      KC::Left => editor.left(),
+      KC::Right => editor.right(),
+      KC::Up => editor.up(),
+      KC::Down => editor.down(),
+      KC::Home => editor.home(),
+      KC::End => editor.end(),
+      KC::PageUp => editor.page_up(height),
+      KC::PageDown => editor.page_down(height),
+      _ => {}
+    });
+    NoteKey::Handled
+  }
+
+  /// Run `f` on the open note buffer, then restore the normal-mode caret
+  /// invariant (issue #557, Codex review #582).
+  ///
+  /// Movement and the list toggles are written for insert mode, where the
+  /// caret may sit one past the last char. In normal mode it may not, or
+  /// `x` deletes nothing and `i` inserts past the end of the line. Whoever
+  /// moves the caret restores the invariant, rather than every reader of
+  /// `cursor_col` having to distrust it.
+  fn edit_note_buffer(&mut self, f: impl FnOnce(&mut crate::tui::state::note_editor::NoteEditor)) {
+    use crate::tui::state::note_editor::NoteMode;
     if let Some(editor) = self.note_editor.as_mut() {
-      match key.code {
-        KC::Left => editor.left(),
-        KC::Right => editor.right(),
-        KC::Up => editor.up(),
-        KC::Down => editor.down(),
-        KC::Home => editor.home(),
-        KC::End => editor.end(),
-        KC::PageUp => editor.page_up(height),
-        KC::PageDown => editor.page_down(height),
-        _ => {}
+      f(editor);
+      if editor.mode == NoteMode::Normal {
+        editor.clamp_normal();
       }
     }
-    NoteKey::Handled
   }
 
   /// Re-read the note after `$EDITOR` exited (issue #515), so the modal
@@ -4362,8 +4474,16 @@ impl App {
       return;
     };
     let (branch, path) = (editor.branch.clone(), editor.path.clone());
+    // #557: the buffer is rebuilt, so the mode has to be carried over by
+    // hand — coming back from `$EDITOR` into insert mode would leave a vim
+    // user typing verbs into their note.
+    let mode = editor.mode;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    if mode == crate::tui::state::note_editor::NoteMode::Normal {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
   }
 
   /// Re-read the selected row's note presence once the editor has exited
