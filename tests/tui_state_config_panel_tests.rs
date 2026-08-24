@@ -156,16 +156,19 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → layout / dim unfocused / status one line / sidebar position /
-  // sidebar layout / clipboard / open / countdown / auto refresh in order.
-  // `layout` leads since #545: it is the structural choice the rest of the
-  // tab refines, and the two density knobs (#545, #547) sit right under it.
+  // Tui tab → layout / dim unfocused / status one line / note vim / sidebar
+  // position / sidebar layout / clipboard / open / countdown / auto refresh
+  // in order. `layout` leads since #545: it is the structural choice the
+  // rest of the tab refines, and the boolean knobs (#545, #547, #557) sit
+  // right under it.
   panel.tab = SettingsTab::Tui;
   assert_eq!(panel.selected_field(), Some(SettingField::Layout));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::DimUnfocused));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::StatusOneLine));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::NoteVim));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
   panel.select_next();
@@ -682,6 +685,30 @@ fn the_tui_tab_reaches_the_status_fold_setting() {
     assert!(
       choice.parse::<bool>().is_ok(),
       "status_one_line choice {choice:?} must parse as a bool"
+    );
+  }
+}
+
+#[test]
+fn the_tui_tab_reaches_the_note_mode_setting() {
+  // #557: the vim mode ships on, so `note_vim = false` is the opt-out —
+  // and an opt-out only a TOML editor can reach is one most users will
+  // never find. Same `Bool` reasoning as the two fields above.
+  let fields = SettingsTab::Tui.fields();
+  assert!(
+    fields.contains(&SettingField::NoteVim),
+    "note_vim must be reachable from the TUI tab, got {fields:?}"
+  );
+  assert_eq!(SettingField::NoteVim.kind(), FieldKind::Bool);
+  assert_eq!(SettingField::NoteVim.key_path(), "tui.note_vim");
+
+  let cfg = gwm::config::Config::default();
+  assert_eq!(SettingField::NoteVim.current(&cfg), "true");
+  assert_eq!(SettingField::NoteVim.next_choice(&cfg).as_deref(), Some("false"));
+  for choice in SettingField::NoteVim.choices() {
+    assert!(
+      choice.parse::<bool>().is_ok(),
+      "note_vim choice {choice:?} must parse as a bool"
     );
   }
 }

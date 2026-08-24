@@ -710,3 +710,53 @@ fn the_help_overlay_teaches_the_normal_mode_verbs() {
     "and the bullet chord as bound, not as it once was: {keys:?}"
   );
 }
+
+#[test]
+fn the_help_overlay_scopes_the_mode_rows_to_the_mode() {
+  // `note_vim = false` is a supported config, and in it the editor has no
+  // modes at all: every printable is text and one `Esc` writes and closes.
+  // `help_rows` takes no config, so the rows have to be true either way —
+  // which means the motions live under a heading that names the knob, and
+  // the close verb stops claiming it leaves insert first.
+  use gwm::tui::{help_rows, keymap::Keymap, HelpRow};
+  let rows = help_rows(
+    &Keymap::defaults(),
+    &gwm::tui::modal_keymap::ModalKeymap::defaults(),
+    HintContext::Help,
+  );
+
+  let close = rows
+    .iter()
+    .find_map(|r| match r {
+      HelpRow::Entry { keys, label } if keys == "Esc" && label.contains("save and close") => Some(label.clone()),
+      _ => None,
+    })
+    .expect("the note editor's close row");
+  assert!(
+    !close.contains("leave insert"),
+    "the close row must hold for `note_vim = false` too, got: {close}"
+  );
+
+  let section = rows
+    .iter()
+    .position(|r| matches!(r, HelpRow::Section(s) if s.contains("note_vim")))
+    .expect("a heading that names the knob the mode rows depend on");
+  let motions = rows
+    .iter()
+    .position(|r| matches!(r, HelpRow::Entry { keys, .. } if keys == "h j k l"))
+    .expect("the motion row");
+  assert!(
+    section < motions,
+    "the motion rows must sit under that heading (heading at {section}, motions at {motions})"
+  );
+  let next_section = rows
+    .iter()
+    .skip(section + 1)
+    .position(|r| matches!(r, HelpRow::Section(_)))
+    .map(|i| i + section + 1)
+    .unwrap_or(rows.len());
+  assert!(
+    motions < next_section,
+    "and before the next heading (motions at {motions}, next heading at {next_section})"
+  );
+}

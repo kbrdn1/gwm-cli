@@ -4007,21 +4007,28 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
         "tick the box on the line, spawning one first",
       ),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
-      modal_entry(
-        ModalAction::NoteClose,
-        "leave insert, then save and close (empty it to delete)",
-      ),
+      modal_entry(ModalAction::NoteClose, "save and close (empty it to delete)"),
+      HelpRow::Blank,
       // #557: the normal-mode verbs are hard-coded, so they are `fixed`
       // rows. They belong here rather than only in the modal's own bar
       // because `?` is a printable inside the editor: this overlay is the
-      // one place they can be read at leisure. `[tui] note_vim = false`
-      // turns the mode off, and then these six rows do not apply.
-      fixed("h j k l", "normal mode: move"),
+      // one place they can be read at leisure.
+      //
+      // Their own section, and the heading names the knob: `help_rows` has
+      // no config to read, and `note_vim = false` is a supported config
+      // where none of these letters is a verb — under a heading that says
+      // so, the rows stay true for both. Same reason the close row above
+      // stops at "save and close": with the mode on, the press that leaves
+      // insert is documented here instead (Codex review #582, second pass).
+      HelpRow::Section("Note Editor · normal mode ([tui] note_vim, on by default)".to_string()),
+      HelpRow::Blank,
+      fixed("h j k l", "move"),
       fixed("w b e", "word forward / back / end (W B E: blank-separated)"),
       fixed("0 ^ $", "first column / first non-blank / last char"),
       fixed("gg G", "first / last line"),
       fixed("x dd", "delete the char under the caret / the line"),
       fixed("i I a A o O", "enter insert (o / O open a line, carrying the marker)"),
+      fixed("Esc", "insert to normal; from normal, save and close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,

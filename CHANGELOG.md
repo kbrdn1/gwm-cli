@@ -41,7 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **The cost is `Esc`, so it gets its own line: it no longer writes and closes
   on the first press.** It leaves insert, and the second press saves.
   `[tui] note_vim = false` buys the single-press gesture back and returns the
-  editor to the modeless one, where every printable is text. No counts, no
+  editor to the modeless one, where every printable is text, and it is a
+  toggle in the Settings panel's TUI tab like the other two TUI booleans. No counts, no
   registers, no undo: this is a scratch buffer, and `Ctrl+e` still hands the
   file to the real vim. The verbs are hard-coded rather than bindable, so
   `[tui.keys.modal.note]` holds the same four verbs either way and an
