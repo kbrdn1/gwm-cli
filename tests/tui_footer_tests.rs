@@ -680,3 +680,33 @@ fn the_note_bullet_hint_follows_the_chord_that_reaches_the_app() {
     );
   }
 }
+
+#[test]
+fn the_help_overlay_teaches_the_normal_mode_verbs() {
+  // `?` is a printable inside the note editor, so the overlay cannot be
+  // opened from it: whoever wants to read the vim verbs at leisure reads
+  // them here, on the surface reachable from the list.
+  use gwm::tui::{help_rows, keymap::Keymap, HelpRow};
+  let rows = help_rows(
+    &Keymap::defaults(),
+    &gwm::tui::modal_keymap::ModalKeymap::defaults(),
+    HintContext::Help,
+  );
+  let keys: Vec<String> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } => Some(keys.clone()),
+      _ => None,
+    })
+    .collect();
+  for verb in ["h j k l", "w b e", "gg G", "x dd", "i I a A o O"] {
+    assert!(
+      keys.iter().any(|k| k == verb),
+      "the help overlay must document the normal-mode `{verb}` row: {keys:?}"
+    );
+  }
+  assert!(
+    keys.iter().any(|k| k == "Ctrl+u"),
+    "and the bullet chord as bound, not as it once was: {keys:?}"
+  );
+}

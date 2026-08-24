@@ -4386,13 +4386,12 @@ impl App {
     match self.resolve_modal(KeyContext::Note, key) {
       Some(ModalAction::NoteClose) => {
         // #557: with a mode, the first `Esc` is the one that leaves insert
-        // and closing takes two. That is exactly why the mode is opt-in:
-        // `Esc` writing and closing on the first press is a shipped
-        // default, and it stays the default for everyone else.
+        // and closing takes two. That is the cost of shipping the mode on,
+        // and `note_vim = false` is what buys the single press back.
         //
         // This reads the knob where the block above reads the mode, and
         // they are the same fact from two sides: normal mode is only ever
-        // entered behind the knob, but insert mode is where both worlds
+        // entered with the knob on, but insert mode is where both worlds
         // meet, so `Esc` cannot tell them apart without asking.
         if self.config.tui.note_vim {
           if let Some(editor) = self.note_editor.as_mut() {
