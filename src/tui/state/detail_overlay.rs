@@ -96,6 +96,13 @@ pub struct DetailRow {
   /// and the tests work against, so the styling is additive rather than a
   /// second source of truth about what the row says.
   pub segments: Vec<crate::tui::state::markdown::Segment>,
+  /// True for a row that must not be reflowed and may therefore be wider
+  /// than the modal: a fenced code line, a diff hunk (issue #551).
+  ///
+  /// Every other row is wrapped to fit before it gets here, so the renderer
+  /// can paint it as-is. One of these is clipped against the view's
+  /// horizontal offset instead, which is the only way to reach its tail.
+  pub preformatted: bool,
 }
 
 /// The overlay's whole state. "Closed" is simply `View::List` — the `App`

@@ -2918,6 +2918,7 @@ impl HintContext {
       // #420: no filter verb — a rich view is prose, not a row set.
       HintContext::RichView => &[
         Hint::Lit("j/k", "select"),
+        Hint::Lit("h/l", "scroll"),
         Hint::Modal(ModalAction::RichViewTab, "issue/pr"),
         Hint::Modal(ModalAction::RichViewOpen, "open"),
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
@@ -3876,6 +3877,8 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::RichViewNext, "next row"),
       modal_entry(ModalAction::RichViewPrev, "previous row"),
       modal_entry(ModalAction::RichViewTab, "switch between the issue and the PR"),
+      modal_entry(ModalAction::RichViewLeft, "scroll code and diff lines left"),
+      modal_entry(ModalAction::RichViewRight, "scroll code and diff lines right"),
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
@@ -6386,6 +6389,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // fetched: a lone tab is a label, not a tab, and would cost two rows to
   // say what the title already says.
   let tabs = app.rich_view_tabs();
+  let h_offset = app.rich_h_offset();
   if !tabs.is_empty() {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (label, active) in &tabs {
@@ -6448,14 +6452,25 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       }
     }
     let value_budget = inner.saturating_sub(gutter + if extra_cols > 0 { extra_cols + 2 } else { 0 });
-    let value: String = if row.value.chars().count() > value_budget {
+    // A preformatted row is clipped by the offset below, not ellipsised
+    // here: an ellipsis would throw away the very columns the offset exists
+    // to reach (issue #551).
+    let value: String = if !row.preformatted && row.value.chars().count() > value_budget {
       let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
       v.push('…');
       v
     } else {
       row.value.clone()
     };
-    let text_cols = gutter + value.chars().count();
+    // Against what will actually be painted: a preformatted row clipped by
+    // the offset is shorter than its value, and padding for the full value
+    // would push the right-aligned detail column off the frame.
+    let painted = if row.segments.is_empty() || !row.preformatted {
+      value.chars().count()
+    } else {
+      value.chars().count().saturating_sub(h_offset).min(value_budget)
+    };
+    let text_cols = gutter + painted;
     let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
@@ -6481,14 +6496,26 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     if row.segments.is_empty() {
       spans.push(Span::styled(value, value_style));
     } else {
-      let mut left = value.chars().count();
+      // A preformatted row was never wrapped — it is code, where the column
+      // is the meaning — so it is clipped against the view's horizontal
+      // offset instead (issue #551). Every other row already fits, and
+      // scrolling one would only hide its left edge.
+      let skip = if row.preformatted { h_offset } else { 0 };
+      let mut skipped = 0usize;
+      let mut left = value_budget;
       for segment in &row.segments {
         if left == 0 {
           break;
         }
-        let take = segment.text.chars().count().min(left);
-        left -= take;
-        let text: String = segment.text.chars().take(take).collect();
+        let cols = segment.text.chars().count();
+        if skipped + cols <= skip {
+          skipped += cols;
+          continue;
+        }
+        let drop = skip.saturating_sub(skipped);
+        skipped += cols;
+        let text: String = segment.text.chars().skip(drop).take(left).collect();
+        left -= text.chars().count();
         let mut style = markdown_style(segment.emphasis, &app.theme);
         if i == ov.selected {
           style = style.bg(app.theme.selection_bg);

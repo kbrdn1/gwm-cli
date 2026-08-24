@@ -13668,3 +13668,80 @@ fn the_tab_bar_names_both_sides_and_marks_the_active_one() {
     vec![("Issue #42".to_string(), true), ("PR #61".to_string(), false)]
   );
 }
+
+#[test]
+fn the_horizontal_offset_only_moves_as_far_as_there_is_something_to_see() {
+  // Issue #551. A fenced line or a diff hunk is kept whole rather than
+  // reflowed, so the offset is the only way to its tail. Unbounded, it would
+  // scroll a view full of prose into blank space and leave the reader with
+  // no clue how to get back.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  let long = "x".repeat(400);
+  pr.detail.body = format!("prose\n\n```\n{long}\n```");
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+
+  assert_eq!(app.rich_h_offset(), 0, "it starts at the left edge");
+  app.rich_view_scroll_left();
+  assert_eq!(app.rich_h_offset(), 0, "and cannot go further left than that");
+
+  for _ in 0..200 {
+    app.rich_view_scroll_right();
+  }
+  let stopped = app.rich_h_offset();
+  assert!(stopped > 0, "the offset moved");
+  assert!(
+    stopped < 400,
+    "and stopped once the widest row's tail was on screen, at {stopped}"
+  );
+
+  app.rich_view_scroll_left();
+  assert!(app.rich_h_offset() < stopped, "left walks it back");
+}
+
+#[test]
+fn a_view_with_nothing_to_scroll_does_not_scroll() {
+  // Every row is wrapped to fit, so there is no tail to reach and moving
+  // would only hide the left edge of the text.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.set_term_width(200);
+  app.enter_rich_view();
+
+  app.rich_view_scroll_right();
+
+  assert_eq!(app.rich_h_offset(), 0);
+}
+
+#[test]
+fn switching_tab_or_closing_puts_the_offset_back_at_the_left_edge() {
+  // The offset describes one side's widest row. Carried across, it would
+  // open the other tab already scrolled, with its first columns hidden and
+  // nothing on screen saying why.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  app.rich_view_scroll_right();
+  assert!(app.rich_h_offset() > 0);
+
+  app.rich_view_next_tab();
+  assert_eq!(app.rich_h_offset(), 0, "a tab switch resets it");
+
+  app.rich_view_next_tab();
+  app.rich_view_scroll_right();
+  app.close_detail_overlay();
+  app.enter_rich_view();
+  assert_eq!(app.rich_h_offset(), 0, "and so does closing the view");
+}

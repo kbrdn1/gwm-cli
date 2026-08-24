@@ -384,6 +384,10 @@ define_modal_actions! {
     // than `h`/`l`, which the horizontal offset wants for the rows that
     // cannot wrap.
     RichViewTab     => "next_tab"    [ "Tab" ],
+    // #551: a fenced code line and a diff hunk are kept whole rather than
+    // reflowed, so this is the only way to their tail.
+    RichViewLeft    => "scroll_left"  [ "h", "Left" ],
+    RichViewRight   => "scroll_right" [ "l", "Right" ],
   }
   // #515: two verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see

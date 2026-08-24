@@ -253,3 +253,35 @@ fn a_marker_flanked_by_whitespace_does_not_delimit() {
   // The rules must not break the nominal case.
   assert_eq!(roles("**yes**"), vec![("yes".to_string(), Emphasis::Bold)]);
 }
+
+#[test]
+fn a_fenced_line_is_not_wrapped_it_is_kept_whole() {
+  // Issue #551. A wrapped `+` line's continuation carries no sigil and reads
+  // as context; a wrapped YAML line lands at the wrong indent. In code the
+  // column IS the meaning, which is the argument `hunk_rows` already makes
+  // for diff hunks (#528). So a fenced line is emitted WHOLE, past the
+  // budget if it has to be, and the horizontal offset is what reaches its
+  // tail.
+  let long = "x".repeat(200);
+  let got = render(&format!("```\n{long}\n```"), 40);
+  assert_eq!(got.len(), 1, "one source line, one rendered line: {got:?}");
+  assert_eq!(got[0].plain(), long, "kept whole rather than reflowed");
+  assert!(got[0].preformatted);
+}
+
+#[test]
+fn prose_still_wraps_next_to_a_fence_that_does_not() {
+  // The exemption is for preformatted lines only. A paragraph in the same
+  // body keeps wrapping, or the change would trade one unreadable view for
+  // another.
+  let got = render(&format!("{}\n\n```\n{}\n```", "word ".repeat(40), "y".repeat(90)), 30);
+  let prose: Vec<&MdLine> = got.iter().filter(|l| !l.preformatted).collect();
+  assert!(prose.len() > 1, "the paragraph wrapped");
+  for line in prose {
+    assert!(line.plain().chars().count() <= 30, "{:?}", line.plain());
+  }
+  assert!(
+    got.iter().any(|l| l.preformatted && l.plain().chars().count() == 90),
+    "and the fenced line did not: {got:?}"
+  );
+}

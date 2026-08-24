@@ -815,6 +815,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           },
           Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
           Some(ModalAction::RichViewTab) => app.rich_view_next_tab(),
+          Some(ModalAction::RichViewLeft) => app.rich_view_scroll_left(),
+          Some(ModalAction::RichViewRight) => app.rich_view_scroll_right(),
           _ => {}
         }
       }

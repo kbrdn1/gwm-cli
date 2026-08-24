@@ -290,6 +290,14 @@ pub struct WorkspaceState {
   pub active: usize,
 }
 
+/// Columns one `h` / `l` moves the rich view (issue #551).
+///
+/// Eight rather than one: the rows this scrolls are code and diff lines,
+/// where the reader is looking for a stretch of text rather than nudging a
+/// cursor, and a one-column step turns a 200-column line into a key-repeat
+/// exercise. Small enough to still land on a specific column in a few taps.
+const RICH_H_STEP: usize = 8;
+
 pub struct App {
   pub repo: Repository,
   /// The name `{repo}` expands to, in `branch_pattern`, `path_pattern` and
@@ -654,6 +662,15 @@ pub struct App {
   /// default still must be. This is the bit that tells them apart, and it
   /// belongs to one open overlay — `close_detail_overlay` clears it.
   rich_tab_pinned: bool,
+  /// How many columns the rich view is scrolled right (issue #551).
+  ///
+  /// Only the rows that cannot be reflowed are wide enough to need it — a
+  /// fenced code line, a diff hunk — and they are the reason it exists: in
+  /// code the column is the meaning, so the line is kept whole and this is
+  /// the only way to its tail. Every other row was wrapped to fit and simply
+  /// loses its left edge, which is why the offset is bounded by the widest
+  /// preformatted row rather than by the widest row.
+  rich_h_offset: usize,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
@@ -807,6 +824,7 @@ impl App {
       detail_overlay_target: None,
       detail_overlay_link: None,
       rich_tab_pinned: false,
+      rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
@@ -3421,7 +3439,46 @@ impl App {
       self.spawn_github_pr_threads(number);
     }
     self.rich_tab_pinned = true;
+    // The offset describes the side being left. Carried across, the other
+    // tab would open already scrolled, with its first columns hidden.
+    self.rich_h_offset = 0;
     self.open_rich_overlay(source, title, width);
+  }
+
+  /// How far right the rich view is scrolled, in columns (issue #551).
+  pub fn rich_h_offset(&self) -> usize {
+    self.rich_h_offset
+  }
+
+  /// The furthest right the view can usefully scroll: enough to bring the
+  /// widest PREFORMATTED row's last column on screen, and not one column
+  /// more.
+  ///
+  /// Bounded by the preformatted rows alone because they are the only ones
+  /// that can be wider than the modal. Bounding by the widest row of any
+  /// kind would be the same number in practice and wrong in principle: a
+  /// wrapped row has no tail to reach, so scrolling past its left edge only
+  /// hides text that was already fully on screen.
+  fn rich_h_max(&self) -> usize {
+    let widest = self
+      .detail_overlay
+      .rows
+      .iter()
+      .filter(|r| r.preformatted)
+      .map(|r| r.value.chars().count())
+      .max()
+      .unwrap_or(0);
+    widest.saturating_sub(self.rich_view_width())
+  }
+
+  /// `l` / `→` inside the rich view.
+  pub fn rich_view_scroll_right(&mut self) {
+    self.rich_h_offset = (self.rich_h_offset + RICH_H_STEP).min(self.rich_h_max());
+  }
+
+  /// `h` / `←` inside the rich view.
+  pub fn rich_view_scroll_left(&mut self) {
+    self.rich_h_offset = self.rich_h_offset.saturating_sub(RICH_H_STEP);
   }
 
   /// The URL of the selected rich-view row, when it carries one — the
@@ -3787,6 +3844,7 @@ impl App {
     self.detail_overlay_target = None;
     self.detail_overlay_link = None;
     self.rich_tab_pinned = false;
+    self.rich_h_offset = 0;
     self.ci_overlay_checks.clear();
     self.rich_overlay_source = None;
     self.view = View::List;

@@ -540,8 +540,10 @@ fn a_single_line_anchor_renders_one_number_not_a_range() {
 fn hunk_lines_keep_their_sigil_and_are_never_re_wrapped() {
   // The wrap path splits on whitespace, so a wrapped `+` line's
   // continuation would read as context — in a diff the sigil *is* the
-  // meaning. Long hunk lines are truncated instead, which keeps the row
-  // count equal to the line count.
+  // meaning. A long hunk line is kept whole instead, which keeps the row
+  // count equal to the line count. It USED to be truncated here; issue #551
+  // moved that decision to the renderer, which clips against the view's
+  // horizontal offset so the tail can still be reached.
   let long_add = format!("+{}", "x ".repeat(80));
   let hunk = format!("@@ -1,2 +1,2 @@\n context\n{long_add}");
   let state = loaded(vec![thread("a.rs", Some(2), None, &hunk, &["see above"])], 1);
@@ -574,8 +576,12 @@ fn hunk_lines_keep_their_sigil_and_are_never_re_wrapped() {
     );
   }
   assert!(
-    hunk_rows.iter().any(|v| v.contains('…')),
-    "the cut has to be visible: {hunk_rows:?}"
+    hunk_rows.iter().any(|v| v.chars().count() > W),
+    "the long line is kept whole for the offset to scroll: {hunk_rows:?}"
+  );
+  assert!(
+    !hunk_rows.iter().any(|v| v.contains('…')),
+    "and nothing is thrown away before it can be scrolled to: {hunk_rows:?}"
   );
 }
 
@@ -695,7 +701,13 @@ fn every_thread_row_fits_the_budget() {
     1,
   );
 
+  // Preformatted rows excepted (issue #551): a diff hunk and a fenced code
+  // line are kept whole and clipped by the renderer against the horizontal
+  // offset, because reflowing them would change what they say.
   for row in rich_pr_rows(&sample_pr(), &state, W) {
+    if row.preformatted {
+      continue;
+    }
     let width = row_width(&row);
     assert!(width <= W, "row overflows the modal: {width} > {W} — {row:?}");
   }
@@ -825,5 +837,53 @@ fn a_closed_issue_is_not_painted_like_a_closed_pr() {
   assert_eq!(
     roles_for(&rich_issue_rows(&issue, W), "state").first().map(|(_, e)| *e),
     Some(Emphasis::Notice)
+  );
+}
+
+#[test]
+fn a_preformatted_row_may_outrun_the_budget_and_says_that_it_is_one() {
+  // Issue #551, and the one exception to `no_row_overflows_the_width_it_was
+  // _built_for` above. A fenced line is kept whole rather than reflowed,
+  // because in code the column is the meaning — the same call `hunk_rows`
+  // already made for a diff hunk. The row is flagged so the renderer knows
+  // to clip it against the horizontal offset instead of assuming it fits.
+  let mut pr = sample_pr();
+  let long = "x".repeat(200);
+  pr.detail.body = format!("prose\n\n```\n{long}\n```");
+
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let wide: Vec<_> = rows.iter().filter(|r| r.value.chars().count() > W).collect();
+
+  assert_eq!(wide.len(), 1, "exactly the fenced line: {wide:?}");
+  assert!(wide[0].preformatted, "and it is flagged as preformatted");
+  assert!(
+    rows.iter().filter(|r| !r.preformatted).all(|r| row_width(r) <= W),
+    "every other row still fits: {:?}",
+    rows
+      .iter()
+      .filter(|r| !r.preformatted && row_width(r) > W)
+      .collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn a_diff_hunk_row_is_preformatted_too() {
+  // Same reason, and it predates the flag: `hunk_rows` truncates rather than
+  // wraps because a wrapped `+` line's continuation reads as context.
+  let state = loaded(
+    vec![thread(
+      "src/tui/ui.rs",
+      Some(7),
+      Some(7),
+      &format!("@@ -1 +1 @@\n+{}", "z".repeat(200)),
+      &["looks long"],
+    )],
+    1,
+  );
+  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  assert!(
+    rows.iter().any(|r| r.preformatted && r.value.contains('z')),
+    "the hunk line must be flagged: {:?}",
+    rows.iter().map(|r| &r.value).collect::<Vec<_>>()
   );
 }

@@ -140,7 +140,16 @@ pub fn render(body: &str, budget: usize) -> Vec<MdLine> {
         fence = None;
         continue;
       }
-      out.extend(wrap(vec![Segment::new(raw, Emphasis::Code)], budget, true, "", ""));
+      // NOT wrapped, and past the budget when it has to be (issue #551).
+      // A wrapped `+` line's continuation carries no sigil and reads as
+      // context; a wrapped YAML line lands at the wrong indent. In code the
+      // column is the meaning, which is the argument `rich_view::hunk_rows`
+      // already makes for a diff hunk. The horizontal offset is what
+      // reaches the tail of one of these.
+      out.push(MdLine {
+        segments: vec![Segment::new(raw, Emphasis::Code)],
+        preformatted: true,
+      });
       continue;
     }
 

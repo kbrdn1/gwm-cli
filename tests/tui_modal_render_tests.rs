@@ -2210,3 +2210,55 @@ fn dump_the_tabbed_rich_view() {
   let buf = render_at(&mut app, 160, 50);
   println!("{}", row_strings(&buf).join("\n"));
 }
+
+#[test]
+fn scrolling_right_brings_a_code_lines_tail_on_screen() {
+  // Issue #551. The offset is state; this is the half that matters. A fenced
+  // line is kept whole rather than reflowed, so without the renderer
+  // honouring the offset its tail is simply unreachable — and the row-level
+  // ellipsis that used to cut it would throw those columns away before
+  // anything could scroll to them.
+  //
+  // The needle is a marker placed at column 300 of a 400-column line, which
+  // no plausible modal width can show at rest.
+  let mut line = "x".repeat(400);
+  line.replace_range(300..309, "NEEDLEHIT");
+  let (_dir, mut app) = app_with_the_rich_view_open(&format!("```\n{line}\n```"));
+  app.set_term_width(160);
+
+  let before = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    !before.contains("NEEDLEHIT"),
+    "precondition: the tail is off screen at rest — modal:\n{before}"
+  );
+
+  for _ in 0..40 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+
+  assert!(
+    after.contains("NEEDLEHIT"),
+    "scrolling right must reach it — modal:\n{after}"
+  );
+}
+
+#[test]
+fn scrolling_leaves_the_wrapped_prose_where_it_was() {
+  // The offset is bounded to preformatted rows on purpose: prose was
+  // wrapped to fit, so it has no tail to reach and sliding it would only
+  // hide its left edge.
+  let (_dir, mut app) =
+    app_with_the_rich_view_open(&format!("A paragraph that stays put.\n\n```\n{}\n```", "x".repeat(400)));
+  app.set_term_width(160);
+  let _ = render_at(&mut app, 160, 50);
+  for _ in 0..40 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+
+  assert!(
+    after.contains("A paragraph that stays put."),
+    "the prose must not slide out of the frame — modal:\n{after}"
+  );
+}

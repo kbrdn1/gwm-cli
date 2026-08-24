@@ -415,7 +415,7 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
     ..Default::default()
   });
 
-  hunk_rows(rows, &t.diff_hunk, budget);
+  hunk_rows(rows, &t.diff_hunk);
 
   for c in &t.comments {
     rows.push(DetailRow {
@@ -446,7 +446,7 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
 /// context — in a diff the leading `+` / `-` / space *is* the meaning, and
 /// a line that silently changes side is worse than one that is visibly
 /// cut. Prose can afford the reflow; this cannot.
-fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
+fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str) {
   if hunk.trim().is_empty() {
     return;
   }
@@ -458,12 +458,16 @@ fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
     more(rows, format!("    … {start} earlier hunk lines"));
   }
   for line in &lines[start..] {
+    // Whole, not truncated (issue #551): the row is flagged preformatted and
+    // the horizontal offset reaches its tail. Truncating here threw the tail
+    // away before anything could scroll to it.
+    let text = format!("    {line}");
     rows.push(DetailRow {
       label: String::new(),
-      value: truncate(&format!("    {line}"), budget),
+      value: text.clone(),
       role: DetailRole::Muted,
-      meta: None,
-      extra: None,
+      preformatted: true,
+      segments: vec![Segment::new(text, Emphasis::Code)],
       ..Default::default()
     });
   }
@@ -490,6 +494,7 @@ fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, indent: &str)
       label: String::new(),
       value: segments.iter().map(|s| s.text.as_str()).collect(),
       role: DetailRole::Normal,
+      preformatted: line.preformatted,
       segments,
       ..Default::default()
     });
