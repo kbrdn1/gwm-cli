@@ -3288,7 +3288,12 @@ impl App {
     let (kind, rows, target, number) = match &source {
       RichSource::Pr(pr) => (
         crate::tui::state::detail_overlay::DetailKind::RichPr,
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        crate::tui::state::rich_view::rich_pr_rows(
+          pr,
+          self.github.pr_threads_state(pr.number),
+          width,
+          &self.pr_noun_titlecase(),
+        ),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -3363,9 +3368,12 @@ impl App {
     }
     let width = self.rich_view_width();
     let rows = match &self.rich_overlay_source {
-      Some(RichSource::Pr(pr)) => {
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width)
-      }
+      Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(
+        pr,
+        self.github.pr_threads_state(pr.number),
+        width,
+        &self.pr_noun_titlecase(),
+      ),
       Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
       None => return,
     };
@@ -3473,7 +3481,11 @@ impl App {
       .rows
       .iter()
       .filter(|r| r.preformatted)
-      .map(|r| r.value.chars().count())
+      // In terminal CELLS, the unit the modal's width is in (Codex review
+      // on #551). A line of CJK is twice as wide as it is long, so a
+      // character count bounds the offset at half of what the line needs
+      // and its tail stays unreachable.
+      .map(|r| crate::tui::ui::cells(&r.value))
       .max()
       .unwrap_or(0);
     widest.saturating_sub(self.rich_view_width())
@@ -6609,7 +6621,12 @@ impl App {
     let width = self.rich_view_width();
     let (rows, target, number) = match &source {
       RichSource::Pr(pr) => (
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        crate::tui::state::rich_view::rich_pr_rows(
+          pr,
+          self.github.pr_threads_state(pr.number),
+          width,
+          &self.pr_noun_titlecase(),
+        ),
         LinkTarget::Pr,
         pr.number,
       ),

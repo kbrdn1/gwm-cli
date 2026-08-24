@@ -38,6 +38,7 @@ use crate::forge::{
   ForgeComment, ForgeReview, IssueStatus, PrState, PrStatus, ReviewState, ReviewThread, ReviewThreads,
 };
 use crate::naming::{sanitise_block_for_terminal, sanitise_for_terminal};
+use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, ISSUE_ICON, PR_ICON};
 
 /// Width the metadata block's label column is expected to need. The wrap
 /// budget no longer subtracts it (see [`wrap_budget`]), but the METADATA
@@ -58,15 +59,36 @@ const HUNK_MAX_LINES: usize = 6;
 /// **separate** transport from the PR itself and therefore has its own
 /// state: it is still in flight when this view first opens, and on a
 /// backend that cannot answer it never resolves to a list at all.
-pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, width: usize) -> Vec<DetailRow> {
+pub fn rich_pr_rows(
+  pr: &PrStatus,
+  threads: &GitHubFetchState<ReviewThreads>,
+  width: usize,
+  noun: &str,
+) -> Vec<DetailRow> {
   let mut rows = Vec::new();
   let d = &pr.detail;
 
-  meta_segments(
-    &mut rows,
-    "state",
-    vec![Segment::new(pr_state_label(pr.state), pr_state_role(pr.state))],
-  );
+  // One line saying identity, state and CI, the way the Status pane behind
+  // the modal says them (validation feedback on issue #551). It replaces
+  // the `state` and `checks` rows rather than sitting above them.
+  let role = pr_state_role(pr.state);
+  let mut identity = vec![
+    Segment::new(format!("{PR_ICON} "), role),
+    // `MR` for GitLab, following the resolved forge the way the overlay
+    // title does (issue #419). The caller owns the noun; this only shortens
+    // it, since a badge line has no room for `Merge request #519`.
+    Segment::new(format!("{} #{}", short_noun(noun), pr.number), Emphasis::Plain),
+    Segment::new(" ", Emphasis::Plain),
+    Segment::chip(format!(" {} ", pr_state_label(pr.state)), role),
+  ];
+  if let Some((label, ci_role, icon)) = ci_summary(pr) {
+    identity.push(Segment::new(" ", Emphasis::Plain));
+    identity.push(Segment::chip(
+      format!(" {icon} CI {label} {}/{} ", pr.checks_passed, pr.checks_total),
+      ci_role,
+    ));
+  }
+  meta_segments(&mut rows, "", identity);
   if !d.author.is_empty() {
     meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
   }
@@ -95,22 +117,6 @@ pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, wi
       ],
     );
   }
-  if pr.checks_total > 0 {
-    let (label, role) = match pr.ci {
-      crate::forge::CiState::Passing => ("passing", Emphasis::Success),
-      crate::forge::CiState::Failing => ("failing", Emphasis::Failure),
-      crate::forge::CiState::Running => ("running", Emphasis::Running),
-      crate::forge::CiState::None => ("no checks", Emphasis::Muted),
-    };
-    meta_segments(
-      &mut rows,
-      "checks",
-      vec![Segment::new(
-        format!("{label} {}/{}", pr.checks_passed, pr.checks_total),
-        role,
-      )],
-    );
-  }
   if !pr.updated_at.is_empty() {
     meta(&mut rows, "updated", day(&pr.updated_at));
   }
@@ -136,7 +142,16 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
     crate::forge::IssueState::Open => ("open", Emphasis::Success),
     crate::forge::IssueState::Closed => ("closed", Emphasis::Notice),
   };
-  meta_segments(&mut rows, "state", vec![Segment::new(label, role)]);
+  meta_segments(
+    &mut rows,
+    "",
+    vec![
+      Segment::new(format!("{ISSUE_ICON} "), role),
+      Segment::new(format!("Issue #{}", issue.number), Emphasis::Plain),
+      Segment::new(" ", Emphasis::Plain),
+      Segment::chip(format!(" {label} "), role),
+    ],
+  );
   if !d.author.is_empty() {
     meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
   }
@@ -206,6 +221,34 @@ fn meta_segments(rows: &mut Vec<DetailRow>, label: &str, segments: Vec<Segment>)
     segments,
     ..Default::default()
   });
+}
+
+/// `PR` / `MR`: the identity line is a badge row, with no room for
+/// `Merge request #519`. Derived from the noun the caller resolved rather
+/// than from a second forge lookup, so the two cannot disagree.
+fn short_noun(noun: &str) -> &'static str {
+  if noun.to_ascii_lowercase().starts_with("merge") {
+    "MR"
+  } else {
+    "PR"
+  }
+}
+
+/// The CI half of the identity row, or `None` when there is nothing
+/// measured to say. Mirrors `ui::ci_indicator`, which cannot be called from
+/// here: it resolves theme colours, and this module stays ratatui-free.
+fn ci_summary(pr: &PrStatus) -> Option<(&'static str, Emphasis, &'static str)> {
+  if pr.checks_total == 0 {
+    return None;
+  }
+  match pr.ci {
+    crate::forge::CiState::Passing => Some(("passing", Emphasis::Success, CI_PASSING_ICON)),
+    crate::forge::CiState::Failing => Some(("failing", Emphasis::Failure, CI_FAILING_ICON)),
+    crate::forge::CiState::Running => Some(("running", Emphasis::Running, CI_RUNNING_ICON)),
+    // `checks_total > 0` with no state is a payload gwm cannot read, not a
+    // PR without checks, so it says nothing rather than saying "none".
+    crate::forge::CiState::None => None,
+  }
 }
 
 /// The colour a PR state takes, following `ui::pr_badge_color`.
@@ -281,20 +324,21 @@ fn reviews_section(rows: &mut Vec<DetailRow>, reviews: &[ForgeReview], budget: u
       ReviewState::Pending => DetailRole::Running,
       _ => DetailRole::Muted,
     };
+    let segments = vec![
+      Segment::chip(format!(" {} ", r.state.label()), verdict_role(r.state)),
+      Segment::new(
+        truncate(
+          &format!(" {} · {}", sanitise_for_terminal(&r.author), day(&r.submitted_at)),
+          budget,
+        ),
+        Emphasis::Plain,
+      ),
+    ];
     rows.push(DetailRow {
       label: String::new(),
-      value: truncate(
-        &format!(
-          "{} · {} · {}",
-          r.state.label(),
-          sanitise_for_terminal(&r.author),
-          day(&r.submitted_at)
-        ),
-        budget,
-      ),
+      value: segments.iter().map(|s| s.text.as_str()).collect(),
       role,
-      meta: None,
-      extra: None,
+      segments,
       ..Default::default()
     });
     // A bare approval carries no body, which is the common case.
@@ -308,18 +352,7 @@ fn comments_section(rows: &mut Vec<DetailRow>, comments: &[ForgeComment], budget
   }
   heading(rows, format!("comments ({})", comments.len()));
   for c in comments {
-    rows.push(DetailRow {
-      label: String::new(),
-      value: truncate(
-        &format!("{} · {}", sanitise_for_terminal(&c.author), day(&c.created_at)),
-        budget,
-      ),
-      role: DetailRole::Normal,
-      // The permalink, so Enter opens the thread on the forge.
-      meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
-      extra: None,
-      ..Default::default()
-    });
+    rows.push(author_header("", &c.author, &c.created_at, budget, c.url.as_deref()));
     push_body(rows, &c.body, budget.saturating_sub(2).max(8), "  ");
   }
 }
@@ -418,18 +451,13 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
   hunk_rows(rows, &t.diff_hunk);
 
   for c in &t.comments {
-    rows.push(DetailRow {
-      label: String::new(),
-      value: truncate(
-        &format!("    {} · {}", sanitise_for_terminal(&c.author), day(&c.created_at)),
-        budget,
-      ),
-      role: DetailRole::Normal,
-      // The permalink to this very comment, so Enter opens it on the forge.
-      meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
-      extra: None,
-      ..Default::default()
-    });
+    rows.push(author_header(
+      "    ",
+      &c.author,
+      &c.created_at,
+      budget,
+      c.url.as_deref(),
+    ));
     push_body(rows, &c.body, budget.saturating_sub(2).max(8), "      ");
   }
   // Same distinction as the thread list: what the fetch did not return.
@@ -498,6 +526,49 @@ fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, indent: &str)
       segments,
       ..Default::default()
     });
+  }
+}
+
+/// A comment header: the author as a badge, the date as plain text
+/// (validation feedback on issue #551). One helper for the conversation and
+/// for the inline threads, so the two sections cannot read as different
+/// kinds of content.
+fn author_header(indent: &str, author: &str, created_at: &str, budget: usize, url: Option<&str>) -> DetailRow {
+  let mut segments = Vec::new();
+  if !indent.is_empty() {
+    segments.push(Segment::new(indent.to_string(), Emphasis::Plain));
+  }
+  // `name` rather than an outcome colour: an author is an identity, not a
+  // verdict. Same role the directory badge in the header takes.
+  segments.push(Segment::chip(
+    format!(" {} ", sanitise_for_terminal(author)),
+    Emphasis::Plain,
+  ));
+  segments.push(Segment::new(
+    truncate(&format!(" {}", day(created_at)), budget),
+    Emphasis::Muted,
+  ));
+  DetailRow {
+    label: String::new(),
+    value: segments.iter().map(|s| s.text.as_str()).collect(),
+    role: DetailRole::Normal,
+    segments,
+    // The permalink, so Enter opens the thread on the forge.
+    meta: url.map(sanitise_for_terminal),
+    ..Default::default()
+  }
+}
+
+/// The colour a review verdict takes. `Pending` is in flight, `Commented`
+/// and `Dismissed` carry no verdict, and `Unknown` is a state this build
+/// did not read (see `ReviewState::Unknown`) — none of them is an outcome,
+/// so none of them gets an outcome colour.
+fn verdict_role(s: ReviewState) -> Emphasis {
+  match s {
+    ReviewState::Approved => Emphasis::Success,
+    ReviewState::ChangesRequested => Emphasis::Failure,
+    ReviewState::Pending => Emphasis::Running,
+    ReviewState::Commented | ReviewState::Dismissed | ReviewState::Unknown => Emphasis::Muted,
   }
 }
 

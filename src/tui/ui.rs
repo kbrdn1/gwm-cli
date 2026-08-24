@@ -5869,7 +5869,7 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
 /// `debug_assert!` saying so. A Unix path may legally hold a `\n`, and this
 /// helper does not sanitise (that is `trunc`'s job, #506), so measuring one
 /// directly panicked every debug build.
-fn cells(s: &str) -> usize {
+pub fn cells(s: &str) -> usize {
   s.graphemes(true).map(grapheme_cells).sum()
 }
 
@@ -5950,6 +5950,27 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   // The two slices cannot meet: `head + tail` is `max - 1`, and we only get
   // here when the whole string is wider than `max`.
   format!("{}…{}", &s[..head_end], &s[tail_start..])
+}
+
+/// Byte index at which `skip` terminal CELLS of `s` have been consumed.
+///
+/// The counterpart of [`head_end`], for the horizontal offset of the rich
+/// view (Codex review on #551): both the bound and the clip used to count
+/// characters, and a line of CJK is twice as wide as it is long, so the
+/// tail of one could not be reached at any offset. A glyph straddling the
+/// boundary is dropped whole rather than half-shown.
+pub fn skip_cells(s: &str, skip: usize) -> usize {
+  if skip == 0 {
+    return 0;
+  }
+  let mut used = 0usize;
+  for (i, g) in s.grapheme_indices(true) {
+    if used >= skip {
+      return i;
+    }
+    used += grapheme_cells(g);
+  }
+  s.len()
 }
 
 /// Right-pad `s` to `width` terminal cells.
@@ -6468,7 +6489,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let painted = if row.segments.is_empty() || !row.preformatted {
       value.chars().count()
     } else {
-      value.chars().count().saturating_sub(h_offset).min(value_budget)
+      cells(&value).saturating_sub(h_offset).min(value_budget)
     };
     let text_cols = gutter + painted;
     let pad = inner.saturating_sub(text_cols + extra_cols);
@@ -6507,17 +6528,32 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         if left == 0 {
           break;
         }
-        let cols = segment.text.chars().count();
+        // Measured in CELLS throughout (Codex review on #551). `value_budget`
+        // is a column count and so is the offset; counting the text in
+        // characters against them puts the tail of a CJK line out of reach
+        // at every offset.
+        let cols = cells(&segment.text);
         if skipped + cols <= skip {
           skipped += cols;
           continue;
         }
         let drop = skip.saturating_sub(skipped);
         skipped += cols;
-        let text: String = segment.text.chars().skip(drop).take(left).collect();
-        left -= text.chars().count();
+        let kept = &segment.text[skip_cells(&segment.text, drop)..];
+        let text: String = kept[..head_end(kept, left)].to_string();
+        left -= cells(&text);
         let mut style = markdown_style(segment.emphasis, &app.theme);
-        if i == ov.selected {
+        // A badge run goes through the Status pane's own `chip_style`, so
+        // the two surfaces cannot drift into resembling each other instead
+        // of matching (validation feedback on issue #551).
+        if segment.chip {
+          style = match style.fg {
+            Some(fg) => chip_style(fg),
+            None => style,
+          };
+        } else if i == ov.selected {
+          // A chip is already reverse video; painting the selection
+          // background under it would swap its ground and erase it.
           style = style.bg(app.theme.selection_bg);
         }
         spans.push(Span::styled(text, style));

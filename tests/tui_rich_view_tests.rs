@@ -113,6 +113,38 @@ fn value_for(rows: &[gwm::tui::state::detail_overlay::DetailRow], label: &str) -
   rows.iter().find(|r| r.label == label).map(|r| r.value.clone())
 }
 
+/// The identity row: the label-less badge line the `state` and `checks`
+/// rows were folded into (validation feedback on issue #551).
+fn identity(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> String {
+  rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))
+    .map(|r| r.value.clone())
+    .unwrap_or_default()
+}
+
+/// The badge text on the identity row, without its padding.
+fn state_badge(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Option<String> {
+  rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))?
+    .segments
+    .iter()
+    .find(|s| s.chip)
+    .map(|s| s.text.trim().to_string())
+}
+
+/// The role of the state badge on the identity row.
+fn state_role(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Option<Emphasis> {
+  rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))?
+    .segments
+    .iter()
+    .find(|s| s.chip)
+    .map(|s| s.emphasis)
+}
+
 #[test]
 fn every_emitted_label_fits_the_reserved_column() {
   // `LABEL_W` is an ASSUMPTION here and a DERIVED value in the renderer,
@@ -122,7 +154,7 @@ fn every_emitted_label_fits_the_reserved_column() {
   // would keep passing. This is the assertion that makes the width checks
   // mean something.
   let rows = [
-    rich_pr_rows(&sample_pr(), &NO_THREADS, W),
+    rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request"),
     rich_issue_rows(&sample_issue(), W),
   ]
   .concat();
@@ -137,9 +169,9 @@ fn every_emitted_label_fits_the_reserved_column() {
 
 #[test]
 fn pr_rows_carry_the_metadata_block() {
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
 
-  assert_eq!(value_for(&rows, "state").as_deref(), Some("open"));
+  assert_eq!(state_badge(&rows).as_deref(), Some("open"));
   assert_eq!(value_for(&rows, "author").as_deref(), Some("kbrdn1"));
   assert_eq!(
     value_for(&rows, "branch").as_deref(),
@@ -147,7 +179,11 @@ fn pr_rows_carry_the_metadata_block() {
     "head → base, the direction the merge actually goes"
   );
   assert_eq!(value_for(&rows, "diff").as_deref(), Some("+1198 −12"));
-  assert_eq!(value_for(&rows, "checks").as_deref(), Some("passing 7/7"));
+  assert!(
+    identity(&rows).contains("CI passing 7/7"),
+    "the CI rollup moved onto the identity row: {:?}",
+    identity(&rows)
+  );
   assert_eq!(
     value_for(&rows, "updated").as_deref(),
     Some("2026-08-04"),
@@ -157,7 +193,7 @@ fn pr_rows_carry_the_metadata_block() {
 
 #[test]
 fn the_url_row_is_the_actionable_one() {
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
   let url = rows.iter().find(|r| r.label == "url").expect("a url row");
 
   assert_eq!(url.value, "https://github.com/kbrdn1/gwm-cli/pull/519");
@@ -176,7 +212,7 @@ because the overlay renderer truncates a value instead of wrapping it, so the wr
 is this builder's job and nothing else's."
     .into();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
 
   for r in &rows {
     assert!(
@@ -199,7 +235,7 @@ fn a_word_longer_than_the_budget_is_hard_split() {
   // one over-wide row and the renderer would ellipsise the tail away.
   pr.detail.body = format!("see {}", "x".repeat(200));
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
 
   for r in &rows {
     assert!(row_width(r) <= W, "unbreakable word must be hard split");
@@ -217,7 +253,7 @@ fn a_long_body_is_rendered_whole_because_the_scroll_is_the_budget() {
   let mut pr = sample_pr();
   pr.detail.body = (0..500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
   let vals = values(&rows);
 
   assert_eq!(
@@ -249,7 +285,7 @@ fn every_comment_of_the_conversation_is_rendered() {
     })
     .collect();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
   let vals = values(&rows);
 
   assert!(
@@ -276,7 +312,7 @@ fn control_and_bidi_characters_are_neutralised() {
   pr.detail.body = "safe \u{202E}txet desrever\u{202C} and \u{000D}overwrite".into();
   pr.detail.author = "al\u{202E}ice".into();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
 
   for r in &rows {
     assert!(
@@ -293,7 +329,7 @@ fn control_and_bidi_characters_are_neutralised() {
 #[test]
 fn reviews_are_listed_with_their_verdict() {
   use gwm::tui::state::detail_overlay::DetailRole;
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
   let vals = values(&rows);
 
   assert!(
@@ -319,7 +355,7 @@ fn reviews_are_listed_with_their_verdict() {
 
 #[test]
 fn comments_carry_their_permalink_as_meta() {
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
 
   let head = rows
     .iter()
@@ -337,7 +373,7 @@ fn a_summary_only_pr_renders_no_empty_sections() {
   let mut pr = sample_pr();
   pr.detail = PrDetail::default();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
   let vals = values(&rows);
 
   assert!(
@@ -347,7 +383,7 @@ fn a_summary_only_pr_renders_no_empty_sections() {
   assert!(!vals.iter().any(|v| v.starts_with("reviews")));
   assert!(!vals.iter().any(|v| v.starts_with("comments")));
   // The summary tier still renders — a GitLab MR lands exactly here.
-  assert_eq!(value_for(&rows, "state").as_deref(), Some("open"));
+  assert_eq!(state_badge(&rows).as_deref(), Some("open"));
   assert!(
     value_for(&rows, "diff").is_none(),
     "a 0/0 diff is a missing measurement, not an empty one"
@@ -360,7 +396,7 @@ fn issue_rows_drop_what_an_issue_does_not_have() {
   let rows = rich_issue_rows(&sample_issue(), W);
   let vals = values(&rows);
 
-  assert_eq!(value_for(&rows, "state").as_deref(), Some("open"));
+  assert_eq!(state_badge(&rows).as_deref(), Some("open"));
   assert_eq!(value_for(&rows, "author").as_deref(), Some("kbrdn1"));
   assert_eq!(value_for(&rows, "labels").as_deref(), Some("feature, tui"));
   assert!(value_for(&rows, "checks").is_none(), "an issue has no CI");
@@ -377,7 +413,7 @@ fn a_draft_pr_says_draft() {
   let mut pr = sample_pr();
   pr.state = PrState::Draft;
   assert_eq!(
-    value_for(&rich_pr_rows(&pr, &NO_THREADS, W), "state").as_deref(),
+    state_badge(&rich_pr_rows(&pr, &NO_THREADS, W, "Pull request")).as_deref(),
     Some("draft")
   );
 }
@@ -387,7 +423,7 @@ fn a_zero_width_budget_does_not_panic_or_loop() {
   // `overlay_modal_width` clamps at 48, so this cannot happen through the
   // TUI — but a wrap loop that never advances hangs the whole render
   // thread, and that is not a failure mode worth leaving reachable.
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, 0);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, 0, "Pull request");
   assert!(!rows.is_empty());
 }
 
@@ -401,7 +437,7 @@ fn a_preformatted_block_keeps_its_indentation() {
   let mut pr = sample_pr();
   pr.detail.body = "Config:\n\n```yaml\njobs:\n  build:\n    runs-on: ubuntu\n```\n\nA | B\n--- | ---\n1 | 2".into();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
   let vals = values(&rows);
 
   assert!(
@@ -425,7 +461,7 @@ fn a_wrapped_continuation_keeps_the_line_indent() {
   let mut pr = sample_pr();
   pr.detail.body = format!("    {}", "alpha ".repeat(40));
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
   let body: Vec<&String> = rows.iter().map(|r| &r.value).filter(|v| v.contains("alpha")).collect();
 
   assert!(body.len() > 1, "precondition: the line had to wrap");
@@ -454,7 +490,7 @@ fn indented_comment_and_review_bodies_stay_inside_the_budget() {
   pr.detail.comments[0].body = body.clone();
   pr.detail.reviews[1].body = body;
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
 
   for r in &rows {
     assert!(
@@ -510,7 +546,7 @@ fn a_thread_renders_its_anchor_its_hunk_and_its_chain() {
     1,
   );
 
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "Pull request");
   let text = values(&rows).join("\n");
 
   // The anchor is what tells the reader which code is under discussion.
@@ -530,7 +566,7 @@ fn a_single_line_anchor_renders_one_number_not_a_range() {
     1,
   );
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request")).join("\n");
 
   assert!(text.contains("src/lib.rs:3"), "in:\n{text}");
   assert!(!text.contains("src/lib.rs:3-3"), "a null startLine is not a range");
@@ -548,7 +584,7 @@ fn hunk_lines_keep_their_sigil_and_are_never_re_wrapped() {
   let hunk = format!("@@ -1,2 +1,2 @@\n context\n{long_add}");
   let state = loaded(vec![thread("a.rs", Some(2), None, &hunk, &["see above"])], 1);
 
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "Pull request");
   // Identified by role, not by their first character: a filter that looks
   // for a sigil cannot see a row that LOST one, which is the whole bug.
   // The metadata block's `diff: +1198 −12` carries a label, and the
@@ -591,7 +627,7 @@ fn a_long_hunk_keeps_its_tail_because_the_anchor_is_the_last_line() {
   let hunk = format!("@@ -1,20 +1,21 @@\n{body}+the anchored line");
   let state = loaded(vec![thread("a.rs", Some(21), None, &hunk, &["here"])], 1);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request")).join("\n");
 
   assert!(
     text.contains("+the anchored line"),
@@ -607,7 +643,9 @@ fn a_long_hunk_keeps_its_tail_because_the_anchor_is_the_last_line() {
 fn an_unsupported_forge_says_so_instead_of_reporting_none() {
   let state = GitHubFetchState::Loaded(ReviewThreads::Unsupported);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n").to_lowercase();
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request"))
+    .join("\n")
+    .to_lowercase();
 
   assert!(
     text.contains("not available") || text.contains("github only"),
@@ -620,20 +658,29 @@ fn an_unsupported_forge_says_so_instead_of_reporting_none() {
 fn zero_threads_reads_as_zero_not_as_a_missing_section() {
   let state = loaded(vec![], 0);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n").to_lowercase();
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request"))
+    .join("\n")
+    .to_lowercase();
 
   assert!(text.contains("no inline comments"), "a clean PR says so:\n{text}");
 }
 
 #[test]
 fn an_inflight_fetch_and_a_failed_one_are_both_visible() {
-  let loading = values(&rich_pr_rows(&sample_pr(), &GitHubFetchState::Loading, W)).join("\n");
+  let loading = values(&rich_pr_rows(
+    &sample_pr(),
+    &GitHubFetchState::Loading,
+    W,
+    "Pull request",
+  ))
+  .join("\n");
   assert!(loading.to_lowercase().contains("loading"), "in:\n{loading}");
 
   let failed = values(&rich_pr_rows(
     &sample_pr(),
     &GitHubFetchState::Error("gh: HTTP 403".into()),
     W,
+    "Pull request",
   ))
   .join("\n");
   assert!(failed.contains("gh: HTTP 403"), "in:\n{failed}");
@@ -641,7 +688,7 @@ fn an_inflight_fetch_and_a_failed_one_are_both_visible() {
 
 #[test]
 fn an_idle_fetch_renders_no_threads_section_at_all() {
-  let text = values(&rich_pr_rows(&sample_pr(), &NO_THREADS, W))
+  let text = values(&rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request"))
     .join("\n")
     .to_lowercase();
 
@@ -657,7 +704,7 @@ fn a_capped_thread_list_states_what_it_dropped() {
     .collect();
   let state = loaded(threads, 9);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request")).join("\n");
 
   assert!(text.contains("6 more"), "9 reported, 3 rendered:\n{text}");
 }
@@ -668,7 +715,7 @@ fn a_capped_comment_chain_states_what_it_dropped() {
   t.total_comments = 4;
   let state = loaded(vec![t], 1);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request")).join("\n");
 
   assert!(text.contains("3 more"), "4 reported, 1 rendered:\n{text}");
 }
@@ -681,7 +728,9 @@ fn a_resolved_or_outdated_thread_is_labelled() {
   outdated.is_outdated = true;
   let state = loaded(vec![resolved, outdated], 2);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n").to_lowercase();
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request"))
+    .join("\n")
+    .to_lowercase();
 
   assert!(text.contains("resolved"), "in:\n{text}");
   assert!(text.contains("outdated"), "in:\n{text}");
@@ -704,7 +753,7 @@ fn every_thread_row_fits_the_budget() {
   // Preformatted rows excepted (issue #551): a diff hunk and a fenced code
   // line are kept whole and clipped by the renderer against the horizontal
   // offset, because reflowing them would change what they say.
-  for row in rich_pr_rows(&sample_pr(), &state, W) {
+  for row in rich_pr_rows(&sample_pr(), &state, W, "Pull request") {
     if row.preformatted {
       continue;
     }
@@ -728,7 +777,7 @@ fn a_thread_body_is_sanitised_like_every_other_remote_text() {
     1,
   );
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request")).join("\n");
 
   assert!(!text.contains('\u{202e}'), "a bidi override reached the renderer");
 }
@@ -746,7 +795,7 @@ fn the_hunk_is_sanitised_too() {
     1,
   );
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "Pull request")).join("\n");
 
   assert!(!text.contains('\u{202e}'), "the hunk is remote text as well");
 }
@@ -755,7 +804,7 @@ fn the_hunk_is_sanitised_too() {
 fn a_thread_row_carries_the_comment_permalink() {
   let state = loaded(vec![thread("a.rs", Some(1), None, "@@ -1 +1 @@\n+x", &["c"])], 1);
 
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "Pull request");
 
   assert!(
     rows
@@ -789,12 +838,21 @@ fn the_metadata_block_is_coloured_the_way_the_status_pane_colours_it() {
   // the URL, while the Status pane right behind the modal colours the same
   // facts. Same facts, same vocabulary: an open PR is `Success`, the way
   // `pr_badge_color` sends it to `theme.clean`.
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
-  assert_eq!(roles_for(&rows, "state"), vec![("open".to_string(), Emphasis::Success)]);
-  assert_eq!(
-    roles_for(&rows, "checks"),
-    vec![("passing 7/7".to_string(), Emphasis::Success)]
-  );
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
+  assert_eq!(state_role(&rows), Some(Emphasis::Success));
+  // The CI rollup is the second badge of the identity row now.
+  let ci = rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))
+    .expect("identity row")
+    .segments
+    .iter()
+    .filter(|s| s.chip)
+    .nth(1)
+    .cloned()
+    .expect("a CI badge");
+  assert!(ci.text.contains("CI passing 7/7"), "{ci:?}");
+  assert_eq!(ci.emphasis, Emphasis::Success);
   // The one row that carries two outcomes at once, which is why a role per
   // ROW could never have expressed it.
   assert_eq!(
@@ -819,9 +877,9 @@ fn every_pr_state_takes_the_status_panes_own_colour() {
   ] {
     let mut pr = sample_pr();
     pr.state = state;
-    let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+    let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
     assert_eq!(
-      roles_for(&rows, "state").first().map(|(_, e)| *e),
+      state_role(&rows),
       Some(expected),
       "{state:?} must carry the colour the Status pane gives it"
     );
@@ -834,10 +892,7 @@ fn a_closed_issue_is_not_painted_like_a_closed_pr() {
   // a closed issue is resolved, a closed PR is abandoned.
   let mut issue = sample_issue();
   issue.state = gwm::github::IssueState::Closed;
-  assert_eq!(
-    roles_for(&rich_issue_rows(&issue, W), "state").first().map(|(_, e)| *e),
-    Some(Emphasis::Notice)
-  );
+  assert_eq!(state_role(&rich_issue_rows(&issue, W)), Some(Emphasis::Notice));
 }
 
 #[test]
@@ -851,7 +906,7 @@ fn a_preformatted_row_may_outrun_the_budget_and_says_that_it_is_one() {
   let long = "x".repeat(200);
   pr.detail.body = format!("prose\n\n```\n{long}\n```");
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "Pull request");
   let wide: Vec<_> = rows.iter().filter(|r| r.value.chars().count() > W).collect();
 
   assert_eq!(wide.len(), 1, "exactly the fenced line: {wide:?}");
@@ -880,10 +935,137 @@ fn a_diff_hunk_row_is_preformatted_too() {
     )],
     1,
   );
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "Pull request");
   assert!(
     rows.iter().any(|r| r.preformatted && r.value.contains('z')),
     "the hunk line must be flagged: {:?}",
+    rows.iter().map(|r| &r.value).collect::<Vec<_>>()
+  );
+}
+
+/// The segments of the first row with no label whose text contains `needle`.
+fn segments_containing(
+  rows: &[gwm::tui::state::detail_overlay::DetailRow],
+  needle: &str,
+) -> Vec<(String, Emphasis, bool)> {
+  rows
+    .iter()
+    .find(|r| r.value.contains(needle))
+    .map(|r| {
+      r.segments
+        .iter()
+        .map(|s| (s.text.clone(), s.emphasis, s.chip))
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+#[test]
+fn the_identity_row_reads_like_the_status_panes_own_line() {
+  // Validation feedback on #551: the metadata block's `state` was coloured
+  // text where the pane behind the modal puts a BADGE, and the pane says
+  // identity, state and CI on one line rather than spreading them over
+  // three labelled rows. Same shape here, same `chip_style`.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
+  let identity = segments_containing(&rows, "#519");
+
+  assert_eq!(
+    identity,
+    vec![
+      (format!("{} ", gwm::tui::PR_ICON), Emphasis::Success, false),
+      ("PR #519".to_string(), Emphasis::Plain, false),
+      (" ".to_string(), Emphasis::Plain, false),
+      (" open ".to_string(), Emphasis::Success, true),
+      (" ".to_string(), Emphasis::Plain, false),
+      (
+        format!(" {} CI passing 7/7 ", gwm::tui::CI_PASSING_ICON),
+        Emphasis::Success,
+        true
+      ),
+    ]
+  );
+  // And the two rows it absorbed are gone rather than repeated.
+  assert_eq!(value_for(&rows, "state"), None);
+  assert_eq!(value_for(&rows, "checks"), None);
+}
+
+#[test]
+fn an_issue_gets_the_same_line_without_the_ci_half() {
+  let rows = rich_issue_rows(&sample_issue(), W);
+  let identity = segments_containing(&rows, "#420");
+  assert_eq!(
+    identity,
+    vec![
+      (format!("{} ", gwm::tui::ISSUE_ICON), Emphasis::Success, false),
+      ("Issue #420".to_string(), Emphasis::Plain, false),
+      (" ".to_string(), Emphasis::Plain, false),
+      (" open ".to_string(), Emphasis::Success, true),
+    ]
+  );
+}
+
+#[test]
+fn a_merge_request_says_merge_request_on_its_identity_row() {
+  // The noun follows the resolved forge (issue #419), the same way the
+  // overlay title does. A GitLab worktree must not read "PR".
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Merge request");
+  assert!(
+    rows.iter().any(|r| r.value.contains("MR #519")),
+    "rows: {:?}",
+    rows.iter().map(|r| &r.value).collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn a_review_wears_its_verdict_as_a_coloured_badge() {
+  // Validation feedback: same badge treatment as the identity row, with the
+  // verdict's own colour, so a `changes requested` is visible at a glance
+  // in a list of approvals.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "Pull request");
+  let approved = segments_containing(&rows, "Copilot");
+  assert_eq!(
+    approved.first(),
+    Some(&(" approved ".to_string(), Emphasis::Success, true))
+  );
+  let changes = segments_containing(&rows, "coderabbitai · 2026-08-04");
+  assert_eq!(
+    changes.first(),
+    Some(&(" changes requested ".to_string(), Emphasis::Failure, true))
+  );
+}
+
+#[test]
+fn a_comment_header_wears_its_author_as_a_badge() {
+  // Read off the ISSUE fixture: its commenter is `sassman`, where the PR's
+  // is `kbrdn1`, which is also the value of its `author` row — and
+  // `segments_containing` takes the first row that matches.
+  let rows = rich_issue_rows(&sample_issue(), W);
+  let header = segments_containing(&rows, "sassman");
+  assert_eq!(
+    header.first().map(|(t, _, chip)| (t.clone(), *chip)),
+    Some((" sassman ".to_string(), true)),
+    "the author is a badge: {header:?}"
+  );
+  assert!(
+    header.iter().any(|(t, _, chip)| t.contains("2026-08") && !*chip),
+    "the date stays plain text: {header:?}"
+  );
+}
+
+#[test]
+fn an_inline_thread_comment_gets_the_same_badge() {
+  // The third place an author appears. Left out, the section would read as
+  // a different kind of content than the conversation above it.
+  let state = loaded(
+    vec![thread("a.rs", Some(2), None, "@@ -1 +1 @@\n+x", &["see above"])],
+    1,
+  );
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "Pull request");
+  assert!(
+    rows
+      .iter()
+      .any(|r| r.segments.iter().any(|s| s.chip && s.text.contains("coderabbitai"))),
+    "rows: {:?}",
     rows.iter().map(|r| &r.value).collect::<Vec<_>>()
   );
 }

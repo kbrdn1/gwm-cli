@@ -76,6 +76,16 @@ pub enum Emphasis {
 pub struct Segment {
   pub text: String,
   pub emphasis: Emphasis,
+  /// Paint this run as a **badge** rather than as coloured text: reverse
+  /// video plus bold, which is what `ui::chip_style` does and what the
+  /// Status pane uses for a PR state (validation feedback on issue #551).
+  ///
+  /// Orthogonal to [`Emphasis`] on purpose, because the two answer
+  /// different questions: the role says which colour, this says whether the
+  /// colour is the ink or the ground. Splitting them is also what lets the
+  /// renderer reach `chip_style` itself, so a badge here IS the pane's
+  /// badge rather than a second thing that resembles it.
+  pub chip: bool,
 }
 
 impl Segment {
@@ -83,6 +93,17 @@ impl Segment {
     Self {
       text: text.into(),
       emphasis,
+      chip: false,
+    }
+  }
+
+  /// A [`Segment::new`] painted as a badge. The caller pads the text: the
+  /// pane's badges read ` open `, and the padding is what gives the reverse
+  /// video its shape.
+  pub fn chip(text: impl Into<String>, emphasis: Emphasis) -> Self {
+    Self {
+      chip: true,
+      ..Self::new(text, emphasis)
     }
   }
 }
@@ -155,25 +176,21 @@ pub fn render(body: &str, budget: usize) -> Vec<MdLine> {
 
     // `<!-- … -->`. Bot reviews open with a couple of these (CodeRabbit's
     // "summarize by coderabbit.ai"), and the forge shows none of them.
-    if in_comment {
-      if let Some(rest) = trimmed.split_once("-->") {
-        in_comment = false;
-        if !rest.1.trim().is_empty() {
-          out.extend(block(rest.1, budget));
-        }
+    //
+    // Stripped wherever the delimiters sit on the line, not only at column
+    // zero (Codex review, pass 1): a claim that comments are never shown is
+    // not a claim that holds only when one opens the line.
+    let (visible, still_open) = strip_comments(raw, in_comment);
+    in_comment = still_open;
+    if visible.trim().is_empty() {
+      // A line that was ONLY a comment leaves nothing, and must not leave a
+      // blank row either — the forge closes the gap.
+      if !raw.trim().is_empty() {
+        continue;
       }
-      continue;
     }
-    if let Some(rest) = comment_opens(trimmed) {
-      in_comment = true;
-      if let Some(tail) = rest {
-        in_comment = false;
-        if !tail.trim().is_empty() {
-          out.extend(block(&tail, budget));
-        }
-      }
-      continue;
-    }
+    let raw = visible.as_str();
+    let trimmed = raw.trim_start();
 
     if let Some(marker) = fence_opens(trimmed) {
       fence = Some(marker);
@@ -196,13 +213,37 @@ fn fence_opens(trimmed: &str) -> Option<String> {
   None
 }
 
-/// `Some(None)` when the line opens an HTML comment that stays open,
-/// `Some(Some(tail))` when it also closes on the same line.
-fn comment_opens(trimmed: &str) -> Option<Option<String>> {
-  let rest = trimmed.strip_prefix("<!--")?;
-  match rest.split_once("-->") {
-    Some((_, tail)) => Some(Some(tail.to_string())),
-    None => Some(None),
+/// Remove every HTML comment from one line, returning what is left to show
+/// and whether a comment is still open at the end of it.
+///
+/// `open` says a comment was still running when the previous line ended, so
+/// this one starts inside it. Comments do not nest, which is why a plain
+/// scan is enough.
+fn strip_comments(line: &str, mut open: bool) -> (String, bool) {
+  let mut out = String::new();
+  let mut rest = line;
+  loop {
+    if open {
+      match rest.find("-->") {
+        Some(at) => {
+          rest = &rest[at + 3..];
+          open = false;
+        }
+        None => return (out, true),
+      }
+    } else {
+      match rest.find("<!--") {
+        Some(at) => {
+          out.push_str(&rest[..at]);
+          rest = &rest[at + 4..];
+          open = true;
+        }
+        None => {
+          out.push_str(rest);
+          return (out, false);
+        }
+      }
+    }
   }
 }
 
