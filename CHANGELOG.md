@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The rich PR / issue view (`I`) had its design pass** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)). It was
+  built to get the data on screen and had never been laid out; the compact
+  layout of 1.8 made its own density the next thing that read as unpolished.
+  Six things changed:
+  - **The issue and the PR are two tabs**, switched with `Tab`. The view
+    still opens on the PR, which left the issue unreachable from a worktree
+    in review. A PR landing while the view is open still replaces an issue
+    that was only standing in for it, and does not replace one you tabbed
+    to.
+  - **Bodies render as Markdown** rather than as their source. Headings,
+    emphasis, inline code, fenced blocks, lists, task lists, block quotes,
+    GitHub alerts, links by their text, and HTML comments not shown at all.
+  - **Nothing is capped.** The view scrolls, so the window is the terminal
+    and the row count costs only the rows. Descriptions, reviews and the
+    whole conversation render in full; a `… N more` row now only reports
+    what the fetch itself did not return.
+  - **The metadata block wears the Status pane's colours**, resolved through
+    the pane's own helpers rather than a second set of rules.
+  - **A width policy of its own**, 80% of the terminal capped at 120 columns
+    against the shared overlay's 62% capped at 88. That ceiling was chosen
+    for the clean report, whose rows stop earning columns; prose does not.
+    A label-less row also spans the whole inner width now, which the view
+    was paying for twice.
+  - **Code and diff lines are kept whole and scroll sideways** with `h` /
+    `l`. In YAML or Python the indentation is the program, and a wrapped
+    `+` line's continuation carries no sigil and reads as context.
+
 ## Past releases
 
 In reverse chronological order:
