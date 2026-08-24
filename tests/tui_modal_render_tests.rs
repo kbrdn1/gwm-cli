@@ -2259,3 +2259,30 @@ fn scrolling_leaves_the_wrapped_prose_where_it_was() {
     "the prose must not slide out of the frame — modal:\n{after}"
   );
 }
+
+#[test]
+fn scrolling_reaches_the_tail_of_a_line_of_wide_glyphs() {
+  // Codex review, pass 1 (P2): the offset bound and the render clip both
+  // counted CHARS, while the terminal spends CELLS. A line of CJK is twice
+  // as wide as it is long, so the bound stopped at half the columns it
+  // needed to and the tail could not be reached at any offset — on the one
+  // feature whose whole purpose is reaching that tail.
+  let line = format!("{}NEEDLEHIT", "界".repeat(120));
+  let (_dir, mut app) = app_with_the_rich_view_open(&format!("```\n{line}\n```"));
+  app.set_term_width(160);
+
+  let before = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    !before.contains("NEEDLEHIT"),
+    "precondition: 240 cells of glyphs put the tail off screen — modal:\n{before}"
+  );
+
+  for _ in 0..80 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    after.contains("NEEDLEHIT"),
+    "the tail must be reachable — modal:\n{after}"
+  );
+}

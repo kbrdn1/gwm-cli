@@ -285,3 +285,26 @@ fn prose_still_wraps_next_to_a_fence_that_does_not() {
     "and the fenced line did not: {got:?}"
   );
 }
+
+#[test]
+fn an_html_comment_is_hidden_wherever_it_starts_on_the_line() {
+  // Codex review, pass 1 (P2): `comment_opens` used `strip_prefix`, so a
+  // comment opening after visible text was painted with its markers. The
+  // module claims HTML comments are not shown at all, and a claim that only
+  // holds at column zero is a claim that does not hold.
+  assert_eq!(
+    plain("visible <!-- hidden --> tail"),
+    vec!["visible  tail"],
+    "the comment goes, the text around it stays"
+  );
+  // Opening mid-line and closing on a later one. The closing line keeps the
+  // space that followed its `-->`: a line that fits is rendered verbatim,
+  // which is the property that preserves hand-made alignment, and it does
+  // not get to make an exception for whitespace it happens to dislike.
+  assert_eq!(
+    plain("visible <!-- start\nstill hidden\n--> tail"),
+    vec!["visible ", " tail"]
+  );
+  // A lone `-->` with no opener is not a comment; it is text.
+  assert_eq!(plain("a --> b"), vec!["a --> b"]);
+}
