@@ -14,11 +14,14 @@
 //! width it was last drawn at and rebuilds the rows on resize, so the
 //! builder itself stays pure.
 //!
-//! **What is capped, and it says so.** A comment thread on a busy PR is
-//! unbounded, and a bot review body regularly runs to hundreds of lines.
-//! Each body is capped, the comment list is capped, and every cut emits an
-//! explicit `… N more` row — a silently truncated view reads as a complete
-//! one.
+//! **The scroll window is the budget** (issue #551). Bodies and the comment
+//! list used to be capped, each cut marked with an explicit `… N more` row.
+//! That was honest, but it rationed something the overlay does not have to
+//! ration: the view scrolls, so what the reader sees at once is bounded by
+//! the terminal, not by the row count, and a longer list costs only the rows
+//! themselves. A description cut at `… 85 more lines` was the loudest
+//! complaint against this view. What stays capped is the diff hunk, and for
+//! a different reason: see [`hunk_rows`].
 //!
 //! **The inline review threads are a second transport.** The comments
 //! anchored to a diff hunk are reachable through GraphQL only
@@ -40,25 +43,6 @@ use crate::naming::{sanitise_block_for_terminal, sanitise_for_terminal};
 /// derives its own `label_w` from the widest label it is handed, which
 /// would otherwise be circular.
 pub const LABEL_W: usize = 7;
-
-/// Wrapped lines kept from one body (description or review). Enough for a
-/// filled-in PR description; past that the browser is the better tool.
-const BODY_MAX_LINES: usize = 40;
-
-/// Wrapped lines kept from one comment. Bot comments (CodeRabbit,
-/// Copilot) routinely run past this; the header row keeps its permalink so
-/// Enter opens the full thread.
-const COMMENT_MAX_LINES: usize = 12;
-
-/// Comments rendered before the list itself is cut.
-const MAX_COMMENTS: usize = 20;
-
-/// Inline review threads rendered before the list is cut (issue #528).
-const MAX_THREADS: usize = 10;
-
-/// Comments rendered per thread. A thread is a discussion; past this the
-/// permalink on its header row is the better way in.
-const MAX_THREAD_COMMENTS: usize = 5;
 
 /// Diff-hunk lines kept, counted **from the end**: the forge puts the
 /// anchored line last, so a long hunk drops its head, never its tail.
@@ -115,7 +99,7 @@ pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, wi
   url_row(&mut rows, &pr.url);
 
   let budget = wrap_budget(width);
-  body_section(&mut rows, "description", &d.body, budget, BODY_MAX_LINES);
+  body_section(&mut rows, "description", &d.body, budget);
   reviews_section(&mut rows, &d.reviews, budget);
   threads_section(&mut rows, threads, budget);
   comments_section(&mut rows, &d.comments, budget);
@@ -154,7 +138,7 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
   url_row(&mut rows, &issue.url);
 
   let budget = wrap_budget(width);
-  body_section(&mut rows, "description", &d.body, budget, BODY_MAX_LINES);
+  body_section(&mut rows, "description", &d.body, budget);
   comments_section(&mut rows, &d.comments, budget);
   rows
 }
@@ -232,12 +216,12 @@ fn heading(rows: &mut Vec<DetailRow>, text: String) {
 
 /// Wrapped body lines under `title`, or nothing at all when the body is
 /// empty — an empty section header is worse than no section.
-fn body_section(rows: &mut Vec<DetailRow>, title: &str, body: &str, budget: usize, cap: usize) {
+fn body_section(rows: &mut Vec<DetailRow>, title: &str, body: &str, budget: usize) {
   if body.trim().is_empty() {
     return;
   }
   heading(rows, title.to_string());
-  push_body(rows, body, budget, cap, "");
+  push_body(rows, body, budget, "");
 }
 
 fn reviews_section(rows: &mut Vec<DetailRow>, reviews: &[ForgeReview], budget: usize) {
@@ -268,7 +252,7 @@ fn reviews_section(rows: &mut Vec<DetailRow>, reviews: &[ForgeReview], budget: u
       extra: None,
     });
     // A bare approval carries no body, which is the common case.
-    push_body(rows, &r.body, budget.saturating_sub(2).max(8), BODY_MAX_LINES, "  ");
+    push_body(rows, &r.body, budget.saturating_sub(2).max(8), "  ");
   }
 }
 
@@ -277,7 +261,7 @@ fn comments_section(rows: &mut Vec<DetailRow>, comments: &[ForgeComment], budget
     return;
   }
   heading(rows, format!("comments ({})", comments.len()));
-  for c in comments.iter().take(MAX_COMMENTS) {
+  for c in comments {
     rows.push(DetailRow {
       label: String::new(),
       value: truncate(
@@ -285,14 +269,11 @@ fn comments_section(rows: &mut Vec<DetailRow>, comments: &[ForgeComment], budget
         budget,
       ),
       role: DetailRole::Normal,
-      // The permalink, so Enter opens the full thread the cap elided.
+      // The permalink, so Enter opens the thread on the forge.
       meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
       extra: None,
     });
-    push_body(rows, &c.body, budget.saturating_sub(2).max(8), COMMENT_MAX_LINES, "  ");
-  }
-  if let Some(dropped) = comments.len().checked_sub(MAX_COMMENTS).filter(|n| *n > 0) {
-    more(rows, format!("… {dropped} more comments"));
+    push_body(rows, &c.body, budget.saturating_sub(2).max(8), "  ");
   }
 }
 
@@ -341,12 +322,15 @@ fn threads_section(rows: &mut Vec<DetailRow>, state: &GitHubFetchState<ReviewThr
   }
 
   heading(rows, format!("inline comments ({total})"));
-  for t in threads.iter().take(MAX_THREADS) {
+  for t in threads {
     thread_rows(rows, t, budget);
   }
-  let dropped = (*total as usize).saturating_sub(threads.len().min(MAX_THREADS));
+  // The fetch itself is paginated, so `total` can still exceed what arrived.
+  // That marker survives the cap removal: it reports what gwm does not have,
+  // not what it chose to leave out.
+  let dropped = (*total as usize).saturating_sub(threads.len());
   if dropped > 0 {
-    more(rows, format!("… {dropped} more threads"));
+    more(rows, format!("… {dropped} more threads not fetched"));
   }
 }
 
@@ -384,7 +368,7 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
 
   hunk_rows(rows, &t.diff_hunk, budget);
 
-  for c in t.comments.iter().take(MAX_THREAD_COMMENTS) {
+  for c in &t.comments {
     rows.push(DetailRow {
       label: String::new(),
       value: truncate(
@@ -392,23 +376,16 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
         budget,
       ),
       role: DetailRole::Normal,
-      // The permalink to this very comment, so Enter opens the thread the
-      // caps elided.
+      // The permalink to this very comment, so Enter opens it on the forge.
       meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
       extra: None,
     });
-    push_body(
-      rows,
-      &c.body,
-      budget.saturating_sub(2).max(8),
-      COMMENT_MAX_LINES,
-      "      ",
-    );
+    push_body(rows, &c.body, budget.saturating_sub(2).max(8), "      ");
   }
-  let shown = t.comments.len().min(MAX_THREAD_COMMENTS);
-  let dropped = (t.total_comments as usize).saturating_sub(shown);
+  // Same distinction as the thread list: what the fetch did not return.
+  let dropped = (t.total_comments as usize).saturating_sub(t.comments.len());
   if dropped > 0 {
-    more(rows, format!("    … {dropped} more comments"));
+    more(rows, format!("    … {dropped} more comments not fetched"));
   }
 }
 
@@ -441,15 +418,13 @@ fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
   }
 }
 
-/// Wrap `body` and push it, capped at `cap` lines with an explicit tail
-/// row when the cap bites. `indent` prefixes every line (review and
+/// Wrap `body` and push it whole. `indent` prefixes every line (review and
 /// comment bodies sit one step in from their header).
-fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, cap: usize, indent: &str) {
+fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, indent: &str) {
   if body.trim().is_empty() {
     return;
   }
-  let lines = wrap_block(body, budget.saturating_sub(indent.len()).max(8));
-  for line in lines.iter().take(cap) {
+  for line in wrap_block(body, budget.saturating_sub(indent.len()).max(8)) {
     rows.push(DetailRow {
       label: String::new(),
       value: format!("{indent}{line}"),
@@ -457,9 +432,6 @@ fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, cap: usize, i
       meta: None,
       extra: None,
     });
-  }
-  if lines.len() > cap {
-    more(rows, format!("{indent}… {} more lines", lines.len() - cap));
   }
 }
 

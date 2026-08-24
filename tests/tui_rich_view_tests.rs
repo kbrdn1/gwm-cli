@@ -198,20 +198,63 @@ fn a_word_longer_than_the_budget_is_hard_split() {
 }
 
 #[test]
-fn a_long_body_is_capped_and_says_so() {
+fn a_long_body_is_rendered_whole_because_the_scroll_is_the_budget() {
+  // Issue #551, replacing `a_long_body_is_capped_and_says_so`. The 40-line
+  // cap was honest about what it dropped, but it was spending a budget the
+  // overlay does not actually have to ration: the view scrolls, so the
+  // window is the terminal height and the row count costs nothing but the
+  // rows themselves. A description cut at `… 85 more lines` was the single
+  // loudest complaint against this view.
   let mut pr = sample_pr();
   pr.detail.body = (0..500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
 
   let rows = rich_pr_rows(&pr, &NO_THREADS, W);
   let vals = values(&rows);
 
-  assert!(
-    vals.iter().any(|v| v.contains("more lines")),
-    "a truncated body must say how much was dropped, not stop silently: {vals:?}"
+  assert_eq!(
+    vals.iter().filter(|v| v.starts_with("line ")).count(),
+    500,
+    "every line of the description must be there"
   );
   assert!(
-    vals.iter().filter(|v| v.starts_with("line ")).count() <= 40,
-    "the body cap holds"
+    !vals.iter().any(|v| v.contains("more lines")),
+    "nothing was dropped, so nothing may claim it was: {:?}",
+    vals.iter().filter(|v| v.contains("more")).collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn every_comment_of_the_conversation_is_rendered() {
+  // The other half of the same call (issue #551): the comment LIST was
+  // capped at 20 and each comment's body at 12 lines, so a busy thread read
+  // as a wall of `… N more`. `gwm` is where the user is; sending them to the
+  // browser for the rest of a conversation it already fetched is the thing
+  // the view exists to avoid.
+  let mut pr = sample_pr();
+  pr.detail.comments = (0..40)
+    .map(|i| ForgeComment {
+      author: format!("commenter{i}"),
+      body: (0..30).map(|l| format!("body line {l}")).collect::<Vec<_>>().join("\n"),
+      created_at: "2026-08-04T15:00:00Z".into(),
+      url: None,
+    })
+    .collect();
+
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let vals = values(&rows);
+
+  assert!(
+    vals.iter().any(|v| v.contains("commenter39")),
+    "the last comment must be reachable, not elided behind a marker"
+  );
+  assert!(
+    !vals.iter().any(|v| v.contains("more comments")),
+    "no comment was dropped, so nothing may claim it was"
+  );
+  assert_eq!(
+    vals.iter().filter(|v| v.trim() == "body line 29").count(),
+    40,
+    "every comment must render its whole body"
   );
 }
 
