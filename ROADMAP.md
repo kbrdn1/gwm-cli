@@ -238,8 +238,9 @@ channels still open under
 living in the TUI for a day: a multiplexer line (herdr as a third backend
 [#588](https://github.com/kbrdn1/gwm-cli/issues/588), a pane-direction setting
 [#589](https://github.com/kbrdn1/gwm-cli/issues/589), Issue/PR in a terminal
-browser [#590](https://github.com/kbrdn1/gwm-cli/issues/590), opening an agent's
-worktree from the agents overlay [#591](https://github.com/kbrdn1/gwm-cli/issues/591)),
+browser [#590](https://github.com/kbrdn1/gwm-cli/issues/590), resuming an agent's
+session in a pane from the agents overlay
+[#591](https://github.com/kbrdn1/gwm-cli/issues/591)),
 two full-size listings for the panes the sidebar cannot hold
 ([#592](https://github.com/kbrdn1/gwm-cli/issues/592),
 [#593](https://github.com/kbrdn1/gwm-cli/issues/593)), modals following
