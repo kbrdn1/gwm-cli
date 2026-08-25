@@ -444,45 +444,73 @@ fn header_span(line: &ratatui::text::Line<'static>, needle: &str) -> ratatui::te
 }
 
 #[test]
-fn compact_header_text_keeps_one_colour_whatever_the_focus() {
-  // #605: the fill under the header already carries focus, so the text
-  // must not carry it a second time. A pane's name is how you find the
-  // pane to `Tab` into — it cannot dim to `muted` the moment the pane
-  // loses focus. The colour is `theme.accent` in both states.
+fn compact_header_swaps_its_two_roles_on_focus_and_never_dims() {
+  // #605: the fill under the header carries focus, and the text must not
+  // dim to `muted` when the pane goes inactive — a pane's name is how you
+  // find the pane to `Tab` into. The two states swap the *same* two roles
+  // instead: `accent` on the `section_bg` band when inactive, the band's
+  // own colour on a solid `focus` fill when not. Neither is `muted`, and
+  // neither is a shade of the other.
   //
-  // Over every palette, because neither half of the claim discriminates
-  // on its own theme: the default one has `accent == focus`, so only its
-  // unfocused header proves anything, while `claude-dark` separates all
-  // three of `accent` / `focus` / `muted` and pins both states.
+  // Over every palette, because a single theme cannot discriminate the
+  // claim: the default one has `accent == focus`, so only its inactive
+  // header proves anything, while `claude-dark` separates all three of
+  // `accent` / `focus` / `muted` and pins both states.
   let mut themes = vec![("default", Theme::default())];
   for name in preset_names() {
     themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
   }
   for (name, theme) in themes {
-    let focused = compact_header(true, &theme);
-    let unfocused = compact_header(false, &theme);
-    for (state, line) in [("focused", &focused), ("unfocused", &unfocused)] {
-      assert_eq!(
-        header_span(line, "WORKTREES").style.fg,
-        Some(theme.accent),
-        "theme {name:?} / {state}: the pane name wears the accent role"
-      );
-      // Unchanged half: a span that already carries a colour encodes
-      // something other than focus and keeps its own.
-      assert_eq!(
-        header_span(line, "/").style.fg,
-        Some(Color::Yellow),
-        "theme {name:?} / {state}: an already-coloured span keeps its colour"
-      );
-    }
+    let inactive = header_span(&compact_header(false, &theme), "WORKTREES").style;
+    let focused = header_span(&compact_header(true, &theme), "WORKTREES").style;
+
+    assert_eq!(
+      (inactive.fg, inactive.bg),
+      (Some(theme.accent), None),
+      "theme {name:?}: the inactive header is accent text over the section band"
+    );
+    assert_eq!(
+      (focused.fg, focused.bg),
+      (Some(theme.section_bg), Some(theme.focus)),
+      "theme {name:?}: the focused header writes the band's colour on a solid focus fill"
+    );
+    assert_ne!(
+      inactive.fg,
+      Some(theme.muted),
+      "theme {name:?}: a pane's name is never the muted role"
+    );
   }
 }
 
 #[test]
+fn a_coloured_span_speaks_on_the_flat_band_and_not_on_the_solid_one() {
+  // The filter `/` prompt and the Working Tree per-category counts encode
+  // something other than focus, so the inactive header leaves them alone.
+  // The focused one cannot: nothing readable survives an arbitrary colour
+  // on a saturated fill — a yellow `/` on the focus band is a hole in it —
+  // so the solid band imposes its own pair on every span it carries.
+  let theme = Theme::preset("claude-dark").expect("preset must resolve");
+
+  let inactive = header_span(&compact_header(false, &theme), "/").style;
+  assert_eq!(
+    inactive.fg,
+    Some(Color::Yellow),
+    "on the flat band an already-coloured span keeps its colour"
+  );
+
+  let focused = header_span(&compact_header(true, &theme), "/").style;
+  assert_eq!(
+    (focused.fg, focused.bg),
+    (Some(theme.section_bg), Some(theme.focus)),
+    "the solid band overrides it rather than punching a hole in itself"
+  );
+}
+
+#[test]
 fn compact_header_weight_tracks_focus_across_the_whole_line() {
-  // #605: with the colour fixed, weight is what the header itself adds to
-  // the fill — and it applies to *every* span, coloured ones included, so
-  // one header line runs one rule rather than two side by side.
+  // #605: weight is what the header line adds on top of the fill, and it
+  // reaches *every* span, coloured ones included, so one header line runs
+  // one rule rather than two side by side.
   let theme = Theme::default();
   let focused = compact_header(true, &theme);
   let unfocused = compact_header(false, &theme);

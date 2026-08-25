@@ -455,29 +455,30 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
 
 /// Header text style for a compact pane (issue #605).
 ///
-/// The colour is `theme.accent` in both states and focus adds `BOLD`,
-/// nothing else. A pane's name is how you find the pane to `Tab` into, so
-/// it cannot dim to `muted` the moment the pane loses focus; the fill under
-/// it ([`Chrome::fill`]) carries the focus signal — that is what the fill
-/// was added for — and the weight is all the text adds on top.
+/// The two states **swap the same two roles** rather than dimming one of
+/// them: the inactive header is `accent` text on the `section_bg` band
+/// ([`Chrome::fill`]), and the focused one is that band's colour written on
+/// a solid `focus` fill, bold. `muted` appears in neither. A pane's name is
+/// how you find the pane to `Tab` into, so it has to stay fully legible
+/// while the pane is inactive — and a focus signal has to be findable
+/// without hunting, which two adjacent greys (`selection_bg` over
+/// `section_bg`: 14 levels apart on `claude-dark`) were not.
 ///
-/// `accent` rather than `name`, the other candidate, for two reasons. It is
-/// the role's documented job ("General accent: header title, …"), so a
-/// header keeps reading as chrome instead of as another line of body text.
-/// And a focused header is painted on `selection_bg`, which is exactly the
-/// selected row's background: fixing the text to `name` + `BOLD` would have
-/// given the header the *same* fg, bg and weight as the cursor row's name
-/// cell, which is the collision `Theme::section_bg`'s invariant exists to
-/// avoid on the unfocused half.
+/// `section_bg` as the focused foreground because the theme has no
+/// background role beyond it: it is the darkest tone each preset reserves
+/// for chrome, so it is the one colour guaranteed to read on a saturated
+/// fill without naming a hex value the palette does not own.
 ///
 /// Pure like [`panel_border_color`] so the focus→theme wiring is pinned by
 /// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
 pub fn compact_header_style(focused: bool, theme: &super::theme::Theme) -> Style {
-  let base = Style::default().fg(theme.accent);
   if focused {
-    base.add_modifier(Modifier::BOLD)
+    Style::default()
+      .fg(theme.section_bg)
+      .bg(theme.focus)
+      .add_modifier(Modifier::BOLD)
   } else {
-    base
+    Style::default().fg(theme.accent)
   }
 }
 
@@ -503,13 +504,15 @@ pub struct Chrome {
   /// sitting inside the top one. Compact has no rules and does not read it
   /// — its header text is focus-independent (issue #605).
   pub accent: Color,
-  /// Header background, compact only: `selection_bg` on the focused pane,
-  /// `section_bg` elsewhere. With the rules gone this is *the* focus
-  /// signal, not a reinforcement of one (it was added in PR #546 because
-  /// the text colour alone did not read at a glance, and #605 removed the
-  /// text half). Both roles already exist and the theme guarantees they
-  /// differ, so the two header states are distinct by construction on
-  /// every preset — no third background role to keep in tune.
+  /// Header background, compact only: a solid `theme.focus` band on the
+  /// focused pane, `section_bg` elsewhere. With the rules gone this is
+  /// *the* focus signal (PR #546 added it because the text colour alone
+  /// did not read at a glance; #605 removed the text half and made the
+  /// band carry it alone), so it is a saturated role and not the
+  /// `selection_bg` it used to be — that pair sat 14 grey levels apart on
+  /// `claude-dark` and read as a permutation of grey rather than as a
+  /// place. It also stops the focused header from painting exactly like
+  /// the cursor row, which is `selection_bg` too.
   pub fill: Color,
   /// Header text style, compact only — see [`compact_header_style`].
   /// Resolved here rather than at the call sites because `render_section`
@@ -545,7 +548,7 @@ impl Chrome {
     Self {
       compact,
       accent: panel_border_color(focused, theme),
-      fill: if focused { theme.selection_bg } else { theme.section_bg },
+      fill: if focused { theme.focus } else { theme.section_bg },
       header: compact_header_style(focused, theme),
       focused,
       dim_unfocused,
@@ -727,9 +730,21 @@ pub fn compact_header_line(
   header: Style,
 ) -> Line<'static> {
   let width = width as usize;
-  // `patch`, not an overwrite: the span's own `fg` wins where it has one,
-  // and the modifiers merge either way.
-  let restyle = |s: Span<'static>| Span::styled(s.content, header.patch(s.style));
+  // A solid band imposes its foreground; a flat one lets a span keep its
+  // own. The two are told apart by `header` itself carrying a `bg`: a
+  // header that paints its own ground is the focused one, and nothing
+  // readable survives an arbitrary colour on it — a yellow filter `/` on
+  // the focus fill is a hole in the band. Without a `bg` the header is the
+  // inactive grey one, where a span that already encodes something other
+  // than focus keeps saying it.
+  let restyle = |s: Span<'static>| {
+    let style = if header.bg.is_some() {
+      s.style.patch(header)
+    } else {
+      header.patch(s.style)
+    };
+    Span::styled(s.content, style)
+  };
   let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(restyle).collect();
 
   // Measured in terminal CELLS, not chars: a CJK glyph or an emoji in a

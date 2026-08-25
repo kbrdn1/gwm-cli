@@ -131,22 +131,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A compact pane's name no longer dims when the pane loses focus**
+- **A compact pane's header says where you are, and its name no longer
+  dims when it is not**
   ([#605](https://github.com/kbrdn1/gwm-cli/issues/605)). In the default
-  compact layout the header carried the focus signal twice: the fill under it
-  (`selection_bg` / `section_bg`) *and* the text, repainted from `focus` to
-  `muted`. So a pane's name — the thing you read to know which pane to `Tab`
-  into — was rendered in the role reserved for deliberately secondary text
-  the moment it went inactive, and the spans that already carry a colour (the
-  filter `/` prompt, the Working Tree counts) did not follow, leaving one
-  header line running two rules side by side. The header text is now the
-  `accent` role in both states, and focus adds weight to the whole line on
-  top of the fill it was already painting — so an unfocused header is no
-  longer bold, which is what makes the weight a signal. The right-flushed
-  counter follows the title for the same reason: it shares the line, and
-  bordered mode already paints it in the border colour. Bordered mode is
-  otherwise untouched: there the accent still paints the four rules and the
-  title inside the top one.
+  compact layout the header carried the focus signal twice, and both halves
+  were weak. The text was repainted from `focus` to `muted` — so a pane's
+  name, the thing you read to know which pane to `Tab` into, was rendered in
+  the role reserved for deliberately secondary text the moment it went
+  inactive, while the spans that already carry a colour (the filter `/`
+  prompt, the Working Tree counts) did not follow, leaving one header line
+  running two rules side by side. And the fill under it stepped from
+  `section_bg` to `selection_bg`, two tones that are adjacent by design (14
+  grey levels apart on `claude-dark`) and that read as a permutation of grey
+  rather than as a place.
+
+  The two states now swap the same pair of roles instead of dimming one of
+  them. An inactive header is `accent` text on the `section_bg` band; the
+  focused one is a **solid `focus` band** carrying that section tone as its
+  text, bold. `muted` appears in neither, the focus signal is findable
+  without hunting, and the header no longer borrows `selection_bg` from the
+  cursor row. On the solid band every span takes the band's pair, coloured
+  ones included — nothing readable survives an arbitrary colour on a
+  saturated fill — while the inactive band still leaves them alone. The
+  right-flushed counter follows the title the same way; bordered mode
+  already paints it in the border colour.
+
+  Bordered mode is otherwise untouched: there the accent still paints the
+  four rules and the title inside the top one.
 
 - **A linked row with nothing fetched yet is white, not green and purple**
   ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
