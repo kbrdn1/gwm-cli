@@ -845,11 +845,17 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // #515: the note column follows the same rule as AGENT and the mark
   // column — it only exists once something is in it, so a user with no
   // notes keeps the exact pre-#515 table instead of an empty column eating
-  // two cells on a narrow terminal. Caption-less: the marker is binary.
+  // two cells on a narrow terminal.
+  //
+  // #595: it captions itself with [`NOTE_ICON`], the glyph it marks rows
+  // with. It shipped caption-less on the grounds that the marker is binary,
+  // but an empty header immediately right of the two-slot `I/P` group made
+  // the marker read as a third slot of that group rather than as its own
+  // column. A binary column's caption is the thing it marks.
   let show_note = visible.iter().any(|w| w.has_note);
   header_cells.push(Cell::from("I/P"));
   if show_note {
-    header_cells.push(Cell::from(""));
+    header_cells.push(Cell::from(NOTE_ICON));
   }
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
@@ -917,8 +923,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   }
   widths.push(Constraint::Length(3));
   if show_note {
-    // #515: one cell for the note marker, hard-fixed like the I/P column.
-    widths.push(Constraint::Length(1));
+    // #515: hard-fixed like the I/P column. Two cells since #595, the width
+    // [`NOTE_ICON`] takes: the glyph plus the trailing space a nerd-font
+    // glyph needs because most of them render two cells wide.
+    widths.push(Constraint::Length(2));
   }
   widths.extend([
     Constraint::Min(name_w),
@@ -2471,6 +2479,17 @@ fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
   }
 }
 
+/// The note column's glyph (issues #515, #595): `nf-oct-markdown`, the same
+/// one [`wt_tree::WT_MARKDOWN_ICON`] paints on a `.md` file in the Working
+/// Tree pane, because a gwm note *is* a markdown file. Carries its trailing
+/// space, the repo-wide convention for a nerd-font glyph (most render two
+/// cells wide, so the space is what the second cell eats instead of the
+/// neighbouring column).
+///
+/// Header and marker share it: the column is binary, so its caption is the
+/// thing it marks.
+const NOTE_ICON: &str = "\u{f48a} ";
+
 /// The note marker (issue #515). Binary by design: this row carries a note
 /// or it does not — no preview, no length, no freshness colour, and no
 /// second meaning layered onto a glyph that already has one (`★`, `●` and
@@ -2481,7 +2500,7 @@ fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
 /// columns stay aligned — the rule [`mark_cell`] follows.
 fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
   if has_note {
-    Cell::from("≡").style(Style::default().fg(theme.name))
+    Cell::from(NOTE_ICON).style(Style::default().fg(theme.name))
   } else {
     Cell::from("")
   }

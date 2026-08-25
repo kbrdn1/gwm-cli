@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[tui.keys.modal.note]` holds the same four verbs either way and an
   unmodified printable bound to one of them is still refused at load time.
 
+### Fixed
+
+- **The note column captions itself**
+  ([#595](https://github.com/kbrdn1/gwm-cli/issues/595)). The column shipped
+  with an empty header on the grounds that its marker is binary, which left
+  the marker sitting under a blank caption immediately right of the two-slot
+  `I/P` group, where it read as a third slot of that group rather than as its
+  own column. It now carries the same glyph it marks rows with, and both moved
+  from `≡` to the `nf-oct-markdown` glyph the Working Tree pane already paints
+  on a `.md` file, since a note is one. The column stays conditional, so a
+  user who never writes a note keeps the exact table they had before.
+
 ## Past releases
 
 In reverse chronological order:
