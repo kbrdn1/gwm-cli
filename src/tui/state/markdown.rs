@@ -310,7 +310,11 @@ fn block(raw: &str, budget: usize) -> Vec<MdLine> {
   }
 
   if let Some((hashes, text)) = heading(trimmed) {
-    let segments = vec![Segment::new(text.to_string(), Emphasis::Heading)];
+    // Parsed, not taken whole (Codex review, pass 6): `## **Breaking
+    // changes**` is an ordinary heading — this repo's own changelog writes
+    // them — and the markers were staying on screen. `Heading` is the base
+    // role, so a run with no markup of its own still reads as a title.
+    let segments = inline(text, Emphasis::Heading);
     let rule = width(&segments).min(budget);
     let mut lines = wrap(segments, budget, false, "", "");
     // A level-1 or level-2 heading is a section break on the forge; the
@@ -508,21 +512,21 @@ fn marker_at(chars: &[char], at: usize, floors: &mut Floors) -> Option<(Hit, usi
     // show a span that contains one, and stopping at the next single
     // backtick left a literal backtick on each side.
     let run = chars[at..].iter().take_while(|c| **c == '`').count();
-    let ticks: Vec<char> = vec!['`'; run];
-    if let Some(end) = find_seq(chars, at + run, &ticks) {
+    match closing_run(chars, at + run, '`', run, floors) {
       // An empty span is a pair of literal backticks.
-      if end > at + run {
+      Some(end) if end > at + run => {
         return Some((
           Hit::Styled(Segment::new(slice(chars, at + run, end), Emphasis::Code)),
           end + run,
         ));
       }
+      _ => {}
     }
     // No closing run: the opener is literal, and consumed WHOLE so its
     // second backtick cannot open a span of its own.
     return Some((Hit::Literal(slice(chars, at, at + run)), at + run));
   }
-  if let Some((text, next)) = link(chars, at) {
+  if let Some((text, next)) = link(chars, at, floors) {
     return Some((Hit::Styled(Segment::new(text, Emphasis::Link)), next));
   }
 
@@ -563,26 +567,41 @@ fn marker_at(chars: &[char], at: usize, floors: &mut Floors) -> Option<(Hit, usi
   ))
 }
 
-/// Where each kind of delimiter run has been shown to have no closer left.
+/// Where each kind of opener has been shown to have no closer left.
 ///
-/// A run of `len` copies of `c` that found no closer from position `p`
-/// proves there is none from any later position, since that search covers a
-/// smaller suffix. Remembering it turns a per-opener rescan into a single
-/// pass: `*a *a *a …` was quadratic, on the thread that re-wraps the view at
-/// every resize, driven by text a forge accepts 65 536 characters of.
+/// **The invariant, which is what this type exists to hold:** an opener that
+/// finds no closer must never rescan a suffix an earlier opener already
+/// proved empty. A run of `len` copies of `c` that found no closer from
+/// position `p` proves there is none from any later position, since that
+/// search covers a smaller suffix.
+///
+/// Written as a property over EVERY opener rather than per site, because it
+/// was reported twice as a separate bug: pass 5 for emphasis, pass 6 for
+/// links, with inline code sitting there unreported and identical. The slots
+/// are enumerated by construction below, so an opener added later has to
+/// answer the question rather than wait to be found.
+///
+/// It is not cosmetic. All of this is remote text, a forge accepts 65 536
+/// characters of it, and the thread it runs on is the one that re-wraps the
+/// view at every resize.
 #[derive(Default)]
 struct Floors {
-  /// `*`, `_`, `~` by run length, indices 1..=3. Zero means "nothing known
-  /// yet", which is why the stored value is the position PLUS one.
-  seen: [[usize; 4]; 3],
+  /// One row per [`Floors::slot`], by run length, indices 1..=3. Zero means
+  /// "nothing known yet", which is why the stored value is the position
+  /// PLUS one.
+  seen: [[usize; 4]; 5],
 }
 
 impl Floors {
+  /// Every opener the parser scans forward from. Exhaustive on purpose:
+  /// adding a scan without a slot here reintroduces the quadratic shape.
   fn slot(c: char) -> Option<usize> {
     match c {
       '*' => Some(0),
       '_' => Some(1),
       '~' => Some(2),
+      '`' => Some(3),
+      '[' => Some(4),
       _ => None,
     }
   }
@@ -624,6 +643,29 @@ fn emphasis_for(c: char, len: usize) -> Option<Emphasis> {
 
 fn slice(chars: &[char], from: usize, to: usize) -> String {
   chars[from..to].iter().collect()
+}
+
+/// The index of the run of exactly `len` copies of `c` that closes an opener
+/// at `from`, memoising failure in `floors`.
+///
+/// "Exactly" is the half that was missing (Codex review, pass 6): a search
+/// for a run of one happily matched the first character of a run of two, so
+/// `` `foo`` `` came out as a styled `foo` followed by a stray backtick.
+fn closing_run(chars: &[char], from: usize, c: char, len: usize, floors: &mut Floors) -> Option<usize> {
+  if floors.exhausted(c, len, from) {
+    return None;
+  }
+  let marker: Vec<char> = vec![c; len];
+  let mut i = from;
+  while let Some(at) = find_seq(chars, i, &marker) {
+    let run = chars[at..].iter().take_while(|x| **x == c).count();
+    if run == len {
+      return Some(at);
+    }
+    i = at + run;
+  }
+  floors.mark(c, len, from);
+  None
 }
 
 /// Whether the marker at `at` can OPEN a run.
@@ -698,11 +740,19 @@ fn find_seq(chars: &[char], from: usize, marker: &[char]) -> Option<usize> {
 }
 
 /// `[text](url)` starting at `at`, as `(text, index just past the link)`.
-fn link(chars: &[char], at: usize) -> Option<(String, usize)> {
+fn link(chars: &[char], at: usize, floors: &mut Floors) -> Option<(String, usize)> {
   if chars.get(at) != Some(&'[') {
     return None;
   }
-  let close = find(chars, at + 1, ']')?;
+  // Through the floors like every other opener: thousands of `[` with no
+  // `]` used to rescan the whole suffix each (Codex review, pass 6).
+  if floors.exhausted('[', 1, at + 1) {
+    return None;
+  }
+  let Some(close) = find(chars, at + 1, ']') else {
+    floors.mark('[', 1, at + 1);
+    return None;
+  };
   if chars.get(close + 1) != Some(&'(') {
     return None;
   }

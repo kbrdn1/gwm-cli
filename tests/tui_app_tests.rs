@@ -13822,3 +13822,34 @@ fn the_tab_bar_survives_a_refresh_that_only_one_side_answers() {
     "and Tab must still cross to it"
   );
 }
+
+#[test]
+fn a_promotion_puts_the_horizontal_offset_back_at_the_left_edge() {
+  // Codex review, pass 6 (P2). The offset resets on a tab switch and on
+  // close, but a PR landing on an issue the view was standing in for
+  // changes sides through `sync_rich_overlay`, which went past both. A PR
+  // carrying a preformatted line of its own then opened already scrolled,
+  // with its first columns hidden and nothing on screen saying why — the
+  // exact failure the two existing resets were added to prevent.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut issue = rich_issue_fixture(42);
+  issue.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_issue_fetch_result(Ok(issue));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.rich_view_scroll_right();
+  assert!(app.rich_h_offset() > 0, "precondition: the issue scrolled");
+
+  // The PR the issue was standing in for lands, carrying a long line too.
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "y".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "it promoted");
+  assert_eq!(app.rich_h_offset(), 0, "and the new side opens at its left edge");
+}

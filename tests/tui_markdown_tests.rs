@@ -486,3 +486,65 @@ fn emphasis_sharing_a_delimiter_run_is_a_documented_limit() {
     "the form that does work must keep working"
   );
 }
+
+#[test]
+fn no_unclosed_opener_makes_the_parse_quadratic() {
+  // Codex review, pass 6 (P1), and the SECOND finding of this class: pass 5
+  // fixed the emphasis scan, pass 6 found the same shape in the link scan.
+  // Two of a kind means the property is what needs writing down, not each
+  // site as it is reported — so every opener the parser knows is exercised
+  // here, by construction rather than by whichever one got reported.
+  //
+  // The invariant: an opener that finds no closer must never rescan a
+  // suffix an earlier opener already proved empty. All of these are remote
+  // text, and a forge accepts 65 536 characters of it, on the thread that
+  // re-wraps the view at every resize.
+  for opener in ["*a ", "_a ", "~a ", "`a ", "[a "] {
+    let body = opener.repeat(20_000);
+    let start = std::time::Instant::now();
+    assert!(!render(&body, 80).is_empty());
+    assert!(
+      start.elapsed().as_secs() < 5,
+      "{opener:?} took {:?}: a rescan per opener is the shape that gets here",
+      start.elapsed()
+    );
+  }
+}
+
+#[test]
+fn a_code_span_closes_only_on_a_run_of_its_own_length() {
+  // Codex review, pass 6 (P2), on the run support added in pass 5: the
+  // search accepted the first `run` backticks of a LONGER run, so a single
+  // backtick opener closed on the first half of a double one.
+  assert_eq!(plain("`foo``"), vec!["`foo``"], "no run of one closes this");
+  assert_eq!(
+    roles("``foo`` bar"),
+    vec![
+      ("foo".to_string(), Emphasis::Code),
+      (" bar".to_string(), Emphasis::Plain),
+    ]
+  );
+}
+
+#[test]
+fn a_heading_carries_its_own_inline_markup() {
+  // Codex review, pass 6 (P2). `## **Breaking changes**` is an ordinary
+  // heading — this repo's own changelog writes them — and the text went
+  // straight into a `Heading` run, so the asterisks stayed on screen.
+  let got = roles("## **Breaking changes**");
+  assert_eq!(got.len(), 1, "one run, not a marker sandwich: {got:?}");
+  assert_eq!(got[0].0, "Breaking changes");
+  assert!(
+    !got[0].0.contains('*'),
+    "the markers belong to the markup, not to the title: {got:?}"
+  );
+  // Inline code in a heading keeps being code.
+  assert_eq!(
+    roles("### The `gwm doctor` check"),
+    vec![
+      ("The ".to_string(), Emphasis::Heading),
+      ("gwm doctor".to_string(), Emphasis::Code),
+      (" check".to_string(), Emphasis::Heading),
+    ]
+  );
+}

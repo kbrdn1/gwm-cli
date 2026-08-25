@@ -6653,6 +6653,13 @@ impl App {
     };
     let title = crate::naming::sanitise_for_terminal(&title);
     let promoted = self.detail_overlay.kind != kind;
+    // A promotion changes sides, so it owes the same reset a tab switch
+    // does (Codex review, pass 6): the offset describes the side being
+    // left, and the new one would open already scrolled with its first
+    // columns hidden and nothing saying why.
+    if promoted {
+      self.rich_h_offset = 0;
+    }
     self.rich_overlay_source = Some(source);
     self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
     if promoted {
