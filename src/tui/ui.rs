@@ -5309,10 +5309,16 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
 
 /// The merge confirmation (issue #551).
 ///
-/// Names everything the decision turns on: which PR, where it lands, the
-/// resolved method AND what that method does to the history, and the CI
-/// rollup. The last one is why this modal earns its cost — merging on a red
-/// CI is the mistake worth one keypress of friction.
+/// Built on the delete modal's own layout (validation feedback): the same
+/// five zones, the same `LoaderWidget` while it runs, the same countdown
+/// bar while it is armed, and the same buttons hidden mid-flight. A merge
+/// is no less irreversible than a delete, so it gets no less ceremony and
+/// no different shape to learn.
+///
+/// The summary names what the decision turns on: which PR, `head → base`,
+/// the resolved method AND what that method does to the history, and the CI
+/// rollup. That last one is why the modal earns its keypress; merging on a
+/// red CI is the mistake worth one moment of friction.
 fn draw_confirm_merge(f: &mut Frame, app: &App) {
   let danger = app.theme.prunable;
   let muted = app.theme.muted;
@@ -5327,46 +5333,113 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
     ])
   };
 
-  let mut lines: Vec<Line<'static>> = Vec::new();
-  lines.push(
+  let mut content: Vec<Line<'static>> = Vec::new();
+  content.push(
     Line::from(Span::styled(
       format!("Merge {} #{}?", m.noun, m.number),
       Style::default().fg(danger).add_modifier(Modifier::BOLD),
     ))
     .centered(),
   );
-  lines.push(Line::from(String::new()));
-  lines.push(row("title", m.title.clone(), Style::default().fg(app.theme.name)));
+  content.push(Line::from(String::new()));
+  content.push(row("title", m.title.clone(), Style::default().fg(app.theme.name)));
   if !m.head_ref.is_empty() && !m.base_ref.is_empty() {
-    lines.push(row(
+    content.push(row(
       "branch",
       format!("{} → {}", m.head_ref, m.base_ref),
       Style::default().fg(app.theme.branch),
     ));
   }
-  lines.push(row(
+  content.push(row(
     "method",
     format!("{}: {}", m.method.as_str(), m.method.summary()),
     Style::default().fg(app.theme.name),
   ));
   // Shown, not enforced. A forge refuses a merge for reasons gwm does not
-  // model, and its own error says which; inventing a client-side rule adds
-  // a second place to be wrong.
+  // model, and its own error says which; a client-side rule would add a
+  // second place to be wrong.
   if let Some((label, color)) = ci_indicator(m.ci, m.checks_passed, m.checks_total, &app.theme) {
-    lines.push(row("checks", label.trim().to_string(), Style::default().fg(color)));
+    content.push(row("checks", label.trim().to_string(), Style::default().fg(color)));
   }
-  lines.push(Line::from(String::new()));
-  lines.push(Line::from(Span::styled(
+  content.push(Line::from(String::new()));
+  content.push(Line::from(Span::styled(
     "the source branch is kept",
     Style::default().fg(muted),
   )));
-  lines.push(Line::from(String::new()));
-  lines.push(confirm_buttons_line(app.confirm.focused_button(), danger, muted));
 
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + 2 /* border */ + 2 /* padding */;
   let area = centered_content(62, 56, 80, height, f.area());
+  let block = overlay_block_titled("Merge", danger);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // summary
+      Constraint::Length(1), // loader / countdown
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
+
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block_titled("Merge", danger)), area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
+
+  // --- loader / failure / countdown, exactly the delete modal's ladder ---
+  if app.is_merge_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::MergePr.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.merge_failure() {
+    f.render_widget(
+      LoaderWidget::failed("merge failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
+    let now = Instant::now();
+    let mut spans = vec![Span::styled(
+      format!("{} ", app.spinner.glyph(DOT_FRAMES)),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(countdown_bar(
+      app.confirm_countdown_progress(now),
+      app.confirm_countdown_remaining_secs(now),
+      danger,
+      app.theme.dirty,
+      muted,
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), inner[1]);
+  }
+
+  // --- buttons + hint, gone while the merge is in flight ---
+  if !app.is_merge_loading() {
+    f.render_widget(
+      Paragraph::new(confirm_buttons_line(
+        app.confirm.focused_button(),
+        app.theme.accent,
+        muted,
+      ))
+      .alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Confirm,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      ))
+      .alignment(Alignment::Center),
+      inner[4],
+    );
+  }
 }
 
 fn draw_confirm(f: &mut Frame, app: &App) {

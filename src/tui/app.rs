@@ -711,6 +711,10 @@ pub struct App {
   /// auto-refresh can land during the safety countdown, and the row under
   /// the cursor is not necessarily the row the user aimed at.
   pending_merge: Option<PendingMerge>,
+  /// The error banner a failed merge leaves in the modal, mirroring
+  /// `delete_failure`: the forge's own words, kept where the decision was
+  /// made rather than flashed on a status bar the reader may miss.
+  merge_failure: Option<String>,
   /// How many columns the rich view is scrolled right (issue #551).
   ///
   /// Only the rows that cannot be reflowed are wide enough to need it — a
@@ -880,6 +884,7 @@ impl App {
       rich_tab_pinned: false,
       confirm_kind: ConfirmKind::DeleteWorktree,
       pending_merge: None,
+      merge_failure: None,
       rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
@@ -2056,23 +2061,7 @@ impl App {
           if !self.tasks.complete(TaskKind::MergePr, generation) {
             continue;
           }
-          let pending = self.pending_merge.take();
-          self.confirm_kind = ConfirmKind::DeleteWorktree;
-          self.view = View::List;
-          match outcome {
-            Ok(()) => {
-              let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
-              let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
-              self.status = format!("{noun} #{number} merged");
-              // The PR's state and the branch's divergence both changed;
-              // the cached status would otherwise keep saying `open`.
-              self.refresh_github_status();
-            }
-            // Surfaced verbatim. The forge refuses a merge for reasons gwm
-            // does not model — required checks, a review still pending, a
-            // protected base — and its own message says which.
-            Err(e) => self.status = format!("merge failed: {}", e.trim()),
-          }
+          self.apply_merge_result(outcome);
           continue;
         }
         TaskMsg::DeleteWorktree(generation, outcome) => {
@@ -2235,6 +2224,19 @@ impl App {
   /// `true` while the delete-worktree worker is in flight (issue #257).
   pub fn is_delete_worktree_loading(&self) -> bool {
     self.tasks.is_loading(TaskKind::DeleteWorktree)
+  }
+
+  /// Whether a merge is in flight. The modal stays up and shows a loader
+  /// while it is, the way the delete flow does: the operation talks to a
+  /// server, and a modal that vanished would leave the reader guessing
+  /// whether anything happened.
+  pub fn is_merge_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::MergePr)
+  }
+
+  /// The failure banner for the merge modal.
+  pub fn merge_failure(&self) -> Option<&str> {
+    self.merge_failure.as_deref()
   }
 
   /// `true` when a requested quit can safely leave the event loop now.
@@ -5852,6 +5854,41 @@ impl App {
   /// rest of a cleanup the user explicitly asked for. Each target is opened
   /// through its own repo, so a workspace batch spanning several repos is
   /// removed from the right one.
+  /// Apply a merge outcome, the seam the drain arm and the tests share.
+  ///
+  /// Split out for the reason `apply_pr_fetch_result` is: a helper that
+  /// lives only inside the drain loop is a helper no test can reach, and
+  /// this one decides whether the modal closes or stays.
+  pub fn apply_merge_result(&mut self, outcome: std::result::Result<(), String>) {
+    match outcome {
+      Ok(()) => {
+        let pending = self.pending_merge.take();
+        let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
+        let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
+        self.confirm_kind = ConfirmKind::DeleteWorktree;
+        self.merge_failure = None;
+        self.view = View::List;
+        // The refresh FIRST, the message second. The PR's state and the
+        // branch's divergence both changed, so the cache has to be dropped
+        // or the pane keeps saying `open` — but `refresh_github_status`
+        // writes a status line of its own on the way (a repo with no forge
+        // remote says so), and doing it after would bury the one thing the
+        // user is waiting to read.
+        self.refresh_github_status();
+        self.status = format!("{noun} #{number} merged");
+      }
+      // The modal stays, carrying the forge's own words. It refuses a merge
+      // for reasons gwm does not model (a required check, a review still
+      // pending, a protected base) and its message says which; closing on
+      // failure would throw that away and leave the reader to guess whether
+      // to retry.
+      Err(e) => {
+        self.merge_failure = Some(e.trim().to_string());
+        self.status = format!("merge failed: {}", e.trim());
+      }
+    }
+  }
+
   /// Fire the merge the confirmation is holding.
   ///
   /// Off the render thread, like every other mutation here: `gh pr merge`
@@ -5871,6 +5908,10 @@ impl App {
     let Some(generation) = self.tasks.request(TaskKind::MergePr) else {
       return;
     };
+    // The modal STAYS UP (validation feedback), showing a loader the way
+    // the delete flow does. Dismissing it here left the screen with only a
+    // status line for an operation that talks to a server and can fail.
+    self.merge_failure = None;
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::MergePr.loading_label().into();
@@ -5959,10 +6000,15 @@ impl App {
       self.status = TaskKind::DeleteWorktree.loading_label().into();
       return;
     }
+    if self.is_merge_loading() {
+      self.status = TaskKind::MergePr.loading_label().into();
+      return;
+    }
     self.confirm.dismiss();
     self.delete_failure = None;
     self.pending_delete.clear();
     self.pending_merge = None;
+    self.merge_failure = None;
     self.confirm_kind = ConfirmKind::DeleteWorktree;
     self.view = View::List;
   }

@@ -45,11 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Merge a PR from the TUI** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)).
-  `M` from the worktree table merges the selected row's linked PR; `M` inside
-  the PR / issue view merges the active tab's. Both go through the same
-  confirmation the delete flow uses, whose summary names the PR, `head →
-  base`, the resolved method and what it does to the history, and the CI
-  rollup.
+  `m` from the worktree table merges the selected row's linked PR; `m` inside
+  the PR / issue view merges the active tab's. Both go through the delete
+  flow's confirmation, and it is the same modal: same layout, same countdown,
+  same spinner while it runs, same buttons hidden mid-flight. Its summary
+  names the PR, `head → base`, the resolved method and what it does to the
+  history, and the CI rollup. A failure keeps the modal up with the forge's
+  own message in it.
 
   The check state is shown rather than enforced: a forge refuses a merge for
   reasons gwm does not model, and its own error says which. **The source

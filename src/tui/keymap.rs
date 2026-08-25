@@ -562,9 +562,8 @@ impl Keymap {
       // #35/#290: `r` opens the review launcher in an embedded PTY overlay.
       def(Action::ReviewPty, &["r"]),
       // #290: `Y` yanks the worktree path (was `y` before #290).
-      // #551 validation feedback: land the selected worktree's PR. `M`
-      // was the only free letter that says "merge" out loud.
-      def(Action::MergePr, &["M"]),
+      // #551 validation feedback: land the selected worktree's PR.
+      def(Action::MergePr, &["m"]),
       def(Action::YankPath, &["Y"]),
       // #290: `y` yanks the branch name (was yank-path `y` before #290).
       def(Action::YankBranchName, &["y"]),

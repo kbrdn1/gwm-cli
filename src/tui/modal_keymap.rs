@@ -394,7 +394,7 @@ define_modal_actions! {
     RichViewYankBody => "yank_body" [ "Y" ],
     // #551 validation feedback: same verb as the list view's `M`, reachable
     // from the view that shows what is about to be merged.
-    RichViewMerge    => "merge"     [ "M" ],
+    RichViewMerge    => "merge"     [ "m" ],
     // #551 validation feedback: pager motions, vim spelling. `D` / `U`
     // rather than `Ctrl+D` / `Ctrl+U` because an unmodified letter is free
     // in this context and the modifier is not worth the reach.

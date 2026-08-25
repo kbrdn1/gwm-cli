@@ -608,7 +608,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         CreateKey::Cancel => app.view = View::List,
         CreateKey::Handled => {}
       },
-      View::Confirm if app.is_delete_worktree_loading() => {}
+      // Keys are inert while either mutation runs: the modal is showing a
+      // loader for something already in flight.
+      View::Confirm if app.is_delete_worktree_loading() || app.is_merge_loading() => {}
       // #219: keys resolve through the `confirm` context. `confirm` (def `y`)
       // fires regardless of focus (unchanged muscle memory); `activate` (def
       // Enter) acts on the *focused* button — focus defaults to Cancel (#187),

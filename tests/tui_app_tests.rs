@@ -14047,3 +14047,48 @@ fn the_half_page_jump_follows_the_window_the_reader_sees() {
   assert_eq!(tall, gwm::tui::detail_visible_rows(40) / 2);
   assert!(app.rich_half_page() >= 1, "never zero, or the key would be inert");
 }
+
+#[test]
+fn a_failed_merge_keeps_the_modal_and_the_forges_own_words() {
+  // Validation feedback: the merge modal behaves like the delete one. It
+  // stays up with a loader while the work runs, and a failure leaves its
+  // banner where the decision was made instead of flashing on a status bar
+  // the reader may miss. The forge refuses for reasons gwm does not model,
+  // so its message is the only accurate one available.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+
+  app.apply_merge_result(Err(
+    "Pull request is not mergeable: the base branch is protected".into(),
+  ));
+
+  assert_eq!(app.view, View::Confirm, "the modal does not vanish on failure");
+  assert!(
+    app.merge_failure().unwrap().contains("protected"),
+    "and it carries the forge's own words: {:?}",
+    app.merge_failure()
+  );
+  assert!(app.pending_merge().is_some(), "so a retry is one keypress");
+}
+
+#[test]
+fn a_successful_merge_closes_the_modal_and_forgets_the_target() {
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+
+  app.apply_merge_result(Ok(()));
+
+  assert_eq!(app.view, View::List);
+  assert!(app.pending_merge().is_none());
+  assert!(app.merge_failure().is_none());
+  assert_eq!(app.confirm_kind(), ConfirmKind::DeleteWorktree);
+  assert!(app.status.contains("merged"), "status: {}", app.status);
+}
