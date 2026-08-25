@@ -1528,6 +1528,12 @@ fn list_format_table_is_default() {
 //   3. Outside a git repo, the standard `NotInGitRepo` error wins.
 //   4. The argv-builder unit tests in `tests/multiplexer_tests.rs`
 //      cover what gets handed to the spawn.
+//
+// Since #589 the spawn itself is partly in scope after all: a fake `tmux`
+// on `$PATH` that echoes its argv needs no live server, and it is the only
+// place the clap parse, the backend dispatch and the config-vs-flag
+// precedence are exercised together. The builder tests cannot see any of
+// those three.
 
 #[test]
 fn tmux_outside_tmux_session_fails_with_clear_error() {
@@ -1572,6 +1578,113 @@ fn herdr_outside_herdr_session_fails_with_clear_error() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("herdr").and(predicate::str::contains("not")));
+}
+
+/// Issue #589. The flag surface: `--direction` takes the two values every
+/// backend can honour and rejects the rest at parse time.
+///
+/// Cross-platform on purpose, unlike the spawn test below: this asserts
+/// clap's own contract (exit 2 for a usage error, the possible values
+/// echoed back), which has no shell in it.
+#[test]
+fn tmux_direction_rejects_a_value_no_backend_can_honour() {
+  // `left` is the tempting one: tmux reaches it through `split-window -b`,
+  // zellij accepts the word, and herdr declares `[possible values: right,
+  // down]`. A value one backend cannot honour must fail at the parse, not
+  // reach a builder that would have to guess.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("TMUX", "/fake-socket,1,0")
+    .args(["tmux", "anything", "--direction", "left"])
+    .assert()
+    .failure()
+    .code(2)
+    .stderr(predicate::str::contains("left"))
+    .stderr(predicate::str::contains("right").and(predicate::str::contains("down")));
+}
+
+/// Issue #589. The whole chain the builder tests cannot reach: clap parses
+/// `--split` / `--direction`, the dispatcher picks the backend, and the
+/// direction resolves against `[tui] mux_pane_direction`.
+///
+/// The fake `tmux` echoes its argv to stdout, which `spawn_multiplexer`
+/// inherits, so the assertion reads the real spawn rather than a builder's
+/// return value. Unix-only for the same reason as `write_recording_glab`:
+/// what is under test is platform-independent in gwm's own code, and a
+/// `.cmd` shim would mostly exercise `cmd.exe` quoting.
+#[cfg(unix)]
+#[test]
+fn tmux_split_takes_its_direction_from_the_config_and_the_flag_overrides_it() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  // `down` rather than the default, so a config that is never read cannot
+  // pass this test by accident: `right` is what the code falls back to.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[tui]
+mux_pane_direction = "down"
+"#,
+      base = toml_basic_string(base.path()),
+    ),
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "589", "mux-dir"])
+    .assert()
+    .success();
+
+  let fake = tempfile::TempDir::new().unwrap();
+  write_recording_mux(fake.path(), "tmux");
+
+  let run = |args: &[&str]| {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("PATH", prepend_path(fake.path()))
+      .env("TMUX", "/fake-socket,1,0")
+      .args(args)
+      .output()
+      .unwrap()
+  };
+
+  // A bare `--split` reads the config: `down` is tmux's `-v`.
+  let out = run(&["tmux", "mux-dir", "--split"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(out.status.success(), "the spawn must succeed, got: {argv}");
+  assert!(
+    argv.contains("split-window -v"),
+    "`mux_pane_direction = \"down\"` must reach tmux as `-v`, got: {argv}"
+  );
+
+  // `--direction` overrides the config, and says "pane" on its own: no
+  // `--split` alongside it here, and the result is still a split.
+  let out = run(&["tmux", "mux-dir", "--direction", "right"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("split-window -h"),
+    "`--direction right` must beat the config and imply a split, got: {argv}"
+  );
+
+  // No flag at all is still a window, whatever the direction says.
+  let out = run(&["tmux", "mux-dir"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("new-window") && argv.contains("feat-589-mux-dir"),
+    "no flag must still open a named window, got: {argv}"
+  );
 }
 
 #[test]
@@ -2300,6 +2413,27 @@ fi
     .unwrap();
     script
   }
+}
+
+/// A fake multiplexer binary that echoes its argv on stdout (issue #589).
+///
+/// `spawn_multiplexer` uses `.status()`, so the child inherits gwm's
+/// stdout and the argv lands in what `assert_cmd` captures. No log file,
+/// therefore no path quoting to get wrong, and no live tmux server on the
+/// runner.
+///
+/// Unix-only for the same reason as [`write_recording_glab`]: the contract
+/// under test is platform-independent in gwm's own code, and a `.cmd` shim
+/// would mostly exercise `cmd.exe` quoting rules.
+#[cfg(unix)]
+fn write_recording_mux(root: &Path, name: &str) -> PathBuf {
+  let script = root.join(name);
+  fs::write(&script, "#!/bin/sh\nprintf 'MUXARGV: %s\\n' \"$*\"\n").unwrap();
+  let mut perms = fs::metadata(&script).unwrap().permissions();
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
 }
 
 /// A fake `glab` that records how it was invoked before answering.
