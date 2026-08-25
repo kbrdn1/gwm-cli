@@ -581,29 +581,40 @@ fn compact_mode_gives_a_short_lists_blank_rows_to_the_sidebar() {
   );
 }
 
-/// Foreground colour of the first cell of `needle` on the row that
-/// carries it.
-fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
+/// Style of the first cell of `needle` on the row that carries it —
+/// foreground, background and modifiers, since a compact header spends all
+/// three (issue #605).
+fn style_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Style> {
   let buffer = terminal.backend().buffer();
   let area = buffer.area;
   for y in area.y..area.y + area.height {
     let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
     if let Some(byte_idx) = line.find(needle) {
       let col = line[..byte_idx].chars().count() as u16;
-      return Some(buffer[(area.x + col, y)].fg);
+      return Some(buffer[(area.x + col, y)].style());
     }
   }
   None
 }
 
+/// Foreground colour of the first cell of `needle` on the row that
+/// carries it.
+fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
+  style_of(terminal, needle).and_then(|s| s.fg)
+}
+
 #[test]
-fn compact_headers_carry_the_focus_signal_the_borders_used_to() {
-  // Issue #545, unknown #1 — the one the issue calls the real half.
-  // Without rules, the border colour has nowhere to live, so the focus
-  // signal moves onto the header text. Both panes are checked in both
-  // configurations because focus is exclusive: `list_has_focus` is the
-  // negation of the sidebar's, so a header wired to a constant (rather
-  // than to focus) would show the two agreeing in at least one of them.
+fn compact_headers_carry_the_focus_signal_in_their_fill_not_their_text() {
+  // Issue #545, unknown #1 — the one the issue calls the real half —
+  // as issue #605 settled it. Without rules the focus signal lives on the
+  // header, but in its *fill* and its weight, not in its colour: a pane's
+  // name is how you find the pane to `Tab` into and must stay legible
+  // while the pane is inactive.
+  //
+  // Both panes are checked in both configurations because focus is
+  // exclusive: `list_has_focus` is the negation of the sidebar's, so a
+  // header wired to a constant (rather than to focus) would show the two
+  // agreeing in at least one of them.
   let dir = repo_with_commits(4);
   let theme = gwm::tui::theme::Theme::default();
   let headers_when = |sidebar_focused: bool| {
@@ -615,18 +626,38 @@ fn compact_headers_carry_the_focus_signal_the_borders_used_to() {
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     (
-      fg_of(&terminal, "[1] WORKTREES").expect("worktrees header"),
-      fg_of(&terminal, "[2] STATUS").expect("status header"),
+      style_of(&terminal, "[1] WORKTREES").expect("worktrees header"),
+      style_of(&terminal, "[2] STATUS").expect("status header"),
     )
   };
 
-  let (worktrees, status) = headers_when(true);
-  assert_eq!(status, theme.focus, "focused sidebar header wears the focus role");
-  assert_eq!(worktrees, theme.muted, "the unfocused pane header is muted");
+  for sidebar_focused in [true, false] {
+    let (worktrees, status) = headers_when(sidebar_focused);
+    let (focused, unfocused) = if sidebar_focused {
+      (status, worktrees)
+    } else {
+      (worktrees, status)
+    };
 
-  let (worktrees, status) = headers_when(false);
-  assert_eq!(worktrees, theme.focus, "focus moves to the list header");
-  assert_eq!(status, theme.muted, "and leaves the sidebar header muted");
+    assert_eq!(
+      (focused.fg, unfocused.fg),
+      (Some(theme.accent), Some(theme.accent)),
+      "sidebar_focused={sidebar_focused}: neither header repaints its text on focus"
+    );
+    assert_eq!(
+      (focused.bg, unfocused.bg),
+      (Some(theme.selection_bg), Some(theme.section_bg)),
+      "sidebar_focused={sidebar_focused}: the fill is what tells the two apart"
+    );
+    assert!(
+      focused.add_modifier.contains(ratatui::style::Modifier::BOLD),
+      "sidebar_focused={sidebar_focused}: the focused header is bold"
+    );
+    assert!(
+      !unfocused.add_modifier.contains(ratatui::style::Modifier::BOLD),
+      "sidebar_focused={sidebar_focused}: the inactive one is not, or the weight says nothing"
+    );
+  }
 }
 
 #[test]
