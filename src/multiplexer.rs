@@ -10,6 +10,7 @@
 //! spawn lives in `cli.rs`, matching the lazygit-launch pattern in
 //! `tui/mod.rs::run_lazygit`.
 
+use clap::ValueEnum;
 use std::path::Path;
 
 /// Multiplexer the user opted into via `gwm tmux …` / `gwm zellij …` /
@@ -33,21 +34,76 @@ impl Multiplexer {
       Multiplexer::Herdr => "herdr",
     }
   }
+
+  /// What [`SpawnMode::Window`] actually opens here, for a status line that
+  /// names the thing the user is looking at: tmux has windows, zellij and
+  /// herdr have tabs.
+  pub fn window_noun(self) -> &'static str {
+    match self {
+      Multiplexer::Tmux => "window",
+      Multiplexer::Zellij | Multiplexer::Herdr => "tab",
+    }
+  }
+}
+
+/// Which half of the split a new pane takes (issue #589).
+///
+/// Two variants rather than four: `right` and `down` are the intersection
+/// of what the three backends accept. tmux reaches `left` / `up` only
+/// through `split-window -b`, and herdr 0.8.2 declares its `--direction`
+/// as `[possible values: right, down]` outright, so a fuller compass
+/// would be variants one backend could not honour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SplitDirection {
+  /// Side by side. tmux `-h`, `--direction right` on zellij and herdr.
+  Right,
+  /// Stacked. tmux `-v`, `--direction down` on zellij and herdr.
+  Down,
+}
+
+impl SplitDirection {
+  /// Every variant, default first.
+  pub const ALL: [SplitDirection; 2] = [SplitDirection::Right, SplitDirection::Down];
+
+  /// The serialised spelling — equal to the `[tui] mux_pane_direction`
+  /// value, to the `--direction` flag's value, and to the argument zellij
+  /// and herdr take. One string, four surfaces.
+  pub const fn label(self) -> &'static str {
+    match self {
+      SplitDirection::Right => "right",
+      SplitDirection::Down => "down",
+    }
+  }
+
+  /// tmux's own spelling. `-h` is a *horizontal split*, which puts the new
+  /// pane to the RIGHT, and `-v` stacks it BELOW: tmux names the axis the
+  /// divider runs along, not the direction the pane goes. The two
+  /// vocabularies meet here and nowhere else.
+  pub const fn tmux_flag(self) -> &'static str {
+    match self {
+      SplitDirection::Right => "-h",
+      SplitDirection::Down => "-v",
+    }
+  }
 }
 
 /// How to open the worktree inside the multiplexer.
-/// `Window` = new tmux window / zellij tab / herdr tab (the default — full screen real estate).
-/// `Split`  = split the current pane (the `-p` flag — keeps both views visible).
+/// `Window`   = new tmux window / zellij tab / herdr tab (full screen real estate).
+/// `Split(d)` = split the current pane towards `d` (the `-p` flag — keeps both views visible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
   Window,
-  Split,
+  Split(SplitDirection),
 }
 
 /// Build `tmux new-window -n <name> -c <path>` (Window) or
-/// `tmux split-window -c <path>` (Split). `<name>` is the worktree's
+/// `tmux split-window -h|-v -c <path>` (Split). `<name>` is the worktree's
 /// short name so it shows up legibly in tmux's status bar; tmux panes
 /// don't carry a name attribute, so Split intentionally omits `-n`.
+///
+/// The direction flag is not optional the way it reads: without it tmux
+/// falls back to `-v` and stacks, which is what `--split` did up to 1.9
+/// while its own `--help` promised "a horizontal split" (issue #589).
 pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<String> {
   let path_str = path.display().to_string();
   match mode {
@@ -59,14 +115,26 @@ pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Strin
       "-c".into(),
       path_str,
     ],
-    SpawnMode::Split => vec!["tmux".into(), "split-window".into(), "-c".into(), path_str],
+    SpawnMode::Split(dir) => vec![
+      "tmux".into(),
+      "split-window".into(),
+      dir.tmux_flag().into(),
+      "-c".into(),
+      path_str,
+    ],
   }
 }
 
 /// Build `zellij action new-tab --name <name> --cwd <path>` (Window) or
-/// `zellij action new-pane --cwd <path>` (Split). `--cwd` on `new-tab`
-/// requires zellij ≥ 0.40 — older versions surface their own error,
-/// which is preferable to silently ignoring the cwd.
+/// `zellij action new-pane --direction right|down --cwd <path>` (Split).
+/// `--cwd` on `new-tab` requires zellij ≥ 0.40 — older versions surface
+/// their own error, which is preferable to silently ignoring the cwd.
+///
+/// `--direction` on `new-pane` is optional in zellij's parser ("if no
+/// direction is specified, it will try to use the biggest available
+/// space"), so passing it is what makes the choice gwm's rather than the
+/// layout's. It conflicts with `--floating` / `--in-place`, neither of
+/// which gwm passes.
 pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<String> {
   let path_str = path.display().to_string();
   match mode {
@@ -79,10 +147,12 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
       "--cwd".into(),
       path_str,
     ],
-    SpawnMode::Split => vec![
+    SpawnMode::Split(dir) => vec![
       "zellij".into(),
       "action".into(),
       "new-pane".into(),
+      "--direction".into(),
+      dir.label().into(),
       "--cwd".into(),
       path_str,
     ],
@@ -90,7 +160,7 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
 }
 
 /// Build `herdr tab create --label <name> --cwd <path>` (Window) or
-/// `herdr pane split --current --direction right --cwd <path>` (Split).
+/// `herdr pane split --current --direction right|down --cwd <path>` (Split).
 /// Herdr drives its own server over a socket, so both verbs are control
 /// commands rather than a `new-window` equivalent; measured against
 /// herdr 0.8.2 (`herdr tab create --help`, `herdr pane split --help`).
@@ -101,10 +171,9 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
 /// * `pane split` needs `--current` to target the caller's pane. Without
 ///   it herdr has no pane to split from.
 /// * `--direction` has no default in herdr's parser, so it must be
-///   passed. `right` is the analogue of tmux's `-h` and of the direction
-///   herdr's own agent guidance reaches for on a wide pane. Making it a
-///   preference is filed separately; this is the hardcoded default until
-///   that lands.
+///   passed. It is the one flag the three backends share by name, and
+///   since #589 the value comes from [`SplitDirection`] rather than from
+///   the `right` this builder used to hardcode.
 /// * **`--focus` is not the default.** `tab create` and `pane split` both
 ///   come back `"focused": false` when the flag is omitted, where
 ///   `tmux new-window` and `zellij action new-tab` move the user to what
@@ -142,13 +211,13 @@ pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode, workspace: 
       ]);
       argv
     }
-    SpawnMode::Split => vec![
+    SpawnMode::Split(dir) => vec![
       "herdr".into(),
       "pane".into(),
       "split".into(),
       "--current".into(),
       "--direction".into(),
-      "right".into(),
+      dir.label().into(),
       "--cwd".into(),
       path_str,
       "--focus".into(),
@@ -156,40 +225,90 @@ pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode, workspace: 
   }
 }
 
-/// Resolve which multiplexer the process is inside/// Resolve which multiplexer the process is inside and build its `Split`
-/// argv, in the order tmux, zellij, herdr.
+/// Resolve which multiplexer the process is inside, in the order tmux,
+/// zellij, herdr.
 ///
 /// Both TUI call sites (`t`, and a `[tui.macro*]` with
 /// `open_in = "mux_pane"`) need that same answer, and until #588 each wrote
 /// its own if-chain: adding a third backend was two edits that could
-/// disagree about the order. The `Multiplexer` comes back with the argv
-/// because the macro path has to tell herdr apart, whose panes take no
-/// command.
+/// disagree about the order. This is the one answer, and [`build_command`]
+/// turns it into an argv.
 ///
 /// The three env values are parameters rather than reads, the shape
 /// [`detect_tmux`] already uses, so the state tests can drive every branch
 /// without rewriting a process-global variable. That is not theoretical
 /// here: `$TMUX` is also read by the clipboard path, so a test that unset it
 /// would pull every yank test in the same binary under the env lock.
-pub fn detect_split_command(
-  name: &str,
-  path: &Path,
-  tmux: Option<String>,
-  zellij: Option<String>,
-  herdr: Option<String>,
-) -> Option<(Multiplexer, Vec<String>)> {
+pub fn detect_multiplexer(tmux: Option<String>, zellij: Option<String>, herdr: Option<String>) -> Option<Multiplexer> {
   if detect_tmux(tmux) {
-    Some((Multiplexer::Tmux, build_tmux_command(name, path, SpawnMode::Split)))
+    Some(Multiplexer::Tmux)
   } else if detect_zellij(zellij) {
-    Some((Multiplexer::Zellij, build_zellij_command(name, path, SpawnMode::Split)))
+    Some(Multiplexer::Zellij)
   } else if detect_herdr(herdr) {
-    // A split needs no workspace id: `--current` resolves it.
-    Some((
-      Multiplexer::Herdr,
-      build_herdr_command(name, path, SpawnMode::Split, None),
-    ))
+    Some(Multiplexer::Herdr)
   } else {
     None
+  }
+}
+
+/// Dispatch to the right `build_*_command` for `mux`. The three call sites
+/// (the CLI verb, the TUI's `t`, a `mux_pane` macro) all had this match
+/// written out, and the CLI's copy is the one that knows about
+/// `$HERDR_WORKSPACE_ID`.
+///
+/// `workspace` is forwarded unconditionally: [`build_herdr_command`] drops
+/// it on a `Split`, where `--current` already resolves the workspace, and
+/// the other two backends never took it. Passing it here therefore cannot
+/// put a `--workspace` on a `pane split`, which is the regression this
+/// signature invites and `tests/multiplexer_tests.rs` pins.
+pub fn build_command(
+  mux: Multiplexer,
+  name: &str,
+  path: &Path,
+  mode: SpawnMode,
+  workspace: Option<&str>,
+) -> Vec<String> {
+  match mux {
+    Multiplexer::Tmux => build_tmux_command(name, path, mode),
+    Multiplexer::Zellij => build_zellij_command(name, path, mode),
+    Multiplexer::Herdr => build_herdr_command(name, path, mode, workspace),
+  }
+}
+
+/// What `mode` just opened, for a status line that names the thing the
+/// user is looking at rather than the thing the key is called: `t` can now
+/// open a whole window or tab (#589), and "opened <name> in new pane" was
+/// the only sentence the TUI had for it.
+pub fn spawn_noun(mux: Multiplexer, mode: SpawnMode) -> &'static str {
+  match mode {
+    SpawnMode::Split(_) => "pane",
+    SpawnMode::Window => mux.window_noun(),
+  }
+}
+
+/// Why `mux` cannot carry a `[tui.macro*]` command in `mode`, or `None`
+/// when it can.
+///
+/// A macro needs the new pane/tab to *run* something, and only some of the
+/// six (backend, mode) pairs have a trailing-command form:
+///
+/// * `tmux split-window <cmd>` and `tmux new-window <cmd>` both take one.
+/// * `zellij action new-pane -- <cmd>` takes one; `zellij action new-tab`
+///   does not, so `mux_pane_direction = "window"` has nothing to hand a
+///   zellij macro (#589).
+/// * neither herdr verb takes one. Running a command in a herdr pane is
+///   `herdr pane run <pane-id> <cmd>`, and the id only comes back in the
+///   JSON `pane split` prints, so it is two processes and a parse, not an
+///   argv (#599).
+///
+/// Splitting anyway would open an empty pane and silently drop the macro,
+/// so the caller falls back to the PTY overlay and puts the reason in the
+/// status bar.
+pub const fn macro_refusal(mux: Multiplexer, mode: SpawnMode) -> Option<&'static str> {
+  match (mux, mode) {
+    (Multiplexer::Herdr, _) => Some("herdr panes take no command"),
+    (Multiplexer::Zellij, SpawnMode::Window) => Some("zellij tabs take no command"),
+    _ => None,
   }
 }
 

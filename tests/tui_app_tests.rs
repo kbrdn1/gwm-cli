@@ -1823,11 +1823,19 @@ fn mux_pane_status_reports_the_multiplexers_own_refusal() {
   // that said "opened" whatever happened. herdr answers a refusal with a
   // non-zero exit and a JSON body on stdout, so the message is built from
   // whichever stream spoke.
-  let ok = gwm::tui::mux_pane_status("feat-7-foo", true, "{\"result\":{}}", "");
+  let ok = gwm::tui::mux_pane_status("feat-7-foo", "pane", true, "{\"result\":{}}", "");
   assert_eq!(ok, "opened feat-7-foo in new pane");
+
+  // The noun is a parameter because `t` no longer always opens a pane:
+  // `mux_pane_direction = "window"` opens a tmux window or a zellij/herdr
+  // tab, and a status bar that still said "pane" would be describing the
+  // key rather than the screen (#589).
+  let ok = gwm::tui::mux_pane_status("feat-7-foo", "tab", true, "", "");
+  assert_eq!(ok, "opened feat-7-foo in new tab");
 
   let err = gwm::tui::mux_pane_status(
     "feat-7-foo",
+    "pane",
     false,
     "{\"error\":{\"message\":\"unknown workspace w9Z\"}}\n",
     "",
@@ -1841,7 +1849,7 @@ fn mux_pane_status_reports_the_multiplexers_own_refusal() {
 
   // stderr wins when both spoke: tmux and zellij put their diagnostics
   // there, and it is the more specific of the two.
-  let err = gwm::tui::mux_pane_status("feat-7-foo", false, "some stdout", "no server running");
+  let err = gwm::tui::mux_pane_status("feat-7-foo", "pane", false, "some stdout", "no server running");
   assert!(
     err.contains("no server running"),
     "expected the stderr text, got: {}",
@@ -1850,7 +1858,7 @@ fn mux_pane_status_reports_the_multiplexers_own_refusal() {
 
   // A refusal with nothing on either stream still has to read as a failure,
   // not as a success with an empty reason.
-  let quiet = gwm::tui::mux_pane_status("feat-7-foo", false, "", "");
+  let quiet = gwm::tui::mux_pane_status("feat-7-foo", "pane", false, "", "");
   assert!(
     !quiet.starts_with("opened"),
     "a silent non-zero exit is still a failure, got: {}",
@@ -1865,7 +1873,7 @@ fn mux_pane_without_a_selection_says_so_and_spawns_nothing() {
   let (_dir, mut app) = make_app();
   app.worktrees.clear();
   app.list_state.select(None);
-  app.open_in_mux_pane_from(None, None, Some("1".into()));
+  app.open_in_mux_pane_from(None, None, Some("1".into()), None);
   assert_eq!(
     app.status, "no worktree selected",
     "the selection gate comes before the multiplexer probe"
@@ -1885,12 +1893,54 @@ fn mux_pane_with_no_multiplexer_names_all_three_variables() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("feat-7-foo")];
   app.list_state.select(Some(0));
-  app.open_in_mux_pane_from(None, None, None);
+  app.open_in_mux_pane_from(None, None, None, None);
   assert!(
     app.status.contains("$TMUX") && app.status.contains("$ZELLIJ") && app.status.contains("$HERDR_ENV"),
     "the hint must name all three probes, got: {}",
     app.status
   );
+}
+
+#[test]
+fn the_mux_pane_knob_picks_the_mode_the_t_key_builds() {
+  // `t` reads `[tui] mux_pane_direction` (#589). The spawn itself is not
+  // reachable from a test (it shells out to a multiplexer that is not on the
+  // runner), so this pins the two pure steps the key runs on: the config
+  // value it resolves, and the argv that value produces for the backend the
+  // cascade would have picked.
+  use gwm::config::MuxPaneDirection;
+  use gwm::multiplexer::{build_command, spawn_noun, Multiplexer, SpawnMode, SplitDirection};
+
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-7-foo")];
+  app.list_state.select(Some(0));
+  let path = app.worktrees[0].path.clone();
+
+  // Default: a pane on the right, where 1.9 and earlier left the choice to
+  // the backend and tmux answered "below".
+  assert_eq!(app.config.tui.mux_pane_direction, MuxPaneDirection::Right);
+  let mode = app.config.tui.mux_pane_direction.spawn_mode();
+  assert_eq!(mode, SpawnMode::Split(SplitDirection::Right));
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None);
+  assert_eq!(argv[1], "split-window");
+  assert_eq!(argv[2], "-h", "the default must reach tmux as `-h`, got: {:?}", argv);
+  assert_eq!(spawn_noun(Multiplexer::Tmux, mode), "pane");
+
+  app.config.tui.mux_pane_direction = MuxPaneDirection::Down;
+  let mode = app.config.tui.mux_pane_direction.spawn_mode();
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None);
+  assert_eq!(argv[2], "-v", "`down` must reach tmux as `-v`, got: {:?}", argv);
+
+  // `window` is the escape hatch: `t` opens a whole window/tab instead of
+  // half a screen, and the status bar has to say so.
+  app.config.tui.mux_pane_direction = MuxPaneDirection::Window;
+  let mode = app.config.tui.mux_pane_direction.spawn_mode();
+  assert_eq!(mode, SpawnMode::Window);
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None);
+  assert_eq!(argv[1], "new-window", "`window` must not split, got: {:?}", argv);
+  assert_eq!(spawn_noun(Multiplexer::Tmux, mode), "window");
+  assert_eq!(spawn_noun(Multiplexer::Zellij, mode), "tab");
+  assert_eq!(spawn_noun(Multiplexer::Herdr, mode), "tab");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use gwm::config::{
   expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, ClipboardMode, Config, ConfigRow,
-  ConfigSource, MacroOpenMode, SidebarOrientation, SidebarPosition, TuiLayout, TuiOpenMode, WorktreeConfig,
-  CONFIG_FILE,
+  ConfigSource, MacroOpenMode, MuxPaneDirection, SidebarOrientation, SidebarPosition, TuiLayout, TuiOpenMode,
+  WorktreeConfig, CONFIG_FILE,
 };
 use tempfile::TempDir;
 
@@ -2981,6 +2981,62 @@ fn handed_repo_bytes_go_through_the_same_validators() {
   assert!(
     format!("{err}").contains("empty `command`"),
     "the semantic validator has to run on handed bytes too, got: {err}"
+  );
+}
+
+#[test]
+fn tui_mux_pane_direction_defaults_to_right() {
+  // #589. Up to 1.9 a split carried no direction and each backend answered
+  // for itself: tmux stacked, zellij took the biggest free space, herdr went
+  // right. `right` is the deliberate default — it is what the `--split` help
+  // has promised since it shipped, and the half that is free on a wide
+  // screen. `down` is the value that restores tmux's old behaviour.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.mux_pane_direction, MuxPaneDirection::Right);
+  assert_eq!(
+    Config::default().tui.mux_pane_direction,
+    MuxPaneDirection::Right,
+    "`Config::default()` must agree with the serde default"
+  );
+}
+
+#[test]
+fn tui_mux_pane_direction_round_trips_every_documented_value() {
+  // The three values are what the Settings panel writes back, so each one
+  // has to load from the file it produces. `window` is the odd one: it is
+  // not a direction at all, it asks for a whole window/tab instead of half
+  // a screen.
+  for (value, expected) in [
+    ("right", MuxPaneDirection::Right),
+    ("down", MuxPaneDirection::Down),
+    ("window", MuxPaneDirection::Window),
+  ] {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+      dir.path().join(CONFIG_FILE),
+      format!("[tui]\nmux_pane_direction = \"{value}\"\n"),
+    )
+    .unwrap();
+    let cfg = Config::load_layered(dir.path(), None).unwrap();
+    assert_eq!(cfg.tui.mux_pane_direction, expected, "`{value}` must load back");
+    assert_eq!(expected.label(), value, "the label is the TOML spelling");
+  }
+}
+
+#[test]
+fn tui_mux_pane_direction_rejects_a_value_no_backend_can_honour() {
+  // tmux reaches `left` only through `split-window -b` and herdr 0.8.2
+  // declares `[possible values: right, down]`, so `left` is not a direction
+  // gwm can pass on. A typo has to fail at load rather than silently fall
+  // back to the default.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nmux_pane_direction = \"left\"\n").unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("`left` is not a value gwm can honour");
+  assert!(
+    format!("{err}").contains("mux_pane_direction"),
+    "the error must name the key, got: {err}"
   );
 }
 
