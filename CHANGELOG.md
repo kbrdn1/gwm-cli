@@ -131,6 +131,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A compact pane's name no longer dims when the pane loses focus**
+  ([#605](https://github.com/kbrdn1/gwm-cli/issues/605)). In the default
+  compact layout the header carried the focus signal twice: the fill under it
+  (`selection_bg` / `section_bg`) *and* the text, repainted from `focus` to
+  `muted`. So a pane's name — the thing you read to know which pane to `Tab`
+  into — was rendered in the role reserved for deliberately secondary text
+  the moment it went inactive, and the spans that already carry a colour (the
+  filter `/` prompt, the Working Tree counts) did not follow, leaving one
+  header line running two rules side by side. The header text is now the
+  `accent` role in both states, and focus adds weight to the whole line on
+  top of the fill it was already painting. Bordered mode is untouched: there
+  the accent still paints the four rules and the title inside the top one.
+
 - **A linked row with nothing fetched yet is white, not green and purple**
   ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
   marker painted its two placeholder slots with a different status role each:
