@@ -141,8 +141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter `/` prompt, the Working Tree counts) did not follow, leaving one
   header line running two rules side by side. The header text is now the
   `accent` role in both states, and focus adds weight to the whole line on
-  top of the fill it was already painting. Bordered mode is untouched: there
-  the accent still paints the four rules and the title inside the top one.
+  top of the fill it was already painting — so an unfocused header is no
+  longer bold, which is what makes the weight a signal. The right-flushed
+  counter follows the title for the same reason: it shares the line, and
+  bordered mode already paints it in the border colour. Bordered mode is
+  otherwise untouched: there the accent still paints the four rules and the
+  title inside the top one.
 
 - **A linked row with nothing fetched yet is white, not green and purple**
   ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`

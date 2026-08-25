@@ -430,12 +430,15 @@ fn compact_header(focused: bool, theme: &Theme) -> ratatui::text::Line<'static> 
   compact_header_line(title, None, 30, compact_header_style(focused, theme))
 }
 
-/// The span of `line` whose content contains `needle`.
+/// The span of `line` that *is* `needle`, or failing that the one that
+/// contains it. Exact first so a one-character needle keeps naming the span
+/// it was written for even if a title later grows the same character.
 fn header_span(line: &ratatui::text::Line<'static>, needle: &str) -> ratatui::text::Span<'static> {
   line
     .spans
     .iter()
-    .find(|s| s.content.contains(needle))
+    .find(|s| s.content.as_ref() == needle)
+    .or_else(|| line.spans.iter().find(|s| s.content.contains(needle)))
     .unwrap_or_else(|| panic!("span {needle:?} in {:?}", title_text(line)))
     .clone()
 }
