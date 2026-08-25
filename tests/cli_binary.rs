@@ -51,6 +51,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  switch "))
     .stdout(predicate::str::contains("  tmux "))
     .stdout(predicate::str::contains("  zellij "))
+    // Issue #588: herdr is the third multiplexer backend.
+    .stdout(predicate::str::contains("  herdr "))
     .stdout(predicate::str::contains("  doctor "))
     .stdout(predicate::str::contains("  link "))
     .stdout(predicate::str::contains("  unlink "))
@@ -1512,6 +1514,7 @@ fn list_format_table_is_default() {
 
 // --------------------------------------------------------------------------
 // Issue #23 — `gwm tmux <pattern>` / `gwm zellij <pattern>`
+// Issue #588 — `gwm herdr <pattern>`
 // --------------------------------------------------------------------------
 //
 // The actual spawn (`std::process::Command::new("tmux").args(...)`) is out
@@ -1519,9 +1522,9 @@ fn list_format_table_is_default() {
 // every CI runner. We instead pin the user-visible contract:
 //
 //   1. The subcommands exist and are listed in `gwm --help`.
-//   2. Outside the corresponding multiplexer (no `$TMUX` / `$ZELLIJ`),
-//      the command exits non-zero with a clear stderr that names the
-//      missing multiplexer — no silent no-op.
+//   2. Outside the corresponding multiplexer (no `$TMUX` / `$ZELLIJ` /
+//      `$HERDR_ENV`), the command exits non-zero with a clear stderr that
+//      names the missing multiplexer — no silent no-op.
 //   3. Outside a git repo, the standard `NotInGitRepo` error wins.
 //   4. The argv-builder unit tests in `tests/multiplexer_tests.rs`
 //      cover what gets handed to the spawn.
@@ -1556,6 +1559,22 @@ fn zellij_outside_zellij_session_fails_with_clear_error() {
 }
 
 #[test]
+fn herdr_outside_herdr_session_fails_with_clear_error() {
+  // Herdr sets `$HERDR_ENV` in the panes it manages; outside one the
+  // command must refuse rather than shell out to a herdr that would go
+  // looking for a socket that isn't there.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("HERDR_ENV")
+    .args(["herdr", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("herdr").and(predicate::str::contains("not")));
+}
+
+#[test]
 fn tmux_outside_git_repo_fails() {
   // `NotInGitRepo` wins over the multiplexer-not-running gate when both
   // apply — the user is told to fix the more fundamental problem first.
@@ -1578,6 +1597,19 @@ fn zellij_outside_git_repo_fails() {
     .current_dir(dir.path())
     .env_remove("ZELLIJ")
     .args(["zellij", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn herdr_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("HERDR_ENV")
+    .args(["herdr", "anything"])
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
@@ -1617,6 +1649,20 @@ fn zellij_outside_zellij_error_does_not_escape_dollar() {
 }
 
 #[test]
+fn herdr_outside_herdr_error_does_not_escape_dollar() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("HERDR_ENV")
+    .args(["herdr", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("\\$").not())
+    .stderr(predicate::str::contains("$HERDR_ENV"));
+}
+
+#[test]
 fn tmux_help_mentions_split_flag() {
   // The `-p` flag (split-pane instead of new-window) is the one knob users
   // care about; it must show up in `--help` so it's discoverable without
@@ -1630,6 +1676,13 @@ fn tmux_help_mentions_split_flag() {
 fn zellij_help_mentions_split_flag() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["zellij", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("--split"));
+}
+
+#[test]
+fn herdr_help_mentions_split_flag() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["herdr", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--split"));
 }
 

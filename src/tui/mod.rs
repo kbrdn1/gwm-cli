@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
-  NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
+  mux_pane_status, read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage,
+  LinkTarget, NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -1394,7 +1394,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+  use crate::multiplexer::{detect_split_command, Multiplexer};
   // Macros run in the selected worktree. With nothing selected (e.g. a filter
   // with no matches), refuse rather than silently running in the main repo —
   // a destructive command must not hit the wrong tree (Codex review on #292).
@@ -1414,13 +1414,31 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
   // review on PR #292), rather than no-oping.
   let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
     let label = format!("macro{}", n);
-    if detect_tmux(std::env::var("TMUX").ok()) {
-      Some(build_tmux_command(&label, &path, SpawnMode::Split))
-    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      Some(build_zellij_command(&label, &path, SpawnMode::Split))
-    } else {
-      app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
-      None
+    match detect_split_command(
+      &label,
+      &path,
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+    ) {
+      // Herdr is detected but its argv is deliberately dropped (#588): a
+      // macro needs the pane to run a command, and `herdr pane split` has no
+      // trailing-command form the way `tmux split-window <cmd>` and
+      // `zellij action new-pane -- <cmd>` do. Running one takes
+      // `herdr pane run <pane-id> <cmd>`, and the id only comes back in the
+      // JSON `pane split` prints, so it is two processes and a parse, not an
+      // argv (#599). Splitting anyway would open an empty pane and silently
+      // drop the macro, so the PTY overlay stays the honest fallback and the
+      // status says why.
+      Some((Multiplexer::Herdr, _)) => {
+        app.status = format!("macro{}: herdr panes take no command; falling back to PTY overlay", n);
+        None
+      }
+      Some((_, cmd)) => Some(cmd),
+      None => {
+        app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
+        None
+      }
     }
   } else {
     None

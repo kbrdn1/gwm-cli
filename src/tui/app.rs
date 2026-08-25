@@ -5148,30 +5148,59 @@ impl App {
   }
 
   /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
-  /// Detects tmux / zellij at runtime via environment variables; prints a
-  /// status message when no supported multiplexer is active.
+  /// Detects tmux / zellij / herdr at runtime via environment variables;
+  /// prints a status message when no supported multiplexer is active.
   pub fn open_in_mux_pane(&mut self) {
-    use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+    self.open_in_mux_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+    );
+  }
+
+  /// [`Self::open_in_mux_pane`] with the three env probes passed in, so a
+  /// state test can drive the refusals without rewriting a process-global
+  /// variable (#588). `$TMUX` is read by the clipboard path too, so unsetting
+  /// it in a test would put every yank test in the same binary under the env
+  /// lock.
+  pub fn open_in_mux_pane_from(&mut self, tmux: Option<String>, zellij: Option<String>, herdr: Option<String>) {
     let Some(w) = self.selected() else {
       self.status = "no worktree selected".into();
       return;
     };
     let path = w.path.clone();
     let name = w.name.clone();
-    // `mux_pane` promises a pane, so split the current pane (tmux
-    // `split-window` / zellij `new-pane`) rather than opening a new
-    // window/tab (Codex review on PR #292).
-    let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-      build_tmux_command(&name, &path, SpawnMode::Split)
-    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      build_zellij_command(&name, &path, SpawnMode::Split)
-    } else {
-      self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
+    // `mux_pane` promises a pane, so the shared cascade builds a Split (tmux
+    // `split-window` / zellij `new-pane` / herdr `pane split`) rather than a
+    // new window/tab (Codex review on PR #292). Herdr comes last in it, so a
+    // user running gwm inside both keeps what they had before #588.
+    let Some((_, cmd)) = crate::multiplexer::detect_split_command(&name, &path, tmux, zellij, herdr) else {
+      self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
     };
     let bin = cmd[0].as_str();
-    match std::process::Command::new(bin).args(&cmd[1..]).spawn() {
-      Ok(_) => self.status = format!("opened {} in new pane", name),
+    // `output()` rather than `spawn()`: both pipes have to be captured
+    // because this runs while ratatui owns the screen, and a child that
+    // inherits them draws over the frame (`herdr pane split` prints its
+    // `pane_info` JSON on every call, which would land in the middle of the
+    // worktree table). Capturing without reading would then deadlock on a
+    // full pipe, and dropping the streams on the floor would leave the status
+    // bar saying "opened" over a refusal.
+    //
+    // Waiting is affordable because all three verbs are control commands that
+    // return as soon as the pane exists: `herdr tab create` measured 40ms,
+    // and `tmux split-window` / `zellij action new-pane` do not wait on the
+    // shell they start either. A multiplexer that hangs here hangs the TUI,
+    // which is the trade for a status bar that does not lie.
+    match std::process::Command::new(bin).args(&cmd[1..]).output() {
+      Ok(out) => {
+        self.status = mux_pane_status(
+          &name,
+          out.status.success(),
+          &String::from_utf8_lossy(&out.stdout),
+          &String::from_utf8_lossy(&out.stderr),
+        )
+      }
       Err(e) => self.status = format!("mux-pane failed: {}", e),
     }
   }
@@ -7059,4 +7088,26 @@ fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
     .clone()
     .or_else(|| std::env::var("EDITOR").ok())
     .unwrap_or_else(|| "vi".into())
+}
+
+/// Status-bar line for a finished `mux_pane` spawn (#588).
+///
+/// Split out of [`App::open_in_mux_pane_from`] because it is the observable
+/// half: the spawn cannot be exercised from a test without opening a real
+/// pane, but what the status bar says about its outcome can.
+///
+/// A refusal reads out of the multiplexer's own words. stderr wins when both
+/// streams spoke (tmux and zellij put diagnostics there), but stdout is not
+/// ignored: herdr answers over its socket API, so its error arrives as a JSON
+/// body on stdout with a non-zero exit. The line is trimmed to its first
+/// non-empty line because the status bar is one row.
+pub fn mux_pane_status(name: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in new pane", name);
+  }
+  let detail = [stderr, stdout]
+    .iter()
+    .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
+    .unwrap_or("no output");
+  format!("mux-pane refused: {}", detail)
 }
