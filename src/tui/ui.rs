@@ -6540,20 +6540,26 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         let drop = skip.saturating_sub(skipped);
         skipped += cols;
         let kept = &segment.text[skip_cells(&segment.text, drop)..];
-        let mut text: String = kept[..head_end(kept, left)].to_string();
+        // Does this run outrun what is left of the row? Answered BEFORE the
+        // cut, so the ellipsis can be given a column instead of being added
+        // on top of a full one (Codex review, pass 4).
+        //
+        // The first cut of this reserved against `value_budget`, the whole
+        // row's width, where `left` is what remains after the runs already
+        // painted. A row opening with a badge therefore came out one column
+        // over, and ratatui clipped the ellipsis itself — which put the
+        // silent truncation back exactly where pass 2 had removed it.
+        let overflows = cells(kept) > left;
+        let room = if overflows { left.saturating_sub(1) } else { left };
+        let mut text: String = kept[..head_end(kept, room)].to_string();
         left -= cells(&text);
-        // The row ran out of budget mid-segment, or mid-list: say so
-        // (Codex review, pass 2). `value` above already carries an
-        // ellipsised copy, but this branch paints the RUNS, so it ignored
-        // it and cut silently — losing the end of a URL with no mark is the
-        // exact failure the ellipsis exists to prevent.
-        if left == 0 && cells(kept) > cells(&text) {
-          while cells(&text) + 1 > value_budget.max(1) {
-            if text.pop().is_none() {
-              break;
-            }
-          }
+        // `value` above already carries an ellipsised copy, but this branch
+        // paints the RUNS, so it has to mark the cut itself: losing the end
+        // of a URL with nothing saying so is the exact failure the ellipsis
+        // exists to prevent (Codex review, pass 2).
+        if overflows {
           text.push('…');
+          left = left.saturating_sub(1);
         }
         let mut style = markdown_style(segment.emphasis, &app.theme);
         // A badge run goes through the Status pane's own `chip_style`, so

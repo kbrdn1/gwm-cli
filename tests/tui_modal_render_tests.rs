@@ -2305,3 +2305,30 @@ fn a_segmented_row_too_wide_for_the_modal_is_ellipsised() {
 
   assert!(url.contains('…'), "a row cut by the modal must say so: {url:?}");
 }
+
+#[test]
+fn a_row_cut_after_a_badge_keeps_its_ellipsis_on_screen() {
+  // Codex review, pass 4 (P2), on the ellipsis added in pass 2. It reserved
+  // its column against the whole row's width instead of against what was
+  // LEFT after the runs already painted, so a row opening with a badge came
+  // out one column over and ratatui clipped the ellipsis itself — putting
+  // the silent truncation back exactly where pass 2 had removed it.
+  //
+  // The identity row is the one that opens with a badge, and a narrow
+  // terminal is where it stops fitting.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(40);
+  let buf = render_at(&mut app, 40, 40);
+  let rows = modal_rows(&buf);
+  let identity = rows
+    .iter()
+    // Not the title, which rides the top rule and carries the same number,
+    // and not the tab bar, which names both sides on one row.
+    .find(|r| r.contains("#551") && !r.contains('╭') && !r.contains("Issue"))
+    .unwrap_or_else(|| panic!("the identity row must be on screen — modal:\n{}", rows.join("\n")));
+
+  assert!(
+    identity.contains('…'),
+    "a row the modal cut must say so, and the mark must survive the clip: {identity:?}"
+  );
+}

@@ -400,3 +400,24 @@ fn deeply_nested_emphasis_terminates() {
   assert!(!render("***_a_***", 40).is_empty());
   assert!(!render("**", 40).is_empty());
 }
+
+#[test]
+fn an_escaped_delimiter_inside_emphasis_does_not_close_it() {
+  // Codex review, pass 4 (P2), on the escape support added in pass 3: the
+  // opener honoured escapes but the CLOSER did not, so `*foo \* bar*` ended
+  // at the escaped asterisk and rendered carrying the backslash it was
+  // escaping with.
+  assert_eq!(
+    roles(r"*foo \* bar*"),
+    vec![("foo * bar".to_string(), Emphasis::Italic)]
+  );
+  // Parity, not presence: `\\` is an escaped backslash, so the asterisk
+  // after it is live and does close the run.
+  assert_eq!(
+    roles(r"*a \\* b"),
+    vec![
+      (r"a \".to_string(), Emphasis::Italic),
+      (" b".to_string(), Emphasis::Plain),
+    ]
+  );
+}

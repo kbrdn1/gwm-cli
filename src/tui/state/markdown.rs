@@ -585,12 +585,30 @@ fn closes(chars: &[char], from: usize, marker: &[char]) -> Option<usize> {
     let after = chars.get(at + marker.len());
     let flanks = before.is_some_and(|c| !c.is_whitespace());
     let intraword = marker[0] == '_' && after.is_some_and(|c| c.is_alphanumeric());
-    if flanks && !intraword {
+    // An escaped delimiter is a character, not a closer (Codex review,
+    // pass 4). Without this, `*foo \* bar*` closed on the escaped
+    // asterisk: the run ended early, and the text came out carrying the
+    // backslash it was escaping with.
+    if flanks && !intraword && !escaped(chars, at) {
       return Some(at);
     }
     i = at + 1;
   }
   None
+}
+
+/// Whether the character at `at` is backslash-escaped.
+///
+/// Counted rather than peeked: `\\*` is an escaped backslash followed by a
+/// live asterisk, so it is the PARITY of the run that decides.
+fn escaped(chars: &[char], at: usize) -> bool {
+  let mut n = 0usize;
+  let mut i = at;
+  while i > 0 && chars[i - 1] == '\\' {
+    n += 1;
+    i -= 1;
+  }
+  n % 2 == 1
 }
 
 fn find(chars: &[char], from: usize, c: char) -> Option<usize> {
