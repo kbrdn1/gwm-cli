@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **herdr is a third multiplexer backend**
+  ([#588](https://github.com/kbrdn1/gwm-cli/issues/588)). `gwm herdr <pattern>`
+  opens the matched worktree in a new [herdr](https://herdr.dev) tab, `-p`
+  splits the current pane instead, and the TUI's `t` key finds herdr the way
+  it finds tmux and zellij. Detection reads `$HERDR_ENV`, which herdr sets in
+  every pane it manages, and it comes last in the cascade so nothing changes
+  for a tmux or zellij user.
+
+  Under the hood: `herdr tab create --label <name> --cwd <path>` and
+  `herdr pane split --current --direction right --cwd <path>`, verified
+  against herdr 0.8.2. The split needs a direction because herdr's parser has
+  no default for one, and `right` is the analogue of tmux's `-h`.
+
+  One surface stays on its old path: a `[tui.macro*]` with
+  `open_in = "mux_pane"` still falls back to the PTY overlay under herdr, and
+  now says so. A macro needs the new pane to run a command, and
+  `herdr pane split` has no trailing-command form, so running one takes a
+  second call with the pane id that `pane split` prints back.
+
 - **A worktree note can be a checklist**
   ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `Ctrl+t` in the note
   editor ticks the box on the line and spawns one when the line has none, from

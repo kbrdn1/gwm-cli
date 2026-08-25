@@ -86,7 +86,7 @@ tests/
 ├── aliases_tests.rs             # [aliases] resolution + shadowing + shell-pipeline refusal
 ├── doctor_tests.rs              # gwm doctor checks + severity arithmetic
 ├── hooks_tests.rs               # gwm hooks install commit-msg (force, linked worktree, hooksPath)
-├── multiplexer_tests.rs         # gwm tmux / gwm zellij argv construction + $TMUX guard
+├── multiplexer_tests.rs         # gwm tmux / zellij / herdr argv construction + env guard
 ├── launcher_tests.rs            # [git_tui] / [review] placeholder expansion + base resolution
 ├── error_tests.rs               # GwmError variants + Display + From impls
 ├── error_variants_tests.rs      # newer GwmError variants (unborn HEAD, gh JSON parse, …)

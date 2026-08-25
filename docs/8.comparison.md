@@ -133,7 +133,7 @@ for a tool that is finished, and a real risk if you need a bug fixed.
 
 Roughly at parity, with differences of shape rather than presence:
 
-- tmux and zellij integration
+- tmux, zellij and herdr integration
 - a command palette
 - shell helpers and completions (bash, zsh, fish)
 - custom commands bound to keys
