@@ -156,7 +156,7 @@ pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode, workspace: 
   }
 }
 
-/// Resolve which multiplexer the process is inside/// Resolve which multiplexer the process is inside and build its `Split`
+/// Resolve which multiplexer the process is inside and build its `Split`
 /// argv, in the order tmux, zellij, herdr.
 ///
 /// Both TUI call sites (`t`, and a `[tui.macro*]` with
