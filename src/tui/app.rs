@@ -5148,10 +5148,13 @@ impl App {
   }
 
   /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
-  /// Detects tmux / zellij at runtime via environment variables; prints a
-  /// status message when no supported multiplexer is active.
+  /// Detects tmux / zellij / herdr at runtime via environment variables;
+  /// prints a status message when no supported multiplexer is active.
   pub fn open_in_mux_pane(&mut self) {
-    use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+    use crate::multiplexer::{
+      build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_tmux, detect_zellij,
+      SpawnMode,
+    };
     let Some(w) = self.selected() else {
       self.status = "no worktree selected".into();
       return;
@@ -5159,14 +5162,20 @@ impl App {
     let path = w.path.clone();
     let name = w.name.clone();
     // `mux_pane` promises a pane, so split the current pane (tmux
-    // `split-window` / zellij `new-pane`) rather than opening a new
-    // window/tab (Codex review on PR #292).
+    // `split-window` / zellij `new-pane` / herdr `pane split`) rather
+    // than opening a new window/tab (Codex review on PR #292).
+    //
+    // Herdr goes last in the cascade so a user running gwm inside both
+    // (herdr hosting a tmux session, say) keeps the behaviour they had
+    // before #588: the innermost multiplexer is the one that splits.
     let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
       build_tmux_command(&name, &path, SpawnMode::Split)
     } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
       build_zellij_command(&name, &path, SpawnMode::Split)
+    } else if detect_herdr(std::env::var("HERDR_ENV").ok()) {
+      build_herdr_command(&name, &path, SpawnMode::Split)
     } else {
-      self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
+      self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
     };
     let bin = cmd[0].as_str();
