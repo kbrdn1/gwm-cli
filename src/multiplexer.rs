@@ -138,6 +138,39 @@ pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Stri
   }
 }
 
+/// Resolve which multiplexer the process is inside and build its `Split`
+/// argv, in the order tmux, zellij, herdr.
+///
+/// Both TUI call sites (`t`, and a `[tui.macro*]` with
+/// `open_in = "mux_pane"`) need that same answer, and until #588 each wrote
+/// its own if-chain: adding a third backend was two edits that could
+/// disagree about the order. The `Multiplexer` comes back with the argv
+/// because the macro path has to tell herdr apart, whose panes take no
+/// command.
+///
+/// The three env values are parameters rather than reads, the shape
+/// [`detect_tmux`] already uses, so the state tests can drive every branch
+/// without rewriting a process-global variable. That is not theoretical
+/// here: `$TMUX` is also read by the clipboard path, so a test that unset it
+/// would pull every yank test in the same binary under the env lock.
+pub fn detect_split_command(
+  name: &str,
+  path: &Path,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+) -> Option<(Multiplexer, Vec<String>)> {
+  if detect_tmux(tmux) {
+    Some((Multiplexer::Tmux, build_tmux_command(name, path, SpawnMode::Split)))
+  } else if detect_zellij(zellij) {
+    Some((Multiplexer::Zellij, build_zellij_command(name, path, SpawnMode::Split)))
+  } else if detect_herdr(herdr) {
+    Some((Multiplexer::Herdr, build_herdr_command(name, path, SpawnMode::Split)))
+  } else {
+    None
+  }
+}
+
 /// `true` when `$TMUX` is set to a non-empty value — tmux exports the
 /// socket path to every process spawned inside a session, so its
 /// presence is the canonical "am I inside tmux?" probe.

@@ -1816,6 +1816,41 @@ fn exit_filter_cancel_clears_query() {
 }
 
 #[test]
+fn mux_pane_without_a_selection_says_so_and_spawns_nothing() {
+  // Issue #588. `t` on an empty list (or a filter that matches nothing) must
+  // refuse on the status bar rather than reach the multiplexer with no path.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+  app.open_in_mux_pane_from(None, None, Some("1".into()));
+  assert_eq!(
+    app.status, "no worktree selected",
+    "the selection gate comes before the multiplexer probe"
+  );
+}
+
+#[test]
+fn mux_pane_with_no_multiplexer_names_all_three_variables() {
+  // The hint is the only thing a user gets when `t` does nothing, so it has
+  // to name what gwm actually looked for. Before #588 it said `$TMUX /
+  // $ZELLIJ`, which reads as "gwm has no idea what you are running" to
+  // someone sitting in a herdr pane.
+  //
+  // The three values are passed in rather than removed from the environment:
+  // `$TMUX` is also read by the clipboard path, so rewriting it here would
+  // pull every yank test in this binary under the env lock.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-7-foo")];
+  app.list_state.select(Some(0));
+  app.open_in_mux_pane_from(None, None, None);
+  assert!(
+    app.status.contains("$TMUX") && app.status.contains("$ZELLIJ") && app.status.contains("$HERDR_ENV"),
+    "the hint must name all three probes, got: {}",
+    app.status
+  );
+}
+
+#[test]
 fn filtered_indices_returns_all_when_query_empty() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![

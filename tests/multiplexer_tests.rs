@@ -4,8 +4,8 @@
 //! the runner — they assert against the produced argv vectors.
 
 use gwm::multiplexer::{
-  build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_tmux, detect_zellij, Multiplexer,
-  SpawnMode,
+  build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_split_command, detect_tmux,
+  detect_zellij, Multiplexer, SpawnMode,
 };
 use std::path::Path;
 
@@ -206,6 +206,74 @@ fn detect_herdr_true_when_herdr_env_set() {
 fn detect_herdr_false_when_herdr_env_missing_or_empty() {
   assert!(!detect_herdr(None));
   assert!(!detect_herdr(Some(String::new())));
+}
+
+// --------------------------------------------------------------------------
+// the cascade the TUI runs on (#588)
+// --------------------------------------------------------------------------
+//
+// `t` and the `mux_pane` macro both have to answer "which multiplexer am I
+// inside, and what is its split argv". That answer used to be an if-chain
+// written out twice, once per call site, which is why adding a third backend
+// was two edits that could disagree. `detect_split_command` is the one
+// answer, and it takes the three env values as parameters (the shape
+// `detect_tmux` already uses) so these tests never touch the process
+// environment: `tui_app_tests` rewrites variables under a lock precisely
+// because `$TMUX` is read by the clipboard path too.
+
+fn path() -> &'static Path {
+  Path::new("/tmp/wt/feat-7-foo")
+}
+
+#[test]
+fn detect_split_command_prefers_tmux_over_the_other_two() {
+  // Order matters, and it is the reason herdr goes last: someone running gwm
+  // inside a tmux session nested in a herdr pane has both variables set, and
+  // #588 must not move them onto the newer backend.
+  let (mux, argv) = detect_split_command(
+    "feat-7-foo",
+    path(),
+    Some("/tmp/tmux-501/default,1,0".into()),
+    Some("0".into()),
+    Some("1".into()),
+  )
+  .expect("tmux is active, so a command must come back");
+  assert_eq!(mux, Multiplexer::Tmux);
+  assert_eq!(argv[1], "split-window", "tmux wins the cascade, got: {:?}", argv);
+}
+
+#[test]
+fn detect_split_command_falls_through_to_zellij_then_herdr() {
+  let (mux, argv) = detect_split_command("feat-7-foo", path(), None, Some("0".into()), Some("1".into()))
+    .expect("zellij is active, so a command must come back");
+  assert_eq!(mux, Multiplexer::Zellij);
+  assert_eq!(argv[2], "new-pane", "zellij beats herdr, got: {:?}", argv);
+
+  let (mux, argv) = detect_split_command("feat-7-foo", path(), None, None, Some("1".into()))
+    .expect("herdr is active, so a command must come back");
+  assert_eq!(mux, Multiplexer::Herdr);
+  assert_eq!(argv[1], "pane", "herdr must be reached last, got: {:?}", argv);
+  assert_eq!(
+    argv[2], "split",
+    "the cascade builds a Split, never a Window, got: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn detect_split_command_is_none_when_nothing_is_active() {
+  // The three empty strings are not padding: a shell that ran `unset TMUX`
+  // and a shell that never had it both surface as an empty value through
+  // some wrappers, and neither means "inside a multiplexer".
+  assert!(detect_split_command("feat-7-foo", path(), None, None, None).is_none());
+  assert!(detect_split_command(
+    "feat-7-foo",
+    path(),
+    Some(String::new()),
+    Some(String::new()),
+    Some(String::new())
+  )
+  .is_none());
 }
 
 // --------------------------------------------------------------------------

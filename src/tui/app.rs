@@ -5151,30 +5151,30 @@ impl App {
   /// Detects tmux / zellij / herdr at runtime via environment variables;
   /// prints a status message when no supported multiplexer is active.
   pub fn open_in_mux_pane(&mut self) {
-    use crate::multiplexer::{
-      build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_tmux, detect_zellij,
-      SpawnMode,
-    };
+    self.open_in_mux_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+    );
+  }
+
+  /// [`Self::open_in_mux_pane`] with the three env probes passed in, so a
+  /// state test can drive the refusals without rewriting a process-global
+  /// variable (#588). `$TMUX` is read by the clipboard path too, so unsetting
+  /// it in a test would put every yank test in the same binary under the env
+  /// lock.
+  pub fn open_in_mux_pane_from(&mut self, tmux: Option<String>, zellij: Option<String>, herdr: Option<String>) {
     let Some(w) = self.selected() else {
       self.status = "no worktree selected".into();
       return;
     };
     let path = w.path.clone();
     let name = w.name.clone();
-    // `mux_pane` promises a pane, so split the current pane (tmux
-    // `split-window` / zellij `new-pane` / herdr `pane split`) rather
-    // than opening a new window/tab (Codex review on PR #292).
-    //
-    // Herdr goes last in the cascade so a user running gwm inside both
-    // (herdr hosting a tmux session, say) keeps the behaviour they had
-    // before #588: the innermost multiplexer is the one that splits.
-    let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-      build_tmux_command(&name, &path, SpawnMode::Split)
-    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      build_zellij_command(&name, &path, SpawnMode::Split)
-    } else if detect_herdr(std::env::var("HERDR_ENV").ok()) {
-      build_herdr_command(&name, &path, SpawnMode::Split)
-    } else {
+    // `mux_pane` promises a pane, so the shared cascade builds a Split (tmux
+    // `split-window` / zellij `new-pane` / herdr `pane split`) rather than a
+    // new window/tab (Codex review on PR #292). Herdr comes last in it, so a
+    // user running gwm inside both keeps what they had before #588.
+    let Some((_, cmd)) = crate::multiplexer::detect_split_command(&name, &path, tmux, zellij, herdr) else {
       self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
     };
