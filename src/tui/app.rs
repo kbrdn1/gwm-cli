@@ -726,6 +726,11 @@ pub struct App {
   /// renderer knows, so the event loop stamps it here — see
   /// [`Self::set_term_width`], which also re-wraps an open overlay.
   term_width: u16,
+  /// The terminal height the App was last drawn at, stamped beside
+  /// [`Self::term_width`] (issue #551). A half-page jump has to move by the
+  /// window the reader is actually looking at, and only the frame knows how
+  /// tall that is.
+  term_height: u16,
 
   /// The status the open rich view renders (issue #420 / Codex review
   /// #529). The overlay owns its source rather than reading it back from
@@ -880,6 +885,7 @@ impl App {
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
       term_width: 80,
+      term_height: 24,
       rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
@@ -3418,6 +3424,22 @@ impl App {
   /// resize that never reached the `App` would leave the rows wrapped for
   /// the previous width, and the renderer ellipsises whatever overflows —
   /// so the widened terminal would show *less* text, not more.
+  /// Stamp the terminal height. Unlike the width it changes no wrapping,
+  /// so it needs no rebuild: only the jump distance reads it.
+  pub fn set_term_height(&mut self, rows: u16) {
+    self.term_height = rows;
+  }
+
+  /// Rows the rich view shows at once, through the renderer's own answer.
+  fn rich_visible_rows(&self) -> usize {
+    crate::tui::ui::detail_visible_rows(self.term_height)
+  }
+
+  /// Half a window, the `Ctrl+D` / `Ctrl+U` distance, never zero.
+  pub fn rich_half_page(&self) -> usize {
+    (self.rich_visible_rows() / 2).max(1)
+  }
+
   pub fn set_term_width(&mut self, cols: u16) {
     if self.term_width == cols {
       return;

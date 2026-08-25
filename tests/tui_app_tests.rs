@@ -13996,3 +13996,54 @@ fn the_merge_confirmation_carries_the_configured_method() {
   app.enter_confirm_merge();
   assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
 }
+
+#[test]
+fn the_rich_view_has_pager_motions() {
+  // Validation feedback on #551: `D` / `U` move half a window, `g` / `G`
+  // jump to the ends. A description now runs to hundreds of rows, so `j`
+  // sixty times was the only way across it.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = (0..200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(120);
+  app.set_term_height(40);
+  app.enter_rich_view();
+  let last = app.detail_overlay.rows.len() - 1;
+
+  let half = app.rich_half_page();
+  assert!(half > 1, "half a 40-row window is a real jump, got {half}");
+
+  app.detail_overlay.select_page_down(half);
+  assert_eq!(app.detail_overlay.selected, half);
+  app.detail_overlay.select_page_up(half);
+  assert_eq!(app.detail_overlay.selected, 0);
+
+  // Clamped, not wrapped: a pager stops at the ends, and wrapping would
+  // lose the reader's place in a body this long.
+  app.detail_overlay.select_page_up(half);
+  assert_eq!(app.detail_overlay.selected, 0, "up from the top stays");
+  app.detail_overlay.select_last();
+  assert_eq!(app.detail_overlay.selected, last);
+  app.detail_overlay.select_page_down(half);
+  assert_eq!(app.detail_overlay.selected, last, "down from the bottom stays");
+  app.detail_overlay.select_first();
+  assert_eq!(app.detail_overlay.selected, 0);
+}
+
+#[test]
+fn the_half_page_jump_follows_the_window_the_reader_sees() {
+  // The distance is half of what is ON SCREEN, so it has to come from the
+  // renderer's own answer rather than a second guess at the same number.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.set_term_height(40);
+  let tall = app.rich_half_page();
+  app.set_term_height(20);
+  let short = app.rich_half_page();
+
+  assert!(short < tall, "a shorter terminal jumps less: {short} vs {tall}");
+  assert_eq!(tall, gwm::tui::detail_visible_rows(40) / 2);
+  assert!(app.rich_half_page() >= 1, "never zero, or the key would be inert");
+}

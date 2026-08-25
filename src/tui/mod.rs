@@ -74,19 +74,20 @@ pub use ui::{
   chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_line,
   config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line,
   confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title,
-  detail_overlay_width, display_path_with_home, ellipsize_middle, field_input_line, filled_cells_for_progress,
-  folded_status_line, footer_line, form_field_scroll, format_status, freshness_color, github_status_lines, header_line,
-  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
-  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
-  link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter, markdown_style, modal_height,
-  modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width, overlay_modal_width,
-  pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line,
-  recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, rich_view_modal_width,
-  skip_cells, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
-  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
-  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
-  WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON,
-  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  detail_overlay_width, detail_visible_rows, display_path_with_home, ellipsize_middle, field_input_line,
+  filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll, format_status, freshness_color,
+  github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows,
+  help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line,
+  link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter,
+  markdown_style, modal_height, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line,
+  modal_width, overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
+  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -321,7 +322,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // covers the changes, this covers the FIRST frame — an overlay opened
     // before any resize event would otherwise wrap against the 80-column
     // default whatever the real terminal is. A no-op once they agree.
-    app.set_term_width(terminal.size().unwrap_or_default().width);
+    let size = terminal.size().unwrap_or_default();
+    app.set_term_width(size.width);
+    app.set_term_height(size.height);
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -394,6 +397,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // resize that never reached it would leave the rows wrapped for the
       // previous terminal and the renderer would ellipsise the overflow.
       app.set_term_width(cols);
+      app.set_term_height(rows);
       clear_without_cursor_query(terminal)?;
       continue;
     }
@@ -829,6 +833,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             None => app.status = "this one has no description".into(),
           },
           Some(ModalAction::RichViewMerge) => app.enter_confirm_merge(),
+          Some(ModalAction::RichViewHalfDown) => {
+            let n = app.rich_half_page();
+            app.detail_overlay.select_page_down(n);
+          }
+          Some(ModalAction::RichViewHalfUp) => {
+            let n = app.rich_half_page();
+            app.detail_overlay.select_page_up(n);
+          }
+          Some(ModalAction::RichViewTop) => app.detail_overlay.select_first(),
+          Some(ModalAction::RichViewBottom) => app.detail_overlay.select_last(),
+          Some(ModalAction::RichViewCiChecks) => app.enter_ci_checks(),
           Some(ModalAction::RichViewLeft) => app.rich_view_scroll_left(),
           Some(ModalAction::RichViewRight) => app.rich_view_scroll_right(),
           _ => {}

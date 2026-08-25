@@ -2919,6 +2919,7 @@ impl HintContext {
       HintContext::RichView => &[
         Hint::Lit("j/k", "select"),
         Hint::Lit("h/l", "scroll"),
+        Hint::Lit("D/U", "half page"),
         Hint::Lit("y/Y", "copy url/body"),
         Hint::Modal(ModalAction::RichViewMerge, "merge"),
         Hint::Modal(ModalAction::RichViewTab, "issue/pr"),
@@ -3885,6 +3886,11 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::RichViewYankUrl, "copy the URL of the active tab"),
       modal_entry(ModalAction::RichViewYankBody, "copy the description of the active tab"),
       modal_entry(ModalAction::RichViewMerge, "merge the PR (asks first)"),
+      modal_entry(ModalAction::RichViewHalfDown, "half a page down"),
+      modal_entry(ModalAction::RichViewHalfUp, "half a page up"),
+      modal_entry(ModalAction::RichViewTop, "jump to the top"),
+      modal_entry(ModalAction::RichViewBottom, "jump to the bottom"),
+      modal_entry(ModalAction::RichViewCiChecks, "open this PR's CI checks"),
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
@@ -5154,6 +5160,16 @@ pub fn markdown_style(emphasis: crate::tui::state::markdown::Emphasis, theme: &T
     Emphasis::Muted => Style::default().fg(theme.muted),
     Emphasis::Branch => Style::default().fg(theme.branch),
   }
+}
+
+/// How many rows the detail overlay shows at once, for a given terminal.
+///
+/// One answer shared by the renderer and by `App`, for the reason the width
+/// is shared: a half-page jump that guesses a different window than the one
+/// on screen lands somewhere the reader did not ask for. Ten rows go to the
+/// frame, the hint bar and the margins.
+pub fn detail_visible_rows(term_height: u16) -> usize {
+  (term_height as usize).saturating_sub(10).max(3)
 }
 
 /// Modal width for the rich PR / issue view (issue #551).
@@ -6476,7 +6492,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // The modal height is derived from the VISIBLE row count, which is
   // constant while navigating — scrolling must never resize the frame
   // (user feedback 2026-07-22). The window follows the selection.
-  let max_visible = (term.height as usize).saturating_sub(10).max(3);
+  let max_visible = detail_visible_rows(term.height);
   let visible = total.min(max_visible);
   let (start, end) = picker_window(total, ov.selected, visible);
 

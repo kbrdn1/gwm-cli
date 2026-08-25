@@ -153,6 +153,31 @@ impl DetailOverlay {
     self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
   }
 
+  /// Jump `n` rows down, stopping at the last one (`D`, issue #551).
+  ///
+  /// Clamped rather than wrapped: `Ctrl+D` in a pager stops at the bottom,
+  /// and a jump that wrapped to the top would lose the reader's place in a
+  /// body that can now run to hundreds of rows.
+  pub fn select_page_down(&mut self, n: usize) {
+    if self.rows.is_empty() {
+      return;
+    }
+    self.selected = (self.selected + n).min(self.rows.len() - 1);
+  }
+
+  /// Jump `n` rows up, stopping at the first.
+  pub fn select_page_up(&mut self, n: usize) {
+    self.selected = self.selected.saturating_sub(n);
+  }
+
+  pub fn select_first(&mut self) {
+    self.selected = 0;
+  }
+
+  pub fn select_last(&mut self) {
+    self.selected = self.rows.len().saturating_sub(1);
+  }
+
   pub fn select_prev(&mut self) {
     self.selected = self.selected.saturating_sub(1);
   }

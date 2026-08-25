@@ -395,6 +395,18 @@ define_modal_actions! {
     // #551 validation feedback: same verb as the list view's `M`, reachable
     // from the view that shows what is about to be merged.
     RichViewMerge    => "merge"     [ "M" ],
+    // #551 validation feedback: pager motions, vim spelling. `D` / `U`
+    // rather than `Ctrl+D` / `Ctrl+U` because an unmodified letter is free
+    // in this context and the modifier is not worth the reach.
+    RichViewHalfDown => "half_down" [ "D" ],
+    RichViewHalfUp   => "half_up"   [ "U" ],
+    // `g` alone, not the `gg` chord: modal contexts bind one key per verb,
+    // and a second `g` simply repeats a jump that is already at the top.
+    RichViewTop      => "top"       [ "g", "Home" ],
+    RichViewBottom   => "bottom"    [ "G", "End" ],
+    // The CI checks list of the same PR, one key away rather than a close
+    // and a re-open from the list view.
+    RichViewCiChecks => "ci_checks" [ "c" ],
   }
   // #515: two verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see

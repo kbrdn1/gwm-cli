@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `l`. In YAML or Python the indentation is the program, and a wrapped
     `+` line's continuation carries no sigil and reads as context.
   - **`y` copies the active tab's URL, `Y` its description.**
+  - **Pager motions**: `D` / `U` move half a window, `g` / `G` jump to the
+    ends, and `c` opens the same PR's CI checks without leaving the view.
 
 ### Added
 
