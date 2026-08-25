@@ -62,6 +62,39 @@ pub struct LauncherPlan {
   pub base: Option<String>,
 }
 
+/// What an open [`View::Confirm`] is asking about.
+///
+/// Exhaustive matches, no `_` arm: the modal carries a safety countdown and
+/// a danger border because what follows cannot be taken back, and a third
+/// use must state its own answer rather than inherit the delete flow's.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum ConfirmKind {
+  #[default]
+  DeleteWorktree,
+  /// Landing a PR / MR on its base branch (issue #551).
+  MergePr,
+}
+
+/// The merge a confirmation is holding, snapshotted when it opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMerge {
+  pub number: u64,
+  pub title: String,
+  pub head_ref: String,
+  pub base_ref: String,
+  pub method: crate::forge::MergeMethod,
+  /// The CI rollup as it stood when the modal opened, rendered in the
+  /// summary. Merging on a red CI is the case the confirmation earns its
+  /// cost, and gwm shows it rather than deciding for the forge: `main` here
+  /// carries required checks, so the server refuses on its own and its
+  /// error is more accurate than a rule invented in this process.
+  pub ci: crate::forge::CiState,
+  pub checks_passed: u32,
+  pub checks_total: u32,
+  /// `PR` / `MR`, resolved by the caller.
+  pub noun: String,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
   List,
@@ -289,6 +322,14 @@ pub struct WorkspaceState {
   /// Index into `repos` of the currently active repo (mirrors `App.repo*`).
   pub active: usize,
 }
+
+/// Columns one `h` / `l` moves the rich view (issue #551).
+///
+/// Eight rather than one: the rows this scrolls are code and diff lines,
+/// where the reader is looking for a stretch of text rather than nudging a
+/// cursor, and a one-column step turns a 200-column line into a key-repeat
+/// exercise. Small enough to still land on a specific column in a few taps.
+const RICH_H_STEP: usize = 8;
 
 pub struct App {
   pub repo: Repository,
@@ -645,12 +686,65 @@ pub struct App {
   /// compared equal and left `Enter` pointing at the old host (Codex
   /// review #529).
   detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
+  /// Whether the reader CHOSE the rich view's current side (issue #551).
+  ///
+  /// The view opens on the PR whenever one is linked and lets a landing PR
+  /// promote an issue that was only standing in for it (#529). Tabs make
+  /// those two rules collide: an issue the reader tabbed to must not be
+  /// yanked away by the next fetch, while an issue the view opened on by
+  /// default still must be. This is the bit that tells them apart, and it
+  /// belongs to one open overlay — `close_detail_overlay` clears it.
+  rich_tab_pinned: bool,
+  /// What the open confirmation modal is about (validation feedback on
+  /// issue #551).
+  ///
+  /// The modal was single-purpose — `View::Confirm` meant "delete a
+  /// worktree" and nothing else — and a merge needs the same ceremony:
+  /// countdown, danger border, a summary naming what is about to happen.
+  /// Discriminated the way `DetailKind` discriminates the detail overlay,
+  /// with exhaustive matches and no `_` arm, so a third use has to answer
+  /// the question rather than inherit the delete flow's behaviour.
+  confirm_kind: ConfirmKind,
+  /// The merge the confirmation is holding, snapshotted when it opened.
+  ///
+  /// A snapshot for the same reason `pending_delete` is one (#484): an
+  /// auto-refresh can land during the safety countdown, and the row under
+  /// the cursor is not necessarily the row the user aimed at.
+  pending_merge: Option<PendingMerge>,
+  /// The error banner a failed merge leaves in the modal, mirroring
+  /// `delete_failure`: the forge's own words, kept where the decision was
+  /// made rather than flashed on a status bar the reader may miss.
+  merge_failure: Option<String>,
+  /// The rich view to come back to when a modal opened FROM it closes
+  /// (validation feedback on issue #551).
+  ///
+  /// `c` and `m` are reached from inside the view, so returning to the
+  /// worktree table on `Esc` throws away where the reader was: they have to
+  /// re-select the row and press `I` again to get back to the thing they
+  /// were reading. The source is kept rather than re-fetched, for the
+  /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
+  /// invalidates the cache on its way out.
+  rich_return: Option<(RichSource, bool)>,
+  /// How many columns the rich view is scrolled right (issue #551).
+  ///
+  /// Only the rows that cannot be reflowed are wide enough to need it — a
+  /// fenced code line, a diff hunk — and they are the reason it exists: in
+  /// code the column is the meaning, so the line is kept whole and this is
+  /// the only way to its tail. Every other row was wrapped to fit and simply
+  /// loses its left edge, which is why the offset is bounded by the widest
+  /// preformatted row rather than by the widest row.
+  rich_h_offset: usize,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
   /// renderer knows, so the event loop stamps it here — see
   /// [`Self::set_term_width`], which also re-wraps an open overlay.
   term_width: u16,
+  /// The terminal height the App was last drawn at, stamped beside
+  /// [`Self::term_width`] (issue #551). A half-page jump has to move by the
+  /// window the reader is actually looking at, and only the frame knows how
+  /// tall that is.
+  term_height: u16,
 
   /// The status the open rich view renders (issue #420 / Codex review
   /// #529). The overlay owns its source rather than reading it back from
@@ -797,10 +891,17 @@ impl App {
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
       detail_overlay_link: None,
+      rich_tab_pinned: false,
+      confirm_kind: ConfirmKind::DeleteWorktree,
+      pending_merge: None,
+      merge_failure: None,
+      rich_return: None,
+      rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
       term_width: 80,
+      term_height: 24,
       rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
@@ -1967,6 +2068,13 @@ impl App {
           // refresh / sync arms use).
           refresh_applied = true;
         }
+        TaskMsg::MergePr(generation, outcome) => {
+          if !self.tasks.complete(TaskKind::MergePr, generation) {
+            continue;
+          }
+          self.apply_merge_result(outcome);
+          continue;
+        }
         TaskMsg::DeleteWorktree(generation, outcome) => {
           if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
             // Late result — a newer run (or an invalidate) superseded it.
@@ -2127,6 +2235,19 @@ impl App {
   /// `true` while the delete-worktree worker is in flight (issue #257).
   pub fn is_delete_worktree_loading(&self) -> bool {
     self.tasks.is_loading(TaskKind::DeleteWorktree)
+  }
+
+  /// Whether a merge is in flight. The modal stays up and shows a loader
+  /// while it is, the way the delete flow does: the operation talks to a
+  /// server, and a modal that vanished would leave the reader guessing
+  /// whether anything happened.
+  pub fn is_merge_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::MergePr)
+  }
+
+  /// The failure banner for the merge modal.
+  pub fn merge_failure(&self) -> Option<&str> {
+    self.merge_failure.as_deref()
   }
 
   /// `true` when a requested quit can safely leave the event loop now.
@@ -2567,7 +2688,10 @@ impl App {
     use super::ui::HintContext;
     match self.view {
       View::Create => self.create_hint_context(),
-      View::Confirm => HintContext::Confirm,
+      View::Confirm => match self.confirm_kind {
+        ConfirmKind::DeleteWorktree => HintContext::Confirm,
+        ConfirmKind::MergePr => HintContext::ConfirmMerge,
+      },
       View::OpenMenu => HintContext::OpenMenu,
       // #219: the two link-prompt stages advertise different keys — the
       // choose-target picker vs the number-input submit/cancel — so the
@@ -3185,6 +3309,9 @@ impl App {
         return;
       }
     };
+    // Before the overlay is replaced: `c` is reachable from inside the rich
+    // view, and `Esc` there should come back to it rather than to the table.
+    self.remember_rich_view();
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
@@ -3270,7 +3397,12 @@ impl App {
     let (kind, rows, target, number) = match &source {
       RichSource::Pr(pr) => (
         crate::tui::state::detail_overlay::DetailKind::RichPr,
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        crate::tui::state::rich_view::rich_pr_rows(
+          pr,
+          self.github.pr_threads_state(pr.number),
+          width,
+          &self.pr_noun_titlecase(),
+        ),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -3306,7 +3438,13 @@ impl App {
   /// The wrap budget handed to the row builders: the overlay modal's inner
   /// width for the terminal the App was last drawn at.
   fn rich_view_width(&self) -> usize {
-    crate::tui::ui::overlay_modal_width(self.term_width).saturating_sub(6) as usize
+    // Names the rich view's OWN policy (issue #551), not the routing the
+    // renderer goes through: `enter_rich_view` sizes the wrap before
+    // `open_rich_overlay` has set the kind, so routing on
+    // `self.detail_overlay.kind` here would budget the first open against
+    // whichever consumer used the overlay last. Both sides still resolve to
+    // `rich_view_modal_width`, which is the number that has to agree.
+    crate::tui::ui::rich_view_modal_width(self.term_width).saturating_sub(6) as usize
   }
 
   /// Stamp the terminal width and re-wrap an open rich view (issue #420).
@@ -3315,6 +3453,22 @@ impl App {
   /// resize that never reached the `App` would leave the rows wrapped for
   /// the previous width, and the renderer ellipsises whatever overflows —
   /// so the widened terminal would show *less* text, not more.
+  /// Stamp the terminal height. Unlike the width it changes no wrapping,
+  /// so it needs no rebuild: only the jump distance reads it.
+  pub fn set_term_height(&mut self, rows: u16) {
+    self.term_height = rows;
+  }
+
+  /// Rows the rich view shows at once, through the renderer's own answer.
+  fn rich_visible_rows(&self) -> usize {
+    crate::tui::ui::detail_visible_rows(self.term_height)
+  }
+
+  /// Half a window, the `Ctrl+D` / `Ctrl+U` distance, never zero.
+  pub fn rich_half_page(&self) -> usize {
+    (self.rich_visible_rows() / 2).max(1)
+  }
+
   pub fn set_term_width(&mut self, cols: u16) {
     if self.term_width == cols {
       return;
@@ -3339,13 +3493,217 @@ impl App {
     }
     let width = self.rich_view_width();
     let rows = match &self.rich_overlay_source {
-      Some(RichSource::Pr(pr)) => {
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width)
-      }
+      Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(
+        pr,
+        self.github.pr_threads_state(pr.number),
+        width,
+        &self.pr_noun_titlecase(),
+      ),
       Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
       None => return,
     };
     self.detail_overlay.set_rows(rows);
+  }
+
+  /// The rich view's tabs as `(label, active)`, or empty when there is only
+  /// one side to show (issue #551).
+  ///
+  /// Empty is the signal the renderer keys off: a lone tab is not a tab, it
+  /// is a label, and drawing a one-entry bar would cost a row to say nothing
+  /// the title does not already say.
+  pub fn rich_view_tabs(&self) -> Vec<(String, bool)> {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay {
+      return Vec::new();
+    }
+    // The ACTIVE side is read off the overlay's own source, not off the
+    // fetch cache (Codex review, pass 2). The overlay deliberately keeps
+    // its source when a refresh fails, so requiring both caches to be
+    // `Loaded` took the bar away exactly when the reader most needed it:
+    // the displayed side errored, the other one landed, and `Tab` went
+    // inert with stale data on screen and no way across.
+    //
+    // Only the DESTINATION has to be loaded, since it is the one a switch
+    // has to render.
+    let (on_issue, active) = match (&self.rich_overlay_source, self.detail_overlay.kind) {
+      (Some(RichSource::Issue(i)), DetailKind::RichIssue) => (true, format!("Issue #{}", i.number)),
+      (Some(RichSource::Pr(p)), DetailKind::RichPr) => (false, format!("{} #{}", self.pr_noun_titlecase(), p.number)),
+      _ => return Vec::new(),
+    };
+    let other = if on_issue {
+      match self.pr_fetch_state() {
+        GitHubFetchState::Loaded(pr) => format!("{} #{}", self.pr_noun_titlecase(), pr.number),
+        _ => return Vec::new(),
+      }
+    } else {
+      match self.issue_fetch_state() {
+        GitHubFetchState::Loaded(issue) => format!("Issue #{}", issue.number),
+        _ => return Vec::new(),
+      }
+    };
+    if on_issue {
+      vec![(active, true), (other, false)]
+    } else {
+      vec![(other, false), (active, true)]
+    }
+  }
+
+  /// Switch the rich view to the other side, and remember that the reader
+  /// asked for it (issue #551).
+  ///
+  /// A no-op with only one side fetched: there is nothing to switch TO, and
+  /// blanking the overlay or closing it would both be worse than ignoring
+  /// the key.
+  pub fn rich_view_next_tab(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.rich_view_tabs().is_empty() {
+      return;
+    }
+    let width = self.rich_view_width();
+    let source = match self.detail_overlay.kind {
+      DetailKind::RichPr => {
+        let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() else {
+          return;
+        };
+        RichSource::Issue(issue.clone())
+      }
+      DetailKind::RichIssue => {
+        let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() else {
+          return;
+        };
+        RichSource::Pr(pr.clone())
+      }
+      DetailKind::Agents | DetailKind::CiChecks => return,
+    };
+    let title = match &source {
+      RichSource::Pr(pr) => format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+      RichSource::Issue(issue) => format!("Issue #{} · {}", issue.number, issue.title),
+    };
+    // Before the rows are built, so the inline-comments section opens as
+    // "loading" rather than appearing out of nowhere one landing later —
+    // the same order `enter_rich_view` uses.
+    if let RichSource::Pr(pr) = &source {
+      let number = pr.number;
+      self.spawn_github_pr_threads(number);
+    }
+    self.rich_tab_pinned = true;
+    // The offset describes the side being left. Carried across, the other
+    // tab would open already scrolled, with its first columns hidden.
+    self.rich_h_offset = 0;
+    self.open_rich_overlay(source, title, width);
+  }
+
+  /// How far right the rich view is scrolled, in columns (issue #551).
+  ///
+  /// Clamped on READ rather than at each site that could invalidate it. The
+  /// bound moves whenever the rows or the modal width do: a wider terminal
+  /// is a wider modal, so the same row runs out of tail sooner, and a
+  /// refresh can return a body whose widest line is shorter. Past the bound
+  /// the renderer skips beyond the end of the line and paints a blank row
+  /// with nothing on screen to explain it. One clamp here means a path
+  /// added later inherits it instead of having to remember it.
+  pub fn rich_h_offset(&self) -> usize {
+    self.rich_h_offset.min(self.rich_h_max())
+  }
+
+  /// The furthest right the view can usefully scroll: enough to bring the
+  /// widest PREFORMATTED row's last column on screen, and not one column
+  /// more.
+  ///
+  /// Bounded by the preformatted rows alone because they are the only ones
+  /// that can be wider than the modal. Bounding by the widest row of any
+  /// kind would be the same number in practice and wrong in principle: a
+  /// wrapped row has no tail to reach, so scrolling past its left edge only
+  /// hides text that was already fully on screen.
+  fn rich_h_max(&self) -> usize {
+    let widest = self
+      .detail_overlay
+      .rows
+      .iter()
+      .filter(|r| r.preformatted)
+      // In terminal CELLS, the unit the modal's width is in (Codex review
+      // on #551). A line of CJK is twice as wide as it is long, so a
+      // character count bounds the offset at half of what the line needs
+      // and its tail stays unreachable.
+      .map(|r| crate::tui::ui::cells(&r.value))
+      .max()
+      .unwrap_or(0);
+    widest.saturating_sub(self.rich_view_width())
+  }
+
+  /// `l` / `→` inside the rich view.
+  pub fn rich_view_scroll_right(&mut self) {
+    self.rich_h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
+  }
+
+  /// `h` / `←` inside the rich view.
+  pub fn rich_view_scroll_left(&mut self) {
+    self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
+  }
+
+  /// Remember the open rich view so a child modal can come back to it.
+  ///
+  /// A no-op when the rich view is not what is on screen, which is what
+  /// makes it safe to call from `enter_ci_checks` and `enter_confirm_merge`
+  /// unconditionally: both are reachable from the worktree table too, and
+  /// from there there is nothing to come back to.
+  fn remember_rich_view(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    let from_rich = self.view == View::DetailOverlay
+      && matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr);
+    if !from_rich {
+      self.rich_return = None;
+      return;
+    }
+    self.rich_return = self.rich_overlay_source.clone().map(|s| (s, self.rich_tab_pinned));
+  }
+
+  /// Reopen the rich view a child modal was opened from, if there was one.
+  ///
+  /// `true` when it took the view back, so the caller knows not to fall
+  /// through to the worktree table.
+  fn restore_rich_view(&mut self) -> bool {
+    let Some((source, pinned)) = self.rich_return.take() else {
+      return false;
+    };
+    let width = self.rich_view_width();
+    let title = match &source {
+      RichSource::Pr(pr) => format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+      RichSource::Issue(issue) => format!("Issue #{} · {}", issue.number, issue.title),
+    };
+    self.open_rich_overlay(source, title, width);
+    // The tab the reader had chosen survives the round trip; without this a
+    // PR landing right after would promote the issue tab out from under
+    // them, which is the bug the pin exists to prevent.
+    self.rich_tab_pinned = pinned;
+    true
+  }
+
+  /// The URL of the open rich view's ACTIVE tab, for `y`.
+  ///
+  /// Read off the overlay's own source rather than the fetch cache, the
+  /// same reason `rebuild_rich_rows` gives: a manual refresh flushes that
+  /// cache, and a yank landing in that window would copy an empty string
+  /// over whatever the user had.
+  pub fn rich_yank_url(&self) -> Option<String> {
+    match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => Some(pr.url.clone()),
+      RichSource::Issue(issue) => Some(issue.url.clone()),
+    }
+    .filter(|u| !u.is_empty())
+  }
+
+  /// The body of the open rich view's ACTIVE tab, for `Y`.
+  ///
+  /// `None` for an empty description, which is ordinary: copying nothing
+  /// over whatever was on the clipboard is worse than saying there is
+  /// nothing to copy.
+  pub fn rich_yank_body(&self) -> Option<String> {
+    let body = match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => &pr.detail.body,
+      RichSource::Issue(issue) => &issue.detail.body,
+    };
+    (!body.trim().is_empty()).then(|| body.clone())
   }
 
   /// The URL of the selected rich-view row, when it carries one — the
@@ -3710,8 +4068,15 @@ impl App {
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
     self.detail_overlay_link = None;
+    self.rich_tab_pinned = false;
+    self.rich_h_offset = 0;
     self.ci_overlay_checks.clear();
     self.rich_overlay_source = None;
+    // Back to the rich view when this overlay was opened from it, rather
+    // than all the way out to the table (validation feedback on #551).
+    if self.restore_rich_view() {
+      return;
+    }
     self.view = View::List;
   }
 
@@ -5613,6 +5978,69 @@ impl App {
     self.spinner.reset();
   }
 
+  /// Open the merge confirmation for the PR of the current context.
+  ///
+  /// Serves both surfaces (validation feedback on issue #551): the rich
+  /// view, where the active tab names the PR, and the worktree table, where
+  /// the selected row's link does. Three states are told apart rather than
+  /// collapsed into one refusal, the way `enter_rich_view` tells them
+  /// apart: no PR linked, linked but not fetched, ready.
+  pub fn enter_confirm_merge(&mut self) {
+    // Same workspace contract as `enter_rich_view` and `rich_view_refresh`:
+    // a failed `Repository::open` for the selected row leaves the link
+    // pointing at the previously active repo, and a merge would then land
+    // the OLD repo's PR. The one guard here that cannot be skipped.
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable; can't merge its PR".into();
+      return;
+    }
+    let Some(number) = self.github.link.pr else {
+      self.status = match self.keymap.primary_chord(Action::LinkPrompt) {
+        Some(key) => format!("no {} linked here: link one first ({key})", self.pr_noun_lower()),
+        None => format!("no {} linked here", self.pr_noun_lower()),
+      };
+      return;
+    };
+    let GitHubFetchState::Loaded(pr) = self.github.pr_fetch_state(number) else {
+      self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+        Some(key) => format!("{} #{number} not fetched yet ({key})", self.pr_noun_titlecase(),),
+        None => format!("{} #{number} not fetched yet", self.pr_noun_titlecase()),
+      };
+      return;
+    };
+    self.pending_merge = Some(PendingMerge {
+      number: pr.number,
+      title: crate::naming::sanitise_for_terminal(&pr.title),
+      head_ref: crate::naming::sanitise_for_terminal(&pr.detail.head_ref),
+      base_ref: crate::naming::sanitise_for_terminal(&pr.detail.base_ref),
+      method: self.config.merge_method,
+      ci: pr.ci,
+      checks_passed: pr.checks_passed,
+      checks_total: pr.checks_total,
+      noun: self.pr_noun_titlecase(),
+    });
+    self.remember_rich_view();
+    self.confirm_kind = ConfirmKind::MergePr;
+    self.view = View::Confirm;
+    self.confirm.reset();
+    self.spinner.reset();
+  }
+
+  /// `PR` / `MR` in lower case, for a sentence.
+  fn pr_noun_lower(&self) -> String {
+    self.pr_noun_titlecase().to_lowercase()
+  }
+
+  /// What the open confirmation is about.
+  pub fn confirm_kind(&self) -> ConfirmKind {
+    self.confirm_kind
+  }
+
+  /// The merge the confirmation is holding, for the renderer.
+  pub fn pending_merge(&self) -> Option<&PendingMerge> {
+    self.pending_merge.as_ref()
+  }
+
   pub fn confirm_delete(&mut self) -> Result<()> {
     // Fire the snapshot taken when the overlay opened, not a fresh
     // resolution: an auto-refresh can land during the safety countdown and
@@ -5649,6 +6077,106 @@ impl App {
   /// rest of a cleanup the user explicitly asked for. Each target is opened
   /// through its own repo, so a workspace batch spanning several repos is
   /// removed from the right one.
+  /// Apply a merge outcome, the seam the drain arm and the tests share.
+  ///
+  /// Split out for the reason `apply_pr_fetch_result` is: a helper that
+  /// lives only inside the drain loop is a helper no test can reach, and
+  /// this one decides whether the modal closes or stays.
+  pub fn apply_merge_result(&mut self, outcome: std::result::Result<(), String>) {
+    match outcome {
+      Ok(()) => {
+        let pending = self.pending_merge.take();
+        let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
+        let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
+        self.confirm_kind = ConfirmKind::DeleteWorktree;
+        self.merge_failure = None;
+        // A merged PR is still the thing the reader was looking at, and the
+        // refresh below will bring its new state to the same view.
+        if !self.restore_rich_view() {
+          self.view = View::List;
+        }
+        // The refresh FIRST, the message second. The PR's state and the
+        // branch's divergence both changed, so the cache has to be dropped
+        // or the pane keeps saying `open` — but `refresh_github_status`
+        // writes a status line of its own on the way (a repo with no forge
+        // remote says so), and doing it after would bury the one thing the
+        // user is waiting to read.
+        self.refresh_github_status();
+        self.status = format!("{noun} #{number} merged");
+      }
+      // The modal stays, carrying the forge's own words. It refuses a merge
+      // for reasons gwm does not model (a required check, a review still
+      // pending, a protected base) and its message says which; closing on
+      // failure would throw that away and leave the reader to guess whether
+      // to retry.
+      Err(e) => {
+        self.merge_failure = Some(e.trim().to_string());
+        self.status = format!("merge failed: {}", e.trim());
+      }
+    }
+  }
+
+  /// Cycle the method the open merge confirmation will use (issue #551).
+  ///
+  /// On the modal rather than only in `.gwm.toml`, because the choice is
+  /// per-merge as often as it is per-project: the config sets what you do
+  /// by default, this is for the one PR where the default is wrong. Inert
+  /// unless a merge is what the modal is holding, and inert while it runs.
+  ///
+  /// Re-arming the countdown is deliberate: the summary now describes a
+  /// different consequence, so the moment of friction is owed again.
+  pub fn cycle_merge_method(&mut self) {
+    use crate::forge::MergeMethod;
+    if self.confirm_kind != ConfirmKind::MergePr || self.is_merge_loading() {
+      return;
+    }
+    let Some(pending) = self.pending_merge.as_mut() else {
+      return;
+    };
+    pending.method = match pending.method {
+      MergeMethod::Merge => MergeMethod::Squash,
+      MergeMethod::Squash => MergeMethod::Rebase,
+      MergeMethod::Rebase => MergeMethod::Merge,
+    };
+    let method = pending.method;
+    self.confirm.reset();
+    self.status = format!("merge method: {} ({})", method.as_str(), method.summary());
+  }
+
+  /// Fire the merge the confirmation is holding.
+  ///
+  /// Off the render thread, like every other mutation here: `gh pr merge`
+  /// talks to a server and takes seconds, and a synchronous call would
+  /// freeze the frame for all of them.
+  pub fn confirm_merge(&mut self) {
+    let Some(pending) = self.pending_merge.clone() else {
+      return;
+    };
+    // Fire the SNAPSHOT taken when the modal opened, not a fresh lookup: an
+    // auto-refresh can land during the countdown and move the link (#484 is
+    // the same lesson on the delete side).
+    let Some(forge) = self.github.forge.clone() else {
+      self.status = "no forge resolved for this repo".into();
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::MergePr) else {
+      return;
+    };
+    // The modal STAYS UP (validation feedback), showing a loader the way
+    // the delete flow does. Dismissing it here left the screen with only a
+    // status line for an operation that talks to a server and can fail.
+    self.merge_failure = None;
+    self.confirm.dismiss();
+    self.spinner.reset();
+    self.status = TaskKind::MergePr.loading_label().into();
+    let tx = self.task_tx.clone();
+    let (number, method) = (pending.number, pending.method);
+    std::thread::spawn(move || {
+      let outcome = forge.merge_pr(number, method).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::MergePr(generation, outcome));
+    });
+  }
+
   fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
     let trust_mode = self.trust_mode;
@@ -5726,9 +6254,19 @@ impl App {
       self.status = TaskKind::DeleteWorktree.loading_label().into();
       return;
     }
+    if self.is_merge_loading() {
+      self.status = TaskKind::MergePr.loading_label().into();
+      return;
+    }
     self.confirm.dismiss();
     self.delete_failure = None;
     self.pending_delete.clear();
+    self.pending_merge = None;
+    self.merge_failure = None;
+    self.confirm_kind = ConfirmKind::DeleteWorktree;
+    if self.restore_rich_view() {
+      return;
+    }
     self.view = View::List;
   }
 
@@ -6594,6 +7132,12 @@ impl App {
         if self.github.link.pr != Some(pr.number) {
           return;
         }
+        // The reader is on the issue tab because they asked to be (#551).
+        // Promoting here is right for an issue that was standing in for a
+        // PR that had not landed yet, and wrong for one that was chosen.
+        if self.rich_tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
+          return;
+        }
         (
           DetailKind::RichPr,
           format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
@@ -6612,7 +7156,12 @@ impl App {
     let width = self.rich_view_width();
     let (rows, target, number) = match &source {
       RichSource::Pr(pr) => (
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        crate::tui::state::rich_view::rich_pr_rows(
+          pr,
+          self.github.pr_threads_state(pr.number),
+          width,
+          &self.pr_noun_titlecase(),
+        ),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -6624,6 +7173,13 @@ impl App {
     };
     let title = crate::naming::sanitise_for_terminal(&title);
     let promoted = self.detail_overlay.kind != kind;
+    // A promotion changes sides, so it owes the same reset a tab switch
+    // does (Codex review, pass 6): the offset describes the side being
+    // left, and the new one would open already scrolled with its first
+    // columns hidden and nothing saying why.
+    if promoted {
+      self.rich_h_offset = 0;
+    }
     self.rich_overlay_source = Some(source);
     self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
     if promoted {

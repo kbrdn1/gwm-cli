@@ -297,8 +297,8 @@ fn bindings_for_returns_only_that_contexts_verbs() {
   let km = ModalKeymap::defaults();
   let confirm = km.bindings_for(KeyContext::Confirm);
   assert!(confirm.iter().all(|b| b.action.context() == KeyContext::Confirm));
-  // confirm has six verbs
-  assert_eq!(confirm.len(), 6);
+  // confirm has seven verbs (#551 added `cycle_method`)
+  assert_eq!(confirm.len(), 7);
 }
 
 // ── BackTab / Shift-Tab terminal disagreement (issue #219 review) ──────────

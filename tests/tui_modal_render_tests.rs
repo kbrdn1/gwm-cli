@@ -1908,6 +1908,431 @@ fn a_form_that_had_to_scroll_says_so() {
   );
 }
 
+/// A PR whose description is one long paragraph, linked and fetched onto a
+/// freshly-initialised repo, with the rich view open (issue #551).
+fn app_with_the_rich_view_open(body: &str) -> (tempfile::TempDir, App) {
+  let (dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  gwm::github::link_pr(&repo, &branch, 551).unwrap();
+  app.refresh_link();
+  let mut pr = gwm::github::PrStatus {
+    number: 551,
+    title: "polish the rich PR / issue view".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pull/551".into(),
+    updated_at: "2026-08-24T10:00:00Z".into(),
+    checks_passed: 13,
+    checks_total: 13,
+    ci: gwm::github::CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: String::new(),
+      author: "kbrdn1".into(),
+      additions: 1,
+      deletions: 0,
+      base_ref: "dev".into(),
+      head_ref: branch,
+      reviews: vec![],
+      comments: vec![],
+    },
+  };
+  pr.detail.body = body.to_string();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+  (dir, app)
+}
+
+/// The horizontal span of the modal's frame, read off its top rule.
+fn frame_width(buf: &Buffer) -> usize {
+  let rows = row_strings(buf);
+  let rule = rows
+    .iter()
+    .find(|r| r.contains('╭') && r.contains('╮'))
+    .unwrap_or_else(|| panic!("no modal frame — rows:\n{}", rows.join("\n")));
+  let start = rule.chars().position(|c| c == '╭').unwrap();
+  let end = rule.chars().position(|c| c == '╮').unwrap();
+  end - start + 1
+}
+
+#[test]
+fn the_rich_view_is_painted_at_its_own_width_not_the_shared_overlays() {
+  // Issue #551. The width is decided TWICE: `App::rich_view_width` wraps the
+  // rows against it, `draw_detail_overlay` paints the frame at it. Nothing
+  // ties the two together but this pair of assertions — and the failure is
+  // silent in both directions. Painting narrower than the wrap ellipsises
+  // the tail of every line of prose; painting wider leaves a column of dead
+  // space the wrap already refused to use.
+  let (_dir, mut app) = app_with_the_rich_view_open("A description worth reading.");
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  assert_eq!(
+    frame_width(&buf),
+    gwm::tui::rich_view_modal_width(200) as usize,
+    "the frame must be painted at the rich view's own policy — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn a_wrapped_body_line_is_never_ellipsised_by_the_renderer() {
+  // The other half of the pair above, and the one that reads as the bug:
+  // the wrap already fitted every line to the inner width, so an ellipsis on
+  // a body row can only mean the paint budget was smaller than the wrap
+  // budget. Asserted on a body long enough to wrap several times at any
+  // plausible width.
+  let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+  // The negative assertion below is vacuous unless the body is on screen at
+  // all: an overlay that failed to open has no `lorem` row to ellipsise.
+  assert!(
+    rows.iter().any(|r| r.contains("lorem")),
+    "the body must be rendered before its ellipsis means anything — rows:\n{}",
+    rows.join("\n")
+  );
+  let culprit = rows.iter().find(|r| {
+    // A body row: inside the frame, carrying prose, cut with an ellipsis.
+    r.contains("lorem") && r.contains('…')
+  });
+  assert!(
+    culprit.is_none(),
+    "a body row was ellipsised, so the paint width is under the wrap width: {:?}\nrows:\n{}",
+    culprit,
+    rows.join("\n")
+  );
+}
+
+#[test]
+fn a_body_row_starts_at_the_frame_edge_not_behind_an_empty_label_column() {
+  // Issue #551, question 2 of the issue body: does the label column earn
+  // its width on rows that are pure prose? It does not. The shell sizes one
+  // label column from the widest label it is handed and indents EVERY row
+  // by it, so each wrapped line of a description paid nine columns for a
+  // label it does not have — on top of wrapping against a budget nine
+  // columns short, which is the same nine columns spent twice.
+  let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+
+  let body = rows
+    .iter()
+    .find(|r| r.contains("lorem"))
+    .unwrap_or_else(|| panic!("the body must be on screen — rows:\n{}", rows.join("\n")));
+  let left_rule = body
+    .chars()
+    .position(|c| c == '│')
+    .expect("a body row sits inside the frame");
+  let text = body.chars().position(|c| c == 'l').expect("the body text");
+
+  // The frame's own inset: the rule, then the block's two padding columns.
+  // Anything past that is the empty label column.
+  assert_eq!(
+    text - left_rule,
+    3,
+    "a label-less row must start at the frame's padding, not {} columns in — row: {body:?}",
+    text - left_rule
+  );
+}
+
+#[test]
+fn markdown_reaches_the_terminal_rendered_not_as_source() {
+  // Issue #551, the complaint in one assertion: `## Description` and
+  // `**bold**` were painted with their markers, because the body reached the
+  // renderer as the Markdown source it arrived as.
+  let (_dir, mut app) = app_with_the_rich_view_open(
+    "## Description\n\nA **bold** claim and `some_code` and a [link](https://example.test/x).\n\n- one\n- [x] done\n\n<!-- hidden -->",
+  );
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+  let all = rows.join("\n");
+
+  assert!(all.contains("Description"), "the heading text is there — rows:\n{all}");
+  assert!(
+    !all.contains("## Description"),
+    "and it is a heading, not its source — rows:\n{all}"
+  );
+  assert!(all.contains("bold"), "the emphasised word is there");
+  assert!(!all.contains("**bold**"), "without its markers — rows:\n{all}");
+  assert!(all.contains("• one"), "a list item gets a bullet — rows:\n{all}");
+  assert!(all.contains("☑ done"), "a task gets its box — rows:\n{all}");
+  assert!(!all.contains("hidden"), "an HTML comment is not shown — rows:\n{all}");
+  assert!(all.contains("link"), "a link shows its text");
+  assert!(!all.contains("https://example.test/x"), "not its URL — rows:\n{all}");
+}
+
+#[test]
+fn an_emphasised_run_is_painted_in_its_own_style() {
+  // The needle the assertions above cannot reach: the text can be correct
+  // while every run is painted identically, which is the same view with
+  // extra steps. Read off the real cells.
+  let (_dir, mut app) = app_with_the_rich_view_open("plainword **boldword** `codeword`");
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+
+  let cell_style = |needle: &str| {
+    let area = *buf.area();
+    for y in 0..area.height {
+      let row: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+      if let Some(at) = row.find(needle) {
+        // `find` is a byte offset and every character here is ASCII.
+        let cell = &buf[(at as u16, y)];
+        return Some((cell.fg, cell.modifier));
+      }
+    }
+    None
+  };
+
+  let plain = cell_style("plainword").expect("plain prose on screen");
+  let bold = cell_style("boldword").expect("the emphasised run on screen");
+  let code = cell_style("codeword").expect("the code run on screen");
+
+  assert_ne!(bold, plain, "an emphasised run must not paint like plain prose");
+  assert_ne!(code, plain, "inline code must not paint like plain prose");
+  assert_ne!(code, bold, "code and emphasis are different things");
+}
+
+#[test]
+#[ignore = "not an assertion: prints the rich view so a human can look at it"]
+fn dump_the_rich_view() {
+  // Question 1 of issue #551: "screenshot the view against a real PR with a
+  // long body — that picture is the brief". `GWM_DUMP_BODY` points at a file
+  // holding one, so the picture can be retaken after any change here:
+  //
+  //   gh pr view 582 --json body -q .body > /tmp/body.md
+  //   GWM_DUMP_BODY=/tmp/body.md cargo test --test tui_modal_render_tests \
+  //     dump_the_rich_view -- --ignored --nocapture
+  //
+  // `GWM_DUMP_TABS=1` instead prints the two-tab case.
+  let body = std::env::var("GWM_DUMP_BODY")
+    .ok()
+    .and_then(|p| std::fs::read_to_string(p).ok())
+    .unwrap_or_else(|| "## Heading\n\nSome **bold** prose.".into());
+  // With `GWM_DUMP_TABS` set, both sides are linked so the tab bar shows.
+  let (_dir, mut app) = if std::env::var_os("GWM_DUMP_TABS").is_some() {
+    app_with_both_tabs()
+  } else {
+    app_with_the_rich_view_open(&body)
+  };
+  let (w, h) = (160, 60);
+  app.set_term_width(w);
+  let buf = render_at(&mut app, w, h);
+  println!("{}", row_strings(&buf).join("\n"));
+}
+
+/// The rich view with BOTH sides linked and fetched, so the tab bar renders.
+fn app_with_both_tabs() -> (tempfile::TempDir, App) {
+  let (dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  gwm::github::link_pr(&repo, &branch, 551).unwrap();
+  gwm::github::link_issue(&repo, &branch, 420).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::github::IssueStatus {
+    number: 420,
+    title: "the view itself".into(),
+    state: gwm::github::IssueState::Open,
+    url: "https://example.test/issues/420".into(),
+    labels: vec!["tui".into()],
+    updated_at: "2026-08-01T10:00:00Z".into(),
+    detail: gwm::forge::IssueDetail {
+      body: "The issue body.".into(),
+      author: "kbrdn1".into(),
+      comments: vec![],
+    },
+  }));
+  app.apply_pr_fetch_result(Ok(gwm::github::PrStatus {
+    number: 551,
+    title: "polish the rich view".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pull/551".into(),
+    updated_at: "2026-08-24T10:00:00Z".into(),
+    checks_passed: 13,
+    checks_total: 13,
+    ci: gwm::github::CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: "The PR body.".into(),
+      author: "kbrdn1".into(),
+      additions: 1,
+      deletions: 0,
+      base_ref: "dev".into(),
+      head_ref: branch,
+      reviews: vec![],
+      comments: vec![],
+    },
+  }));
+  app.enter_rich_view();
+  (dir, app)
+}
+
+#[test]
+fn the_tab_bar_is_on_screen_when_both_sides_are_linked() {
+  // Issue #551: the PR wins whenever one is linked, which left the issue
+  // with no way back. The bar is what says the other side is one key away.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  let inside = modal_rows(&buf).join("\n");
+
+  assert!(inside.contains("Issue #420"), "the issue tab — modal:\n{inside}");
+  assert!(inside.contains("PR #551"), "the PR tab — modal:\n{inside}");
+}
+
+#[test]
+fn the_tab_bar_does_not_push_the_hint_row_out_of_the_frame() {
+  // Two rows were added to `lines`, so two rows had to be added to the
+  // height. Under-count them and `Paragraph` simply drops the tail: the hint
+  // bar, which is the row that tells the reader `Tab` exists at all.
+  //
+  // Asserted inside the frame. The footer at the bottom of the screen
+  // advertises the very same verbs, so a whole-buffer search passes with the
+  // hint bar missing — which is exactly what it did.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  let inside = modal_rows(&buf).join("\n");
+
+  assert!(
+    inside.contains("issue/pr"),
+    "the tab hint must survive the frame — modal:\n{inside}"
+  );
+  assert!(
+    inside.contains("close"),
+    "and so must the rest of the hint bar — modal:\n{inside}"
+  );
+}
+
+#[test]
+fn scrolling_right_brings_a_code_lines_tail_on_screen() {
+  // Issue #551. The offset is state; this is the half that matters. A fenced
+  // line is kept whole rather than reflowed, so without the renderer
+  // honouring the offset its tail is simply unreachable — and the row-level
+  // ellipsis that used to cut it would throw those columns away before
+  // anything could scroll to them.
+  //
+  // The needle is a marker placed at column 300 of a 400-column line, which
+  // no plausible modal width can show at rest.
+  let mut line = "x".repeat(400);
+  line.replace_range(300..309, "NEEDLEHIT");
+  let (_dir, mut app) = app_with_the_rich_view_open(&format!("```\n{line}\n```"));
+  app.set_term_width(160);
+
+  let before = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    !before.contains("NEEDLEHIT"),
+    "precondition: the tail is off screen at rest — modal:\n{before}"
+  );
+
+  for _ in 0..40 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+
+  assert!(
+    after.contains("NEEDLEHIT"),
+    "scrolling right must reach it — modal:\n{after}"
+  );
+}
+
+#[test]
+fn scrolling_leaves_the_wrapped_prose_where_it_was() {
+  // The offset is bounded to preformatted rows on purpose: prose was
+  // wrapped to fit, so it has no tail to reach and sliding it would only
+  // hide its left edge.
+  let (_dir, mut app) =
+    app_with_the_rich_view_open(&format!("A paragraph that stays put.\n\n```\n{}\n```", "x".repeat(400)));
+  app.set_term_width(160);
+  let _ = render_at(&mut app, 160, 50);
+  for _ in 0..40 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+
+  assert!(
+    after.contains("A paragraph that stays put."),
+    "the prose must not slide out of the frame — modal:\n{after}"
+  );
+}
+
+#[test]
+fn scrolling_reaches_the_tail_of_a_line_of_wide_glyphs() {
+  // Codex review, pass 1 (P2): the offset bound and the render clip both
+  // counted CHARS, while the terminal spends CELLS. A line of CJK is twice
+  // as wide as it is long, so the bound stopped at half the columns it
+  // needed to and the tail could not be reached at any offset — on the one
+  // feature whose whole purpose is reaching that tail.
+  let line = format!("{}NEEDLEHIT", "界".repeat(120));
+  let (_dir, mut app) = app_with_the_rich_view_open(&format!("```\n{line}\n```"));
+  app.set_term_width(160);
+
+  let before = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    !before.contains("NEEDLEHIT"),
+    "precondition: 240 cells of glyphs put the tail off screen — modal:\n{before}"
+  );
+
+  for _ in 0..80 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    after.contains("NEEDLEHIT"),
+    "the tail must be reachable — modal:\n{after}"
+  );
+}
+
+#[test]
+fn a_segmented_row_too_wide_for_the_modal_is_ellipsised() {
+  // Codex review, pass 2 (P2): `value` carried the ellipsised text but the
+  // segment branch walked the original runs until the budget ran out, so a
+  // styled row was cut silently. The `url` row is the one that hits this
+  // first, and losing the end of a URL with no mark saying so is the exact
+  // failure the ellipsis exists to prevent.
+  let (_dir, mut app) = app_with_the_rich_view_open("body");
+  app.set_term_width(44);
+  let buf = render_at(&mut app, 44, 40);
+  let rows = modal_rows(&buf);
+  let url = rows
+    .iter()
+    .find(|r| r.contains("example.test"))
+    .unwrap_or_else(|| panic!("the url row must be on screen — modal:\n{}", rows.join("\n")));
+
+  assert!(url.contains('…'), "a row cut by the modal must say so: {url:?}");
+}
+
+#[test]
+fn a_row_cut_after_a_badge_keeps_its_ellipsis_on_screen() {
+  // Codex review, pass 4 (P2), on the ellipsis added in pass 2. It reserved
+  // its column against the whole row's width instead of against what was
+  // LEFT after the runs already painted, so a row opening with a badge came
+  // out one column over and ratatui clipped the ellipsis itself — putting
+  // the silent truncation back exactly where pass 2 had removed it.
+  //
+  // The identity row is the one that opens with a badge, and a narrow
+  // terminal is where it stops fitting.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(40);
+  let buf = render_at(&mut app, 40, 40);
+  let rows = modal_rows(&buf);
+  let identity = rows
+    .iter()
+    // Not the title, which rides the top rule and carries the same number,
+    // and not the tab bar, which names both sides on one row.
+    .find(|r| r.contains("#551") && !r.contains('╭') && !r.contains("Issue"))
+    .unwrap_or_else(|| panic!("the identity row must be on screen — modal:\n{}", rows.join("\n")));
+
+  assert!(
+    identity.contains('…'),
+    "a row the modal cut must say so, and the mark must survive the clip: {identity:?}"
+  );
+}
+
 // ── the note editor's mode indicator (#557) ────────────────────────────────
 
 #[test]

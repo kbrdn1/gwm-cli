@@ -10,6 +10,7 @@ use gwm::forge::{ForgeComment, ForgeReview, IssueDetail, PrDetail, ReviewState};
 use gwm::forge::{ReviewThread, ReviewThreads};
 use gwm::github::{CheckOutcome, CiState, IssueState, IssueStatus, PrCheck, PrState, PrStatus};
 use gwm::tui::state::detail_overlay::DetailRole;
+use gwm::tui::state::markdown::Emphasis;
 use gwm::tui::state::rich_view::{rich_issue_rows, rich_pr_rows, LABEL_W};
 use gwm::tui::GitHubFetchState;
 
@@ -91,9 +92,17 @@ fn sample_issue() -> IssueStatus {
   }
 }
 
-/// `label` + two padding columns + `value`, the shell's own layout.
+/// The shell's own layout, mirrored: a LABELLED row pays the label column
+/// and its two padding columns, a label-less row spans the whole inner
+/// width (issue #551). Getting this wrong in either direction makes every
+/// width assertion below meaningless, so it is the one thing
+/// `tests/tui_modal_render_tests.rs` asserts against the real renderer.
 fn row_width(r: &gwm::tui::state::detail_overlay::DetailRow) -> usize {
-  LABEL_W + 2 + r.value.chars().count()
+  if r.label.is_empty() {
+    r.value.chars().count()
+  } else {
+    LABEL_W + 2 + r.value.chars().count()
+  }
 }
 
 fn values(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Vec<String> {
@@ -102,6 +111,38 @@ fn values(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Vec<String> {
 
 fn value_for(rows: &[gwm::tui::state::detail_overlay::DetailRow], label: &str) -> Option<String> {
   rows.iter().find(|r| r.label == label).map(|r| r.value.clone())
+}
+
+/// The identity row: the label-less badge line the `state` and `checks`
+/// rows were folded into (validation feedback on issue #551).
+fn identity(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> String {
+  rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))
+    .map(|r| r.value.clone())
+    .unwrap_or_default()
+}
+
+/// The badge text on the identity row, without its padding.
+fn state_badge(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Option<String> {
+  rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))?
+    .segments
+    .iter()
+    .find(|s| s.chip)
+    .map(|s| s.text.trim().to_string())
+}
+
+/// The role of the state badge on the identity row.
+fn state_role(rows: &[gwm::tui::state::detail_overlay::DetailRow]) -> Option<Emphasis> {
+  rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))?
+    .segments
+    .iter()
+    .find(|s| s.chip)
+    .map(|s| s.emphasis)
 }
 
 #[test]
@@ -113,7 +154,7 @@ fn every_emitted_label_fits_the_reserved_column() {
   // would keep passing. This is the assertion that makes the width checks
   // mean something.
   let rows = [
-    rich_pr_rows(&sample_pr(), &NO_THREADS, W),
+    rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR"),
     rich_issue_rows(&sample_issue(), W),
   ]
   .concat();
@@ -128,9 +169,9 @@ fn every_emitted_label_fits_the_reserved_column() {
 
 #[test]
 fn pr_rows_carry_the_metadata_block() {
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
 
-  assert_eq!(value_for(&rows, "state").as_deref(), Some("open"));
+  assert_eq!(state_badge(&rows).as_deref(), Some("open"));
   assert_eq!(value_for(&rows, "author").as_deref(), Some("kbrdn1"));
   assert_eq!(
     value_for(&rows, "branch").as_deref(),
@@ -138,7 +179,11 @@ fn pr_rows_carry_the_metadata_block() {
     "head → base, the direction the merge actually goes"
   );
   assert_eq!(value_for(&rows, "diff").as_deref(), Some("+1198 −12"));
-  assert_eq!(value_for(&rows, "checks").as_deref(), Some("passing 7/7"));
+  assert!(
+    identity(&rows).contains("CI passing 7/7"),
+    "the CI rollup moved onto the identity row: {:?}",
+    identity(&rows)
+  );
   assert_eq!(
     value_for(&rows, "updated").as_deref(),
     Some("2026-08-04"),
@@ -148,7 +193,7 @@ fn pr_rows_carry_the_metadata_block() {
 
 #[test]
 fn the_url_row_is_the_actionable_one() {
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
   let url = rows.iter().find(|r| r.label == "url").expect("a url row");
 
   assert_eq!(url.value, "https://github.com/kbrdn1/gwm-cli/pull/519");
@@ -167,7 +212,7 @@ because the overlay renderer truncates a value instead of wrapping it, so the wr
 is this builder's job and nothing else's."
     .into();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
 
   for r in &rows {
     assert!(
@@ -190,7 +235,7 @@ fn a_word_longer_than_the_budget_is_hard_split() {
   // one over-wide row and the renderer would ellipsise the tail away.
   pr.detail.body = format!("see {}", "x".repeat(200));
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
 
   for r in &rows {
     assert!(row_width(r) <= W, "unbreakable word must be hard split");
@@ -198,20 +243,63 @@ fn a_word_longer_than_the_budget_is_hard_split() {
 }
 
 #[test]
-fn a_long_body_is_capped_and_says_so() {
+fn a_long_body_is_rendered_whole_because_the_scroll_is_the_budget() {
+  // Issue #551, replacing `a_long_body_is_capped_and_says_so`. The 40-line
+  // cap was honest about what it dropped, but it was spending a budget the
+  // overlay does not actually have to ration: the view scrolls, so the
+  // window is the terminal height and the row count costs nothing but the
+  // rows themselves. A description cut at `… 85 more lines` was the single
+  // loudest complaint against this view.
   let mut pr = sample_pr();
   pr.detail.body = (0..500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
+  let vals = values(&rows);
+
+  assert_eq!(
+    vals.iter().filter(|v| v.starts_with("line ")).count(),
+    500,
+    "every line of the description must be there"
+  );
+  assert!(
+    !vals.iter().any(|v| v.contains("more lines")),
+    "nothing was dropped, so nothing may claim it was: {:?}",
+    vals.iter().filter(|v| v.contains("more")).collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn every_comment_of_the_conversation_is_rendered() {
+  // The other half of the same call (issue #551): the comment LIST was
+  // capped at 20 and each comment's body at 12 lines, so a busy thread read
+  // as a wall of `… N more`. `gwm` is where the user is; sending them to the
+  // browser for the rest of a conversation it already fetched is the thing
+  // the view exists to avoid.
+  let mut pr = sample_pr();
+  pr.detail.comments = (0..40)
+    .map(|i| ForgeComment {
+      author: format!("commenter{i}"),
+      body: (0..30).map(|l| format!("body line {l}")).collect::<Vec<_>>().join("\n"),
+      created_at: "2026-08-04T15:00:00Z".into(),
+      url: None,
+    })
+    .collect();
+
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
   let vals = values(&rows);
 
   assert!(
-    vals.iter().any(|v| v.contains("more lines")),
-    "a truncated body must say how much was dropped, not stop silently: {vals:?}"
+    vals.iter().any(|v| v.contains("commenter39")),
+    "the last comment must be reachable, not elided behind a marker"
   );
   assert!(
-    vals.iter().filter(|v| v.starts_with("line ")).count() <= 40,
-    "the body cap holds"
+    !vals.iter().any(|v| v.contains("more comments")),
+    "no comment was dropped, so nothing may claim it was"
+  );
+  assert_eq!(
+    vals.iter().filter(|v| v.trim() == "body line 29").count(),
+    40,
+    "every comment must render its whole body"
   );
 }
 
@@ -224,7 +312,7 @@ fn control_and_bidi_characters_are_neutralised() {
   pr.detail.body = "safe \u{202E}txet desrever\u{202C} and \u{000D}overwrite".into();
   pr.detail.author = "al\u{202E}ice".into();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
 
   for r in &rows {
     assert!(
@@ -241,7 +329,7 @@ fn control_and_bidi_characters_are_neutralised() {
 #[test]
 fn reviews_are_listed_with_their_verdict() {
   use gwm::tui::state::detail_overlay::DetailRole;
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
   let vals = values(&rows);
 
   assert!(
@@ -267,7 +355,7 @@ fn reviews_are_listed_with_their_verdict() {
 
 #[test]
 fn comments_carry_their_permalink_as_meta() {
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
 
   let head = rows
     .iter()
@@ -285,7 +373,7 @@ fn a_summary_only_pr_renders_no_empty_sections() {
   let mut pr = sample_pr();
   pr.detail = PrDetail::default();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
   let vals = values(&rows);
 
   assert!(
@@ -295,7 +383,7 @@ fn a_summary_only_pr_renders_no_empty_sections() {
   assert!(!vals.iter().any(|v| v.starts_with("reviews")));
   assert!(!vals.iter().any(|v| v.starts_with("comments")));
   // The summary tier still renders — a GitLab MR lands exactly here.
-  assert_eq!(value_for(&rows, "state").as_deref(), Some("open"));
+  assert_eq!(state_badge(&rows).as_deref(), Some("open"));
   assert!(
     value_for(&rows, "diff").is_none(),
     "a 0/0 diff is a missing measurement, not an empty one"
@@ -308,7 +396,7 @@ fn issue_rows_drop_what_an_issue_does_not_have() {
   let rows = rich_issue_rows(&sample_issue(), W);
   let vals = values(&rows);
 
-  assert_eq!(value_for(&rows, "state").as_deref(), Some("open"));
+  assert_eq!(state_badge(&rows).as_deref(), Some("open"));
   assert_eq!(value_for(&rows, "author").as_deref(), Some("kbrdn1"));
   assert_eq!(value_for(&rows, "labels").as_deref(), Some("feature, tui"));
   assert!(value_for(&rows, "checks").is_none(), "an issue has no CI");
@@ -325,7 +413,7 @@ fn a_draft_pr_says_draft() {
   let mut pr = sample_pr();
   pr.state = PrState::Draft;
   assert_eq!(
-    value_for(&rich_pr_rows(&pr, &NO_THREADS, W), "state").as_deref(),
+    state_badge(&rich_pr_rows(&pr, &NO_THREADS, W, "PR")).as_deref(),
     Some("draft")
   );
 }
@@ -335,7 +423,7 @@ fn a_zero_width_budget_does_not_panic_or_loop() {
   // `overlay_modal_width` clamps at 48, so this cannot happen through the
   // TUI — but a wrap loop that never advances hangs the whole render
   // thread, and that is not a failure mode worth leaving reachable.
-  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, 0);
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, 0, "PR");
   assert!(!rows.is_empty());
 }
 
@@ -349,7 +437,7 @@ fn a_preformatted_block_keeps_its_indentation() {
   let mut pr = sample_pr();
   pr.detail.body = "Config:\n\n```yaml\njobs:\n  build:\n    runs-on: ubuntu\n```\n\nA | B\n--- | ---\n1 | 2".into();
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
   let vals = values(&rows);
 
   assert!(
@@ -373,7 +461,7 @@ fn a_wrapped_continuation_keeps_the_line_indent() {
   let mut pr = sample_pr();
   pr.detail.body = format!("    {}", "alpha ".repeat(40));
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
   let body: Vec<&String> = rows.iter().map(|r| &r.value).filter(|v| v.contains("alpha")).collect();
 
   assert!(body.len() > 1, "precondition: the line had to wrap");
@@ -383,9 +471,10 @@ fn a_wrapped_continuation_keeps_the_line_indent() {
   }
 }
 
-/// `row_width` for a bare value string.
+/// `row_width` for a bare value string. Every caller measures a BODY line,
+/// which carries no label and therefore no gutter.
 fn row_width_of(v: &str) -> usize {
-  LABEL_W + 2 + v.chars().count()
+  v.chars().count()
 }
 
 #[test]
@@ -401,7 +490,7 @@ fn indented_comment_and_review_bodies_stay_inside_the_budget() {
   pr.detail.comments[0].body = body.clone();
   pr.detail.reviews[1].body = body;
 
-  let rows = rich_pr_rows(&pr, &NO_THREADS, W);
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
 
   for r in &rows {
     assert!(
@@ -457,7 +546,7 @@ fn a_thread_renders_its_anchor_its_hunk_and_its_chain() {
     1,
   );
 
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "PR");
   let text = values(&rows).join("\n");
 
   // The anchor is what tells the reader which code is under discussion.
@@ -477,7 +566,7 @@ fn a_single_line_anchor_renders_one_number_not_a_range() {
     1,
   );
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR")).join("\n");
 
   assert!(text.contains("src/lib.rs:3"), "in:\n{text}");
   assert!(!text.contains("src/lib.rs:3-3"), "a null startLine is not a range");
@@ -487,13 +576,15 @@ fn a_single_line_anchor_renders_one_number_not_a_range() {
 fn hunk_lines_keep_their_sigil_and_are_never_re_wrapped() {
   // The wrap path splits on whitespace, so a wrapped `+` line's
   // continuation would read as context — in a diff the sigil *is* the
-  // meaning. Long hunk lines are truncated instead, which keeps the row
-  // count equal to the line count.
+  // meaning. A long hunk line is kept whole instead, which keeps the row
+  // count equal to the line count. It USED to be truncated here; issue #551
+  // moved that decision to the renderer, which clips against the view's
+  // horizontal offset so the tail can still be reached.
   let long_add = format!("+{}", "x ".repeat(80));
   let hunk = format!("@@ -1,2 +1,2 @@\n context\n{long_add}");
   let state = loaded(vec![thread("a.rs", Some(2), None, &hunk, &["see above"])], 1);
 
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "PR");
   // Identified by role, not by their first character: a filter that looks
   // for a sigil cannot see a row that LOST one, which is the whole bug.
   // The metadata block's `diff: +1198 −12` carries a label, and the
@@ -521,8 +612,12 @@ fn hunk_lines_keep_their_sigil_and_are_never_re_wrapped() {
     );
   }
   assert!(
-    hunk_rows.iter().any(|v| v.contains('…')),
-    "the cut has to be visible: {hunk_rows:?}"
+    hunk_rows.iter().any(|v| v.chars().count() > W),
+    "the long line is kept whole for the offset to scroll: {hunk_rows:?}"
+  );
+  assert!(
+    !hunk_rows.iter().any(|v| v.contains('…')),
+    "and nothing is thrown away before it can be scrolled to: {hunk_rows:?}"
   );
 }
 
@@ -532,7 +627,7 @@ fn a_long_hunk_keeps_its_tail_because_the_anchor_is_the_last_line() {
   let hunk = format!("@@ -1,20 +1,21 @@\n{body}+the anchored line");
   let state = loaded(vec![thread("a.rs", Some(21), None, &hunk, &["here"])], 1);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR")).join("\n");
 
   assert!(
     text.contains("+the anchored line"),
@@ -548,7 +643,9 @@ fn a_long_hunk_keeps_its_tail_because_the_anchor_is_the_last_line() {
 fn an_unsupported_forge_says_so_instead_of_reporting_none() {
   let state = GitHubFetchState::Loaded(ReviewThreads::Unsupported);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n").to_lowercase();
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR"))
+    .join("\n")
+    .to_lowercase();
 
   assert!(
     text.contains("not available") || text.contains("github only"),
@@ -561,20 +658,23 @@ fn an_unsupported_forge_says_so_instead_of_reporting_none() {
 fn zero_threads_reads_as_zero_not_as_a_missing_section() {
   let state = loaded(vec![], 0);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n").to_lowercase();
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR"))
+    .join("\n")
+    .to_lowercase();
 
   assert!(text.contains("no inline comments"), "a clean PR says so:\n{text}");
 }
 
 #[test]
 fn an_inflight_fetch_and_a_failed_one_are_both_visible() {
-  let loading = values(&rich_pr_rows(&sample_pr(), &GitHubFetchState::Loading, W)).join("\n");
+  let loading = values(&rich_pr_rows(&sample_pr(), &GitHubFetchState::Loading, W, "PR")).join("\n");
   assert!(loading.to_lowercase().contains("loading"), "in:\n{loading}");
 
   let failed = values(&rich_pr_rows(
     &sample_pr(),
     &GitHubFetchState::Error("gh: HTTP 403".into()),
     W,
+    "PR",
   ))
   .join("\n");
   assert!(failed.contains("gh: HTTP 403"), "in:\n{failed}");
@@ -582,7 +682,7 @@ fn an_inflight_fetch_and_a_failed_one_are_both_visible() {
 
 #[test]
 fn an_idle_fetch_renders_no_threads_section_at_all() {
-  let text = values(&rich_pr_rows(&sample_pr(), &NO_THREADS, W))
+  let text = values(&rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR"))
     .join("\n")
     .to_lowercase();
 
@@ -598,7 +698,7 @@ fn a_capped_thread_list_states_what_it_dropped() {
     .collect();
   let state = loaded(threads, 9);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR")).join("\n");
 
   assert!(text.contains("6 more"), "9 reported, 3 rendered:\n{text}");
 }
@@ -609,7 +709,7 @@ fn a_capped_comment_chain_states_what_it_dropped() {
   t.total_comments = 4;
   let state = loaded(vec![t], 1);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR")).join("\n");
 
   assert!(text.contains("3 more"), "4 reported, 1 rendered:\n{text}");
 }
@@ -622,7 +722,9 @@ fn a_resolved_or_outdated_thread_is_labelled() {
   outdated.is_outdated = true;
   let state = loaded(vec![resolved, outdated], 2);
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n").to_lowercase();
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR"))
+    .join("\n")
+    .to_lowercase();
 
   assert!(text.contains("resolved"), "in:\n{text}");
   assert!(text.contains("outdated"), "in:\n{text}");
@@ -642,8 +744,14 @@ fn every_thread_row_fits_the_budget() {
     1,
   );
 
-  for row in rich_pr_rows(&sample_pr(), &state, W) {
-    let width = row.label.chars().count().max(LABEL_W) + 1 + row.value.chars().count();
+  // Preformatted rows excepted (issue #551): a diff hunk and a fenced code
+  // line are kept whole and clipped by the renderer against the horizontal
+  // offset, because reflowing them would change what they say.
+  for row in rich_pr_rows(&sample_pr(), &state, W, "PR") {
+    if row.preformatted {
+      continue;
+    }
+    let width = row_width(&row);
     assert!(width <= W, "row overflows the modal: {width} > {W} — {row:?}");
   }
 }
@@ -663,7 +771,7 @@ fn a_thread_body_is_sanitised_like_every_other_remote_text() {
     1,
   );
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR")).join("\n");
 
   assert!(!text.contains('\u{202e}'), "a bidi override reached the renderer");
 }
@@ -681,7 +789,7 @@ fn the_hunk_is_sanitised_too() {
     1,
   );
 
-  let text = values(&rich_pr_rows(&sample_pr(), &state, W)).join("\n");
+  let text = values(&rich_pr_rows(&sample_pr(), &state, W, "PR")).join("\n");
 
   assert!(!text.contains('\u{202e}'), "the hunk is remote text as well");
 }
@@ -690,7 +798,7 @@ fn the_hunk_is_sanitised_too() {
 fn a_thread_row_carries_the_comment_permalink() {
   let state = loaded(vec![thread("a.rs", Some(1), None, "@@ -1 +1 @@\n+x", &["c"])], 1);
 
-  let rows = rich_pr_rows(&sample_pr(), &state, W);
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "PR");
 
   assert!(
     rows
@@ -707,4 +815,277 @@ fn an_issue_view_has_no_threads_section() {
   let text = values(&rich_issue_rows(&sample_issue(), W)).join("\n").to_lowercase();
 
   assert!(!text.contains("inline comments"));
+}
+
+/// The roles used on the row labelled `label`.
+fn roles_for(rows: &[gwm::tui::state::detail_overlay::DetailRow], label: &str) -> Vec<(String, Emphasis)> {
+  rows
+    .iter()
+    .find(|r| r.label == label)
+    .map(|r| r.segments.iter().map(|s| (s.text.clone(), s.emphasis)).collect())
+    .unwrap_or_default()
+}
+
+#[test]
+fn the_metadata_block_is_coloured_the_way_the_status_pane_colours_it() {
+  // Issue #551. `state`, `checks` and `diff` all read at the same weight as
+  // the URL, while the Status pane right behind the modal colours the same
+  // facts. Same facts, same vocabulary: an open PR is `Success`, the way
+  // `pr_badge_color` sends it to `theme.clean`.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
+  assert_eq!(state_role(&rows), Some(Emphasis::Success));
+  // The CI rollup is the second badge of the identity row now.
+  let ci = rows
+    .iter()
+    .find(|r| r.label.is_empty() && r.value.contains(" #"))
+    .expect("identity row")
+    .segments
+    .iter()
+    .filter(|s| s.chip)
+    .nth(1)
+    .cloned()
+    .expect("a CI badge");
+  assert!(ci.text.contains("CI passing 7/7"), "{ci:?}");
+  assert_eq!(ci.emphasis, Emphasis::Success);
+  // The one row that carries two outcomes at once, which is why a role per
+  // ROW could never have expressed it.
+  assert_eq!(
+    roles_for(&rows, "diff"),
+    vec![
+      ("+1198".to_string(), Emphasis::Success),
+      (" ".to_string(), Emphasis::Plain),
+      ("−12".to_string(), Emphasis::Failure),
+    ]
+  );
+}
+
+#[test]
+fn every_pr_state_takes_the_status_panes_own_colour() {
+  // The mapping has to agree with `pr_badge_color`, or the same PR reads as
+  // one thing in the pane and another in the overlay one keypress away.
+  for (state, expected) in [
+    (PrState::Open, Emphasis::Success),
+    (PrState::Draft, Emphasis::Muted),
+    (PrState::Merged, Emphasis::Notice),
+    (PrState::Closed, Emphasis::Failure),
+  ] {
+    let mut pr = sample_pr();
+    pr.state = state;
+    let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
+    assert_eq!(
+      state_role(&rows),
+      Some(expected),
+      "{state:?} must carry the colour the Status pane gives it"
+    );
+  }
+}
+
+#[test]
+fn a_closed_issue_is_not_painted_like_a_closed_pr() {
+  // `issue_badge_color` sends a closed issue to `locked`, not to `prunable`:
+  // a closed issue is resolved, a closed PR is abandoned.
+  let mut issue = sample_issue();
+  issue.state = gwm::github::IssueState::Closed;
+  assert_eq!(state_role(&rich_issue_rows(&issue, W)), Some(Emphasis::Notice));
+}
+
+#[test]
+fn a_preformatted_row_may_outrun_the_budget_and_says_that_it_is_one() {
+  // Issue #551, and the one exception to `no_row_overflows_the_width_it_was
+  // _built_for` above. A fenced line is kept whole rather than reflowed,
+  // because in code the column is the meaning — the same call `hunk_rows`
+  // already made for a diff hunk. The row is flagged so the renderer knows
+  // to clip it against the horizontal offset instead of assuming it fits.
+  let mut pr = sample_pr();
+  let long = "x".repeat(200);
+  pr.detail.body = format!("prose\n\n```\n{long}\n```");
+
+  let rows = rich_pr_rows(&pr, &NO_THREADS, W, "PR");
+  let wide: Vec<_> = rows.iter().filter(|r| r.value.chars().count() > W).collect();
+
+  assert_eq!(wide.len(), 1, "exactly the fenced line: {wide:?}");
+  assert!(wide[0].preformatted, "and it is flagged as preformatted");
+  assert!(
+    rows.iter().filter(|r| !r.preformatted).all(|r| row_width(r) <= W),
+    "every other row still fits: {:?}",
+    rows
+      .iter()
+      .filter(|r| !r.preformatted && row_width(r) > W)
+      .collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn a_diff_hunk_row_is_preformatted_too() {
+  // Same reason, and it predates the flag: `hunk_rows` truncates rather than
+  // wraps because a wrapped `+` line's continuation reads as context.
+  let state = loaded(
+    vec![thread(
+      "src/tui/ui.rs",
+      Some(7),
+      Some(7),
+      &format!("@@ -1 +1 @@\n+{}", "z".repeat(200)),
+      &["looks long"],
+    )],
+    1,
+  );
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "PR");
+  assert!(
+    rows.iter().any(|r| r.preformatted && r.value.contains('z')),
+    "the hunk line must be flagged: {:?}",
+    rows.iter().map(|r| &r.value).collect::<Vec<_>>()
+  );
+}
+
+/// The segments of the first row with no label whose text contains `needle`.
+fn segments_containing(
+  rows: &[gwm::tui::state::detail_overlay::DetailRow],
+  needle: &str,
+) -> Vec<(String, Emphasis, bool)> {
+  rows
+    .iter()
+    .find(|r| r.value.contains(needle))
+    .map(|r| {
+      r.segments
+        .iter()
+        .map(|s| (s.text.clone(), s.emphasis, s.chip))
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+#[test]
+fn the_identity_row_reads_like_the_status_panes_own_line() {
+  // Validation feedback on #551: the metadata block's `state` was coloured
+  // text where the pane behind the modal puts a BADGE, and the pane says
+  // identity, state and CI on one line rather than spreading them over
+  // three labelled rows. Same shape here, same `chip_style`.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
+  let identity = segments_containing(&rows, "#519");
+
+  assert_eq!(
+    identity,
+    vec![
+      (format!("{} ", gwm::tui::PR_ICON), Emphasis::Success, false),
+      ("PR #519".to_string(), Emphasis::Plain, false),
+      (" ".to_string(), Emphasis::Plain, false),
+      (" open ".to_string(), Emphasis::Success, true),
+      (" ".to_string(), Emphasis::Plain, false),
+      (
+        format!(" {} CI passing 7/7 ", gwm::tui::CI_PASSING_ICON),
+        Emphasis::Success,
+        true
+      ),
+    ]
+  );
+  // And the two rows it absorbed are gone rather than repeated.
+  assert_eq!(value_for(&rows, "state"), None);
+  assert_eq!(value_for(&rows, "checks"), None);
+}
+
+#[test]
+fn an_issue_gets_the_same_line_without_the_ci_half() {
+  let rows = rich_issue_rows(&sample_issue(), W);
+  let identity = segments_containing(&rows, "#420");
+  assert_eq!(
+    identity,
+    vec![
+      (format!("{} ", gwm::tui::ISSUE_ICON), Emphasis::Success, false),
+      ("Issue #420".to_string(), Emphasis::Plain, false),
+      (" ".to_string(), Emphasis::Plain, false),
+      (" open ".to_string(), Emphasis::Success, true),
+    ]
+  );
+}
+
+#[test]
+fn the_identity_row_renders_the_noun_the_app_actually_passes() {
+  // Codex review, pass 3 (P2). The first cut of this took a long noun and
+  // shortened it, and the test fed it `"Merge request"` — a string the
+  // production path never produces. `Forge::pr_noun` already returns `PR` /
+  // `MR`, so the shortening always missed and every merge request rendered
+  // as `PR #…`, disagreeing with the title and the tabs one row above.
+  //
+  // Asserted against `pr_noun` itself rather than against a literal, which
+  // is what makes the test unable to invent its own input again.
+  for kind in [gwm::forge::ForgeKind::GitHub, gwm::forge::ForgeKind::GitLab] {
+    let noun = gwm::forge::pr_noun_for(kind);
+    let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, noun);
+    assert!(
+      rows.iter().any(|r| r.value.contains(&format!("{noun} #519"))),
+      "{kind:?} must read {noun}: {:?}",
+      rows.iter().map(|r| &r.value).collect::<Vec<_>>()
+    );
+  }
+}
+
+#[test]
+fn a_review_wears_its_verdict_as_a_coloured_badge() {
+  // Validation feedback: same badge treatment as the identity row, with the
+  // verdict's own colour, so a `changes requested` is visible at a glance
+  // in a list of approvals.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
+  let approved = segments_containing(&rows, "Copilot");
+  assert_eq!(
+    approved.first(),
+    Some(&(" approved ".to_string(), Emphasis::Success, true))
+  );
+  let changes = segments_containing(&rows, "coderabbitai · 2026-08-04");
+  assert_eq!(
+    changes.first(),
+    Some(&(" changes requested ".to_string(), Emphasis::Failure, true))
+  );
+}
+
+#[test]
+fn a_comment_header_wears_its_author_as_a_badge() {
+  // Read off the ISSUE fixture: its commenter is `sassman`, where the PR's
+  // is `kbrdn1`, which is also the value of its `author` row — and
+  // `segments_containing` takes the first row that matches.
+  let rows = rich_issue_rows(&sample_issue(), W);
+  let header = segments_containing(&rows, "sassman");
+  assert_eq!(
+    header.first().map(|(t, _, chip)| (t.clone(), *chip)),
+    Some((" sassman ".to_string(), true)),
+    "the author is a badge: {header:?}"
+  );
+  assert!(
+    header.iter().any(|(t, _, chip)| t.contains("2026-08") && !*chip),
+    "the date stays plain text: {header:?}"
+  );
+}
+
+#[test]
+fn an_inline_thread_comment_gets_the_same_badge() {
+  // The third place an author appears. Left out, the section would read as
+  // a different kind of content than the conversation above it.
+  let state = loaded(
+    vec![thread("a.rs", Some(2), None, "@@ -1 +1 @@\n+x", &["see above"])],
+    1,
+  );
+  let rows = rich_pr_rows(&sample_pr(), &state, W, "PR");
+  assert!(
+    rows
+      .iter()
+      .any(|r| r.segments.iter().any(|s| s.chip && s.text.contains("coderabbitai"))),
+    "rows: {:?}",
+    rows.iter().map(|r| &r.value).collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn the_metadata_fields_each_carry_their_own_role() {
+  // Validation feedback: the block still read as prose below the identity
+  // row. The author is an identity, the branch pair is a branch, and the
+  // date is context — three different things painted the same.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
+  assert_eq!(roles_for(&rows, "author"), vec![("kbrdn1".to_string(), Emphasis::Bold)]);
+  assert_eq!(
+    roles_for(&rows, "branch"),
+    vec![("feat/#392-symfony-preset → dev".to_string(), Emphasis::Branch)]
+  );
+  assert_eq!(
+    roles_for(&rows, "updated"),
+    vec![("2026-08-04".to_string(), Emphasis::Muted)]
+  );
 }

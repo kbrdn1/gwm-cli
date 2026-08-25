@@ -58,8 +58,9 @@ impl DetailKind {
 
 /// Semantic style role of a detail row — mapped to theme colours at render
 /// time so the state stays ratatui-free and theme-agnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetailRole {
+  #[default]
   Normal,
   /// Highlighted (an active agent session).
   Active,
@@ -75,7 +76,7 @@ pub enum DetailRole {
 
 /// One overlay row: a left-aligned label, its value text, and an opaque
 /// `meta` payload consumer actions can key off (`None` for inert rows).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DetailRow {
   pub label: String,
   pub value: String,
@@ -85,6 +86,23 @@ pub struct DetailRow {
   /// workflow name + run duration on a CI check row). `None` keeps the
   /// pre-#436 two-column layout.
   pub extra: Option<String>,
+  /// The row's text split into styled runs (issue #551), for the consumer
+  /// that renders Markdown. Empty means "paint `value` in `role`", which is
+  /// what every row did before this field existed and what the agents and
+  /// CI consumers still do.
+  ///
+  /// When it is non-empty the invariant is that the segments concatenate to
+  /// `value`: the plain string stays the one thing that measuring, filtering
+  /// and the tests work against, so the styling is additive rather than a
+  /// second source of truth about what the row says.
+  pub segments: Vec<crate::tui::state::markdown::Segment>,
+  /// True for a row that must not be reflowed and may therefore be wider
+  /// than the modal: a fenced code line, a diff hunk (issue #551).
+  ///
+  /// Every other row is wrapped to fit before it gets here, so the renderer
+  /// can paint it as-is. One of these is clipped against the view's
+  /// horizontal offset instead, which is the only way to reach its tail.
+  pub preformatted: bool,
 }
 
 /// The overlay's whole state. "Closed" is simply `View::List` — the `App`
@@ -135,6 +153,31 @@ impl DetailOverlay {
     self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
   }
 
+  /// Jump `n` rows down, stopping at the last one (`D`, issue #551).
+  ///
+  /// Clamped rather than wrapped: `Ctrl+D` in a pager stops at the bottom,
+  /// and a jump that wrapped to the top would lose the reader's place in a
+  /// body that can now run to hundreds of rows.
+  pub fn select_page_down(&mut self, n: usize) {
+    if self.rows.is_empty() {
+      return;
+    }
+    self.selected = (self.selected + n).min(self.rows.len() - 1);
+  }
+
+  /// Jump `n` rows up, stopping at the first.
+  pub fn select_page_up(&mut self, n: usize) {
+    self.selected = self.selected.saturating_sub(n);
+  }
+
+  pub fn select_first(&mut self) {
+    self.selected = 0;
+  }
+
+  pub fn select_last(&mut self) {
+    self.selected = self.rows.len().saturating_sub(1);
+  }
+
   pub fn select_prev(&mut self) {
     self.selected = self.selected.saturating_sub(1);
   }
@@ -162,6 +205,7 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: &[String], now
       role: DetailRole::Muted,
       meta: None,
       extra: None,
+      ..Default::default()
     }];
   }
   sessions
@@ -188,6 +232,7 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: &[String], now
         role,
         meta: Some(s.id.clone()),
         extra: None,
+        ..Default::default()
       }
     })
     .collect()
@@ -221,6 +266,7 @@ pub fn ci_check_rows(checks: &[crate::github::PrCheck], now: SystemTime) -> Vec<
         role,
         meta: c.url.clone(),
         extra: check_extra(c, now),
+        ..Default::default()
       }
     })
     .collect()

@@ -2102,3 +2102,45 @@ fn parse_pr_threads_json_reads_an_empty_review_as_zero_threads_not_unsupported()
     "GitHub answered; the answer was zero"
   );
 }
+
+#[test]
+fn pr_merge_argv_names_its_method_and_never_deletes_the_branch() {
+  // Validation feedback on #551. Two things this has to pin, and the
+  // second is why the test exists at all:
+  //
+  // 1. The method flag is always explicit. Without one `gh` prompts, and a
+  //    prompt from inside a TUI is a hang — the terminal belongs to the
+  //    TUI, not to `gh`.
+  // 2. No `--delete-branch`, ever. This repo's rules say the atomic commit
+  //    history on the branch is the artefact, and a merge fired from a
+  //    keypress is the last place to be inventive about that. Pinning the
+  //    argv is cheap; debugging an accidental branch deletion is not.
+  use gwm::forge::MergeMethod;
+  use gwm::github::pr_merge_argv;
+
+  assert_eq!(
+    pr_merge_argv("kbrdn1/gwm-cli", 587, MergeMethod::Merge),
+    vec!["pr", "merge", "587", "--merge", "--repo", "kbrdn1/gwm-cli"]
+  );
+  assert_eq!(
+    pr_merge_argv("kbrdn1/gwm-cli", 587, MergeMethod::Squash),
+    vec!["pr", "merge", "587", "--squash", "--repo", "kbrdn1/gwm-cli"]
+  );
+  assert_eq!(
+    pr_merge_argv("kbrdn1/gwm-cli", 587, MergeMethod::Rebase),
+    vec!["pr", "merge", "587", "--rebase", "--repo", "kbrdn1/gwm-cli"]
+  );
+  for method in MergeMethod::ALL {
+    let argv = pr_merge_argv("owner/repo", 1, method);
+    assert!(
+      !argv.iter().any(|a| a == "--delete-branch" || a == "-d"),
+      "{method:?} must not ask for a branch deletion: {argv:?}"
+    );
+  }
+  // An empty slug means `origin` was unresolvable; `gh` then infers the
+  // repo from the local git context, same as every other argv here.
+  assert_eq!(
+    pr_merge_argv("", 3, MergeMethod::Merge),
+    vec!["pr", "merge", "3", "--merge"]
+  );
+}

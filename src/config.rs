@@ -18,6 +18,15 @@ pub struct Config {
   /// key is the supported way in; it always wins over inference.
   #[serde(default)]
   pub forge: Option<crate::forge::ForgeKind>,
+  /// `merge_method` — how the TUI lands a PR / MR (validation feedback on
+  /// issue #551).
+  ///
+  /// Beside `forge` rather than under `[tui]` because it describes how gwm
+  /// talks to the forge, not how it draws. Defaults to a merge commit: the
+  /// least destructive of the three, and the one this repo's own rules
+  /// require.
+  #[serde(default)]
+  pub merge_method: crate::forge::MergeMethod,
   /// `[forge_hosts]` — the hosts this user authorises gwm to make an
   /// authenticated call against, each with the backend that drives it
   /// (issue #419).
