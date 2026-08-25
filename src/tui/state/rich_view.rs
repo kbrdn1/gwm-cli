@@ -75,9 +75,11 @@ pub fn rich_pr_rows(
   let mut identity = vec![
     Segment::new(format!("{PR_ICON} "), role),
     // `MR` for GitLab, following the resolved forge the way the overlay
-    // title does (issue #419). The caller owns the noun; this only shortens
-    // it, since a badge line has no room for `Merge request #519`.
-    Segment::new(format!("{} #{}", short_noun(noun), pr.number), Emphasis::Plain),
+    // title does (issue #419). Rendered as handed over: `Forge::pr_noun`
+    // already returns the short form, and the first cut of this shortened
+    // it again against a long form that never arrives, so every merge
+    // request read `PR #…` (Codex review, pass 3).
+    Segment::new(format!("{noun} #{}", pr.number), Emphasis::Plain),
     Segment::new(" ", Emphasis::Plain),
     Segment::chip(format!(" {} ", pr_state_label(pr.state)), role),
   ];
@@ -221,17 +223,6 @@ fn meta_segments(rows: &mut Vec<DetailRow>, label: &str, segments: Vec<Segment>)
     segments,
     ..Default::default()
   });
-}
-
-/// `PR` / `MR`: the identity line is a badge row, with no room for
-/// `Merge request #519`. Derived from the noun the caller resolved rather
-/// than from a second forge lookup, so the two cannot disagree.
-fn short_noun(noun: &str) -> &'static str {
-  if noun.to_ascii_lowercase().starts_with("merge") {
-    "MR"
-  } else {
-    "PR"
-  }
 }
 
 /// The CI half of the identity row, or `None` when there is nothing

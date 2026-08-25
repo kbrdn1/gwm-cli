@@ -424,6 +424,21 @@ pub enum ForgeKind {
   GitLab,
 }
 
+/// The short noun a forge uses for a change request: `PR` on GitHub, `MR`
+/// on GitLab (issue #419).
+///
+/// A free function as well as a [`Forge::pr_noun`] method so a caller that
+/// has no forge instance — a row builder, a test — reads the same source
+/// rather than writing the mapping out a second time. The second copy is
+/// how the rich view's identity row came to render every merge request as
+/// `PR #…` while its own title said `MR` (Codex review on #551).
+pub fn pr_noun_for(kind: ForgeKind) -> &'static str {
+  match kind {
+    ForgeKind::GitHub => "PR",
+    ForgeKind::GitLab => "MR",
+  }
+}
+
 impl ForgeKind {
   pub fn as_str(&self) -> &'static str {
     match self {
@@ -727,10 +742,7 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
 
   /// User-facing noun for a change proposal: `"PR"` or `"MR"`.
   fn pr_noun(&self) -> &'static str {
-    match self.kind() {
-      ForgeKind::GitHub => "PR",
-      ForgeKind::GitLab => "MR",
-    }
+    pr_noun_for(self.kind())
   }
 
   fn issue_url(&self, number: u64) -> String;

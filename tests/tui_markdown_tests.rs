@@ -342,3 +342,61 @@ fn an_html_comment_inside_inline_code_is_kept() {
   // An unbacked comment on the same line still goes.
   assert_eq!(plain("`<!-- kept -->` <!-- gone -->"), vec!["<!-- kept --> "]);
 }
+
+#[test]
+fn emphasis_nested_inside_emphasis_is_parsed_not_shown() {
+  // Codex review, pass 3 (P2). `Emphasis::BoldItalic` documents this exact
+  // body as the reason it exists, and the parser put the whole inner slice
+  // in one `Bold` run without re-reading it — so the underscores stayed on
+  // screen and the nested half never got the role the doc promised.
+  assert_eq!(
+    roles("**bold _and_ italic**"),
+    vec![
+      ("bold ".to_string(), Emphasis::Bold),
+      ("and".to_string(), Emphasis::BoldItalic),
+      (" italic".to_string(), Emphasis::Bold),
+    ]
+  );
+  // Inline code nested in emphasis keeps being code: it is the more
+  // specific role, and its content is literal.
+  assert_eq!(
+    roles("**run `x` now**"),
+    vec![
+      ("run ".to_string(), Emphasis::Bold),
+      ("x".to_string(), Emphasis::Code),
+      (" now".to_string(), Emphasis::Bold),
+    ]
+  );
+}
+
+#[test]
+fn a_backslash_escape_shows_the_character_not_the_markup() {
+  // Codex review, pass 3 (P2). `\*literal\*` is ordinary Markdown for
+  // showing an asterisk. Unescaped, the delimiters matched and the body
+  // rendered as `\literal\` in italics: the markup was obeyed AND the
+  // backslashes were shown, which is both halves wrong at once.
+  assert_eq!(plain(r"\*literal\*"), vec!["*literal*"]);
+  assert_eq!(plain(r"a \_b\_ c"), vec!["a _b_ c"]);
+  // A backslash before an ordinary character is just a backslash.
+  assert_eq!(plain(r"C:\path\to"), vec![r"C:\path\to"]);
+  // And an escape does not break the nominal case next to it.
+  assert_eq!(
+    roles(r"\*not\* **yes**"),
+    vec![
+      ("*not* ".to_string(), Emphasis::Plain),
+      ("yes".to_string(), Emphasis::Bold),
+    ]
+  );
+}
+
+#[test]
+fn deeply_nested_emphasis_terminates() {
+  // The nesting fix re-enters the parser on the inner slice. That slice is
+  // strictly shorter — the delimiters are gone — so it cannot recurse
+  // forever, but a parser that hangs takes the render thread with it and
+  // the property is cheap to hold down.
+  let deep = format!("{}x{}", "**_".repeat(20), "_**".repeat(20));
+  assert!(!render(&deep, 40).is_empty());
+  assert!(!render("***_a_***", 40).is_empty());
+  assert!(!render("**", 40).is_empty());
+}

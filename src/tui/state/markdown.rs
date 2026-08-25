@@ -431,10 +431,24 @@ fn inline(line: &str, base: Emphasis) -> Vec<Segment> {
   let mut i = 0;
 
   while i < chars.len() {
+    // A backslash escape shows the character and eats the markup meaning
+    // (Codex review, pass 3). Checked before anything else, since its whole
+    // job is to stop what follows from being read as a delimiter.
+    if chars[i] == '\\' {
+      if let Some(next) = chars.get(i + 1).filter(|c| is_escapable(**c)) {
+        plain.push(*next);
+        i += 2;
+        continue;
+      }
+    }
     match marker_at(&chars, i) {
       Some((Hit::Styled(segment), next)) => {
         flush(&mut out, &mut plain, base);
-        out.push(segment);
+        // Emphasis nests: `**bold _and_ italic**` is one bold run with an
+        // italic inside it, and reading the inner slice as flat text left
+        // the underscores on screen. Re-read, with the outer role folded
+        // into whatever the inner one turns out to be.
+        flush_nested(&mut out, segment);
         i = next;
       }
       // A delimiter run that opened nothing is literal text, and it is
@@ -600,6 +614,47 @@ fn link(chars: &[char], at: usize) -> Option<(String, usize)> {
   let text: String = chars[at + 1..close].iter().collect();
   // `[]()` carries nothing to show; leave it as literal text.
   (!text.is_empty()).then_some((text, end + 1))
+}
+
+/// Push a styled run, re-reading its text for markers of its own.
+///
+/// Only [`Emphasis::Bold`], [`Emphasis::Italic`] and their pair can carry
+/// anything nested. A code span is literal by definition and a link's text
+/// is taken as a unit, so both are pushed as they are — re-reading either
+/// would undo the reason it has its own role.
+fn flush_nested(out: &mut Vec<Segment>, segment: Segment) {
+  if !matches!(
+    segment.emphasis,
+    Emphasis::Bold | Emphasis::Italic | Emphasis::BoldItalic
+  ) {
+    out.push(segment);
+    return;
+  }
+  for inner in inline(&segment.text, segment.emphasis) {
+    out.push(Segment::new(inner.text, combine(segment.emphasis, inner.emphasis)));
+  }
+}
+
+/// The role a run carries when `inner` sits inside `outer`.
+///
+/// Bold inside italic (or the reverse) is the pair; anything more specific
+/// than emphasis — code, a link — keeps its own role, because that is the
+/// role that says how to read the text rather than how loud it is.
+fn combine(outer: Emphasis, inner: Emphasis) -> Emphasis {
+  use Emphasis::{Bold, BoldItalic, Italic};
+  match (outer, inner) {
+    (o, i) if o == i => o,
+    (Bold, Italic) | (Italic, Bold) | (BoldItalic, _) | (_, BoldItalic) => BoldItalic,
+    // The inner run said something the outer one did not.
+    (_, i) => i,
+  }
+}
+
+/// Characters a backslash may escape. CommonMark's ASCII punctuation set,
+/// which is deliberately wide: outside it, a backslash is a backslash, and
+/// a Windows path in a body must survive being written down.
+fn is_escapable(c: char) -> bool {
+  c.is_ascii_punctuation()
 }
 
 fn flush(out: &mut Vec<Segment>, plain: &mut String, base: Emphasis) {
