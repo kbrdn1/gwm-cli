@@ -421,3 +421,68 @@ fn an_escaped_delimiter_inside_emphasis_does_not_close_it() {
     ]
   );
 }
+
+#[test]
+fn a_multi_backtick_code_span_holds_a_backtick() {
+  // Codex review, pass 5 (P2). Two backticks are how you show a span that
+  // contains one, and the scan stopped at the next single backtick instead
+  // of a run of the same length — so a literal backtick survived on each
+  // side, and a `<!-- … -->` written inside such a span was exposed to the
+  // comment strip and deleted.
+  assert_eq!(
+    roles("a ``x ` y`` b"),
+    vec![
+      ("a ".to_string(), Emphasis::Plain),
+      ("x ` y".to_string(), Emphasis::Code),
+      (" b".to_string(), Emphasis::Plain),
+    ]
+  );
+  assert_eq!(plain("``<!-- kept -->``"), vec!["<!-- kept -->"]);
+}
+
+#[test]
+fn a_line_of_unclosed_openers_does_not_take_quadratic_time() {
+  // Codex review, pass 5 (P2), and the only finding of this loop that
+  // describes the TUI locking up rather than looking wrong. Each opener
+  // rescanned the whole suffix before failing, so a body of `*a *a *a …` —
+  // remote text, and a forge accepts 65 536 characters of it — went
+  // quadratic on the render thread, which re-wraps on every resize.
+  //
+  // Timed with a wide margin rather than counted: linear is milliseconds
+  // here, quadratic is minutes, and no plausible CI runner sits between.
+  let body = "*a ".repeat(20_000);
+  let start = std::time::Instant::now();
+  let got = render(&body, 80);
+  assert!(!got.is_empty());
+  assert!(
+    start.elapsed().as_secs() < 5,
+    "took {:?}; a rescan per opener is the shape that gets here",
+    start.elapsed()
+  );
+}
+
+#[test]
+fn emphasis_sharing_a_delimiter_run_is_a_documented_limit() {
+  // Codex review, pass 5 (P2), NOT fixed and deliberately so. Splitting the
+  // trailing run of three between the two levels is CommonMark's delimiter
+  // stack, and implementing it here means reimplementing a Markdown parser
+  // to render a PR body in a terminal.
+  //
+  // Pinned rather than left unsaid: the day it does get fixed, this test
+  // fails and says where the decision was made. Nesting with DIFFERENT
+  // markers, which is the form that reads naturally, does work.
+  let shared = plain("**bold and *italic***");
+  assert!(
+    shared[0].contains('*'),
+    "the markers stay visible, which is what every body did before this module: {shared:?}"
+  );
+  assert_eq!(
+    roles("**bold _and_ italic**"),
+    vec![
+      ("bold ".to_string(), Emphasis::Bold),
+      ("and".to_string(), Emphasis::BoldItalic),
+      (" italic".to_string(), Emphasis::Bold),
+    ],
+    "the form that does work must keep working"
+  );
+}

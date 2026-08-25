@@ -12,6 +12,15 @@
 //! nested block structures are rendered as the plain text they already were,
 //! which is exactly what happened before this module existed.
 //!
+//! One limit is worth naming because it looks like a bug rather than a gap.
+//! Emphasis nests when the two levels use DIFFERENT markers — `**bold _and_
+//! italic**` reads correctly — but not when they share one and their runs
+//! meet, as in `**bold and *italic***`. Splitting that trailing run of three
+//! between the two levels is CommonMark's delimiter stack, and implementing
+//! it here would be reimplementing a Markdown parser to render a PR body in
+//! a terminal. The markers stay visible in that case, which is the same
+//! thing this whole module did to every body until it existed.
+//!
 //! **Why it is ratatui-free.** [`Emphasis`] is a semantic role, not a colour,
 //! for the same reason `DetailRole` is: the mapping to theme colours belongs
 //! to the renderer, so this stays a pure function that a test can call
@@ -278,7 +287,10 @@ fn strip_comments(line: &str, mut open: bool) -> (String, bool) {
 /// The byte range of the first complete `` `…` `` span in `s`.
 fn code_span(s: &str) -> Option<(usize, usize)> {
   let start = s.find('`')?;
-  let end = s[start + 1..].find('`')? + start + 2;
+  let run = s[start..].chars().take_while(|c| *c == '`').count();
+  let fence: String = "`".repeat(run);
+  let after = start + run;
+  let end = s[after..].find(&fence)? + after + run;
   Some((start, end))
 }
 
@@ -429,6 +441,10 @@ fn inline(line: &str, base: Emphasis) -> Vec<Segment> {
   let mut out: Vec<Segment> = Vec::new();
   let mut plain = String::new();
   let mut i = 0;
+  // Delimiter floors, one per (marker character, run length). See
+  // [`Floors`]: without them a line of unclosed openers rescans its whole
+  // suffix once per opener, which is quadratic on remote text.
+  let mut floors = Floors::default();
 
   while i < chars.len() {
     // A backslash escape shows the character and eats the markup meaning
@@ -441,7 +457,7 @@ fn inline(line: &str, base: Emphasis) -> Vec<Segment> {
         continue;
       }
     }
-    match marker_at(&chars, i) {
+    match marker_at(&chars, i, &mut floors) {
       Some((Hit::Styled(segment), next)) => {
         flush(&mut out, &mut plain, base);
         // Emphasis nests: `**bold _and_ italic**` is one bold run with an
@@ -485,17 +501,26 @@ enum Hit {
 /// Ordered by precedence, which is the forge's: nothing inside a backtick
 /// span is a marker, and a link's text is parsed as a unit rather than for
 /// the underscores a URL slug is full of.
-fn marker_at(chars: &[char], at: usize) -> Option<(Hit, usize)> {
+fn marker_at(chars: &[char], at: usize, floors: &mut Floors) -> Option<(Hit, usize)> {
   if chars[at] == '`' {
-    if let Some(end) = find(chars, at + 1, '`') {
-      // An empty span is two literal backticks.
-      if end > at + 1 {
+    // The whole RUN of backticks opens the span, and only a run of the same
+    // length closes it (Codex review, pass 5): two backticks are how you
+    // show a span that contains one, and stopping at the next single
+    // backtick left a literal backtick on each side.
+    let run = chars[at..].iter().take_while(|c| **c == '`').count();
+    let ticks: Vec<char> = vec!['`'; run];
+    if let Some(end) = find_seq(chars, at + run, &ticks) {
+      // An empty span is a pair of literal backticks.
+      if end > at + run {
         return Some((
-          Hit::Styled(Segment::new(slice(chars, at + 1, end), Emphasis::Code)),
-          end + 1,
+          Hit::Styled(Segment::new(slice(chars, at + run, end), Emphasis::Code)),
+          end + run,
         ));
       }
     }
+    // No closing run: the opener is literal, and consumed WHOLE so its
+    // second backtick cannot open a span of its own.
+    return Some((Hit::Literal(slice(chars, at, at + run)), at + run));
   }
   if let Some((text, next)) = link(chars, at) {
     return Some((Hit::Styled(Segment::new(text, Emphasis::Link)), next));
@@ -518,7 +543,14 @@ fn marker_at(chars: &[char], at: usize) -> Option<(Hit, usize)> {
   if !opens(chars, at, &marker) {
     return literal();
   }
+  // If no closer was found past an EARLIER position, there is none past
+  // this one either: the search would cover a strictly smaller suffix. That
+  // memo is what keeps the scan linear (Codex review, pass 5).
+  if floors.exhausted(c, run, at + run) {
+    return literal();
+  }
   let Some(end) = closes(chars, at + run, &marker) else {
+    floors.mark(c, run, at + run);
     return literal();
   };
   // `**` with nothing between it is two literal asterisks.
@@ -529,6 +561,52 @@ fn marker_at(chars: &[char], at: usize) -> Option<(Hit, usize)> {
     Hit::Styled(Segment::new(slice(chars, at + run, end), emphasis)),
     end + run,
   ))
+}
+
+/// Where each kind of delimiter run has been shown to have no closer left.
+///
+/// A run of `len` copies of `c` that found no closer from position `p`
+/// proves there is none from any later position, since that search covers a
+/// smaller suffix. Remembering it turns a per-opener rescan into a single
+/// pass: `*a *a *a …` was quadratic, on the thread that re-wraps the view at
+/// every resize, driven by text a forge accepts 65 536 characters of.
+#[derive(Default)]
+struct Floors {
+  /// `*`, `_`, `~` by run length, indices 1..=3. Zero means "nothing known
+  /// yet", which is why the stored value is the position PLUS one.
+  seen: [[usize; 4]; 3],
+}
+
+impl Floors {
+  fn slot(c: char) -> Option<usize> {
+    match c {
+      '*' => Some(0),
+      '_' => Some(1),
+      '~' => Some(2),
+      _ => None,
+    }
+  }
+
+  fn exhausted(&self, c: char, len: usize, from: usize) -> bool {
+    match Self::slot(c) {
+      Some(i) if len <= 3 => {
+        let seen = self.seen[i][len];
+        seen > 0 && from >= seen - 1
+      }
+      _ => false,
+    }
+  }
+
+  fn mark(&mut self, c: char, len: usize, from: usize) {
+    if let Some(i) = Self::slot(c) {
+      if len <= 3 {
+        let cur = self.seen[i][len];
+        if cur == 0 || from + 1 < cur {
+          self.seen[i][len] = from + 1;
+        }
+      }
+    }
+  }
 }
 
 /// The role a delimiter run of `len` copies of `c` carries, if any.
