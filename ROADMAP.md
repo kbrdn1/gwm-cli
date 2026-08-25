@@ -224,14 +224,31 @@ are closed; the fourth, the docs site reading flat, lives in `kbrdn1/kbrdn-docs`
 rather than here. The capture pass that closed #575 left one defect of its own
 behind: the stills are written at 1x and the published site scales them up, so
 they blur on a HiDPI screen ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)).
-Beyond it: richer note editing
-([#557](https://github.com/kbrdn1/gwm-cli/issues/557)), forms compressing their
+Richer note editing
+([#557](https://github.com/kbrdn1/gwm-cli/issues/557)) has landed on `dev` and
+ships with the next minor: the note editor takes bullets and checkboxes for
+everyone, and its vim normal mode is on by default, with `[tui] note_vim = false`
+as the opt-out. Beyond it: forms compressing their
 spacing before they scroll ([#559](https://github.com/kbrdn1/gwm-cli/issues/559)),
 polish on the rich PR/Issue view
 ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)), the remaining relays
 ([#525](https://github.com/kbrdn1/gwm-cli/issues/525)) and the distribution
 channels still open under
-[#383](https://github.com/kbrdn1/gwm-cli/issues/383). Translating the docs into
+[#383](https://github.com/kbrdn1/gwm-cli/issues/383). A second lot came out of
+living in the TUI for a day: a multiplexer line (herdr as a third backend
+[#588](https://github.com/kbrdn1/gwm-cli/issues/588), a pane-direction setting
+[#589](https://github.com/kbrdn1/gwm-cli/issues/589), Issue/PR in a terminal
+browser [#590](https://github.com/kbrdn1/gwm-cli/issues/590), resuming an agent's
+session in a pane from the agents overlay
+[#591](https://github.com/kbrdn1/gwm-cli/issues/591)),
+two full-size listings for the panes the sidebar cannot hold
+([#592](https://github.com/kbrdn1/gwm-cli/issues/592),
+[#593](https://github.com/kbrdn1/gwm-cli/issues/593)), modals following
+`[tui] layout` instead of staying bordered
+([#594](https://github.com/kbrdn1/gwm-cli/issues/594)), and three table / context
+defects ([#595](https://github.com/kbrdn1/gwm-cli/issues/595),
+[#596](https://github.com/kbrdn1/gwm-cli/issues/596),
+[#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Translating the docs into
 German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/522))
 is roughly 155,000 words with no native reviewer lined up, so it stays a
 decision rather than a plan.

@@ -611,3 +611,152 @@ fn a_bidi_control_in_the_action_log_never_reaches_the_row() {
     }
   }
 }
+
+// ── the note editor's mode line (#557, install pass) ───────────────────────
+
+#[test]
+fn the_note_footer_names_the_mode_it_is_in() {
+  // The bar under the modal is the context line: it already carries the
+  // pane name, so the mode belongs in the same slot rather than in a hint.
+  // With the mode turned off there is no state to name.
+  assert_eq!(HintContext::NoteNormal.label(), "note · NORMAL");
+  assert_eq!(HintContext::NoteInsert.label(), "note · INSERT");
+  assert_eq!(HintContext::Note.label(), "note");
+}
+
+#[test]
+fn the_normal_mode_footer_lists_the_motions() {
+  // `?` is a printable inside the editor, so the help overlay cannot be
+  // reached from it: this bar is the only place the vim verbs are ever
+  // spelled out.
+  use gwm::tui::keymap::Keymap;
+  let resolved = HintContext::NoteNormal.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
+  for (key, label) in [
+    ("hjkl", "move"),
+    ("w/b/e", "word"),
+    ("i/a/o", "insert"),
+    ("x/dd", "delete"),
+  ] {
+    assert!(
+      resolved.iter().any(|(k, l)| k == key && l == label),
+      "normal mode must advertise `{key} {label}`: {resolved:?}"
+    );
+  }
+  assert!(
+    resolved.iter().any(|(k, l)| k == "Esc" && l == "save & close"),
+    "and the way out, which is what `Esc` does from normal mode: {resolved:?}"
+  );
+}
+
+#[test]
+fn the_insert_mode_footer_does_not_promise_esc_saves() {
+  // The one verb whose meaning the mode changes. A bar that still said
+  // "save & close" here would send the user's first `Esc` somewhere it
+  // does not go.
+  use gwm::tui::keymap::Keymap;
+  let resolved = HintContext::NoteInsert.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
+  assert!(
+    resolved.iter().any(|(k, l)| k == "Esc" && l == "normal mode"),
+    "insert mode must say where `Esc` goes: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "save & close"),
+    "and must not promise the gesture it no longer performs: {resolved:?}"
+  );
+}
+
+#[test]
+fn the_note_bullet_hint_follows_the_chord_that_reaches_the_app() {
+  // `Ctrl+l` never arrives inside tmux (tmux.nvim binds the whole
+  // `Ctrl+h/j/k/l` pane set), so the advertised chord is the one gwm can
+  // actually receive.
+  use gwm::tui::keymap::Keymap;
+  for ctx in [HintContext::Note, HintContext::NoteNormal, HintContext::NoteInsert] {
+    let resolved = ctx.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
+    assert!(
+      resolved.iter().any(|(k, l)| k == "Ctrl+u" && l == "bullet"),
+      "{:?} must advertise `Ctrl+u bullet`: {resolved:?}",
+      ctx.label()
+    );
+  }
+}
+
+#[test]
+fn the_help_overlay_teaches_the_normal_mode_verbs() {
+  // `?` is a printable inside the note editor, so the overlay cannot be
+  // opened from it: whoever wants to read the vim verbs at leisure reads
+  // them here, on the surface reachable from the list.
+  use gwm::tui::{help_rows, keymap::Keymap, HelpRow};
+  let rows = help_rows(
+    &Keymap::defaults(),
+    &gwm::tui::modal_keymap::ModalKeymap::defaults(),
+    HintContext::Help,
+  );
+  let keys: Vec<String> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } => Some(keys.clone()),
+      _ => None,
+    })
+    .collect();
+  for verb in ["h j k l", "w b e", "gg G", "x dd", "i I a A o O"] {
+    assert!(
+      keys.iter().any(|k| k == verb),
+      "the help overlay must document the normal-mode `{verb}` row: {keys:?}"
+    );
+  }
+  assert!(
+    keys.iter().any(|k| k == "Ctrl+u"),
+    "and the bullet chord as bound, not as it once was: {keys:?}"
+  );
+}
+
+#[test]
+fn the_help_overlay_scopes_the_mode_rows_to_the_mode() {
+  // `note_vim = false` is a supported config, and in it the editor has no
+  // modes at all: every printable is text and one `Esc` writes and closes.
+  // `help_rows` takes no config, so the rows have to be true either way —
+  // which means the motions live under a heading that names the knob, and
+  // the close verb stops claiming it leaves insert first.
+  use gwm::tui::{help_rows, keymap::Keymap, HelpRow};
+  let rows = help_rows(
+    &Keymap::defaults(),
+    &gwm::tui::modal_keymap::ModalKeymap::defaults(),
+    HintContext::Help,
+  );
+
+  let close = rows
+    .iter()
+    .find_map(|r| match r {
+      HelpRow::Entry { keys, label } if keys == "Esc" && label.contains("save and close") => Some(label.clone()),
+      _ => None,
+    })
+    .expect("the note editor's close row");
+  assert!(
+    !close.contains("leave insert"),
+    "the close row must hold for `note_vim = false` too, got: {close}"
+  );
+
+  let section = rows
+    .iter()
+    .position(|r| matches!(r, HelpRow::Section(s) if s.contains("note_vim")))
+    .expect("a heading that names the knob the mode rows depend on");
+  let motions = rows
+    .iter()
+    .position(|r| matches!(r, HelpRow::Entry { keys, .. } if keys == "h j k l"))
+    .expect("the motion row");
+  assert!(
+    section < motions,
+    "the motion rows must sit under that heading (heading at {section}, motions at {motions})"
+  );
+  let next_section = rows
+    .iter()
+    .skip(section + 1)
+    .position(|r| matches!(r, HelpRow::Section(_)))
+    .map(|i| i + section + 1)
+    .unwrap_or(rows.len());
+  assert!(
+    motions < next_section,
+    "and before the next heading (motions at {motions}, next heading at {next_section})"
+  );
+}

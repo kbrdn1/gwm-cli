@@ -10,6 +10,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **herdr is a third multiplexer backend**
+  ([#588](https://github.com/kbrdn1/gwm-cli/issues/588)). `gwm herdr <pattern>`
+  opens the matched worktree in a new [herdr](https://herdr.dev) tab, `-p`
+  splits the current pane instead, and the TUI's `t` key finds herdr the way
+  it finds tmux and zellij. Detection reads `$HERDR_ENV`, which herdr sets in
+  every pane it manages, and it comes last in the cascade so nothing changes
+  for a tmux or zellij user.
+
+  Under the hood: `herdr tab create --workspace <id> --label <name> --cwd
+  <path> --focus` and `herdr pane split --current --direction right --cwd
+  <path> --focus`, verified against a live herdr 0.8.2 rather than its help
+  text. The split needs a direction because herdr's parser has no default for
+  one, and `right` is the analogue of tmux's `-h`. The other two flags are
+  there because herdr's defaults are the opposite of what the names suggest:
+  without `--focus` the tab opens where you cannot see it, and without
+  `--workspace` it opens in whichever workspace the server had focused, which
+  is another project's window as often as not.
+
+  One surface stays on its old path: a `[tui.macro*]` with
+  `open_in = "mux_pane"` still falls back to the PTY overlay under herdr, and
+  now says so. A macro needs the new pane to run a command, and
+  `herdr pane split` has no trailing-command form, so running one takes a
+  second call with the pane id that `pane split` prints back.
+
+- **A worktree note can be a checklist**
+  ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `Ctrl+t` in the note
+  editor ticks the box on the line and spawns one when the line has none, from
+  anywhere on the line; `Ctrl+u` makes the line a list item or takes the marker
+  back off it; `Enter` continues the list and ends it on an empty item, the way
+  every Markdown editor does. Both chords are Ctrl-modified because an
+  unmodified printable is text in that modal, and which chord is left over is
+  tmux's call: `Ctrl+b` is its prefix, and `Ctrl+h` / `Ctrl+j` / `Ctrl+k` /
+  `Ctrl+l` are the vim-tmux-navigator pane set that tmux forwards only to a
+  pane running vim.
+
+  Ticking used to mean arrowing onto the right column and retyping a character
+  by hand, which is what a note becomes after a day: "what to check before
+  opening the PR" is a list you tick off.
+
+- **A vim normal mode for the note editor**
+  ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `N` opens in normal
+  mode: `hjkl`, `w` / `b` / `e` and their `W` / `B` / `E`, `0` / `^` / `$`,
+  `gg` / `G`, `x`, `dd`, and `i` / `I` / `a` / `A` / `o` / `O` to enter
+  insert. `o` and `O` carry the list marker the way `Enter` does, the modal
+  title carries a `NORMAL` / `INSERT` chip, and the modal's own last row
+  leads with the mode as a reverse-video badge (the treatment the statusbar
+  context anchor already wears) before listing the keys that mode takes,
+  as does the statusbar behind it. A list too long for the row is cut with a `…` rather than
+  clipped at the frame, which reads as a list that ends there.
+
+  **The cost is `Esc`, so it gets its own line: it no longer writes and closes
+  on the first press.** It leaves insert, and the second press saves.
+  `[tui] note_vim = false` buys the single-press gesture back and returns the
+  editor to the modeless one, where every printable is text, and it is a
+  toggle in the Settings panel's TUI tab like the other two TUI booleans. No counts, no
+  registers, no undo: this is a scratch buffer, and `Ctrl+e` still hands the
+  file to the real vim. The verbs are hard-coded rather than bindable, so
+  `[tui.keys.modal.note]` holds the same four verbs either way and an
+  unmodified printable bound to one of them is still refused at load time.
+
+- **Merge a PR from the TUI** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)).
+  `m` from the worktree table merges the selected row's linked PR; `m` inside
+  the PR / issue view merges the active tab's. Both go through the delete
+  flow's confirmation, and it is the same modal: same layout, same countdown,
+  same spinner while it runs, same buttons hidden mid-flight. Its summary
+  names the PR, `head → base`, the resolved method and what it does to the
+  history, and the CI rollup. `m` cycles the method from inside it, and a
+  failure keeps the modal up with the forge's own message.
+
+  The check state is shown rather than enforced: a forge refuses a merge for
+  reasons gwm does not model, and its own error says which. **The source
+  branch is never deleted**: neither backend is ever asked to.
+
+  The method comes from the new `merge_method` key and defaults to `merge`,
+  the least destructive of the three:
+
+  ```toml
+  merge_method = "merge"   # or "squash", "rebase"
+  ```
+
 ### Changed
 
 - **The rich PR / issue view (`I`) had its design pass** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)). It was
@@ -47,27 +129,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and pressing `I` again to carry on reading. Opened from the table, both
     still close to the table.
 
-### Added
+### Fixed
 
-- **Merge a PR from the TUI** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)).
-  `m` from the worktree table merges the selected row's linked PR; `m` inside
-  the PR / issue view merges the active tab's. Both go through the delete
-  flow's confirmation, and it is the same modal: same layout, same countdown,
-  same spinner while it runs, same buttons hidden mid-flight. Its summary
-  names the PR, `head → base`, the resolved method and what it does to the
-  history, and the CI rollup. `m` cycles the method from inside it, and a
-  failure keeps the modal up with the forge's own message.
+- **A linked row with nothing fetched yet is white, not green and purple**
+  ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
+  marker painted its two placeholder slots with a different status role each:
+  `clean` green for the issue, `locked` purple for the PR. So one row said two
+  different things about the same missing data, and both colours were on loan
+  from a loaded state (`clean` is an open issue and an open PR, `locked` is a
+  merged PR, a closed issue, and the locked-worktree badge). That is the state
+  every linked row launches in, since nothing is fetched until `F`. Both slots
+  now take `name`, the one role in the marker that neither badge map can
+  produce and the colour the empty slot beside them already uses. The glyph
+  still tells the two apart: `-` is "no link", `●` is "linked, not fetched
+  yet".
 
-  The check state is shown rather than enforced: a forge refuses a merge for
-  reasons gwm does not model, and its own error says which. **The source
-  branch is never deleted**: neither backend is ever asked to.
+- **The note column captions itself**
+  ([#595](https://github.com/kbrdn1/gwm-cli/issues/595)). The column shipped
+  with an empty header on the grounds that its marker is binary, which left
+  the marker sitting under a blank caption immediately right of the two-slot
+  `I/P` group, where it read as a third slot of that group rather than as its
+  own column. It now carries the same glyph it marks rows with, and both moved
+  from `≡` to the `nf-oct-markdown` glyph the Working Tree pane already paints
+  on a `.md` file, since a note is one. The column stays conditional, so a
+  user who never writes a note keeps the exact table they had before.
 
-  The method comes from the new `merge_method` key and defaults to `merge`,
-  the least destructive of the three:
-
-  ```toml
-  merge_method = "merge"   # or "squash", "rebase"
-  ```
 
 ## Past releases
 

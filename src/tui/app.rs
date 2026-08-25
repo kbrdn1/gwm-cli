@@ -2715,7 +2715,17 @@ impl App {
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
-      View::Note => HintContext::Note,
+      // #557: the note bar follows the mode. With the knob off there is no
+      // mode to follow, and the #515 bar is what stays — a `NORMAL` chip on
+      // an editor that has no normal mode would name a state nobody can be
+      // in.
+      View::Note => match self.note_editor.as_ref() {
+        Some(editor) if self.config.tui.note_vim => match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => HintContext::NoteNormal,
+          crate::tui::state::note_editor::NoteMode::Insert => HintContext::NoteInsert,
+        },
+        _ => HintContext::Note,
+      },
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
@@ -4585,7 +4595,13 @@ impl App {
       return;
     };
     let text = crate::notes::read(&self.repo, &branch).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    // #557: `note_vim` opens in normal mode, the way vim itself does. The
+    // knob is what keeps that off everyone else's `N`.
+    if self.config.tui.note_vim {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
     self.view = View::Note;
   }
 
@@ -4664,7 +4680,61 @@ impl App {
     use crate::tui::modal_keymap::{KeyContext, ModalAction};
     use crossterm::event::KeyCode as KC;
 
+    use crate::tui::state::note_editor::NoteMode;
+
     let stroke = crate::tui::keymap::KeyStroke::from_event(&key);
+
+    // #557: normal mode routes BEFORE the typing reservation, because that
+    // reservation is what makes `j` a letter. Only reachable behind
+    // `[tui] note_vim = true`, so with the knob off this block never sees
+    // a key and the #515 editor is untouched.
+    let normal = self.note_editor.as_ref().is_some_and(|e| e.mode == NoteMode::Normal);
+    if normal {
+      // Backspace, Enter and Delete are text in insert mode, so they must
+      // not edit here: a Backspace that ate a character would be prose
+      // lost to a key pressed to move. vim's own answers are `h`, `j`, `x`.
+      // Everything else (Esc, the arrows, the page keys, the Ctrl chords)
+      // means the same in both modes and falls through to the blocks below.
+      //
+      // The letter comes off `stroke`, not off `key`: terminals disagree on
+      // how they report a shifted letter (bare `Char('G')`, `Char('G')` +
+      // SHIFT, or the kitty protocol's `Char('g')` + SHIFT), and
+      // `KeyStroke::new` is what folds all three to `Char('G')` (PR #192).
+      // Routing the raw code would turn `G` into `g` and take every
+      // uppercase verb with it (Codex review #582, first pass).
+      let verb = if stroke
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+      {
+        None
+      } else {
+        match stroke.code {
+          KC::Char(c) => Some(c),
+          KC::Backspace => Some('h'),
+          KC::Enter => Some('j'),
+          KC::Delete => Some('x'),
+          _ => None,
+        }
+      };
+      match verb {
+        Some(c) => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.normal_key(c);
+          }
+          return NoteKey::Handled;
+        }
+        // Any other key abandons a half-typed sequence, which is what
+        // `pending` promises: `d`, `Down`, `d` must open a fresh `dd`
+        // rather than delete the line the arrow landed on. There is no
+        // undo here, so a `dd` nobody typed is prose gone for good.
+        None => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.pending = None;
+          }
+        }
+      }
+    }
+
     if KeyContext::Note.reserved_typing_stroke(&stroke) {
       if let Some(editor) = self.note_editor.as_mut() {
         match key.code {
@@ -4680,6 +4750,22 @@ impl App {
 
     match self.resolve_modal(KeyContext::Note, key) {
       Some(ModalAction::NoteClose) => {
+        // #557: with a mode, the first `Esc` is the one that leaves insert
+        // and closing takes two. That is the cost of shipping the mode on,
+        // and `note_vim = false` is what buys the single press back.
+        //
+        // This reads the knob where the block above reads the mode, and
+        // they are the same fact from two sides: normal mode is only ever
+        // entered with the knob on, but insert mode is where both worlds
+        // meet, so `Esc` cannot tell them apart without asking.
+        if self.config.tui.note_vim {
+          if let Some(editor) = self.note_editor.as_mut() {
+            if editor.mode == NoteMode::Insert {
+              editor.enter_normal();
+              return NoteKey::Handled;
+            }
+          }
+        }
         self.flush_note();
         self.note_editor = None;
         self.view = View::List;
@@ -4697,6 +4783,16 @@ impl App {
         }
         return NoteKey::Handled;
       }
+      // #557: the two list verbs. Ctrl-modified, so they reach this far
+      // rather than being consumed as text above.
+      Some(ModalAction::NoteToggleBullet) => {
+        self.edit_note_buffer(|editor| editor.toggle_bullet());
+        return NoteKey::Handled;
+      }
+      Some(ModalAction::NoteToggleCheckbox) => {
+        self.edit_note_buffer(|editor| editor.toggle_checkbox());
+        return NoteKey::Handled;
+      }
       _ => {}
     }
 
@@ -4704,20 +4800,36 @@ impl App {
     // module note gives for `Esc` / `Enter`: an arrow key means one thing
     // in a text buffer and rebinding it would only take it away.
     let height = self.note_editor.as_ref().map_or(10, |e| e.viewport);
+    self.edit_note_buffer(|editor| match key.code {
+      KC::Left => editor.left(),
+      KC::Right => editor.right(),
+      KC::Up => editor.up(),
+      KC::Down => editor.down(),
+      KC::Home => editor.home(),
+      KC::End => editor.end(),
+      KC::PageUp => editor.page_up(height),
+      KC::PageDown => editor.page_down(height),
+      _ => {}
+    });
+    NoteKey::Handled
+  }
+
+  /// Run `f` on the open note buffer, then restore the normal-mode caret
+  /// invariant (issue #557, Codex review #582).
+  ///
+  /// Movement and the list toggles are written for insert mode, where the
+  /// caret may sit one past the last char. In normal mode it may not, or
+  /// `x` deletes nothing and `i` inserts past the end of the line. Whoever
+  /// moves the caret restores the invariant, rather than every reader of
+  /// `cursor_col` having to distrust it.
+  fn edit_note_buffer(&mut self, f: impl FnOnce(&mut crate::tui::state::note_editor::NoteEditor)) {
+    use crate::tui::state::note_editor::NoteMode;
     if let Some(editor) = self.note_editor.as_mut() {
-      match key.code {
-        KC::Left => editor.left(),
-        KC::Right => editor.right(),
-        KC::Up => editor.up(),
-        KC::Down => editor.down(),
-        KC::Home => editor.home(),
-        KC::End => editor.end(),
-        KC::PageUp => editor.page_up(height),
-        KC::PageDown => editor.page_down(height),
-        _ => {}
+      f(editor);
+      if editor.mode == NoteMode::Normal {
+        editor.clamp_normal();
       }
     }
-    NoteKey::Handled
   }
 
   /// Re-read the note after `$EDITOR` exited (issue #515), so the modal
@@ -4727,8 +4839,16 @@ impl App {
       return;
     };
     let (branch, path) = (editor.branch.clone(), editor.path.clone());
+    // #557: the buffer is rebuilt, so the mode has to be carried over by
+    // hand — coming back from `$EDITOR` into insert mode would leave a vim
+    // user typing verbs into their note.
+    let mode = editor.mode;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    if mode == crate::tui::state::note_editor::NoteMode::Normal {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
   }
 
   /// Re-read the selected row's note presence once the editor has exited
@@ -5393,30 +5513,59 @@ impl App {
   }
 
   /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
-  /// Detects tmux / zellij at runtime via environment variables; prints a
-  /// status message when no supported multiplexer is active.
+  /// Detects tmux / zellij / herdr at runtime via environment variables;
+  /// prints a status message when no supported multiplexer is active.
   pub fn open_in_mux_pane(&mut self) {
-    use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+    self.open_in_mux_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+    );
+  }
+
+  /// [`Self::open_in_mux_pane`] with the three env probes passed in, so a
+  /// state test can drive the refusals without rewriting a process-global
+  /// variable (#588). `$TMUX` is read by the clipboard path too, so unsetting
+  /// it in a test would put every yank test in the same binary under the env
+  /// lock.
+  pub fn open_in_mux_pane_from(&mut self, tmux: Option<String>, zellij: Option<String>, herdr: Option<String>) {
     let Some(w) = self.selected() else {
       self.status = "no worktree selected".into();
       return;
     };
     let path = w.path.clone();
     let name = w.name.clone();
-    // `mux_pane` promises a pane, so split the current pane (tmux
-    // `split-window` / zellij `new-pane`) rather than opening a new
-    // window/tab (Codex review on PR #292).
-    let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-      build_tmux_command(&name, &path, SpawnMode::Split)
-    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      build_zellij_command(&name, &path, SpawnMode::Split)
-    } else {
-      self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
+    // `mux_pane` promises a pane, so the shared cascade builds a Split (tmux
+    // `split-window` / zellij `new-pane` / herdr `pane split`) rather than a
+    // new window/tab (Codex review on PR #292). Herdr comes last in it, so a
+    // user running gwm inside both keeps what they had before #588.
+    let Some((_, cmd)) = crate::multiplexer::detect_split_command(&name, &path, tmux, zellij, herdr) else {
+      self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
     };
     let bin = cmd[0].as_str();
-    match std::process::Command::new(bin).args(&cmd[1..]).spawn() {
-      Ok(_) => self.status = format!("opened {} in new pane", name),
+    // `output()` rather than `spawn()`: both pipes have to be captured
+    // because this runs while ratatui owns the screen, and a child that
+    // inherits them draws over the frame (`herdr pane split` prints its
+    // `pane_info` JSON on every call, which would land in the middle of the
+    // worktree table). Capturing without reading would then deadlock on a
+    // full pipe, and dropping the streams on the floor would leave the status
+    // bar saying "opened" over a refusal.
+    //
+    // Waiting is affordable because all three verbs are control commands that
+    // return as soon as the pane exists: `herdr tab create` measured 40ms,
+    // and `tmux split-window` / `zellij action new-pane` do not wait on the
+    // shell they start either. A multiplexer that hangs here hangs the TUI,
+    // which is the trade for a status bar that does not lie.
+    match std::process::Command::new(bin).args(&cmd[1..]).output() {
+      Ok(out) => {
+        self.status = mux_pane_status(
+          &name,
+          out.status.success(),
+          &String::from_utf8_lossy(&out.stdout),
+          &String::from_utf8_lossy(&out.stderr),
+        )
+      }
       Err(e) => self.status = format!("mux-pane failed: {}", e),
     }
   }
@@ -7495,4 +7644,26 @@ fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
     .clone()
     .or_else(|| std::env::var("EDITOR").ok())
     .unwrap_or_else(|| "vi".into())
+}
+
+/// Status-bar line for a finished `mux_pane` spawn (#588).
+///
+/// Split out of [`App::open_in_mux_pane_from`] because it is the observable
+/// half: the spawn cannot be exercised from a test without opening a real
+/// pane, but what the status bar says about its outcome can.
+///
+/// A refusal reads out of the multiplexer's own words. stderr wins when both
+/// streams spoke (tmux and zellij put diagnostics there), but stdout is not
+/// ignored: herdr answers over its socket API, so its error arrives as a JSON
+/// body on stdout with a non-zero exit. The line is trimmed to its first
+/// non-empty line because the status bar is one row.
+pub fn mux_pane_status(name: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in new pane", name);
+  }
+  let detail = [stderr, stdout]
+    .iter()
+    .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
+    .unwrap_or("no output");
+  format!("mux-pane refused: {}", detail)
 }

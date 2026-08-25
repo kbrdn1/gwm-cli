@@ -412,7 +412,7 @@ define_modal_actions! {
     // and a re-open from the list view.
     RichViewCiChecks => "ci_checks" [ "c" ],
   }
-  // #515: two verbs, because everything else is text. `Esc` writes and
+  // #515: the verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see
   // `state::note_editor`). `Ctrl+e` hands the same file to `$EDITOR`,
   // which is what `N` itself used to do.
@@ -420,9 +420,21 @@ define_modal_actions! {
   // `Ctrl+e` is now spoken for. If line motions ever land here, the
   // readline `Ctrl+a` / `Ctrl+e` pair cannot have it — pick another key
   // rather than shadowing the way out to a real editor.
+  //
+  // #557: the two list verbs are Ctrl-modified for the reason the whole
+  // context exists — an unmodified printable is text here, and binding one
+  // to a verb is refused at load time. Which chord is left is decided by
+  // what tmux keeps for itself: `Ctrl+b` is the prefix, and `Ctrl+h` /
+  // `Ctrl+j` / `Ctrl+k` / `Ctrl+l` are the vim-tmux-navigator pane set that
+  // ships in tmux.nvim and every dotfiles repo that copied it. tmux only
+  // forwards those when the pane is running vim, so a note written inside
+  // tmux never sees them — measured on a real config, where `Ctrl+l` did
+  // nothing at all. `Ctrl+u` is free and reads as "unordered".
   Note {
-    NoteClose      => "close"       [ "Esc" ],
-    NoteOpenEditor => "open_editor" [ "Ctrl+e" ],
+    NoteClose          => "close"           [ "Esc" ],
+    NoteOpenEditor     => "open_editor"     [ "Ctrl+e" ],
+    NoteToggleBullet   => "toggle_bullet"   [ "Ctrl+u" ],
+    NoteToggleCheckbox => "toggle_checkbox" [ "Ctrl+t" ],
   }
 }
 

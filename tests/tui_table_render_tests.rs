@@ -44,6 +44,28 @@ fn draw_once(app: &mut App) -> String {
   buffer_text(&terminal)
 }
 
+/// The buffer split one string per terminal row. A flattened buffer cannot
+/// tell a header cell from a row cell, so a `contains` assertion about a
+/// column caption is satisfied by that column's row marker and passes
+/// vacuously (issue #595); these lines let an assertion name the header row
+/// and the data rows apart.
+fn draw_once_lines(app: &mut App) -> Vec<String> {
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, app)).unwrap();
+  let buf = terminal.backend().buffer();
+  let area = *buf.area();
+  (0..area.height)
+    .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+    .collect()
+}
+
+/// The worktrees table's header row, the one carrying both the `I/P` and
+/// `NAME` captions.
+fn is_header(line: &str) -> bool {
+  line.contains("I/P") && line.contains("NAME")
+}
+
 #[test]
 fn agent_column_is_hidden_while_no_session_is_detected() {
   let dir = repo();
@@ -289,11 +311,17 @@ fn a_marked_row_shows_the_glyph_and_the_footer_count() {
   );
 }
 
-// --- Note column (issue #515) ----------------------------------------------
+// --- Note column (issues #515, #595) ---------------------------------------
 //
 // Same conditional rule as AGENT and the mark column: a user who has never
 // written a note keeps the exact pre-#515 table, and the marker appears with
 // the first note. Binary by design — this row carries one or it does not.
+// #595: the column now captions itself with the same glyph it marks rows
+// with, so the marker stops reading as a third slot of the `I/P` group.
+
+/// `nf-oct-markdown`, the note column's glyph (#595): a gwm note is a
+/// markdown file, and both the header caption and the row marker paint it.
+const NOTE_GLYPH: char = '\u{f48a}';
 
 #[test]
 fn the_note_column_is_absent_while_no_row_carries_a_note() {
@@ -305,8 +333,8 @@ fn the_note_column_is_absent_while_no_row_carries_a_note() {
 
   let text = draw_once(&mut app);
   assert!(
-    !text.contains('\u{2261}'),
-    "no note -> the table must stay visually pre-#515: {text}"
+    !text.contains(NOTE_GLYPH),
+    "no note -> the table must stay visually pre-#515, caption included: {text}"
   );
 }
 
@@ -320,8 +348,13 @@ fn a_row_with_a_note_shows_the_marker() {
   app.worktrees.push(row);
   app.list_state.select(Some(app.worktrees.len() - 1));
 
-  let text = draw_once(&mut app);
-  assert!(text.contains('\u{2261}'), "the noted row must carry the marker: {text}");
+  // Data rows only: since #595 the header carries the same glyph, so a
+  // whole-buffer `contains` would pass with no row marker at all.
+  let lines = draw_once_lines(&mut app);
+  assert!(
+    lines.iter().any(|l| !is_header(l) && l.contains(NOTE_GLYPH)),
+    "the noted row must carry the marker, not just the caption: {lines:#?}"
+  );
 }
 
 #[test]
@@ -337,11 +370,43 @@ fn the_note_marker_is_only_on_the_rows_that_carry_one() {
   app.worktrees.push(markable_row("feat-515-bare"));
   app.list_state.select(Some(0));
 
-  let text = draw_once(&mut app);
-  assert_eq!(
-    text.matches('\u{2261}').count(),
-    1,
-    "exactly one row carries a note: {text}"
+  let lines = draw_once_lines(&mut app);
+  let marks: usize = lines
+    .iter()
+    .filter(|l| !is_header(l))
+    .map(|l| l.matches(NOTE_GLYPH).count())
+    .sum();
+  assert_eq!(marks, 1, "exactly one row carries a note: {lines:#?}");
+}
+
+#[test]
+fn the_note_column_captions_itself_between_ip_and_name() {
+  // #595: the caption used to be an empty string, so the marker sat under a
+  // blank header immediately right of `I/P` and read as a third slot of that
+  // two-slot group. Asserted by POSITION, not by presence — a `contains` on
+  // the flattened buffer is satisfied by the row marker and would stay green
+  // with no caption at all.
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  let mut row = markable_row("feat-595-noted");
+  row.has_note = true;
+  app.worktrees.push(row);
+  app.list_state.select(Some(app.worktrees.len() - 1));
+
+  let lines = draw_once_lines(&mut app);
+  let header = lines
+    .iter()
+    .find(|l| is_header(l))
+    .unwrap_or_else(|| panic!("no table header rendered: {lines:#?}"));
+  let ip = header.find("I/P").expect("the I/P caption anchors the left side");
+  let name = header.find("NAME").expect("the NAME caption anchors the right side");
+  let note = header
+    .find(NOTE_GLYPH)
+    .unwrap_or_else(|| panic!("the note column carries no caption: {header:?}"));
+  assert!(
+    ip < note && note < name,
+    "the caption must sit in its own column between I/P and NAME: {header:?}"
   );
 }
 
