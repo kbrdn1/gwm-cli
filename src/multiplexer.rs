@@ -223,6 +223,24 @@ pub fn detect_zellij(env: Option<String>) -> bool {
 /// not parsed, only its presence: `$HERDR_ENV` is the direct analogue of
 /// `$TMUX`, and a herdr that one day exports something richer than `1`
 /// keeps working.
+///
+/// # The one case this probe gets wrong
+///
+/// A tmux server started from inside a herdr pane promotes the whole
+/// `HERDR_*` set to its server-global environment, so every later session
+/// on that server carries `HERDR_ENV=1` and a pane id it does not own
+/// (herdrdev/herdr#2134, filed against 0.7.5 and closed unfixed for
+/// template non-compliance, so still live in 0.8.2).
+///
+/// [`detect_split_command`] is immune by construction: that leak only
+/// happens inside a tmux session, where `$TMUX` is set and tmux wins the
+/// cascade first. `gwm herdr <pattern>` is not, and cannot be made so
+/// here. The upstream issue reports every marker variable leaking
+/// together, pane id and socket path included, so no local check can tell
+/// a real pane from a leaked one: only asking the running server whether
+/// it owns `$HERDR_PANE_ID` separates them, which is the socket round trip
+/// #599 tracks. Until then the failure is loud rather than silent, since
+/// herdr answers a stale pane id with a non-zero exit.
 pub fn detect_herdr(env: Option<String>) -> bool {
   match env {
     Some(s) => !s.is_empty(),

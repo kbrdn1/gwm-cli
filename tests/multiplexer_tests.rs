@@ -304,6 +304,12 @@ fn detect_split_command_prefers_tmux_over_the_other_two() {
   // Order matters, and it is the reason herdr goes last: someone running gwm
   // inside a tmux session nested in a herdr pane has both variables set, and
   // #588 must not move them onto the newer backend.
+  //
+  // It is also what makes the TUI immune to herdrdev/herdr#2134: a tmux
+  // server started from a herdr pane promotes the whole `HERDR_*` set to its
+  // server-global environment, so unrelated sessions on that server claim a
+  // pane they do not own. Every one of them has `$TMUX` set, so this
+  // assertion is the guard, not a preference.
   let (mux, argv) = detect_split_command(
     "feat-7-foo",
     path(),
