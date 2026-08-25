@@ -34,6 +34,7 @@
 //! across the break.
 
 use crate::naming::sanitise_block_for_terminal;
+use crate::tui::ui::{cells, head_end};
 
 /// The semantic role of a run of text, mapped to theme colours at render
 /// time. Deliberately a small set: each variant has to earn a distinct
@@ -144,9 +145,18 @@ impl MdLine {
   }
 }
 
-/// Columns a line of segments occupies.
+/// Columns a line of segments occupies, in terminal CELLS.
+///
+/// Not characters (Codex review, pass 7). The budget handed to this module
+/// is a column count, and a line of 80 CJK ideographs is 80 characters and
+/// 160 columns: measured in characters it was declared to fit, and the
+/// renderer then cut half of it away. Prose is not preformatted, so the
+/// horizontal offset does not reach that half either — it was simply gone.
+///
+/// `ui::cells` is the measure ratatui itself applies when it paints, which
+/// is the only measure that can agree with the frame.
 fn width(segments: &[Segment]) -> usize {
-  segments.iter().map(|s| s.text.chars().count()).sum()
+  segments.iter().map(|s| cells(&s.text)).sum()
 }
 
 /// Render `body` into lines that fit `budget` columns.
@@ -248,6 +258,9 @@ fn fence_closes(trimmed: &str, marker: char, len: usize) -> bool {
 fn strip_comments(line: &str, mut open: bool) -> (String, bool) {
   let mut out = String::new();
   let mut rest = line;
+  // Offset of the next `<!--` relative to `rest`, when a previous pass
+  // already located it and only skipped code in front of it.
+  let mut cached_opener: Option<usize> = None;
   loop {
     if open {
       match rest.find("-->") {
@@ -263,12 +276,26 @@ fn strip_comments(line: &str, mut open: bool) -> (String, bool) {
       // delimiter, and the forge shows it. Skipped whole, before looking
       // for an opener, since the strip runs before the inline parse and is
       // the only place that knows to leave it alone.
-      let opener = rest.find("<!--");
+      //
+      // `opener` is carried across iterations rather than recomputed
+      // (Codex review, pass 7): re-running `find("<!--")` over the whole
+      // suffix once per code span made a line of thousands of spans
+      // quadratic. It is only ever re-searched from where the last one was
+      // consumed, so each byte is visited once.
+      let opener = match cached_opener {
+        Some(rel) => Some(rel),
+        None => rest.find("<!--"),
+      };
+      cached_opener = None;
       let code = code_span(rest);
       match (opener, code) {
         (Some(at), Some((start, end))) if start < at => {
           out.push_str(&rest[..end]);
           rest = &rest[end..];
+          // Where the comment sits relative to what is left. `None` when the
+          // span swallowed it — ```<!-- kept -->``` is a body documenting the
+          // delimiter, and the next comment, if any, is further along.
+          cached_opener = at.checked_sub(end);
         }
         (Some(at), _) => {
           out.push_str(&rest[..at]);
@@ -744,19 +771,27 @@ fn link(chars: &[char], at: usize, floors: &mut Floors) -> Option<(String, usize
   if chars.get(at) != Some(&'[') {
     return None;
   }
-  // Through the floors like every other opener: thousands of `[` with no
-  // `]` used to rescan the whole suffix each (Codex review, pass 6).
-  if floors.exhausted('[', 1, at + 1) {
+  // Through the floors like every other opener, and for EVERY way this can
+  // fail, not just a missing `]` (Codex review, pass 7). A `]` that is
+  // never followed by `(`, or a `(` that is never closed, are the same
+  // quadratic shape: the next `[` walks the same suffix to fail the same
+  // way. What is memoised is "no link starts at or after here".
+  if floors.exhausted('[', 1, at) {
     return None;
   }
+  let give_up = |floors: &mut Floors| {
+    floors.mark('[', 1, at);
+    None::<(String, usize)>
+  };
   let Some(close) = find(chars, at + 1, ']') else {
-    floors.mark('[', 1, at + 1);
-    return None;
+    return give_up(floors);
   };
   if chars.get(close + 1) != Some(&'(') {
-    return None;
+    return give_up(floors);
   }
-  let end = find(chars, close + 2, ')')?;
+  let Some(end) = find(chars, close + 2, ')') else {
+    return give_up(floors);
+  };
   let text: String = chars[at + 1..close].iter().collect();
   // `[]()` carries nothing to show; leave it as literal text.
   (!text.is_empty()).then_some((text, end + 1))
@@ -790,7 +825,12 @@ fn combine(outer: Emphasis, inner: Emphasis) -> Emphasis {
   use Emphasis::{Bold, BoldItalic, Italic};
   match (outer, inner) {
     (o, i) if o == i => o,
-    (Bold, Italic) | (Italic, Bold) | (BoldItalic, _) | (_, BoldItalic) => BoldItalic,
+    // Emphasis combined with emphasis is the pair. Restricted to those
+    // three, since a blanket `(BoldItalic, _)` arm overrode the very rule
+    // this function documents — `***run `x` now***` lost the code role on
+    // `x`, which `Bold` and `Italic` had always kept (Codex review, pass 7).
+    (Bold, Italic) | (Italic, Bold) => BoldItalic,
+    (BoldItalic, Bold | Italic) | (Bold | Italic, BoldItalic) => BoldItalic,
     // The inner run said something the outer one did not.
     (_, i) => i,
   }
@@ -833,7 +873,7 @@ fn wrap(segments: Vec<Segment>, budget: usize, preformatted: bool, first: &str, 
 fn wrap_rows(segments: Vec<Segment>, budget: usize, first: &str, hang: &str) -> Vec<Vec<Segment>> {
   let budget = budget.max(1);
   // A prefix wider than the budget would leave no room to make progress.
-  let too_wide = |p: &str| p.chars().count() + 8 > budget;
+  let too_wide = |p: &str| cells(p) + 8 > budget;
   let (first, hang) = if too_wide(first) || too_wide(hang) {
     ("", "")
   } else {
@@ -847,7 +887,7 @@ fn wrap_rows(segments: Vec<Segment>, budget: usize, first: &str, hang: &str) -> 
     }
   };
 
-  if first.chars().count() + width(&segments) <= budget {
+  if cells(first) + width(&segments) <= budget {
     let mut row = lead(0);
     row.extend(segments);
     return vec![row];
@@ -859,8 +899,8 @@ fn wrap_rows(segments: Vec<Segment>, budget: usize, first: &str, hang: &str) -> 
 
   for segment in segments {
     for word in words(&segment.text) {
-      let room = budget.saturating_sub(prefix(rows.len()).chars().count()).max(1);
-      let word_cols = word.chars().count();
+      let room = budget.saturating_sub(cells(prefix(rows.len()))).max(1);
+      let word_cols = cells(&word);
       // Whitespace never opens a row: a break eats the space it broke on.
       if word.trim().is_empty() {
         if cols > 0 && cols + word_cols <= room {
@@ -878,17 +918,21 @@ fn wrap_rows(segments: Vec<Segment>, budget: usize, first: &str, hang: &str) -> 
         // no break opportunity and would otherwise be ellipsised away.
         let mut rest = word.as_str();
         loop {
-          let room = budget.saturating_sub(prefix(rows.len()).chars().count()).max(1);
-          if rest.chars().count() <= room {
+          let room = budget.saturating_sub(cells(prefix(rows.len()))).max(1);
+          if cells(rest) <= room {
             break;
           }
-          let cut = rest.char_indices().nth(room).map(|(i, _)| i).unwrap_or(rest.len());
+          // Cut on a GRAPHEME boundary at a cell budget, the same walk the
+          // renderer clips with: splitting on a character index puts a
+          // combining mark on the next row and can leave a row wider than
+          // the frame.
+          let cut = head_end(rest, room).max(1);
           push_text(&mut row, &rest[..cut], segment.emphasis);
           rows.push(std::mem::take(&mut row));
           rest = &rest[cut..];
         }
         if !rest.is_empty() {
-          cols = rest.chars().count();
+          cols = cells(rest);
           push_text(&mut row, rest, segment.emphasis);
         }
         continue;

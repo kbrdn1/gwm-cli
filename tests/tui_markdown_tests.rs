@@ -548,3 +548,77 @@ fn a_heading_carries_its_own_inline_markup() {
     ]
   );
 }
+
+#[test]
+fn no_forward_scan_in_this_module_is_quadratic() {
+  // Codex review, pass 7 (two P1s), and the THIRD time this class has been
+  // reported: pass 5 for emphasis, pass 6 for links and code, pass 7 for a
+  // link that finds its `]` but no `(`, and for the comment strip walking
+  // past thousands of code spans.
+  //
+  // Three of a kind means enumerating every forward scan the module makes,
+  // by construction, instead of waiting for the next one to be named. The
+  // shapes below are one per scan site, each built to make that specific
+  // scan fail as late as possible:
+  //
+  //   `[`   opener with no `]` at all
+  //   `[a]` opener whose `]` is never followed by `(`
+  //   `[a](` opener whose `(` is never closed
+  //   `` ` `` span, then a comment: the strip's two searches
+  //   plus the four delimiter runs already covered
+  //
+  // All of it is remote text. A forge accepts 65 536 characters of it, and
+  // the thread that parses it is the one that re-wraps on every resize.
+  let shapes = [
+    ("unclosed bracket", "[".repeat(40_000)),
+    ("bracket, no paren", "[a] ".repeat(20_000)),
+    ("paren, never closed", "[a]( ".repeat(20_000)),
+    ("spans then a comment", format!("{}<!-- x -->", "`x` ".repeat(20_000))),
+    ("unclosed emphasis", "*a ".repeat(20_000)),
+    ("unclosed code", "`a ".repeat(20_000)),
+  ];
+  for (name, body) in shapes {
+    let start = std::time::Instant::now();
+    assert!(!render(&body, 80).is_empty(), "{name}");
+    assert!(
+      start.elapsed().as_secs() < 5,
+      "{name} took {:?}: a rescan per opener is the shape that gets here",
+      start.elapsed()
+    );
+  }
+}
+
+#[test]
+fn bold_italic_does_not_swallow_a_more_specific_inner_role() {
+  // Codex review, pass 7 (P2), on the nesting added in pass 3. `combine`
+  // documents that code and links keep their own role — the one that says
+  // how to READ the text rather than how loud it is — and the `BoldItalic`
+  // arm overrode exactly that, while `Bold` and `Italic` honoured it.
+  assert_eq!(
+    roles("***run `x` now***"),
+    vec![
+      ("run ".to_string(), Emphasis::BoldItalic),
+      ("x".to_string(), Emphasis::Code),
+      (" now".to_string(), Emphasis::BoldItalic),
+    ]
+  );
+}
+
+#[test]
+fn wrapping_measures_terminal_cells_not_characters() {
+  // Codex review, pass 7 (P2). The budget is a column count and the wrap
+  // compared characters to it, so 80 CJK ideographs were declared to fit 80
+  // columns while occupying 160. The renderer then cut half the line away
+  // with an ellipsis, and prose is not preformatted, so the horizontal
+  // offset does not reach it either: the text was simply gone.
+  let line = "界".repeat(80);
+  for row in render(&line, 40) {
+    let plain = row.plain();
+    let cells: usize = plain.chars().map(|c| if c == '界' { 2 } else { 1 }).sum();
+    assert!(
+      cells <= 40,
+      "a row of {cells} cells broke a 40-column budget: {plain:?}"
+    );
+  }
+  assert!(render(&line, 40).len() > 1, "and it actually wrapped");
+}

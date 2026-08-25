@@ -5889,7 +5889,7 @@ fn grapheme_cells(g: &str) -> usize {
 /// would straddle the budget is left out whole, so the prefix is `<= max`
 /// cells and the cut lands where a glyph ends rather than between a base and
 /// its combining mark.
-fn head_end(s: &str, max: usize) -> usize {
+pub fn head_end(s: &str, max: usize) -> usize {
   let mut end = 0usize;
   let mut used = 0usize;
   for (i, g) in s.grapheme_indices(true) {
