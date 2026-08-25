@@ -1816,6 +1816,49 @@ fn exit_filter_cancel_clears_query() {
 }
 
 #[test]
+fn mux_pane_status_reports_the_multiplexers_own_refusal() {
+  // Issue #588, second Codex pass. The spawn used to inherit both pipes,
+  // which let a failing multiplexer draw its error over the ratatui frame;
+  // sending them to `/dev/null` fixed that and traded it for a status bar
+  // that said "opened" whatever happened. herdr answers a refusal with a
+  // non-zero exit and a JSON body on stdout, so the message is built from
+  // whichever stream spoke.
+  let ok = gwm::tui::mux_pane_status("feat-7-foo", true, "{\"result\":{}}", "");
+  assert_eq!(ok, "opened feat-7-foo in new pane");
+
+  let err = gwm::tui::mux_pane_status(
+    "feat-7-foo",
+    false,
+    "{\"error\":{\"message\":\"unknown workspace w9Z\"}}\n",
+    "",
+  );
+  assert!(
+    err.contains("unknown workspace w9Z"),
+    "the multiplexer's own words must reach the status bar, got: {}",
+    err
+  );
+  assert!(!err.contains('\n'), "the status bar is one line, got: {}", err);
+
+  // stderr wins when both spoke: tmux and zellij put their diagnostics
+  // there, and it is the more specific of the two.
+  let err = gwm::tui::mux_pane_status("feat-7-foo", false, "some stdout", "no server running");
+  assert!(
+    err.contains("no server running"),
+    "expected the stderr text, got: {}",
+    err
+  );
+
+  // A refusal with nothing on either stream still has to read as a failure,
+  // not as a success with an empty reason.
+  let quiet = gwm::tui::mux_pane_status("feat-7-foo", false, "", "");
+  assert!(
+    !quiet.starts_with("opened"),
+    "a silent non-zero exit is still a failure, got: {}",
+    quiet
+  );
+}
+
+#[test]
 fn mux_pane_without_a_selection_says_so_and_spawns_nothing() {
   // Issue #588. `t` on an empty list (or a filter that matches nothing) must
   // refuse on the status bar rather than reach the multiplexer with no path.

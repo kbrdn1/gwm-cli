@@ -5179,19 +5179,28 @@ impl App {
       return;
     };
     let bin = cmd[0].as_str();
-    // Both pipes go to `/dev/null` because this runs while ratatui owns the
-    // screen: a child that inherits them draws over the frame, and the status
-    // bar is the only channel gwm has for runtime feedback. tmux and zellij
-    // say nothing on success so it never came up; `herdr pane split` prints
-    // its `pane_info` JSON on every call (#588), which would land in the
-    // middle of the worktree table.
-    match std::process::Command::new(bin)
-      .args(&cmd[1..])
-      .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::null())
-      .spawn()
-    {
-      Ok(_) => self.status = format!("opened {} in new pane", name),
+    // `output()` rather than `spawn()`: both pipes have to be captured
+    // because this runs while ratatui owns the screen, and a child that
+    // inherits them draws over the frame (`herdr pane split` prints its
+    // `pane_info` JSON on every call, which would land in the middle of the
+    // worktree table). Capturing without reading would then deadlock on a
+    // full pipe, and dropping the streams on the floor would leave the status
+    // bar saying "opened" over a refusal.
+    //
+    // Waiting is affordable because all three verbs are control commands that
+    // return as soon as the pane exists: `herdr tab create` measured 40ms,
+    // and `tmux split-window` / `zellij action new-pane` do not wait on the
+    // shell they start either. A multiplexer that hangs here hangs the TUI,
+    // which is the trade for a status bar that does not lie.
+    match std::process::Command::new(bin).args(&cmd[1..]).output() {
+      Ok(out) => {
+        self.status = mux_pane_status(
+          &name,
+          out.status.success(),
+          &String::from_utf8_lossy(&out.stdout),
+          &String::from_utf8_lossy(&out.stderr),
+        )
+      }
       Err(e) => self.status = format!("mux-pane failed: {}", e),
     }
   }
@@ -7079,4 +7088,26 @@ fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
     .clone()
     .or_else(|| std::env::var("EDITOR").ok())
     .unwrap_or_else(|| "vi".into())
+}
+
+/// Status-bar line for a finished `mux_pane` spawn (#588).
+///
+/// Split out of [`App::open_in_mux_pane_from`] because it is the observable
+/// half: the spawn cannot be exercised from a test without opening a real
+/// pane, but what the status bar says about its outcome can.
+///
+/// A refusal reads out of the multiplexer's own words. stderr wins when both
+/// streams spoke (tmux and zellij put diagnostics there), but stdout is not
+/// ignored: herdr answers over its socket API, so its error arrives as a JSON
+/// body on stdout with a non-zero exit. The line is trimmed to its first
+/// non-empty line because the status bar is one row.
+pub fn mux_pane_status(name: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in new pane", name);
+  }
+  let detail = [stderr, stdout]
+    .iter()
+    .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
+    .unwrap_or("no output");
+  format!("mux-pane refused: {}", detail)
 }
