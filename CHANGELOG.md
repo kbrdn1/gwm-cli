@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A setting for which direction a mux pane opens in**
+  ([#589](https://github.com/kbrdn1/gwm-cli/issues/589)). `[tui]
+  mux_pane_direction` decides where the TUI's `t` key puts the worktree it
+  opens: `"right"` (default) or `"down"` to split the current pane, `"window"`
+  for a whole tmux window or zellij / herdr tab. It is also the direction a
+  bare `gwm tmux|zellij|herdr <pattern> --split` takes, and the new
+  `--direction right|down` overrides it for one invocation. The knob cycles
+  live in the Settings panel under the **TUI** tab.
+
+  Two directions rather than four: `left` and `up` reach tmux only through
+  `split-window -b`, and herdr declares its `--direction` as `[possible
+  values: right, down]`, so a fuller compass would be values one backend could
+  not honour.
+
+  One caveat, and it is the same shape as the herdr one below: under
+  `"window"` a `[tui.macro*]` with `open_in = "mux_pane"` falls back to the
+  PTY overlay on zellij, because `zellij action new-tab` takes no trailing
+  command to run. The status bar names the backend that refused.
+
 - **herdr is a third multiplexer backend**
   ([#588](https://github.com/kbrdn1/gwm-cli/issues/588)). `gwm herdr <pattern>`
   opens the matched worktree in a new [herdr](https://herdr.dev) tab, `-p`
@@ -21,10 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a tmux or zellij user.
 
   Under the hood: `herdr tab create --workspace <id> --label <name> --cwd
-  <path> --focus` and `herdr pane split --current --direction right --cwd
-  <path> --focus`, verified against a live herdr 0.8.2 rather than its help
-  text. The split needs a direction because herdr's parser has no default for
-  one, and `right` is the analogue of tmux's `-h`. The other two flags are
+  <path> --focus` and `herdr pane split --current --direction <right|down>
+  --cwd <path> --focus`, verified against a live herdr 0.8.2 rather than its
+  help text. The split needs a direction because herdr's parser has no default
+  for one; which one it gets is [#589](https://github.com/kbrdn1/gwm-cli/issues/589)
+  below. The other two flags are
   there because herdr's defaults are the opposite of what the names suggest:
   without `--focus` the tab opens where you cannot see it, and without
   `--workspace` it opens in whichever workspace the server had focused, which
@@ -71,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file to the real vim. The verbs are hard-coded rather than bindable, so
   `[tui.keys.modal.note]` holds the same four verbs either way and an
   unmodified printable bound to one of them is still refused at load time.
+
+### Changed
+
+- **A tmux or zellij split now opens to the right by default**
+  ([#589](https://github.com/kbrdn1/gwm-cli/issues/589)). Up to 1.9 a split
+  carried no direction at all, so each backend answered for itself: `tmux
+  split-window` fell back to `-v` and stacked the pane, `zellij action
+  new-pane` took "the biggest available space", and herdr went right because
+  gwm hardcoded it. All three now pass a direction, and it defaults to
+  `right`: it is what the `--split` help has promised since it shipped ("a
+  horizontal split of the current pane"), and the half that is actually free
+  on a wide screen. Set `[tui] mux_pane_direction = "down"` to get the old
+  tmux behaviour back.
 
 ### Fixed
 
