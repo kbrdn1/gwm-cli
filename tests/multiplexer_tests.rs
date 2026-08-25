@@ -100,7 +100,12 @@ fn herdr_new_tab_uses_tab_create() {
   // new-tab verb, with `--cwd` for the working directory and `--label` for
   // the name shown on the tab. Measured against herdr 0.8.2
   // (`herdr tab create --help`).
-  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window);
+  let argv = build_herdr_command(
+    "feat-7-foo",
+    Path::new("/tmp/wt/feat-7-foo"),
+    SpawnMode::Window,
+    Some("w2K"),
+  );
   assert_eq!(argv[0], "herdr");
   assert_eq!(argv[1], "tab");
   assert_eq!(argv[2], "create");
@@ -108,12 +113,73 @@ fn herdr_new_tab_uses_tab_create() {
   let has_cwd = argv.windows(2).any(|w| w[0] == "--cwd" && w[1] == "/tmp/wt/feat-7-foo");
   assert!(has_label, "expected `--label feat-7-foo` in argv, got: {:?}", argv);
   assert!(has_cwd, "expected `--cwd /tmp/wt/feat-7-foo` in argv, got: {:?}", argv);
-  // No `--focus` / `--no-focus`: herdr focuses a created tab by default,
-  // which is what `tmux new-window` and `zellij action new-tab` do too.
-  // Passing the flag explicitly would pin a default gwm has no opinion on.
+}
+
+#[test]
+fn herdr_new_tab_asks_for_the_focus_tmux_and_zellij_give_for_free() {
+  // Measured on herdr 0.8.2, and the opposite of what this test asserted
+  // when the builder was first written: `herdr tab create --cwd <path>` with
+  // no focus flag comes back `"focused": false`. `tmux new-window` and
+  // `zellij action new-tab` both move the user to what they create, so
+  // omitting the flag would make `gwm herdr` the one backend that opens the
+  // worktree somewhere the user cannot see.
+  let argv = build_herdr_command(
+    "feat-7-foo",
+    Path::new("/tmp/wt/feat-7-foo"),
+    SpawnMode::Window,
+    Some("w2K"),
+  );
   assert!(
-    !argv.iter().any(|a| a == "--focus" || a == "--no-focus"),
-    "tab create must not pin the focus flag, got: {:?}",
+    argv.iter().any(|a| a == "--focus"),
+    "tab create must focus, got: {:?}",
+    argv
+  );
+  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Split, None);
+  assert!(
+    argv.iter().any(|a| a == "--focus"),
+    "pane split must focus, got: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn herdr_new_tab_targets_the_callers_workspace() {
+  // Measured on herdr 0.8.2 with two workspaces open: `herdr tab create`
+  // without `--workspace` lands in the server's *focused* workspace, not the
+  // caller's. Running it from a pane in `w2K` put the tab in `w2P`, i.e.
+  // `gwm herdr <pattern>` would open the worktree in a different project's
+  // window. `$HERDR_WORKSPACE_ID` is what the calling pane carries, so it is
+  // what pins the target.
+  let argv = build_herdr_command(
+    "feat-7-foo",
+    Path::new("/tmp/wt/feat-7-foo"),
+    SpawnMode::Window,
+    Some("w2K"),
+  );
+  let has_ws = argv.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w2K");
+  assert!(has_ws, "expected `--workspace w2K` in argv, got: {:?}", argv);
+}
+
+#[test]
+fn herdr_new_tab_omits_the_workspace_flag_when_the_id_is_unknown() {
+  // Outside a managed pane there is no `$HERDR_WORKSPACE_ID` to pass, and
+  // `--workspace ""` is an argument herdr would have to reject. Falling back
+  // to herdr's own choice of workspace beats failing the whole command.
+  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window, None);
+  assert!(
+    !argv.iter().any(|a| a == "--workspace"),
+    "no workspace id means no flag, got: {:?}",
+    argv
+  );
+  let argv = build_herdr_command(
+    "feat-7-foo",
+    Path::new("/tmp/wt/feat-7-foo"),
+    SpawnMode::Window,
+    Some(""),
+  );
+  assert!(
+    !argv.iter().any(|a| a == "--workspace"),
+    "an empty workspace id is not an id, got: {:?}",
     argv
   );
 }
@@ -125,10 +191,18 @@ fn herdr_split_pane_uses_pane_split_with_direction() {
   // arg has no default): omitting it makes herdr reject the call. `right`
   // is the analogue of tmux's `-h`. The pane-direction preference is filed
   // separately; until it lands, `right` is hardcoded.
-  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Split);
+  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Split, None);
   assert_eq!(argv[0], "herdr");
   assert_eq!(argv[1], "pane");
   assert_eq!(argv[2], "split");
+  // No `--workspace` on a split: `--current` names the caller's pane, which
+  // already resolves the workspace. Measured on 0.8.2, the new pane came
+  // back in `w2K` while the server's focused workspace was `w2P`.
+  assert!(
+    !argv.iter().any(|a| a == "--workspace"),
+    "`--current` already pins the workspace on a split, got: {:?}",
+    argv
+  );
   assert!(
     argv.iter().any(|a| a == "--current"),
     "split must target the current pane, got: {:?}",

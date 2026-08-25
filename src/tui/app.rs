@@ -5179,7 +5179,18 @@ impl App {
       return;
     };
     let bin = cmd[0].as_str();
-    match std::process::Command::new(bin).args(&cmd[1..]).spawn() {
+    // Both pipes go to `/dev/null` because this runs while ratatui owns the
+    // screen: a child that inherits them draws over the frame, and the status
+    // bar is the only channel gwm has for runtime feedback. tmux and zellij
+    // say nothing on success so it never came up; `herdr pane split` prints
+    // its `pane_info` JSON on every call (#588), which would land in the
+    // middle of the worktree table.
+    match std::process::Command::new(bin)
+      .args(&cmd[1..])
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn()
+    {
       Ok(_) => self.status = format!("opened {} in new pane", name),
       Err(e) => self.status = format!("mux-pane failed: {}", e),
     }

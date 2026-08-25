@@ -95,7 +95,8 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
 /// commands rather than a `new-window` equivalent; measured against
 /// herdr 0.8.2 (`herdr tab create --help`, `herdr pane split --help`).
 ///
-/// Two shapes differ from the tmux / zellij builders:
+/// Four shapes differ from the tmux / zellij builders, three of them
+/// measured against a live server rather than read off the help text:
 ///
 /// * `pane split` needs `--current` to target the caller's pane. Without
 ///   it herdr has no pane to split from.
@@ -104,27 +105,43 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
 ///   herdr's own agent guidance reaches for on a wide pane. Making it a
 ///   preference is filed separately; this is the hardcoded default until
 ///   that lands.
+/// * **`--focus` is not the default.** `tab create` and `pane split` both
+///   come back `"focused": false` when the flag is omitted, where
+///   `tmux new-window` and `zellij action new-tab` move the user to what
+///   they create. Omitting it would make herdr the one backend that opens
+///   the worktree somewhere the user cannot see.
+/// * **`tab create` needs `--workspace`.** Without it herdr uses the
+///   server's *focused* workspace, not the caller's: run from a pane in
+///   `w2K` with `w2P` focused, the tab landed in `w2P`. `workspace` is
+///   `$HERDR_WORKSPACE_ID`, which every managed pane carries. An absent or
+///   empty id drops the flag rather than passing one herdr would reject,
+///   so a caller outside a managed pane degrades to herdr's own choice.
+///   A split needs none of this: `--current` names the pane, which already
+///   resolves the workspace (measured, the pane came back in `w2K`).
 ///
 /// `pane split` takes no `--label` (a pane is renamed after the fact with
 /// `herdr pane rename`), so the worktree name is deliberately dropped in
 /// `Split` mode: passing it bare would be read as the optional `[PANE_ID]`
-/// positional and split someone else's pane.
-///
-/// Neither verb pins `--focus` / `--no-focus`: herdr focuses what it
-/// creates by default, which is what `tmux new-window` and
-/// `zellij action new-tab` do, and gwm has no reason to override it.
-pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<String> {
+/// positional and split someone else's pane. `workspace` is likewise
+/// ignored there.
+pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode, workspace: Option<&str>) -> Vec<String> {
   let path_str = path.display().to_string();
   match mode {
-    SpawnMode::Window => vec![
-      "herdr".into(),
-      "tab".into(),
-      "create".into(),
-      "--label".into(),
-      name.into(),
-      "--cwd".into(),
-      path_str,
-    ],
+    SpawnMode::Window => {
+      let mut argv = vec!["herdr".into(), "tab".into(), "create".into()];
+      if let Some(ws) = workspace.filter(|ws| !ws.is_empty()) {
+        argv.push("--workspace".into());
+        argv.push(ws.into());
+      }
+      argv.extend([
+        "--label".into(),
+        name.into(),
+        "--cwd".into(),
+        path_str,
+        "--focus".into(),
+      ]);
+      argv
+    }
     SpawnMode::Split => vec![
       "herdr".into(),
       "pane".into(),
@@ -134,11 +151,12 @@ pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Stri
       "right".into(),
       "--cwd".into(),
       path_str,
+      "--focus".into(),
     ],
   }
 }
 
-/// Resolve which multiplexer the process is inside and build its `Split`
+/// Resolve which multiplexer the process is inside/// Resolve which multiplexer the process is inside and build its `Split`
 /// argv, in the order tmux, zellij, herdr.
 ///
 /// Both TUI call sites (`t`, and a `[tui.macro*]` with
@@ -165,7 +183,11 @@ pub fn detect_split_command(
   } else if detect_zellij(zellij) {
     Some((Multiplexer::Zellij, build_zellij_command(name, path, SpawnMode::Split)))
   } else if detect_herdr(herdr) {
-    Some((Multiplexer::Herdr, build_herdr_command(name, path, SpawnMode::Split)))
+    // A split needs no workspace id: `--current` resolves it.
+    Some((
+      Multiplexer::Herdr,
+      build_herdr_command(name, path, SpawnMode::Split, None),
+    ))
   } else {
     None
   }

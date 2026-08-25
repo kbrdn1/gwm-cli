@@ -20,10 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every pane it manages, and it comes last in the cascade so nothing changes
   for a tmux or zellij user.
 
-  Under the hood: `herdr tab create --label <name> --cwd <path>` and
-  `herdr pane split --current --direction right --cwd <path>`, verified
-  against herdr 0.8.2. The split needs a direction because herdr's parser has
-  no default for one, and `right` is the analogue of tmux's `-h`.
+  Under the hood: `herdr tab create --workspace <id> --label <name> --cwd
+  <path> --focus` and `herdr pane split --current --direction right --cwd
+  <path> --focus`, verified against a live herdr 0.8.2 rather than its help
+  text. The split needs a direction because herdr's parser has no default for
+  one, and `right` is the analogue of tmux's `-h`. The other two flags are
+  there because herdr's defaults are the opposite of what the names suggest:
+  without `--focus` the tab opens where you cannot see it, and without
+  `--workspace` it opens in whichever workspace the server had focused, which
+  is another project's window as often as not.
 
   One surface stays on its old path: a `[tui.macro*]` with
   `open_in = "mux_pane"` still falls back to the PTY overlay under herdr, and

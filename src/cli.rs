@@ -3993,7 +3993,15 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()>
   let argv = match mux {
     Multiplexer::Tmux => build_tmux_command(&found.name, &found.path, mode),
     Multiplexer::Zellij => build_zellij_command(&found.name, &found.path, mode),
-    Multiplexer::Herdr => build_herdr_command(&found.name, &found.path, mode),
+    // `$HERDR_WORKSPACE_ID` pins the new tab to the calling pane's
+    // workspace; without it herdr uses whichever workspace the server has
+    // focused, which is a different project's window as often as not.
+    Multiplexer::Herdr => build_herdr_command(
+      &found.name,
+      &found.path,
+      mode,
+      std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
+    ),
   };
   spawn_multiplexer(mux, &argv)
 }
