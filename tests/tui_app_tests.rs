@@ -5369,7 +5369,7 @@ fn table_marker_for_main_worktree_is_a_yellow_star() {
 }
 
 #[test]
-fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
+fn table_marker_paints_both_unfetched_pastilles_white() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
@@ -5387,9 +5387,9 @@ fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
   assert_eq!(
     marker_cells(&line),
     vec![
-      ("●".to_string(), Some(Color::Green)),    // issue linked → clean role
+      ("●".to_string(), Some(Color::White)),    // issue linked, unfetched → name role
       ("/".to_string(), Some(Color::DarkGray)), // muted separator
-      ("●".to_string(), Some(Color::Magenta)),  // pr linked → locked role
+      ("●".to_string(), Some(Color::White)),    // pr linked, unfetched → name role too (#596)
     ]
   );
 }
@@ -5411,7 +5411,7 @@ fn table_marker_issue_only_leaves_the_pr_slot_as_dash() {
   };
   let line = gwm::tui::table_marker(&w, &Theme::default());
   let cells = marker_cells(&line);
-  assert_eq!(cells[0].1, Some(Color::Green), "issue dot green");
+  assert_eq!(cells[0].1, Some(Color::White), "unfetched issue dot white (#596)");
   assert_eq!(cells[2].0, "-", "empty pr slot uses a dash");
   assert_eq!(cells[2].1, Some(Color::White), "empty pr dash white");
 }
@@ -5542,7 +5542,7 @@ fn table_marker_pr_only_leaves_the_issue_slot_as_dash() {
   let cells = marker_cells(&line);
   assert_eq!(cells[0].0, "-", "empty issue slot uses a dash");
   assert_eq!(cells[0].1, Some(Color::White), "empty issue dash white");
-  assert_eq!(cells[2].1, Some(Color::Magenta), "pr dot violet");
+  assert_eq!(cells[2].1, Some(Color::White), "unfetched pr dot white (#596)");
 }
 
 #[test]

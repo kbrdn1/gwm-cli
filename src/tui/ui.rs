@@ -7594,10 +7594,27 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
 /// pre-#73 convention). Every other row renders two Issue/PR slots:
 ///
 /// - left = **Issue** — `●` with the loaded issue-state colour when known,
-///   `●` in `clean` green when only a link is known, else `-` in white.
+///   `●` in `name` white when only a link is known, else `-` in white.
 /// - right = **PR** — `●` with the loaded PR-state colour when known, `●`
-///   in `locked` violet when only a link is known, else `-` in white.
+///   in `name` white when only a link is known, else `-` in white.
 /// - a `muted` `/` separates them.
+///
+/// Both "linked, not fetched yet" slots take `name` (#596). They used to take
+/// a status role each, `clean` for the issue and `locked` for the PR, so the
+/// row said two different things about one absence of data and each borrowed a
+/// colour a loaded state owns: `clean` is [`issue_badge_color`]'s and
+/// [`pr_badge_color`]'s Open, `locked` is Merged, Closed, and the
+/// locked-worktree badge.
+///
+/// `name` is the one role here that neither badge map can produce, and it is
+/// already the other half of this same cell (the empty-slot dash), so the two
+/// slots agree without claiming anything. `muted` is not the neutral it looks
+/// like: it is the Draft colour and the separator's. `sidebar_status_dot`
+/// reaches for the same idea on its own surface, though not the same value:
+/// it hard-codes `Color::White` because it has no glyph to vary and needs a
+/// colour outside the theme's roles entirely, where the marker can lean on
+/// `●` vs `-` instead. So `name` and that white coincide in the default theme
+/// and differ in every preset, by design on both sides.
 ///
 /// The table is normally the no-fetch read path. Once GitHub status has been
 /// fetched for linked rows, their snapshots carry loaded states so
@@ -7609,17 +7626,19 @@ pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
     return Line::from(Span::styled("★", Style::default().fg(theme.main)));
   }
-  // An empty slot stays `name`-white so "no link" reads as a neutral
-  // placeholder rather than borrowing a status colour that would claim the
-  // row. A linked slot takes its accent unless a live loaded state exists.
+  // A slot stays `name`-white until a live state is loaded, so neither "no
+  // link" nor "not fetched yet" borrows a status colour that would claim the
+  // row. The two cases stay apart on the glyph (`●` vs `-`), not the colour.
+  // The arms are kept split rather than collapsed to `_`: the day one of the
+  // two stops being white, the site to change is already there.
   let issue_color = match (w.link.issue, w.issue_state) {
     (Some(_), Some(state)) => issue_badge_color(state, theme),
-    (Some(_), None) => theme.clean,
+    (Some(_), None) => theme.name,
     (None, _) => theme.name,
   };
   let pr_color = match (w.link.pr, w.pr_state) {
     (Some(_), Some(state)) => pr_badge_color(state, theme),
-    (Some(_), None) => theme.locked,
+    (Some(_), None) => theme.name,
     (None, _) => theme.name,
   };
   Line::from(vec![
