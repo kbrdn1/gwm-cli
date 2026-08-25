@@ -1,9 +1,12 @@
 //! Pure-logic tests for `gwm::multiplexer`. The module's command builders
 //! and env-var probes are deliberately decoupled from any process spawn, so
-//! these tests do not require `tmux` or `zellij` to be installed on the
-//! runner — they assert against the produced argv vectors.
+//! these tests do not require `tmux`, `zellij` or `herdr` to be installed on
+//! the runner — they assert against the produced argv vectors.
 
-use gwm::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode};
+use gwm::multiplexer::{
+  build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_tmux, detect_zellij, Multiplexer,
+  SpawnMode,
+};
 use std::path::Path;
 
 // --------------------------------------------------------------------------
@@ -88,6 +91,69 @@ fn zellij_split_pane_uses_action_new_pane() {
 }
 
 // --------------------------------------------------------------------------
+// herdr command builder (#588)
+// --------------------------------------------------------------------------
+
+#[test]
+fn herdr_new_tab_uses_tab_create() {
+  // Herdr drives its server over a socket API: `herdr tab create` is the
+  // new-tab verb, with `--cwd` for the working directory and `--label` for
+  // the name shown on the tab. Measured against herdr 0.8.2
+  // (`herdr tab create --help`).
+  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window);
+  assert_eq!(argv[0], "herdr");
+  assert_eq!(argv[1], "tab");
+  assert_eq!(argv[2], "create");
+  let has_label = argv.windows(2).any(|w| w[0] == "--label" && w[1] == "feat-7-foo");
+  let has_cwd = argv.windows(2).any(|w| w[0] == "--cwd" && w[1] == "/tmp/wt/feat-7-foo");
+  assert!(has_label, "expected `--label feat-7-foo` in argv, got: {:?}", argv);
+  assert!(has_cwd, "expected `--cwd /tmp/wt/feat-7-foo` in argv, got: {:?}", argv);
+  // No `--focus` / `--no-focus`: herdr focuses a created tab by default,
+  // which is what `tmux new-window` and `zellij action new-tab` do too.
+  // Passing the flag explicitly would pin a default gwm has no opinion on.
+  assert!(
+    !argv.iter().any(|a| a == "--focus" || a == "--no-focus"),
+    "tab create must not pin the focus flag, got: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn herdr_split_pane_uses_pane_split_with_direction() {
+  // `-p` → split the current pane. `herdr pane split` needs `--current` to
+  // target the caller's pane, and `--direction` is not optional (its clap
+  // arg has no default): omitting it makes herdr reject the call. `right`
+  // is the analogue of tmux's `-h`. The pane-direction preference is filed
+  // separately; until it lands, `right` is hardcoded.
+  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Split);
+  assert_eq!(argv[0], "herdr");
+  assert_eq!(argv[1], "pane");
+  assert_eq!(argv[2], "split");
+  assert!(
+    argv.iter().any(|a| a == "--current"),
+    "split must target the current pane, got: {:?}",
+    argv
+  );
+  let has_direction = argv.windows(2).any(|w| w[0] == "--direction" && w[1] == "right");
+  assert!(has_direction, "expected `--direction right` in argv, got: {:?}", argv);
+  let has_cwd = argv.windows(2).any(|w| w[0] == "--cwd" && w[1] == "/tmp/wt/feat-7-foo");
+  assert!(has_cwd, "pane split must set `--cwd`, got: {:?}", argv);
+  // `herdr pane split` takes no `--label` (panes are renamed after the fact
+  // via `herdr pane rename`), so forwarding the worktree name here would be
+  // parsed as the optional `[PANE_ID]` positional and split the wrong pane.
+  assert!(
+    !argv.iter().any(|a| a == "--label"),
+    "pane split must NOT carry `--label` (herdr rejects it on panes), got: {:?}",
+    argv
+  );
+  assert!(
+    !argv.iter().any(|a| a == "feat-7-foo"),
+    "the worktree name must not leak into argv as a bare positional (herdr would read it as PANE_ID), got: {:?}",
+    argv
+  );
+}
+
+// --------------------------------------------------------------------------
 // multiplexer detection
 // --------------------------------------------------------------------------
 
@@ -126,6 +192,22 @@ fn detect_zellij_false_when_zellij_env_missing_or_empty() {
   assert!(!detect_zellij(Some(String::new())));
 }
 
+#[test]
+fn detect_herdr_true_when_herdr_env_set() {
+  // Inside a herdr-managed pane, `$HERDR_ENV` is `1` (alongside
+  // HERDR_PANE_ID / HERDR_TAB_ID / HERDR_SOCKET_PATH). Presence is the
+  // gate; the value is deliberately not parsed, so a future herdr that
+  // exports something richer than `1` keeps working.
+  assert!(detect_herdr(Some("1".to_string())));
+  assert!(detect_herdr(Some("any-nonempty-string".to_string())));
+}
+
+#[test]
+fn detect_herdr_false_when_herdr_env_missing_or_empty() {
+  assert!(!detect_herdr(None));
+  assert!(!detect_herdr(Some(String::new())));
+}
+
 // --------------------------------------------------------------------------
 // Multiplexer enum: name + binary
 // --------------------------------------------------------------------------
@@ -137,4 +219,5 @@ fn multiplexer_binary_matches_verb() {
   // can name the right multiplexer in one line.
   assert_eq!(Multiplexer::Tmux.binary(), "tmux");
   assert_eq!(Multiplexer::Zellij.binary(), "zellij");
+  assert_eq!(Multiplexer::Herdr.binary(), "herdr");
 }
