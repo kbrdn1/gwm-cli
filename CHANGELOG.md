@@ -72,6 +72,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[tui.keys.modal.note]` holds the same four verbs either way and an
   unmodified printable bound to one of them is still refused at load time.
 
+- **Merge a PR from the TUI** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)).
+  `m` from the worktree table merges the selected row's linked PR; `m` inside
+  the PR / issue view merges the active tab's. Both go through the delete
+  flow's confirmation, and it is the same modal: same layout, same countdown,
+  same spinner while it runs, same buttons hidden mid-flight. Its summary
+  names the PR, `head → base`, the resolved method and what it does to the
+  history, and the CI rollup. `m` cycles the method from inside it, and a
+  failure keeps the modal up with the forge's own message.
+
+  The check state is shown rather than enforced: a forge refuses a merge for
+  reasons gwm does not model, and its own error says which. **The source
+  branch is never deleted**: neither backend is ever asked to.
+
+  The method comes from the new `merge_method` key and defaults to `merge`,
+  the least destructive of the three:
+
+  ```toml
+  merge_method = "merge"   # or "squash", "rebase"
+  ```
+
+### Changed
+
+- **The rich PR / issue view (`I`) had its design pass** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)). It was
+  built to get the data on screen and had never been laid out; the compact
+  layout of 1.8 made its own density the next thing that read as unpolished.
+  Six things changed:
+  - **The issue and the PR are two tabs**, switched with `Tab`. The view
+    still opens on the PR, which left the issue unreachable from a worktree
+    in review. A PR landing while the view is open still replaces an issue
+    that was only standing in for it, and does not replace one you tabbed
+    to.
+  - **Bodies render as Markdown** rather than as their source. Headings,
+    emphasis, inline code, fenced blocks, lists, task lists, block quotes,
+    GitHub alerts, links by their text, and HTML comments not shown at all.
+  - **Nothing is capped.** The view scrolls, so the window is the terminal
+    and the row count costs only the rows. Descriptions, reviews and the
+    whole conversation render in full; a `… N more` row now only reports
+    what the fetch itself did not return.
+  - **The metadata block wears the Status pane's colours**, resolved through
+    the pane's own helpers rather than a second set of rules.
+  - **A width policy of its own**, 80% of the terminal capped at 120 columns
+    against the shared overlay's 62% capped at 88. That ceiling was chosen
+    for the clean report, whose rows stop earning columns; prose does not.
+    A label-less row also spans the whole inner width now, which the view
+    was paying for twice.
+  - **Code and diff lines are kept whole and scroll sideways** with `h` /
+    `l`. In YAML or Python the indentation is the program, and a wrapped
+    `+` line's continuation carries no sigil and reads as context.
+  - **`y` copies the active tab's URL, `Y` its description.**
+  - **Pager motions**: `D` / `U` move half a window, `g` / `G` jump to the
+    ends, and `c` opens the same PR's CI checks without leaving the view.
+  - **A modal opened from the view closes back to it**, on the tab that was
+    being read. The CI list and the merge confirmation are both reached from
+    inside it, and landing on the worktree table meant re-selecting the row
+    and pressing `I` again to carry on reading. Opened from the table, both
+    still close to the table.
+
 ### Fixed
 
 - **A linked row with nothing fetched yet is white, not green and purple**
@@ -96,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `≡` to the `nf-oct-markdown` glyph the Working Tree pane already paints
   on a `.md` file, since a note is one. The column stays conditional, so a
   user who never writes a note keeps the exact table they had before.
+
 
 ## Past releases
 

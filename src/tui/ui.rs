@@ -2712,6 +2712,8 @@ pub enum HintContext {
   CreateFreeform,
   /// Confirm-delete modal.
   Confirm,
+  /// The confirmation modal when it is holding a merge (issue #551).
+  ConfirmMerge,
   /// Open issue/PR URL menu.
   OpenMenu,
   /// Issue/PR link prompt, stage 1 — choose issue vs PR.
@@ -2778,6 +2780,7 @@ impl HintContext {
       HintContext::Picker => "switch",
       HintContext::Create | HintContext::CreateFreeform => "create",
       HintContext::Confirm => "confirm",
+      HintContext::ConfirmMerge => "merge",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
       HintContext::LinkInputNumber => "link",
@@ -2900,6 +2903,17 @@ impl HintContext {
         Hint::Modal(ModalAction::ConfirmActivate, "activate"),
         Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
       ],
+      // The same modal, a different verb set (validation feedback on
+      // #551). `delete branch` belongs to the delete flow and was being
+      // advertised over a merge, where it means nothing and where the key
+      // does nothing; the merge has its own thing to offer instead.
+      HintContext::ConfirmMerge => &[
+        Hint::Modal(ModalAction::ConfirmConfirm, "merge"),
+        Hint::Modal(ModalAction::ConfirmCycleMethod, "method"),
+        Hint::Lit("←/→", "move"),
+        Hint::Modal(ModalAction::ConfirmActivate, "activate"),
+        Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
+      ],
       HintContext::OpenMenu => &[
         Hint::Modal(ModalAction::OpenMenuIssue, "issue"),
         Hint::Modal(ModalAction::OpenMenuPr, "pr"),
@@ -2952,6 +2966,11 @@ impl HintContext {
       // #420: no filter verb — a rich view is prose, not a row set.
       HintContext::RichView => &[
         Hint::Lit("j/k", "select"),
+        Hint::Lit("h/l", "scroll"),
+        Hint::Lit("D/U", "half page"),
+        Hint::Lit("y/Y", "copy url/body"),
+        Hint::Modal(ModalAction::RichViewMerge, "merge"),
+        Hint::Modal(ModalAction::RichViewTab, "issue/pr"),
         Hint::Modal(ModalAction::RichViewOpen, "open"),
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
@@ -3106,7 +3125,9 @@ impl HintContext {
       HintContext::Create | HintContext::CreateFreeform | HintContext::Rename | HintContext::RenameFreeform => {
         KeyContext::Create
       }
-      HintContext::Confirm => KeyContext::Confirm,
+      // Both render the confirmation modal, so both resolve through its
+      // key context; only the verbs they advertise differ (#551).
+      HintContext::Confirm | HintContext::ConfirmMerge => KeyContext::Confirm,
       HintContext::OpenMenu => KeyContext::OpenMenu,
       HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
       HintContext::LinkInputNumber => KeyContext::LinkInputNumber,
@@ -3793,6 +3814,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   ));
   rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
+  rows.push(entry(Action::MergePr, "merge the linked PR (asks first)"));
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
@@ -3926,6 +3948,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
+      modal_entry(
+        ModalAction::ConfirmCycleMethod,
+        "cycle merge / squash / rebase (merge confirmations only)",
+      ),
     ]);
     // #453: one section per modal context, in workflow order, every verb
     // resolved live against the modal keymap so rebinds show through (and
@@ -4008,6 +4034,17 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       modal_entry(ModalAction::RichViewNext, "next row"),
       modal_entry(ModalAction::RichViewPrev, "previous row"),
+      modal_entry(ModalAction::RichViewTab, "switch between the issue and the PR"),
+      modal_entry(ModalAction::RichViewLeft, "scroll code and diff lines left"),
+      modal_entry(ModalAction::RichViewRight, "scroll code and diff lines right"),
+      modal_entry(ModalAction::RichViewYankUrl, "copy the URL of the active tab"),
+      modal_entry(ModalAction::RichViewYankBody, "copy the description of the active tab"),
+      modal_entry(ModalAction::RichViewMerge, "merge the PR (asks first)"),
+      modal_entry(ModalAction::RichViewHalfDown, "half a page down"),
+      modal_entry(ModalAction::RichViewHalfUp, "half a page up"),
+      modal_entry(ModalAction::RichViewTop, "jump to the top"),
+      modal_entry(ModalAction::RichViewBottom, "jump to the bottom"),
+      modal_entry(ModalAction::RichViewCiChecks, "open this PR's CI checks"),
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
@@ -5271,6 +5308,87 @@ pub fn overlay_modal_width(term_width: u16) -> u16 {
   modal_width(term_width, 62, 72, 88)
 }
 
+/// The style one Markdown role is painted in (issue #551).
+///
+/// The other half of the parse: [`Emphasis`] is a semantic role precisely so
+/// that this mapping lives here, where the theme is, and the parser stays a
+/// pure function. Kept public and pure so the pairing is pinned by a test —
+/// a parse that produces perfect segments nobody paints differently is a
+/// feature that is dead on screen with the suite green.
+pub fn markdown_style(emphasis: crate::tui::state::markdown::Emphasis, theme: &Theme) -> Style {
+  use crate::tui::state::markdown::Emphasis;
+  let plain = Style::default().fg(theme.name);
+  match emphasis {
+    Emphasis::Plain => plain,
+    Emphasis::Bold => plain.add_modifier(Modifier::BOLD),
+    Emphasis::Italic => plain.add_modifier(Modifier::ITALIC),
+    Emphasis::BoldItalic => plain.add_modifier(Modifier::BOLD | Modifier::ITALIC),
+    // `staged` rather than `accent`: a literal reads as its own thing, and
+    // `accent` is already the overlay's border and its key hints.
+    Emphasis::Code => Style::default().fg(theme.staged),
+    Emphasis::Strike => Style::default().fg(theme.muted).add_modifier(Modifier::CROSSED_OUT),
+    Emphasis::Link => Style::default().fg(theme.accent).add_modifier(Modifier::UNDERLINED),
+    Emphasis::Heading => Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+    // The forge greys a quoted block whole, marker and text alike.
+    Emphasis::Quote => Style::default().fg(theme.muted),
+    Emphasis::Marker => Style::default().fg(theme.muted),
+    // The Status pane's own colours, so the same fact reads the same in the
+    // pane and in the overlay one keypress away. Written against the same
+    // theme roles `pr_badge_color`, `issue_badge_color` and `ci_indicator`
+    // resolve to rather than re-deciding them here.
+    Emphasis::Success => Style::default().fg(theme.clean),
+    Emphasis::Failure => Style::default().fg(theme.prunable),
+    Emphasis::Running => Style::default().fg(theme.dirty),
+    Emphasis::Notice => Style::default().fg(theme.locked),
+    Emphasis::Muted => Style::default().fg(theme.muted),
+    Emphasis::Branch => Style::default().fg(theme.branch),
+  }
+}
+
+/// How many rows the detail overlay shows at once, for a given terminal.
+///
+/// One answer shared by the renderer and by `App`, for the reason the width
+/// is shared: a half-page jump that guesses a different window than the one
+/// on screen lands somewhere the reader did not ask for. Ten rows go to the
+/// frame, the hint bar and the margins.
+pub fn detail_visible_rows(term_height: u16) -> usize {
+  (term_height as usize).saturating_sub(10).max(3)
+}
+
+/// Modal width for the rich PR / issue view (issue #551).
+///
+/// A policy of its own rather than [`overlay_modal_width`], because the two
+/// boxes hold different payloads. The shared overlay's 88-column ceiling was
+/// picked for the clean report, whose rows are an icon and a directory name
+/// pinned left with a size pinned right: past a point, extra columns only
+/// stretch the gap between the two. This box holds PROSE, which keeps earning
+/// columns until it hits the line length prose stops being readable at.
+///
+/// So: a bigger share of the terminal (80%, against 62%) and a ceiling at 120
+/// rather than 88. The ceiling is the point where a paragraph gets hard to
+/// track back to the next line, not a frame budget — on a 200-column terminal
+/// this leaves the modal reading as a modal.
+///
+/// The floor stays the shared 72 on purpose. The two policies must not cross
+/// over on a narrow terminal, where neither has room to express a preference.
+pub fn rich_view_modal_width(term_width: u16) -> u16 {
+  modal_width(term_width, 80, 72, 120)
+}
+
+/// The width the detail overlay is drawn at, for a given consumer.
+///
+/// The one place the routing lives, so the renderer and the row builder
+/// cannot drift apart (issue #551). Exhaustive `match`, no `_` arm, for the
+/// reason [`DetailKind::is_forge_linked`] gives: a fourth consumer does not
+/// compile until someone answers the question for it.
+pub fn detail_overlay_width(kind: crate::tui::state::detail_overlay::DetailKind, term_width: u16) -> u16 {
+  use crate::tui::state::detail_overlay::DetailKind;
+  match kind {
+    DetailKind::RichIssue | DetailKind::RichPr => rich_view_modal_width(term_width),
+    DetailKind::Agents | DetailKind::CiChecks => overlay_modal_width(term_width),
+  }
+}
+
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
 pub fn help_section_style(section: Color) -> Style {
@@ -5372,7 +5490,153 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
   lines
 }
 
+/// The merge confirmation (issue #551).
+///
+/// Built on the delete modal's own layout (validation feedback): the same
+/// five zones, the same `LoaderWidget` while it runs, the same countdown
+/// bar while it is armed, and the same buttons hidden mid-flight. A merge
+/// is no less irreversible than a delete, so it gets no less ceremony and
+/// no different shape to learn.
+///
+/// The summary names what the decision turns on: which PR, `head → base`,
+/// the resolved method AND what that method does to the history, and the CI
+/// rollup. That last one is why the modal earns its keypress; merging on a
+/// red CI is the mistake worth one moment of friction.
+fn draw_confirm_merge(f: &mut Frame, app: &App) {
+  let danger = app.theme.prunable;
+  let muted = app.theme.muted;
+  let Some(m) = app.pending_merge() else {
+    return;
+  };
+  let label_w = 7usize;
+  let row = |label: &str, value: String, style: Style| -> Line<'static> {
+    Line::from(vec![
+      Span::styled(format!("{label:label_w$}  "), Style::default().fg(muted)),
+      Span::styled(value, style),
+    ])
+  };
+
+  let mut content: Vec<Line<'static>> = Vec::new();
+  content.push(
+    Line::from(Span::styled(
+      format!("Merge {} #{}?", m.noun, m.number),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    ))
+    .centered(),
+  );
+  content.push(Line::from(String::new()));
+  content.push(row("title", m.title.clone(), Style::default().fg(app.theme.name)));
+  if !m.head_ref.is_empty() && !m.base_ref.is_empty() {
+    content.push(row(
+      "branch",
+      format!("{} → {}", m.head_ref, m.base_ref),
+      Style::default().fg(app.theme.branch),
+    ));
+  }
+  content.push(row(
+    "method",
+    format!("{}: {}", m.method.as_str(), m.method.summary()),
+    Style::default().fg(app.theme.name),
+  ));
+  // Shown, not enforced. A forge refuses a merge for reasons gwm does not
+  // model, and its own error says which; a client-side rule would add a
+  // second place to be wrong.
+  if let Some((label, color)) = ci_indicator(m.ci, m.checks_passed, m.checks_total, &app.theme) {
+    content.push(row("checks", label.trim().to_string(), Style::default().fg(color)));
+  }
+  content.push(Line::from(String::new()));
+  content.push(Line::from(Span::styled(
+    "the source branch is kept",
+    Style::default().fg(muted),
+  )));
+
+  let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + 2 /* border */ + 2 /* padding */;
+  let area = centered_content(62, 56, 80, height, f.area());
+  let block = overlay_block_titled("Merge", danger);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // summary
+      Constraint::Length(1), // loader / countdown
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
+
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
+
+  // --- loader / failure / countdown, exactly the delete modal's ladder ---
+  if app.is_merge_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::MergePr.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.merge_failure() {
+    f.render_widget(
+      LoaderWidget::failed("merge failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
+    let now = Instant::now();
+    let mut spans = vec![Span::styled(
+      format!("{} ", app.spinner.glyph(DOT_FRAMES)),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(countdown_bar(
+      app.confirm_countdown_progress(now),
+      app.confirm_countdown_remaining_secs(now),
+      danger,
+      app.theme.dirty,
+      muted,
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), inner[1]);
+  }
+
+  // --- buttons + hint, gone while the merge is in flight ---
+  if !app.is_merge_loading() {
+    f.render_widget(
+      Paragraph::new(confirm_buttons_line(
+        app.confirm.focused_button(),
+        app.theme.accent,
+        muted,
+      ))
+      .alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(
+        // The merge's own verbs (validation feedback): `delete branch`
+        // belongs to the other flow and does nothing here, while cycling
+        // the method is the one thing this modal can offer and could not
+        // advertise.
+        HintContext::ConfirmMerge,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      ))
+      .alignment(Alignment::Center),
+      inner[4],
+    );
+  }
+}
+
 fn draw_confirm(f: &mut Frame, app: &App) {
+  // What this modal is about (issue #551). The countdown, the danger
+  // border and the button row are shared; the summary is not, because the
+  // consequence is not.
+  if app.confirm_kind() == crate::tui::ConfirmKind::MergePr {
+    draw_confirm_merge(f, app);
+    return;
+  }
   let muted = app.theme.muted;
   // The destructive modal reads in the theme's "danger" colour (the
   // same role the prunable `⚠` badge uses), so it tracks `[theme]`
@@ -6016,7 +6280,7 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
 /// `debug_assert!` saying so. A Unix path may legally hold a `\n`, and this
 /// helper does not sanitise (that is `trunc`'s job, #506), so measuring one
 /// directly panicked every debug build.
-fn cells(s: &str) -> usize {
+pub fn cells(s: &str) -> usize {
   s.graphemes(true).map(grapheme_cells).sum()
 }
 
@@ -6036,7 +6300,7 @@ fn grapheme_cells(g: &str) -> usize {
 /// would straddle the budget is left out whole, so the prefix is `<= max`
 /// cells and the cut lands where a glyph ends rather than between a base and
 /// its combining mark.
-fn head_end(s: &str, max: usize) -> usize {
+pub fn head_end(s: &str, max: usize) -> usize {
   let mut end = 0usize;
   let mut used = 0usize;
   for (i, g) in s.grapheme_indices(true) {
@@ -6097,6 +6361,27 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   // The two slices cannot meet: `head + tail` is `max - 1`, and we only get
   // here when the whole string is wider than `max`.
   format!("{}…{}", &s[..head_end], &s[tail_start..])
+}
+
+/// Byte index at which `skip` terminal CELLS of `s` have been consumed.
+///
+/// The counterpart of [`head_end`], for the horizontal offset of the rich
+/// view (Codex review on #551): both the bound and the clip used to count
+/// characters, and a line of CJK is twice as wide as it is long, so the
+/// tail of one could not be reached at any offset. A glyph straddling the
+/// boundary is dropped whole rather than half-shown.
+pub fn skip_cells(s: &str, skip: usize) -> usize {
+  if skip == 0 {
+    return 0;
+  }
+  let mut used = 0usize;
+  for (i, g) in s.grapheme_indices(true) {
+    if used >= skip {
+      return i;
+    }
+    used += grapheme_cells(g);
+  }
+  s.len()
 }
 
 /// Right-pad `s` to `width` terminal cells.
@@ -6352,7 +6637,13 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   use crate::tui::state::detail_overlay::{DetailMode, DetailRole};
   let accent = app.theme.accent;
   let term = f.area();
-  let width = overlay_modal_width(term.width);
+  // The width policy follows the consumer (issue #551): the rich view holds
+  // prose and gets the wider box, the agents and CI lists keep the shared
+  // one. It MUST agree with `App::rich_view_width`, which wraps the rows
+  // against the same number before they ever reach here — wrapping at one
+  // width and painting at another either ellipsises the tail of every line
+  // or leaves a column of dead space down the right edge.
+  let width = detail_overlay_width(app.detail_overlay.kind, term.width);
   let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
   let ov = &app.detail_overlay;
 
@@ -6520,12 +6811,36 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // The modal height is derived from the VISIBLE row count, which is
   // constant while navigating — scrolling must never resize the frame
   // (user feedback 2026-07-22). The window follows the selection.
-  let max_visible = (term.height as usize).saturating_sub(10).max(3);
+  let max_visible = detail_visible_rows(term.height);
   let visible = total.min(max_visible);
   let (start, end) = picker_window(total, ov.selected, visible);
 
   let label_w = ov.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
   let mut lines: Vec<Line<'static>> = Vec::new();
+  // The issue / PR tab bar (issue #551). Empty unless BOTH sides are
+  // fetched: a lone tab is a label, not a tab, and would cost two rows to
+  // say what the title already says.
+  let tabs = app.rich_view_tabs();
+  let h_offset = app.rich_h_offset();
+  if !tabs.is_empty() {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (label, active) in &tabs {
+      if !spans.is_empty() {
+        spans.push(Span::styled("  ", Style::default().fg(app.theme.muted)));
+      }
+      let style = if *active {
+        Style::default()
+          .fg(app.theme.name)
+          .bg(app.theme.selection_bg)
+          .add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(app.theme.muted)
+      };
+      spans.push(Span::styled(format!(" {label} "), style));
+    }
+    lines.push(Line::from(spans));
+    lines.push(Line::from(String::new()));
+  }
   for (i, row) in ov.rows.iter().enumerate().take(end).skip(start) {
     let (label_color, value_color, value_bold) = match row.role {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
@@ -6542,6 +6857,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // aligned inside that bar, rendered muted. Its width is RESERVED
     // (Codex review #455): a long check name truncates with an ellipsis
     // instead of pushing the detail column past the clipping edge.
+    // A row with no label spans the whole inner width (issue #551). The
+    // agents and CI consumers label every row they emit, so this only ever
+    // fires for the rich view's prose, which is exactly the payload the
+    // reserved column was costing without giving anything back.
+    let gutter = if row.label.is_empty() { 0 } else { label_w + 2 };
     let mut extra: String = row.extra.as_deref().unwrap_or("").to_string();
     let mut extra_cols = extra.chars().count();
     // The detail column is bounded too (Codex review #455): on a narrow
@@ -6552,7 +6872,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // or its full width when shorter.
     if extra_cols > 0 {
       let reserve = row.value.chars().count().min(12);
-      let extra_budget = inner.saturating_sub(label_w + 2 + reserve + 2);
+      let extra_budget = inner.saturating_sub(gutter + reserve + 2);
       if extra_cols > extra_budget {
         if extra_budget == 0 {
           extra.clear();
@@ -6563,15 +6883,26 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         extra_cols = extra.chars().count();
       }
     }
-    let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
-    let value: String = if row.value.chars().count() > value_budget {
+    let value_budget = inner.saturating_sub(gutter + if extra_cols > 0 { extra_cols + 2 } else { 0 });
+    // A preformatted row is clipped by the offset below, not ellipsised
+    // here: an ellipsis would throw away the very columns the offset exists
+    // to reach (issue #551).
+    let value: String = if !row.preformatted && row.value.chars().count() > value_budget {
       let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
       v.push('…');
       v
     } else {
       row.value.clone()
     };
-    let text_cols = label_w + 2 + value.chars().count();
+    // Against what will actually be painted: a preformatted row clipped by
+    // the offset is shorter than its value, and padding for the full value
+    // would push the right-aligned detail column off the frame.
+    let painted = if row.segments.is_empty() || !row.preformatted {
+      value.chars().count()
+    } else {
+      cells(&value).saturating_sub(h_offset).min(value_budget)
+    };
+    let text_cols = gutter + painted;
     let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
@@ -6586,12 +6917,81 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       pad_style = pad_style.bg(app.theme.selection_bg);
       extra_style = extra_style.bg(app.theme.selection_bg);
     }
-    lines.push(Line::from(vec![
-      Span::styled(format!("{:label_w$}  ", row.label), label_style),
-      Span::styled(value, value_style),
-      Span::styled(" ".repeat(pad), pad_style),
-      Span::styled(extra, extra_style),
-    ]));
+    let mut spans = Vec::with_capacity(4);
+    if gutter > 0 {
+      spans.push(Span::styled(format!("{:label_w$}  ", row.label), label_style));
+    }
+    // A row that carries Markdown segments is painted run by run (issue
+    // #551); every other row keeps the single-span path it always had. The
+    // segments concatenate to `value`, so the truncation above still decides
+    // how many columns get painted.
+    if row.segments.is_empty() {
+      spans.push(Span::styled(value, value_style));
+    } else {
+      // A preformatted row was never wrapped — it is code, where the column
+      // is the meaning — so it is clipped against the view's horizontal
+      // offset instead (issue #551). Every other row already fits, and
+      // scrolling one would only hide its left edge.
+      let skip = if row.preformatted { h_offset } else { 0 };
+      let mut skipped = 0usize;
+      let mut left = value_budget;
+      for segment in &row.segments {
+        if left == 0 {
+          break;
+        }
+        // Measured in CELLS throughout (Codex review on #551). `value_budget`
+        // is a column count and so is the offset; counting the text in
+        // characters against them puts the tail of a CJK line out of reach
+        // at every offset.
+        let cols = cells(&segment.text);
+        if skipped + cols <= skip {
+          skipped += cols;
+          continue;
+        }
+        let drop = skip.saturating_sub(skipped);
+        skipped += cols;
+        let kept = &segment.text[skip_cells(&segment.text, drop)..];
+        // Does this run outrun what is left of the row? Answered BEFORE the
+        // cut, so the ellipsis can be given a column instead of being added
+        // on top of a full one (Codex review, pass 4).
+        //
+        // The first cut of this reserved against `value_budget`, the whole
+        // row's width, where `left` is what remains after the runs already
+        // painted. A row opening with a badge therefore came out one column
+        // over, and ratatui clipped the ellipsis itself — which put the
+        // silent truncation back exactly where pass 2 had removed it.
+        let overflows = cells(kept) > left;
+        let room = if overflows { left.saturating_sub(1) } else { left };
+        let mut text: String = kept[..head_end(kept, room)].to_string();
+        left -= cells(&text);
+        // `value` above already carries an ellipsised copy, but this branch
+        // paints the RUNS, so it has to mark the cut itself: losing the end
+        // of a URL with nothing saying so is the exact failure the ellipsis
+        // exists to prevent (Codex review, pass 2).
+        if overflows {
+          text.push('…');
+          left = left.saturating_sub(1);
+        }
+        let mut style = markdown_style(segment.emphasis, &app.theme);
+        // A badge run goes through the Status pane's own `chip_style`, so
+        // the two surfaces cannot drift into resembling each other instead
+        // of matching (validation feedback on issue #551).
+        if segment.chip {
+          style = match style.fg {
+            Some(fg) => chip_style(fg),
+            None => style,
+          };
+        } else if i == ov.selected {
+          // A chip is already reverse video; painting the selection
+          // background under it would swap its ground and erase it.
+          style = style.bg(app.theme.selection_bg);
+        }
+        spans.push(Span::styled(text, style));
+      }
+    }
+    spans.push(Span::styled(" ".repeat(pad), pad_style));
+    spans.push(Span::styled(extra, extra_style));
+    lines.push(Line::from(spans));
   }
   // #436 validation feedback: the CI checks consumer advertises ITS verbs,
   // not the agents' attach / detach — the hint context follows the kind.
@@ -6602,12 +7002,12 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
   };
   push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
-  // `visible` rows + the hint's blank spacer and its line. The two title
-  // rows left this count in #549 — the title rides the top rule now, and
-  // keeping them here left the frame two rows too tall, so the hint row
-  // floated with dead space under it (validation feedback + Codex review,
-  // PR #546).
-  let height = (visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
+  // `visible` rows + the hint's blank spacer and its line, plus the tab bar
+  // and ITS spacer when there is one. A row added to `lines` that is not
+  // counted here leaves the frame short and the last row clipped; one
+  // counted but not added leaves dead space under the hint (#549 / PR #546).
+  let chrome = if tabs.is_empty() { 2 } else { 4 };
+  let height = (visible + chrome) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(
@@ -6620,7 +7020,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
-    y: area.y + 2, /* border + padding */
+    y: area.y + 2 /* border + padding */ + if tabs.is_empty() { 0 } else { 2 },
     width: area.width.saturating_sub(2),
     height: visible as u16,
   }

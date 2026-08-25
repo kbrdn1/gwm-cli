@@ -13605,6 +13605,738 @@ fn every_panel_choice_survives_the_write_it_triggers() {
   }
 }
 
+/// A worktree with both an issue and a PR linked and fetched, the rich view
+/// open on the PR (issue #551).
+fn app_with_both_sides_linked() -> (tempfile::TempDir, git2::Repository, App) {
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  (dir, repo, app)
+}
+
+#[test]
+fn tab_reaches_the_issue_the_pr_was_standing_in_front_of() {
+  // Issue #551. The PR wins whenever one is linked, which is the right
+  // default and left the issue unreachable: a worktree in review had no way
+  // back to the thing it is solving without unlinking the PR.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+
+  app.rich_view_next_tab();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.iter().any(|v| v.contains("The issue body.")), "{vals:?}");
+  assert!(
+    app.detail_overlay.title.contains("Issue #42"),
+    "the title follows the tab: {}",
+    app.detail_overlay.title
+  );
+
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "and back again");
+}
+
+#[test]
+fn the_overlay_link_follows_the_active_tab() {
+  // The overlay is pinned to the link it renders so a disagreeing mutation
+  // closes it (#529). With tabs that pin has to follow the TAB, or switching
+  // to the issue would leave the overlay claiming to be the PR and a moved
+  // PR link would close the issue tab out from under the reader.
+  let (_dir, repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+
+  // The PR link moves. The issue tab has nothing to do with it.
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "a PR link change must not close the issue tab"
+  );
+}
+
+#[test]
+fn a_landing_pr_does_not_yank_the_reader_off_a_chosen_issue_tab() {
+  // The interaction the tabs create, and the one that would have shipped
+  // silently: `sync_rich_overlay` promotes the issue to the PR the moment
+  // the PR lands, which is right when the view opened on the issue only
+  // because the PR was not there yet, and wrong when the reader ASKED for
+  // the issue. Same class as the bug the promotion itself fixed (#529).
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  // A refresh lands the PR again while the reader is on the issue tab.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "the reader chose this tab; a landing fetch does not get to overrule it"
+  );
+}
+
+#[test]
+fn an_unchosen_issue_tab_is_still_promoted_when_the_pr_lands() {
+  // The other side of the pin, and the reason it is a pin rather than a
+  // switch: with no PR fetched yet the view opens on the issue because that
+  // is all there is, and the reader never asked for it. Promoting is exactly
+  // right there, and removing the promotion to make the test above pass
+  // would have re-broken #529.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn closing_the_view_forgets_which_tab_was_chosen() {
+  // The pin belongs to one open overlay. Left behind, it would silently
+  // change what the NEXT `I` opens on, which is a setting nobody set.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+  app.close_detail_overlay();
+
+  app.enter_rich_view();
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "a fresh open goes back to preferring the PR"
+  );
+}
+
+#[test]
+fn tab_is_inert_when_there_is_only_one_side() {
+  // No second tab to reach, so the key must do nothing rather than close the
+  // view or blank it.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+
+  app.rich_view_next_tab();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  assert_eq!(app.view, View::DetailOverlay);
+  assert!(
+    app.rich_view_tabs().is_empty(),
+    "and no tab bar is offered: {:?}",
+    app.rich_view_tabs()
+  );
+}
+
+#[test]
+fn the_tab_bar_names_both_sides_and_marks_the_active_one() {
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(
+    app.rich_view_tabs(),
+    vec![("Issue #42".to_string(), false), ("PR #61".to_string(), true)]
+  );
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.rich_view_tabs(),
+    vec![("Issue #42".to_string(), true), ("PR #61".to_string(), false)]
+  );
+}
+
+#[test]
+fn the_horizontal_offset_only_moves_as_far_as_there_is_something_to_see() {
+  // Issue #551. A fenced line or a diff hunk is kept whole rather than
+  // reflowed, so the offset is the only way to its tail. Unbounded, it would
+  // scroll a view full of prose into blank space and leave the reader with
+  // no clue how to get back.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  let long = "x".repeat(400);
+  pr.detail.body = format!("prose\n\n```\n{long}\n```");
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+
+  assert_eq!(app.rich_h_offset(), 0, "it starts at the left edge");
+  app.rich_view_scroll_left();
+  assert_eq!(app.rich_h_offset(), 0, "and cannot go further left than that");
+
+  for _ in 0..200 {
+    app.rich_view_scroll_right();
+  }
+  let stopped = app.rich_h_offset();
+  assert!(stopped > 0, "the offset moved");
+  assert!(
+    stopped < 400,
+    "and stopped once the widest row's tail was on screen, at {stopped}"
+  );
+
+  app.rich_view_scroll_left();
+  assert!(app.rich_h_offset() < stopped, "left walks it back");
+}
+
+#[test]
+fn a_view_with_nothing_to_scroll_does_not_scroll() {
+  // Every row is wrapped to fit, so there is no tail to reach and moving
+  // would only hide the left edge of the text.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.set_term_width(200);
+  app.enter_rich_view();
+
+  app.rich_view_scroll_right();
+
+  assert_eq!(app.rich_h_offset(), 0);
+}
+
+#[test]
+fn switching_tab_or_closing_puts_the_offset_back_at_the_left_edge() {
+  // The offset describes one side's widest row. Carried across, it would
+  // open the other tab already scrolled, with its first columns hidden and
+  // nothing on screen saying why.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  app.rich_view_scroll_right();
+  assert!(app.rich_h_offset() > 0);
+
+  app.rich_view_next_tab();
+  assert_eq!(app.rich_h_offset(), 0, "a tab switch resets it");
+
+  app.rich_view_next_tab();
+  app.rich_view_scroll_right();
+  app.close_detail_overlay();
+  app.enter_rich_view();
+  assert_eq!(app.rich_h_offset(), 0, "and so does closing the view");
+}
+
+#[test]
+fn widening_the_terminal_does_not_leave_the_offset_past_the_end() {
+  // Issue #551. The offset is bounded by what the widest preformatted row
+  // has left to show, and that bound MOVES: a wider terminal is a wider
+  // modal, so the same row runs out of tail sooner. Left where it was, the
+  // renderer skips past the end of the line and paints a blank row with
+  // nothing on screen to say why. Same class as the stale wrap
+  // `set_term_width` already exists to prevent, and a refresh that returns
+  // a shorter body gets there the same way.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(60);
+  app.enter_rich_view();
+
+  for _ in 0..100 {
+    app.rich_view_scroll_right();
+  }
+  let narrow = app.rich_h_offset();
+  assert!(narrow > 0, "precondition: it scrolled on the narrow terminal");
+
+  app.set_term_width(200);
+
+  let widest = app
+    .detail_overlay
+    .rows
+    .iter()
+    .filter(|r| r.preformatted)
+    .map(|r| r.value.chars().count())
+    .max()
+    .unwrap_or(0);
+  assert!(
+    app.rich_h_offset() < widest,
+    "the offset must still land inside the widest row, got {} of {widest}",
+    app.rich_h_offset()
+  );
+  assert!(
+    app.rich_h_offset() < narrow,
+    "and a wider modal leaves less to scroll, not the same"
+  );
+}
+
+#[test]
+fn the_tab_bar_survives_a_refresh_that_only_one_side_answers() {
+  // Codex review, pass 2 (P2). `rich_view_tabs` demanded BOTH caches be
+  // `Loaded`, but the overlay deliberately keeps its own source when a
+  // refresh fails. So a refresh where the displayed side errors and the
+  // other lands took the bar away and made `Tab` inert, stranding the
+  // reader on stale data with no way across until they closed the view.
+  //
+  // The active side comes from the overlay's own source, which survives;
+  // only the DESTINATION has to be loaded.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert_eq!(app.rich_view_tabs().len(), 2);
+
+  // The PR side fails, the issue side is still there.
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  assert_eq!(
+    app.rich_view_tabs().len(),
+    2,
+    "the bar must still offer the side that IS loaded: {:?}",
+    app.rich_view_tabs()
+  );
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "and Tab must still cross to it"
+  );
+}
+
+#[test]
+fn a_promotion_puts_the_horizontal_offset_back_at_the_left_edge() {
+  // Codex review, pass 6 (P2). The offset resets on a tab switch and on
+  // close, but a PR landing on an issue the view was standing in for
+  // changes sides through `sync_rich_overlay`, which went past both. A PR
+  // carrying a preformatted line of its own then opened already scrolled,
+  // with its first columns hidden and nothing on screen saying why — the
+  // exact failure the two existing resets were added to prevent.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut issue = rich_issue_fixture(42);
+  issue.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_issue_fetch_result(Ok(issue));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.rich_view_scroll_right();
+  assert!(app.rich_h_offset() > 0, "precondition: the issue scrolled");
+
+  // The PR the issue was standing in for lands, carrying a long line too.
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "y".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "it promoted");
+  assert_eq!(app.rich_h_offset(), 0, "and the new side opens at its left edge");
+}
+
+#[test]
+fn the_rich_view_yanks_the_url_and_the_body_of_the_active_tab() {
+  // Validation feedback: `y` copies the URL, `Y` copies the description.
+  // Both read the OVERLAY's own source rather than the fetch cache, for the
+  // reason `rebuild_rich_rows` gives — a manual refresh flushes that cache,
+  // so a yank landing in that window would find nothing and copy an empty
+  // string over whatever the user had.
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+
+  assert_eq!(
+    app.rich_yank_url().as_deref(),
+    Some("https://example.test/pull/61"),
+    "the PR tab yanks the PR"
+  );
+  assert_eq!(app.rich_yank_body().as_deref(), Some("A description worth reading."),);
+
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.rich_yank_url().as_deref(),
+    Some("https://example.test/issues/42"),
+    "and the issue tab yanks the issue"
+  );
+  assert_eq!(app.rich_yank_body().as_deref(), Some("The issue body."));
+}
+
+#[test]
+fn yanking_a_body_that_is_empty_says_so_instead_of_copying_nothing() {
+  // A PR with no description is ordinary. Copying an empty string over
+  // whatever the user had on the clipboard is the worst of the options.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = String::new();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+
+  assert_eq!(app.rich_yank_body(), None);
+  assert!(
+    app.rich_yank_url().is_some(),
+    "the URL is still there; only the body is missing"
+  );
+}
+
+#[test]
+fn merging_needs_a_pr_that_is_linked_and_fetched() {
+  // Validation feedback on #551. Three states, told apart rather than
+  // collapsed into one refusal, the way `enter_rich_view` tells them apart:
+  // the way out differs, so the message has to.
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::List, "nothing linked: no modal");
+  assert!(
+    app.status.contains("link"),
+    "the status names the way out: {}",
+    app.status
+  );
+
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::List, "linked but not fetched: still no modal");
+  assert!(app.status.contains("fetch"), "and a different way out: {}", app.status);
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.confirm_kind(), ConfirmKind::MergePr);
+  let pending = app.pending_merge().expect("the modal holds the merge");
+  assert_eq!(pending.number, 61);
+  assert_eq!(pending.base_ref, "dev");
+}
+
+#[test]
+fn a_stale_workspace_selection_cannot_merge_the_wrong_repos_pr() {
+  // The guard `enter_rich_view` and `rich_view_refresh` both carry, and the
+  // one that cannot be skipped here: a failed `Repository::open` for the
+  // selected row leaves the link pointing at the PREVIOUSLY active repo, so
+  // a merge would land a PR in a repository the user is not looking at.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.workspace_active_stale = true;
+
+  app.enter_confirm_merge();
+
+  assert_eq!(app.view, View::List, "no modal opens on a stale selection");
+  assert!(app.pending_merge().is_none());
+  assert!(
+    app.status.contains("unavailable"),
+    "the status says why: {}",
+    app.status
+  );
+}
+
+#[test]
+fn dismissing_a_merge_confirmation_leaves_the_delete_flow_as_it_was() {
+  // `View::Confirm` was single-purpose before this. The delete path is the
+  // one with a safety countdown and a batch snapshot, and it must come back
+  // to its own default rather than inherit whatever the merge left behind.
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.confirm_kind(), ConfirmKind::MergePr);
+
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List);
+  assert!(app.pending_merge().is_none());
+  assert_eq!(
+    app.confirm_kind(),
+    ConfirmKind::DeleteWorktree,
+    "the next confirmation is a delete until something says otherwise"
+  );
+}
+
+#[test]
+fn the_merge_confirmation_carries_the_configured_method() {
+  // The method is resolved when the modal opens and fired from that
+  // snapshot, so what the summary showed is what runs.
+  use gwm::forge::MergeMethod;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.config.merge_method,
+    MergeMethod::Merge,
+    "the default is a merge commit, which is what this repo requires"
+  );
+  app.config.merge_method = MergeMethod::Squash;
+  app.enter_confirm_merge();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
+}
+
+#[test]
+fn the_rich_view_has_pager_motions() {
+  // Validation feedback on #551: `D` / `U` move half a window, `g` / `G`
+  // jump to the ends. A description now runs to hundreds of rows, so `j`
+  // sixty times was the only way across it.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = (0..200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(120);
+  app.set_term_height(40);
+  app.enter_rich_view();
+  let last = app.detail_overlay.rows.len() - 1;
+
+  let half = app.rich_half_page();
+  assert!(half > 1, "half a 40-row window is a real jump, got {half}");
+
+  app.detail_overlay.select_page_down(half);
+  assert_eq!(app.detail_overlay.selected, half);
+  app.detail_overlay.select_page_up(half);
+  assert_eq!(app.detail_overlay.selected, 0);
+
+  // Clamped, not wrapped: a pager stops at the ends, and wrapping would
+  // lose the reader's place in a body this long.
+  app.detail_overlay.select_page_up(half);
+  assert_eq!(app.detail_overlay.selected, 0, "up from the top stays");
+  app.detail_overlay.select_last();
+  assert_eq!(app.detail_overlay.selected, last);
+  app.detail_overlay.select_page_down(half);
+  assert_eq!(app.detail_overlay.selected, last, "down from the bottom stays");
+  app.detail_overlay.select_first();
+  assert_eq!(app.detail_overlay.selected, 0);
+}
+
+#[test]
+fn the_half_page_jump_follows_the_window_the_reader_sees() {
+  // The distance is half of what is ON SCREEN, so it has to come from the
+  // renderer's own answer rather than a second guess at the same number.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.set_term_height(40);
+  let tall = app.rich_half_page();
+  app.set_term_height(20);
+  let short = app.rich_half_page();
+
+  assert!(short < tall, "a shorter terminal jumps less: {short} vs {tall}");
+  assert_eq!(tall, gwm::tui::detail_visible_rows(40) / 2);
+  assert!(app.rich_half_page() >= 1, "never zero, or the key would be inert");
+}
+
+#[test]
+fn a_failed_merge_keeps_the_modal_and_the_forges_own_words() {
+  // Validation feedback: the merge modal behaves like the delete one. It
+  // stays up with a loader while the work runs, and a failure leaves its
+  // banner where the decision was made instead of flashing on a status bar
+  // the reader may miss. The forge refuses for reasons gwm does not model,
+  // so its message is the only accurate one available.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+
+  app.apply_merge_result(Err(
+    "Pull request is not mergeable: the base branch is protected".into(),
+  ));
+
+  assert_eq!(app.view, View::Confirm, "the modal does not vanish on failure");
+  assert!(
+    app.merge_failure().unwrap().contains("protected"),
+    "and it carries the forge's own words: {:?}",
+    app.merge_failure()
+  );
+  assert!(app.pending_merge().is_some(), "so a retry is one keypress");
+}
+
+#[test]
+fn a_successful_merge_closes_the_modal_and_forgets_the_target() {
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+
+  app.apply_merge_result(Ok(()));
+
+  assert_eq!(app.view, View::List);
+  assert!(app.pending_merge().is_none());
+  assert!(app.merge_failure().is_none());
+  assert_eq!(app.confirm_kind(), ConfirmKind::DeleteWorktree);
+  assert!(app.status.contains("merged"), "status: {}", app.status);
+}
+
+#[test]
+fn closing_the_ci_list_comes_back_to_the_view_it_was_opened_from() {
+  // Validation feedback on #551. `c` is reached from inside the rich view,
+  // so `Esc` there returning to the worktree table threw away where the
+  // reader was: re-select the row, press `I` again, find your place.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.checks = vec![gwm::github::PrCheck {
+    name: "test (ubuntu-latest)".into(),
+    outcome: gwm::github::CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+
+  app.enter_ci_checks();
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+
+  app.close_detail_overlay();
+
+  assert_eq!(app.view, View::DetailOverlay, "not all the way out to the table");
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert!(
+    app
+      .detail_overlay
+      .rows
+      .iter()
+      .any(|r| r.value.contains("worth reading")),
+    "and it is the same view, rebuilt from its own source"
+  );
+}
+
+#[test]
+fn the_ci_list_opened_from_the_table_still_closes_to_the_table() {
+  // The other half: nothing to come back to when `c` was pressed on the
+  // worktree table, and inventing a rich view there would be worse than
+  // the bug this fixes.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.checks = vec![gwm::github::PrCheck {
+    name: "test".into(),
+    outcome: gwm::github::CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+
+  app.enter_ci_checks();
+  app.close_detail_overlay();
+
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn cancelling_a_merge_started_from_the_rich_view_comes_back_to_it() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  // On the issue tab by choice, which the round trip must not undo.
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "the chosen tab survives the round trip"
+  );
+
+  // And the pin with it: a PR landing now must not promote it away.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+}
+
+#[test]
+fn a_merge_started_from_the_table_still_ends_on_the_table() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_confirm_merge();
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn the_merge_modal_advertises_its_own_verbs_not_the_delete_flows() {
+  // Validation feedback on #551: the merge modal was showing the delete
+  // flow's hint bar, so it advertised `D  branch` — a key that means
+  // nothing over a merge and does nothing when pressed. It has its own
+  // thing to offer instead, and could not say so.
+  use gwm::forge::MergeMethod;
+  use gwm::tui::HintContext;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_confirm_merge();
+  assert_eq!(app.hint_context(), HintContext::ConfirmMerge);
+
+  // And the verb it advertises actually does something.
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Merge);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Rebase);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Merge, "it cycles");
+}
+
+#[test]
+fn a_delete_confirmation_keeps_the_delete_hint_bar() {
+  // The other half: routing on the kind must not take the delete flow's
+  // own verb away from it.
+  use gwm::tui::HintContext;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_confirm_delete();
+  if app.view == View::Confirm {
+    assert_eq!(app.hint_context(), HintContext::Confirm);
+  }
+}
+
+#[test]
+fn cycling_the_method_cannot_touch_a_delete_confirmation() {
+  // The verb lives in the shared `confirm` key context, so it is reachable
+  // while a DELETE modal is up. It has to be inert there rather than
+  // quietly mutating a merge that is not on screen.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_confirm_delete();
+
+  app.cycle_merge_method();
+
+  assert!(app.pending_merge().is_none());
+}
+
 // ---- lists in the note editor (#557) -------------------------------------
 
 #[test]

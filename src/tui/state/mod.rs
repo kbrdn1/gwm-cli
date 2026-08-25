@@ -26,6 +26,7 @@ pub mod exec_picker;
 pub mod filter;
 pub mod github_fetch;
 pub mod link_prompt;
+pub mod markdown;
 pub mod note_editor;
 pub mod pty_overlay;
 pub mod rich_view;

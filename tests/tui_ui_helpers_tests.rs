@@ -1392,11 +1392,12 @@ fn a_modal_never_shrinks_when_the_terminal_grows() {
   // a pane from 80 to 81 columns collapsed the link prompt by 16 columns and
   // the exec/clean/detail overlay by 22. A modal may stop growing; it must
   // never get narrower because the terminal got wider.
-  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width, rich_view_modal_width};
   for w in 20u16..300 {
     for (name, f) in [
       ("link_prompt_modal_width", link_prompt_modal_width as fn(u16) -> u16),
       ("overlay_modal_width", overlay_modal_width as fn(u16) -> u16),
+      ("rich_view_modal_width", rich_view_modal_width as fn(u16) -> u16),
     ] {
       let (here, next) = (f(w), f(w + 1));
       assert!(
@@ -1410,20 +1411,21 @@ fn a_modal_never_shrinks_when_the_terminal_grows() {
 
 #[test]
 fn the_width_policy_is_monotonic_and_bounded_for_any_knobs() {
-  // Every one of the seven distinct knob sets in use, the two the wrappers
+  // Every one of the eight distinct knob sets in use, the two the wrappers
   // above cover included. The property belongs to the policy, not to its
   // callers: whatever (pct, min, max) a future overlay picks, its width must
   // never shrink as the terminal grows, never break its ceiling, and never
   // reach the frame edge.
   use gwm::tui::modal_width;
   for (pct, min_cols, max_cols) in [
-    (40, 40, 64), // confirm, nothing-selected fallback
-    (60, 64, 72), // open-menu / link prompt
-    (60, 64, 96), // help, config, command palette
-    (62, 64, 88), // confirm, destructive summary
-    (62, 72, 88), // exec picker, clean, detail
-    (70, 56, 72), // create, rename
-    (80, 64, 96), // bootstrap report
+    (40, 40, 64),  // confirm, nothing-selected fallback
+    (60, 64, 72),  // open-menu / link prompt
+    (60, 64, 96),  // help, config, command palette
+    (62, 64, 88),  // confirm, destructive summary
+    (62, 72, 88),  // exec picker, clean, detail
+    (70, 56, 72),  // create, rename
+    (80, 64, 96),  // bootstrap report
+    (80, 72, 120), // rich PR / issue view (#551)
   ] {
     let mut previous = 0u16;
     for w in 20u16..=300 {
@@ -1449,11 +1451,12 @@ fn the_width_policy_is_monotonic_and_bounded_for_any_knobs() {
 fn a_modal_always_leaves_a_margin_inside_the_frame() {
   // #550: the floor that kills the seam above must not let a modal grow into
   // the frame edge on a narrow terminal — the border would hug column 0.
-  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width, rich_view_modal_width};
   for w in 20u16..=300 {
     for (name, f) in [
       ("link_prompt_modal_width", link_prompt_modal_width as fn(u16) -> u16),
       ("overlay_modal_width", overlay_modal_width as fn(u16) -> u16),
+      ("rich_view_modal_width", rich_view_modal_width as fn(u16) -> u16),
     ] {
       let got = f(w);
       assert!(
@@ -1625,5 +1628,115 @@ fn modal_height_is_monotonic_in_its_content() {
     let h = gwm::tui::modal_height(80, rows, 10, 30);
     assert!(h >= prev, "content {rows} produced {h} after {prev}");
     prev = h;
+  }
+}
+
+#[test]
+fn the_rich_view_gets_a_wider_box_than_the_shared_overlay() {
+  // Issue #551. The detail overlay's 88-column ceiling was chosen for the
+  // clean report, whose rows are an icon, a directory name and a size
+  // pinned right — a wider box only stretches the gap between the two
+  // columns. The rich PR / issue view puts PROSE in the same box, and
+  // prose is the one payload that keeps earning columns: on a 200-column
+  // terminal the shared policy left more than half the screen unused
+  // while the description was cut at `… 85 more lines`.
+  use gwm::tui::{overlay_modal_width, rich_view_modal_width};
+  assert!(
+    rich_view_modal_width(200) > overlay_modal_width(200),
+    "the rich view must claim more of a wide terminal than the shared overlay"
+  );
+  // Still a modal, not a takeover: capped well short of the frame.
+  assert!(rich_view_modal_width(400) <= 120);
+  // A narrow terminal keeps the shared floor rather than gaining one of
+  // its own — the two policies must not cross over.
+  assert!(rich_view_modal_width(60) >= overlay_modal_width(60));
+}
+
+#[test]
+fn every_markdown_role_is_painted_differently_from_plain_text() {
+  // The other half of `tests/tui_markdown_tests.rs` (issue #551). That file
+  // asserts the parse produces the right roles; this one asserts the roles
+  // reach the screen as something the eye can tell apart. A parse that
+  // produces perfect segments nobody colours differently is a feature that
+  // is dead on screen with the suite green.
+  //
+  // Written as an exhaustive `match` with no `_` arm so a role added later
+  // does not compile until someone decides how it is painted.
+  use gwm::tui::markdown_style;
+  use gwm::tui::state::markdown::Emphasis;
+  let theme = gwm::tui::theme::Theme::default();
+  let plain = markdown_style(Emphasis::Plain, &theme);
+
+  for role in [
+    Emphasis::Plain,
+    Emphasis::Bold,
+    Emphasis::Italic,
+    Emphasis::BoldItalic,
+    Emphasis::Code,
+    Emphasis::Strike,
+    Emphasis::Link,
+    Emphasis::Heading,
+    Emphasis::Quote,
+    Emphasis::Marker,
+    Emphasis::Success,
+    Emphasis::Failure,
+    Emphasis::Running,
+    Emphasis::Notice,
+    Emphasis::Muted,
+    Emphasis::Branch,
+  ] {
+    let style = markdown_style(role, &theme);
+    match role {
+      // Plain text is the baseline it is measured against.
+      Emphasis::Plain => assert_eq!(style, plain),
+      Emphasis::Bold
+      | Emphasis::Italic
+      | Emphasis::BoldItalic
+      | Emphasis::Code
+      | Emphasis::Strike
+      | Emphasis::Link
+      | Emphasis::Heading
+      | Emphasis::Quote
+      | Emphasis::Marker
+      | Emphasis::Success
+      | Emphasis::Failure
+      | Emphasis::Running
+      | Emphasis::Notice
+      | Emphasis::Muted
+      | Emphasis::Branch => assert_ne!(style, plain, "{role:?} must not be painted exactly like plain prose"),
+    }
+  }
+}
+
+#[test]
+fn the_metadata_roles_resolve_to_the_status_panes_own_colours() {
+  // The rich view's metadata block claims to colour a fact the way the
+  // Status pane colours it (issue #551). That claim is only true if both
+  // sides land on the SAME theme role — asserted against `pr_badge_color`
+  // and `issue_badge_color` themselves rather than against a colour spelled
+  // out twice, which would agree with a wrong implementation.
+  use gwm::github::{IssueState, PrState};
+  use gwm::tui::state::markdown::Emphasis;
+  use gwm::tui::{issue_badge_color, markdown_style, pr_badge_color};
+  let theme = gwm::tui::theme::Theme::default();
+  let fg = |e: Emphasis| markdown_style(e, &theme).fg.expect("a role paints a foreground");
+
+  for (state, role) in [
+    (PrState::Open, Emphasis::Success),
+    (PrState::Draft, Emphasis::Muted),
+    (PrState::Merged, Emphasis::Notice),
+    (PrState::Closed, Emphasis::Failure),
+  ] {
+    assert_eq!(
+      fg(role),
+      pr_badge_color(state, &theme),
+      "{state:?} reads as one colour in the pane and another in the overlay"
+    );
+  }
+  for (state, role) in [
+    (IssueState::Open, Emphasis::Success),
+    (IssueState::Closed, Emphasis::Notice),
+  ] {
+    assert_eq!(fg(role), issue_badge_color(state, &theme), "{state:?}");
   }
 }

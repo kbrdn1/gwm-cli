@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  mux_pane_status, read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage,
-  LinkTarget, NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
+  mux_pane_status, read_pins_from_sources, App, ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey,
+  LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -70,22 +70,24 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, bootstrap_report_lines,
-  branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style,
-  ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_line, config_capture_footer_hints,
-  config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
-  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, display_path_with_home,
-  ellipsize_middle, field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll,
-  format_status, freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line,
-  help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color,
-  issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys,
-  link_target_line, list_pane_counter, modal_height, modal_hint_for_context, modal_hint_for_context_with_fields,
-  modal_hint_line, modal_width, overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color,
-  picker_window, pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
-  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
-  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
-  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
-  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
-  WT_DELETED_ICON, WT_MODIFIED_ICON,
+  branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, cells, centered_abs,
+  chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_line,
+  config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line,
+  confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title,
+  detail_overlay_width, detail_visible_rows, display_path_with_home, ellipsize_middle, field_input_line,
+  filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll, format_status, freshness_color,
+  github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows,
+  help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line,
+  link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter,
+  markdown_style, modal_height, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line,
+  modal_width, overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
+  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -216,11 +218,16 @@ fn confirm_fire(app: &mut App) {
     return;
   }
   match app.confirm_press_y(Instant::now()) {
-    ConfirmKeyAction::FireNow => {
-      if let Err(e) = app.confirm_delete() {
-        app.status = format!("delete failed: {}", e);
+    // Routed on what the modal is actually about (#551). Exhaustive: the
+    // countdown and the danger border are shared, the consequence is not.
+    ConfirmKeyAction::FireNow => match app.confirm_kind() {
+      ConfirmKind::DeleteWorktree => {
+        if let Err(e) = app.confirm_delete() {
+          app.status = format!("delete failed: {}", e);
+        }
       }
-    }
+      ConfirmKind::MergePr => app.confirm_merge(),
+    },
     // Armed / Disarmed update the status line; the loop keeps the modal
     // open and lets the countdown tick (or wait for another y / Esc).
     ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
@@ -315,7 +322,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // covers the changes, this covers the FIRST frame — an overlay opened
     // before any resize event would otherwise wrap against the 80-column
     // default whatever the real terminal is. A no-op once they agree.
-    app.set_term_width(terminal.size().unwrap_or_default().width);
+    let size = terminal.size().unwrap_or_default();
+    app.set_term_width(size.width);
+    app.set_term_height(size.height);
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -388,6 +397,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // resize that never reached it would leave the rows wrapped for the
       // previous terminal and the renderer would ellipsise the overflow.
       app.set_term_width(cols);
+      app.set_term_height(rows);
       clear_without_cursor_query(terminal)?;
       continue;
     }
@@ -598,7 +608,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         CreateKey::Cancel => app.view = View::List,
         CreateKey::Handled => {}
       },
-      View::Confirm if app.is_delete_worktree_loading() => {}
+      // Keys are inert while either mutation runs: the modal is showing a
+      // loader for something already in flight.
+      View::Confirm if app.is_delete_worktree_loading() || app.is_merge_loading() => {}
       // #219: keys resolve through the `confirm` context. `confirm` (def `y`)
       // fires regardless of focus (unchanged muscle memory); `activate` (def
       // Enter) acts on the *focused* button — focus defaults to Cancel (#187),
@@ -616,6 +628,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::ConfirmFocusConfirm) => app.confirm.focus_confirm(),
         Some(ModalAction::ConfirmFocusCancel) => app.confirm.focus_cancel(),
         Some(ModalAction::ConfirmToggleFocus) => app.confirm.toggle_focus(),
+        Some(ModalAction::ConfirmCycleMethod) => app.cycle_merge_method(),
         _ if app.key_matches_action(key, Action::ToggleDeleteBranch) => app.toggle_delete_branch(),
         _ => {}
       },
@@ -813,6 +826,29 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             None => app.status = "this row has nothing to open".into(),
           },
           Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
+          Some(ModalAction::RichViewTab) => app.rich_view_next_tab(),
+          Some(ModalAction::RichViewYankUrl) => match app.rich_yank_url() {
+            Some(url) => copy_text_to_clipboard(&mut app, &url, "url copied"),
+            None => app.status = "no url to copy".into(),
+          },
+          Some(ModalAction::RichViewYankBody) => match app.rich_yank_body() {
+            Some(body) => copy_text_to_clipboard(&mut app, &body, "description copied"),
+            None => app.status = "this one has no description".into(),
+          },
+          Some(ModalAction::RichViewMerge) => app.enter_confirm_merge(),
+          Some(ModalAction::RichViewHalfDown) => {
+            let n = app.rich_half_page();
+            app.detail_overlay.select_page_down(n);
+          }
+          Some(ModalAction::RichViewHalfUp) => {
+            let n = app.rich_half_page();
+            app.detail_overlay.select_page_up(n);
+          }
+          Some(ModalAction::RichViewTop) => app.detail_overlay.select_first(),
+          Some(ModalAction::RichViewBottom) => app.detail_overlay.select_last(),
+          Some(ModalAction::RichViewCiChecks) => app.enter_ci_checks(),
+          Some(ModalAction::RichViewLeft) => app.rich_view_scroll_left(),
+          Some(ModalAction::RichViewRight) => app.rich_view_scroll_right(),
           _ => {}
         }
       }
@@ -1090,6 +1126,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #420: `I` opens the rich PR / issue view on the linked side.
     Action::RichView if !app.picker_mode => app.enter_rich_view(),
+    // #551 validation feedback: merge the selected worktree's linked PR.
+    Action::MergePr if !app.picker_mode => app.enter_confirm_merge(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.

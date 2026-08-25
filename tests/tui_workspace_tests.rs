@@ -228,6 +228,7 @@ fn going_stale_closes_the_open_ci_checks_overlay() {
       role: DetailRole::Success,
       meta: None,
       extra: None,
+      ..Default::default()
     }],
   );
   app.view = gwm::tui::View::DetailOverlay;

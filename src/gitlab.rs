@@ -765,6 +765,30 @@ pub fn parse_mr_head_json(s: &str) -> Result<PrHead> {
   })
 }
 
+/// Argv for `glab mr merge …`.
+///
+/// Three differences from the GitHub side, all measured on `glab mr merge
+/// --help` rather than assumed:
+///
+/// - a merge commit is the DEFAULT, so it passes no flag at all; sending an
+///   invented `--merge` would just be an unknown-flag error,
+/// - `-y` is required, or `glab` asks for confirmation and a prompt from
+///   inside a TUI is a hang,
+/// - the delete-branch flag is spelled `--remove-source-branch`, and is
+///   deliberately absent — see [`Forge::merge_pr`].
+pub fn mr_merge_argv(slug: &str, number: u64, method: crate::forge::MergeMethod) -> Vec<String> {
+  use crate::forge::MergeMethod;
+  let mut argv: Vec<String> = vec!["mr".into(), "merge".into(), number.to_string()];
+  match method {
+    MergeMethod::Merge => {}
+    MergeMethod::Squash => argv.push("--squash".into()),
+    MergeMethod::Rebase => argv.push("--rebase".into()),
+  }
+  argv.push("--yes".into());
+  argv.extend(repo_flag(slug));
+  argv
+}
+
 pub fn mr_view_argv(slug: &str, number: u64) -> Vec<String> {
   let mut argv = vec!["mr".into(), "view".into(), number.to_string()];
   argv.extend(repo_flag(slug));
@@ -1466,6 +1490,11 @@ impl Forge for GitLabForge {
       number,
       url: if url.is_empty() { self.issue_url(number) } else { url },
     })
+  }
+
+  fn merge_pr(&self, number: u64, method: crate::forge::MergeMethod) -> Result<()> {
+    self.run_argv(mr_merge_argv(self.repo_selector(), number, method))?;
+    Ok(())
   }
 
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {

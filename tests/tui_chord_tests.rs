@@ -90,20 +90,25 @@ fn mismatched_second_key_falls_back_to_single_key_dispatch() {
 
 #[test]
 fn mismatched_second_key_with_no_fallback_clears_buffer() {
-  // `g` then `m` — neither a chord match nor a single-key binding.
+  // `g` then `u` — neither a chord match nor a single-key binding.
   // Returns None and clears the buffer; the event loop ignores it.
-  // (`m` rather than `z`: #484 moved `cycle_sidebar_layout` onto `z`.)
+  //
+  // The key here is whichever one is currently UNBOUND, and it has moved
+  // twice: `z` until #484 gave it `cycle_sidebar_layout`, then `m` until
+  // #551 gave it `merge_pr`. That churn is the test doing its job — it can
+  // only assert "an unbound key arms nothing" while the key it names is
+  // actually unbound.
   let (_dir, mut app) = make_app();
   assert_eq!(app.dispatch_key(press('g')), None);
-  assert_eq!(app.dispatch_key(press('m')), None);
+  assert_eq!(app.dispatch_key(press('u')), None);
   assert!(app.pending_chord_is_empty());
 }
 
 #[test]
 fn unbound_key_returns_none_without_arming_buffer() {
   let (_dir, mut app) = make_app();
-  // `m` is the free key since #484 put `cycle_sidebar_layout` on `z`.
-  assert_eq!(app.dispatch_key(press('m')), None);
+  // `u` is the free key since #551 put `merge_pr` on `m`.
+  assert_eq!(app.dispatch_key(press('u')), None);
   assert!(app.pending_chord_is_empty());
 }
 

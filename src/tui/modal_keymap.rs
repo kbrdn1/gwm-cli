@@ -277,6 +277,10 @@ define_modal_actions! {
     ConfirmFocusConfirm => "focus_confirm" [ "Left", "h" ],
     ConfirmFocusCancel  => "focus_cancel"  [ "Right", "l" ],
     ConfirmToggleFocus  => "toggle_focus"  [ "Tab" ],
+    // #551: cycle merge / squash / rebase without leaving the modal. Only
+    // does anything while the modal holds a merge, which is also the only
+    // context whose hint bar advertises it.
+    ConfirmCycleMethod  => "cycle_method"  [ "m" ],
   }
   Help {
     HelpClose        => "close"         [ "Esc", "q", "?" ],
@@ -380,6 +384,33 @@ define_modal_actions! {
     RichViewPrev    => "select_prev" [ "k", "Up" ],
     RichViewOpen    => "open"        [ "Enter" ],
     RichViewRefresh => "refresh"     [ "f" ],
+    // #551: the issue and the PR are two tabs of one view. `Tab` rather
+    // than `h`/`l`, which the horizontal offset wants for the rows that
+    // cannot wrap.
+    RichViewTab     => "next_tab"    [ "Tab" ],
+    // #551: a fenced code line and a diff hunk are kept whole rather than
+    // reflowed, so this is the only way to their tail.
+    RichViewLeft    => "scroll_left"  [ "h", "Left" ],
+    RichViewRight   => "scroll_right" [ "l", "Right" ],
+    // #551 validation feedback. `y` / `Y` are the list view's yanks too,
+    // and free here: this context had no yank at all.
+    RichViewYankUrl  => "yank_url"  [ "y" ],
+    RichViewYankBody => "yank_body" [ "Y" ],
+    // #551 validation feedback: same verb as the list view's `M`, reachable
+    // from the view that shows what is about to be merged.
+    RichViewMerge    => "merge"     [ "m" ],
+    // #551 validation feedback: pager motions, vim spelling. `D` / `U`
+    // rather than `Ctrl+D` / `Ctrl+U` because an unmodified letter is free
+    // in this context and the modifier is not worth the reach.
+    RichViewHalfDown => "half_down" [ "D" ],
+    RichViewHalfUp   => "half_up"   [ "U" ],
+    // `g` alone, not the `gg` chord: modal contexts bind one key per verb,
+    // and a second `g` simply repeats a jump that is already at the top.
+    RichViewTop      => "top"       [ "g", "Home" ],
+    RichViewBottom   => "bottom"    [ "G", "End" ],
+    // The CI checks list of the same PR, one key away rather than a close
+    // and a re-open from the list view.
+    RichViewCiChecks => "ci_checks" [ "c" ],
   }
   // #515: the verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see
