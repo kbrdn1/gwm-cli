@@ -92,7 +92,12 @@ pub fn rich_pr_rows(
   }
   meta_segments(&mut rows, "", identity);
   if !d.author.is_empty() {
-    meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
+    // An identity, not prose: the same weight the worktree name carries.
+    meta_segments(
+      &mut rows,
+      "author",
+      vec![Segment::new(sanitise_for_terminal(&d.author), Emphasis::Bold)],
+    );
   }
   // Both refs or neither: "→ dev" alone tells the user nothing about what
   // is being merged, and GitLab is the backend that serves one without the
@@ -103,7 +108,7 @@ pub fn rich_pr_rows(
       sanitise_for_terminal(&d.head_ref),
       sanitise_for_terminal(&d.base_ref)
     );
-    meta(&mut rows, "branch", &pair);
+    meta_segments(&mut rows, "branch", vec![Segment::new(pair, Emphasis::Branch)]);
   }
   // A zero diff is a measurement gwm does not have (the GitLab backend
   // never fills it), not a PR that changes nothing — so it is omitted
@@ -120,7 +125,11 @@ pub fn rich_pr_rows(
     );
   }
   if !pr.updated_at.is_empty() {
-    meta(&mut rows, "updated", day(&pr.updated_at));
+    meta_segments(
+      &mut rows,
+      "updated",
+      vec![Segment::new(day(&pr.updated_at), Emphasis::Muted)],
+    );
   }
   url_row(&mut rows, &pr.url);
 
@@ -155,7 +164,11 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
     ],
   );
   if !d.author.is_empty() {
-    meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
+    meta_segments(
+      &mut rows,
+      "author",
+      vec![Segment::new(sanitise_for_terminal(&d.author), Emphasis::Bold)],
+    );
   }
   if !issue.labels.is_empty() {
     let labels = issue
@@ -167,7 +180,11 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
     meta(&mut rows, "labels", &labels);
   }
   if !issue.updated_at.is_empty() {
-    meta(&mut rows, "updated", day(&issue.updated_at));
+    meta_segments(
+      &mut rows,
+      "updated",
+      vec![Segment::new(day(&issue.updated_at), Emphasis::Muted)],
+    );
   }
   url_row(&mut rows, &issue.url);
 

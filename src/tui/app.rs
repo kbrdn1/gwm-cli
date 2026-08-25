@@ -62,6 +62,39 @@ pub struct LauncherPlan {
   pub base: Option<String>,
 }
 
+/// What an open [`View::Confirm`] is asking about.
+///
+/// Exhaustive matches, no `_` arm: the modal carries a safety countdown and
+/// a danger border because what follows cannot be taken back, and a third
+/// use must state its own answer rather than inherit the delete flow's.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum ConfirmKind {
+  #[default]
+  DeleteWorktree,
+  /// Landing a PR / MR on its base branch (issue #551).
+  MergePr,
+}
+
+/// The merge a confirmation is holding, snapshotted when it opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMerge {
+  pub number: u64,
+  pub title: String,
+  pub head_ref: String,
+  pub base_ref: String,
+  pub method: crate::forge::MergeMethod,
+  /// The CI rollup as it stood when the modal opened, rendered in the
+  /// summary. Merging on a red CI is the case the confirmation earns its
+  /// cost, and gwm shows it rather than deciding for the forge: `main` here
+  /// carries required checks, so the server refuses on its own and its
+  /// error is more accurate than a rule invented in this process.
+  pub ci: crate::forge::CiState,
+  pub checks_passed: u32,
+  pub checks_total: u32,
+  /// `PR` / `MR`, resolved by the caller.
+  pub noun: String,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
   List,
@@ -662,6 +695,22 @@ pub struct App {
   /// default still must be. This is the bit that tells them apart, and it
   /// belongs to one open overlay — `close_detail_overlay` clears it.
   rich_tab_pinned: bool,
+  /// What the open confirmation modal is about (validation feedback on
+  /// issue #551).
+  ///
+  /// The modal was single-purpose — `View::Confirm` meant "delete a
+  /// worktree" and nothing else — and a merge needs the same ceremony:
+  /// countdown, danger border, a summary naming what is about to happen.
+  /// Discriminated the way `DetailKind` discriminates the detail overlay,
+  /// with exhaustive matches and no `_` arm, so a third use has to answer
+  /// the question rather than inherit the delete flow's behaviour.
+  confirm_kind: ConfirmKind,
+  /// The merge the confirmation is holding, snapshotted when it opened.
+  ///
+  /// A snapshot for the same reason `pending_delete` is one (#484): an
+  /// auto-refresh can land during the safety countdown, and the row under
+  /// the cursor is not necessarily the row the user aimed at.
+  pending_merge: Option<PendingMerge>,
   /// How many columns the rich view is scrolled right (issue #551).
   ///
   /// Only the rows that cannot be reflowed are wide enough to need it — a
@@ -824,6 +873,8 @@ impl App {
       detail_overlay_target: None,
       detail_overlay_link: None,
       rich_tab_pinned: false,
+      confirm_kind: ConfirmKind::DeleteWorktree,
+      pending_merge: None,
       rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
@@ -1994,6 +2045,29 @@ impl App {
           // the post-loop GitHub report from overwriting it (same guard the
           // refresh / sync arms use).
           refresh_applied = true;
+        }
+        TaskMsg::MergePr(generation, outcome) => {
+          if !self.tasks.complete(TaskKind::MergePr, generation) {
+            continue;
+          }
+          let pending = self.pending_merge.take();
+          self.confirm_kind = ConfirmKind::DeleteWorktree;
+          self.view = View::List;
+          match outcome {
+            Ok(()) => {
+              let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
+              let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
+              self.status = format!("{noun} #{number} merged");
+              // The PR's state and the branch's divergence both changed;
+              // the cached status would otherwise keep saying `open`.
+              self.refresh_github_status();
+            }
+            // Surfaced verbatim. The forge refuses a merge for reasons gwm
+            // does not model — required checks, a review still pending, a
+            // protected base — and its own message says which.
+            Err(e) => self.status = format!("merge failed: {}", e.trim()),
+          }
+          continue;
         }
         TaskMsg::DeleteWorktree(generation, outcome) => {
           if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
@@ -3514,6 +3588,33 @@ impl App {
   /// `h` / `←` inside the rich view.
   pub fn rich_view_scroll_left(&mut self) {
     self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
+  }
+
+  /// The URL of the open rich view's ACTIVE tab, for `y`.
+  ///
+  /// Read off the overlay's own source rather than the fetch cache, the
+  /// same reason `rebuild_rich_rows` gives: a manual refresh flushes that
+  /// cache, and a yank landing in that window would copy an empty string
+  /// over whatever the user had.
+  pub fn rich_yank_url(&self) -> Option<String> {
+    match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => Some(pr.url.clone()),
+      RichSource::Issue(issue) => Some(issue.url.clone()),
+    }
+    .filter(|u| !u.is_empty())
+  }
+
+  /// The body of the open rich view's ACTIVE tab, for `Y`.
+  ///
+  /// `None` for an empty description, which is ordinary: copying nothing
+  /// over whatever was on the clipboard is worse than saying there is
+  /// nothing to copy.
+  pub fn rich_yank_body(&self) -> Option<String> {
+    let body = match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => &pr.detail.body,
+      RichSource::Issue(issue) => &issue.detail.body,
+    };
+    (!body.trim().is_empty()).then(|| body.clone())
   }
 
   /// The URL of the selected rich-view row, when it carries one — the
@@ -5631,6 +5732,68 @@ impl App {
     self.spinner.reset();
   }
 
+  /// Open the merge confirmation for the PR of the current context.
+  ///
+  /// Serves both surfaces (validation feedback on issue #551): the rich
+  /// view, where the active tab names the PR, and the worktree table, where
+  /// the selected row's link does. Three states are told apart rather than
+  /// collapsed into one refusal, the way `enter_rich_view` tells them
+  /// apart: no PR linked, linked but not fetched, ready.
+  pub fn enter_confirm_merge(&mut self) {
+    // Same workspace contract as `enter_rich_view` and `rich_view_refresh`:
+    // a failed `Repository::open` for the selected row leaves the link
+    // pointing at the previously active repo, and a merge would then land
+    // the OLD repo's PR. The one guard here that cannot be skipped.
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable; can't merge its PR".into();
+      return;
+    }
+    let Some(number) = self.github.link.pr else {
+      self.status = match self.keymap.primary_chord(Action::LinkPrompt) {
+        Some(key) => format!("no {} linked here: link one first ({key})", self.pr_noun_lower()),
+        None => format!("no {} linked here", self.pr_noun_lower()),
+      };
+      return;
+    };
+    let GitHubFetchState::Loaded(pr) = self.github.pr_fetch_state(number) else {
+      self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+        Some(key) => format!("{} #{number} not fetched yet ({key})", self.pr_noun_titlecase(),),
+        None => format!("{} #{number} not fetched yet", self.pr_noun_titlecase()),
+      };
+      return;
+    };
+    self.pending_merge = Some(PendingMerge {
+      number: pr.number,
+      title: crate::naming::sanitise_for_terminal(&pr.title),
+      head_ref: crate::naming::sanitise_for_terminal(&pr.detail.head_ref),
+      base_ref: crate::naming::sanitise_for_terminal(&pr.detail.base_ref),
+      method: self.config.merge_method,
+      ci: pr.ci,
+      checks_passed: pr.checks_passed,
+      checks_total: pr.checks_total,
+      noun: self.pr_noun_titlecase(),
+    });
+    self.confirm_kind = ConfirmKind::MergePr;
+    self.view = View::Confirm;
+    self.confirm.reset();
+    self.spinner.reset();
+  }
+
+  /// `PR` / `MR` in lower case, for a sentence.
+  fn pr_noun_lower(&self) -> String {
+    self.pr_noun_titlecase().to_lowercase()
+  }
+
+  /// What the open confirmation is about.
+  pub fn confirm_kind(&self) -> ConfirmKind {
+    self.confirm_kind
+  }
+
+  /// The merge the confirmation is holding, for the renderer.
+  pub fn pending_merge(&self) -> Option<&PendingMerge> {
+    self.pending_merge.as_ref()
+  }
+
   pub fn confirm_delete(&mut self) -> Result<()> {
     // Fire the snapshot taken when the overlay opened, not a fresh
     // resolution: an auto-refresh can land during the safety countdown and
@@ -5667,6 +5830,36 @@ impl App {
   /// rest of a cleanup the user explicitly asked for. Each target is opened
   /// through its own repo, so a workspace batch spanning several repos is
   /// removed from the right one.
+  /// Fire the merge the confirmation is holding.
+  ///
+  /// Off the render thread, like every other mutation here: `gh pr merge`
+  /// talks to a server and takes seconds, and a synchronous call would
+  /// freeze the frame for all of them.
+  pub fn confirm_merge(&mut self) {
+    let Some(pending) = self.pending_merge.clone() else {
+      return;
+    };
+    // Fire the SNAPSHOT taken when the modal opened, not a fresh lookup: an
+    // auto-refresh can land during the countdown and move the link (#484 is
+    // the same lesson on the delete side).
+    let Some(forge) = self.github.forge.clone() else {
+      self.status = "no forge resolved for this repo".into();
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::MergePr) else {
+      return;
+    };
+    self.confirm.dismiss();
+    self.spinner.reset();
+    self.status = TaskKind::MergePr.loading_label().into();
+    let tx = self.task_tx.clone();
+    let (number, method) = (pending.number, pending.method);
+    std::thread::spawn(move || {
+      let outcome = forge.merge_pr(number, method).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::MergePr(generation, outcome));
+    });
+  }
+
   fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
     let trust_mode = self.trust_mode;
@@ -5747,6 +5940,8 @@ impl App {
     self.confirm.dismiss();
     self.delete_failure = None;
     self.pending_delete.clear();
+    self.pending_merge = None;
+    self.confirm_kind = ConfirmKind::DeleteWorktree;
     self.view = View::List;
   }
 

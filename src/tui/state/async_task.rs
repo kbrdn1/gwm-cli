@@ -90,6 +90,10 @@ pub enum TaskKind {
   /// directory, and optionally delete the branch, so it must not block the
   /// render loop while the confirm modal is open.
   DeleteWorktree,
+  /// Landing a PR / MR on its base branch (issue #551). A mutating global
+  /// op like [`Self::DeleteWorktree`]: one merge in flight at a time, and
+  /// it must not run while another mutation does.
+  MergePr,
   /// Off-thread `git pull` of the selected worktree's branch (#290). One
   /// global slot — a second `p` press coalesces while one is in flight.
   Pull,
@@ -143,6 +147,7 @@ impl TaskKind {
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
       TaskKind::DeleteWorktree => "deleting worktree…",
+      TaskKind::MergePr => "merging…",
       TaskKind::Pull => "pulling…",
       TaskKind::Push => "pushing…",
       TaskKind::EditWorktree => "renaming worktree…",
@@ -173,6 +178,7 @@ impl TaskKind {
         | TaskKind::Sync
         | TaskKind::Bootstrap
         | TaskKind::DeleteWorktree
+        | TaskKind::MergePr
         | TaskKind::Pull
         | TaskKind::Push
         | TaskKind::EditWorktree
@@ -352,6 +358,8 @@ pub enum TaskMsg {
   /// and the per-target outcome of the batch. A single-row `d` is a batch of
   /// one, so there is one arm rather than two code paths.
   DeleteWorktree(u64, DeleteBatchOutcome),
+  /// `(generation, Ok(()) | Err(message))` for a merge (issue #551).
+  MergePr(u64, Result<(), String>),
   /// A `git pull` result (#290): the worker's generation, the worktree's
   /// display name, and the outcome (a one-line status string on success or
   /// a stringified error).
@@ -497,6 +505,8 @@ impl TaskRunner {
       Some(TaskKind::Sync.loading_label())
     } else if self.running.contains(&TaskKind::Bootstrap) {
       Some(TaskKind::Bootstrap.loading_label())
+    } else if self.running.contains(&TaskKind::MergePr) {
+      Some(TaskKind::MergePr.loading_label())
     } else if self.running.contains(&TaskKind::DeleteWorktree) {
       Some(TaskKind::DeleteWorktree.loading_label())
     } else if self.running.contains(&TaskKind::Pull) {

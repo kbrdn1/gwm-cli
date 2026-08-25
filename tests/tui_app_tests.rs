@@ -13853,3 +13853,146 @@ fn a_promotion_puts_the_horizontal_offset_back_at_the_left_edge() {
   assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "it promoted");
   assert_eq!(app.rich_h_offset(), 0, "and the new side opens at its left edge");
 }
+
+#[test]
+fn the_rich_view_yanks_the_url_and_the_body_of_the_active_tab() {
+  // Validation feedback: `y` copies the URL, `Y` copies the description.
+  // Both read the OVERLAY's own source rather than the fetch cache, for the
+  // reason `rebuild_rich_rows` gives — a manual refresh flushes that cache,
+  // so a yank landing in that window would find nothing and copy an empty
+  // string over whatever the user had.
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+
+  assert_eq!(
+    app.rich_yank_url().as_deref(),
+    Some("https://example.test/pull/61"),
+    "the PR tab yanks the PR"
+  );
+  assert_eq!(app.rich_yank_body().as_deref(), Some("A description worth reading."),);
+
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.rich_yank_url().as_deref(),
+    Some("https://example.test/issues/42"),
+    "and the issue tab yanks the issue"
+  );
+  assert_eq!(app.rich_yank_body().as_deref(), Some("The issue body."));
+}
+
+#[test]
+fn yanking_a_body_that_is_empty_says_so_instead_of_copying_nothing() {
+  // A PR with no description is ordinary. Copying an empty string over
+  // whatever the user had on the clipboard is the worst of the options.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = String::new();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+
+  assert_eq!(app.rich_yank_body(), None);
+  assert!(
+    app.rich_yank_url().is_some(),
+    "the URL is still there; only the body is missing"
+  );
+}
+
+#[test]
+fn merging_needs_a_pr_that_is_linked_and_fetched() {
+  // Validation feedback on #551. Three states, told apart rather than
+  // collapsed into one refusal, the way `enter_rich_view` tells them apart:
+  // the way out differs, so the message has to.
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::List, "nothing linked: no modal");
+  assert!(
+    app.status.contains("link"),
+    "the status names the way out: {}",
+    app.status
+  );
+
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::List, "linked but not fetched: still no modal");
+  assert!(app.status.contains("fetch"), "and a different way out: {}", app.status);
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.confirm_kind(), ConfirmKind::MergePr);
+  let pending = app.pending_merge().expect("the modal holds the merge");
+  assert_eq!(pending.number, 61);
+  assert_eq!(pending.base_ref, "dev");
+}
+
+#[test]
+fn a_stale_workspace_selection_cannot_merge_the_wrong_repos_pr() {
+  // The guard `enter_rich_view` and `rich_view_refresh` both carry, and the
+  // one that cannot be skipped here: a failed `Repository::open` for the
+  // selected row leaves the link pointing at the PREVIOUSLY active repo, so
+  // a merge would land a PR in a repository the user is not looking at.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.workspace_active_stale = true;
+
+  app.enter_confirm_merge();
+
+  assert_eq!(app.view, View::List, "no modal opens on a stale selection");
+  assert!(app.pending_merge().is_none());
+  assert!(
+    app.status.contains("unavailable"),
+    "the status says why: {}",
+    app.status
+  );
+}
+
+#[test]
+fn dismissing_a_merge_confirmation_leaves_the_delete_flow_as_it_was() {
+  // `View::Confirm` was single-purpose before this. The delete path is the
+  // one with a safety countdown and a batch snapshot, and it must come back
+  // to its own default rather than inherit whatever the merge left behind.
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.confirm_kind(), ConfirmKind::MergePr);
+
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List);
+  assert!(app.pending_merge().is_none());
+  assert_eq!(
+    app.confirm_kind(),
+    ConfirmKind::DeleteWorktree,
+    "the next confirmation is a delete until something says otherwise"
+  );
+}
+
+#[test]
+fn the_merge_confirmation_carries_the_configured_method() {
+  // The method is resolved when the modal opens and fired from that
+  // snapshot, so what the summary showed is what runs.
+  use gwm::forge::MergeMethod;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.config.merge_method,
+    MergeMethod::Merge,
+    "the default is a merge commit, which is what this repo requires"
+  );
+  app.config.merge_method = MergeMethod::Squash;
+  app.enter_confirm_merge();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
+}

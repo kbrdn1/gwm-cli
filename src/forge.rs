@@ -424,6 +424,45 @@ pub enum ForgeKind {
   GitLab,
 }
 
+/// How a change request is landed on its base branch.
+///
+/// The three both backends actually offer, measured on their CLIs rather
+/// than assumed: `gh pr merge` takes `--merge` / `--squash` / `--rebase`,
+/// and `glab mr merge` takes `--squash` / `--rebase` with a merge commit as
+/// its default. There is no `Unsupported` here because nothing is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MergeMethod {
+  /// A merge commit. The default, and not an arbitrary one: this repo's own
+  /// rules say "regular merge commit, never squash", and a tool that lands
+  /// someone's work should default to the least destructive option.
+  #[default]
+  Merge,
+  Squash,
+  Rebase,
+}
+
+impl MergeMethod {
+  pub const ALL: [MergeMethod; 3] = [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      Self::Merge => "merge",
+      Self::Squash => "squash",
+      Self::Rebase => "rebase",
+    }
+  }
+
+  /// What the confirmation says out loud, since the consequence differs.
+  pub fn summary(&self) -> &'static str {
+    match self {
+      Self::Merge => "keeps every commit, adds a merge commit",
+      Self::Squash => "collapses the branch into one commit",
+      Self::Rebase => "replays the commits onto the base, no merge commit",
+    }
+  }
+}
+
 /// The short noun a forge uses for a change request: `PR` on GitHub, `MR`
 /// on GitLab (issue #419).
 ///
@@ -808,6 +847,19 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue>;
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr>;
+
+  /// Land a change request on its base branch.
+  ///
+  /// On the trait rather than a shell-out at the call site, for the reason
+  /// every other write verb here is: a GitLab worktree would otherwise
+  /// invoke `gh` and fail somewhere the user cannot see.
+  ///
+  /// **The source branch is never deleted.** Neither backend is asked to
+  /// (`--delete-branch`, `--remove-source-branch`), because the atomic
+  /// commit history on that branch is the artefact — this repo says so in
+  /// as many words, and a merge triggered from a TUI keypress is the last
+  /// place to be inventive about it.
+  fn merge_pr(&self, number: u64, method: MergeMethod) -> Result<()>;
 
   fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>>;
   /// Create a label that does not exist upstream. Split from

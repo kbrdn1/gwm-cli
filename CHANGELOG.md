@@ -38,6 +38,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Code and diff lines are kept whole and scroll sideways** with `h` /
     `l`. In YAML or Python the indentation is the program, and a wrapped
     `+` line's continuation carries no sigil and reads as context.
+  - **`y` copies the active tab's URL, `Y` its description.**
+
+### Added
+
+- **Merge a PR from the TUI** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)).
+  `M` from the worktree table merges the selected row's linked PR; `M` inside
+  the PR / issue view merges the active tab's. Both go through the same
+  confirmation the delete flow uses, whose summary names the PR, `head →
+  base`, the resolved method and what it does to the history, and the CI
+  rollup.
+
+  The check state is shown rather than enforced: a forge refuses a merge for
+  reasons gwm does not model, and its own error says which. **The source
+  branch is never deleted**: neither backend is ever asked to.
+
+  The method comes from the new `merge_method` key and defaults to `merge`,
+  the least destructive of the three:
+
+  ```toml
+  merge_method = "merge"   # or "squash", "rebase"
+  ```
 
 ## Past releases
 

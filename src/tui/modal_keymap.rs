@@ -388,6 +388,13 @@ define_modal_actions! {
     // reflowed, so this is the only way to their tail.
     RichViewLeft    => "scroll_left"  [ "h", "Left" ],
     RichViewRight   => "scroll_right" [ "l", "Right" ],
+    // #551 validation feedback. `y` / `Y` are the list view's yanks too,
+    // and free here: this context had no yank at all.
+    RichViewYankUrl  => "yank_url"  [ "y" ],
+    RichViewYankBody => "yank_body" [ "Y" ],
+    // #551 validation feedback: same verb as the list view's `M`, reachable
+    // from the view that shows what is about to be merged.
+    RichViewMerge    => "merge"     [ "M" ],
   }
   // #515: two verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see

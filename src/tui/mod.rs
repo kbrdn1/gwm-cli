@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
-  NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
+  read_pins_from_sources, App, ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage,
+  LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -217,11 +217,16 @@ fn confirm_fire(app: &mut App) {
     return;
   }
   match app.confirm_press_y(Instant::now()) {
-    ConfirmKeyAction::FireNow => {
-      if let Err(e) = app.confirm_delete() {
-        app.status = format!("delete failed: {}", e);
+    // Routed on what the modal is actually about (#551). Exhaustive: the
+    // countdown and the danger border are shared, the consequence is not.
+    ConfirmKeyAction::FireNow => match app.confirm_kind() {
+      ConfirmKind::DeleteWorktree => {
+        if let Err(e) = app.confirm_delete() {
+          app.status = format!("delete failed: {}", e);
+        }
       }
-    }
+      ConfirmKind::MergePr => app.confirm_merge(),
+    },
     // Armed / Disarmed update the status line; the loop keeps the modal
     // open and lets the countdown tick (or wait for another y / Esc).
     ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
@@ -815,6 +820,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           },
           Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
           Some(ModalAction::RichViewTab) => app.rich_view_next_tab(),
+          Some(ModalAction::RichViewYankUrl) => match app.rich_yank_url() {
+            Some(url) => copy_text_to_clipboard(&mut app, &url, "url copied"),
+            None => app.status = "no url to copy".into(),
+          },
+          Some(ModalAction::RichViewYankBody) => match app.rich_yank_body() {
+            Some(body) => copy_text_to_clipboard(&mut app, &body, "description copied"),
+            None => app.status = "this one has no description".into(),
+          },
+          Some(ModalAction::RichViewMerge) => app.enter_confirm_merge(),
           Some(ModalAction::RichViewLeft) => app.rich_view_scroll_left(),
           Some(ModalAction::RichViewRight) => app.rich_view_scroll_right(),
           _ => {}
@@ -1094,6 +1108,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #420: `I` opens the rich PR / issue view on the linked side.
     Action::RichView if !app.picker_mode => app.enter_rich_view(),
+    // #551 validation feedback: merge the selected worktree's linked PR.
+    Action::MergePr if !app.picker_mode => app.enter_confirm_merge(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.

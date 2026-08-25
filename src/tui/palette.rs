@@ -217,6 +217,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "open the linked PR/issue: description, checks, reviews, comments",
     },
     PaletteEntry {
+      action: Action::MergePr,
+      name: "merge-pr",
+      description: "merge the linked PR (asks first; never deletes the branch)",
+    },
+    PaletteEntry {
       action: Action::WtScrollDown,
       name: "wt-scroll-down",
       description: "scroll the Working Tree pane down (status focus)",

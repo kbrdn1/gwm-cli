@@ -1072,3 +1072,20 @@ fn an_inline_thread_comment_gets_the_same_badge() {
     rows.iter().map(|r| &r.value).collect::<Vec<_>>()
   );
 }
+
+#[test]
+fn the_metadata_fields_each_carry_their_own_role() {
+  // Validation feedback: the block still read as prose below the identity
+  // row. The author is an identity, the branch pair is a branch, and the
+  // date is context — three different things painted the same.
+  let rows = rich_pr_rows(&sample_pr(), &NO_THREADS, W, "PR");
+  assert_eq!(roles_for(&rows, "author"), vec![("kbrdn1".to_string(), Emphasis::Bold)]);
+  assert_eq!(
+    roles_for(&rows, "branch"),
+    vec![("feat/#392-symfony-preset → dev".to_string(), Emphasis::Branch)]
+  );
+  assert_eq!(
+    roles_for(&rows, "updated"),
+    vec![("2026-08-04".to_string(), Emphasis::Muted)]
+  );
+}

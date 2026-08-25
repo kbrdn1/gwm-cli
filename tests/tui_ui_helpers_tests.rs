@@ -1683,6 +1683,7 @@ fn every_markdown_role_is_painted_differently_from_plain_text() {
     Emphasis::Running,
     Emphasis::Notice,
     Emphasis::Muted,
+    Emphasis::Branch,
   ] {
     let style = markdown_style(role, &theme);
     match role {
@@ -1701,7 +1702,8 @@ fn every_markdown_role_is_painted_differently_from_plain_text() {
       | Emphasis::Failure
       | Emphasis::Running
       | Emphasis::Notice
-      | Emphasis::Muted => assert_ne!(style, plain, "{role:?} must not be painted exactly like plain prose"),
+      | Emphasis::Muted
+      | Emphasis::Branch => assert_ne!(style, plain, "{role:?} must not be painted exactly like plain prose"),
     }
   }
 }

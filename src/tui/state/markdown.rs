@@ -77,8 +77,11 @@ pub enum Emphasis {
   /// A resolved-not-failed outcome: a merged PR, a closed issue. Theme
   /// `locked`, again following `pr_badge_color` / `issue_badge_color`.
   Notice,
-  /// De-emphasised: a draft PR. Theme `muted`.
+  /// De-emphasised: a draft PR, a timestamp. Theme `muted`.
   Muted,
+  /// A branch name. Theme `branch`, the colour the worktree table and the
+  /// sidebar identity card already give one.
+  Branch,
 }
 
 /// A run of text sharing one role.

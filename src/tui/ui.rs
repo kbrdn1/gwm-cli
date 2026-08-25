@@ -2919,6 +2919,8 @@ impl HintContext {
       HintContext::RichView => &[
         Hint::Lit("j/k", "select"),
         Hint::Lit("h/l", "scroll"),
+        Hint::Lit("y/Y", "copy url/body"),
+        Hint::Modal(ModalAction::RichViewMerge, "merge"),
         Hint::Modal(ModalAction::RichViewTab, "issue/pr"),
         Hint::Modal(ModalAction::RichViewOpen, "open"),
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
@@ -3661,6 +3663,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   ));
   rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
+  rows.push(entry(Action::MergePr, "merge the linked PR (asks first)"));
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
@@ -3879,6 +3882,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::RichViewTab, "switch between the issue and the PR"),
       modal_entry(ModalAction::RichViewLeft, "scroll code and diff lines left"),
       modal_entry(ModalAction::RichViewRight, "scroll code and diff lines right"),
+      modal_entry(ModalAction::RichViewYankUrl, "copy the URL of the active tab"),
+      modal_entry(ModalAction::RichViewYankBody, "copy the description of the active tab"),
+      modal_entry(ModalAction::RichViewMerge, "merge the PR (asks first)"),
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
@@ -5146,6 +5152,7 @@ pub fn markdown_style(emphasis: crate::tui::state::markdown::Emphasis, theme: &T
     Emphasis::Running => Style::default().fg(theme.dirty),
     Emphasis::Notice => Style::default().fg(theme.locked),
     Emphasis::Muted => Style::default().fg(theme.muted),
+    Emphasis::Branch => Style::default().fg(theme.branch),
   }
 }
 
@@ -5284,7 +5291,76 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
   lines
 }
 
+/// The merge confirmation (issue #551).
+///
+/// Names everything the decision turns on: which PR, where it lands, the
+/// resolved method AND what that method does to the history, and the CI
+/// rollup. The last one is why this modal earns its cost — merging on a red
+/// CI is the mistake worth one keypress of friction.
+fn draw_confirm_merge(f: &mut Frame, app: &App) {
+  let danger = app.theme.prunable;
+  let muted = app.theme.muted;
+  let Some(m) = app.pending_merge() else {
+    return;
+  };
+  let label_w = 7usize;
+  let row = |label: &str, value: String, style: Style| -> Line<'static> {
+    Line::from(vec![
+      Span::styled(format!("{label:label_w$}  "), Style::default().fg(muted)),
+      Span::styled(value, style),
+    ])
+  };
+
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  lines.push(
+    Line::from(Span::styled(
+      format!("Merge {} #{}?", m.noun, m.number),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    ))
+    .centered(),
+  );
+  lines.push(Line::from(String::new()));
+  lines.push(row("title", m.title.clone(), Style::default().fg(app.theme.name)));
+  if !m.head_ref.is_empty() && !m.base_ref.is_empty() {
+    lines.push(row(
+      "branch",
+      format!("{} → {}", m.head_ref, m.base_ref),
+      Style::default().fg(app.theme.branch),
+    ));
+  }
+  lines.push(row(
+    "method",
+    format!("{}: {}", m.method.as_str(), m.method.summary()),
+    Style::default().fg(app.theme.name),
+  ));
+  // Shown, not enforced. A forge refuses a merge for reasons gwm does not
+  // model, and its own error says which; inventing a client-side rule adds
+  // a second place to be wrong.
+  if let Some((label, color)) = ci_indicator(m.ci, m.checks_passed, m.checks_total, &app.theme) {
+    lines.push(row("checks", label.trim().to_string(), Style::default().fg(color)));
+  }
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(Span::styled(
+    "the source branch is kept",
+    Style::default().fg(muted),
+  )));
+  lines.push(Line::from(String::new()));
+  lines.push(confirm_buttons_line(app.confirm.focused_button(), danger, muted));
+
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let area = centered_content(62, 56, 80, height, f.area());
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block_titled("Merge", danger)), area);
+}
+
 fn draw_confirm(f: &mut Frame, app: &App) {
+  // What this modal is about (issue #551). The countdown, the danger
+  // border and the button row are shared; the summary is not, because the
+  // consequence is not.
+  if app.confirm_kind() == crate::tui::ConfirmKind::MergePr {
+    draw_confirm_merge(f, app);
+    return;
+  }
   let muted = app.theme.muted;
   // The destructive modal reads in the theme's "danger" colour (the
   // same role the prunable `⚠` badge uses), so it tracks `[theme]`
