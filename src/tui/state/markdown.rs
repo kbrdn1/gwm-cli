@@ -779,18 +779,23 @@ fn link(chars: &[char], at: usize, floors: &mut Floors) -> Option<(String, usize
   if floors.exhausted('[', 1, at) {
     return None;
   }
-  let give_up = |floors: &mut Floors| {
+  // Only a failure that proves there is no LATER link either may be
+  // memoised (Codex review, pass 8). A missing `]` or a missing `)` does:
+  // any link starting further along would need one beyond this point. A `]`
+  // that simply is not followed by `(` does NOT — and recording it made
+  // `[draft] then [docs](url)` render the real link as source.
+  let exhausted = |floors: &mut Floors| {
     floors.mark('[', 1, at);
     None::<(String, usize)>
   };
   let Some(close) = find(chars, at + 1, ']') else {
-    return give_up(floors);
+    return exhausted(floors);
   };
   if chars.get(close + 1) != Some(&'(') {
-    return give_up(floors);
+    return None;
   }
   let Some(end) = find(chars, close + 2, ')') else {
-    return give_up(floors);
+    return exhausted(floors);
   };
   let text: String = chars[at + 1..close].iter().collect();
   // `[]()` carries nothing to show; leave it as literal text.
@@ -919,14 +924,21 @@ fn wrap_rows(segments: Vec<Segment>, budget: usize, first: &str, hang: &str) -> 
         let mut rest = word.as_str();
         loop {
           let room = budget.saturating_sub(cells(prefix(rows.len()))).max(1);
-          if cells(rest) <= room {
-            break;
-          }
           // Cut on a GRAPHEME boundary at a cell budget, the same walk the
           // renderer clips with: splitting on a character index puts a
           // combining mark on the next row and can leave a row wider than
           // the frame.
-          let cut = head_end(rest, room).max(1);
+          //
+          // `head_end` also answers "does the rest fit?", by returning the
+          // whole string, and it costs `room` graphemes rather than the
+          // length of what is left. Asking `cells(rest)` instead re-measured
+          // the entire suffix once per row and made the split quadratic on a
+          // single long token (Codex review, pass 8).
+          let cut = head_end(rest, room);
+          if cut >= rest.len() {
+            break;
+          }
+          let cut = cut.max(1);
           push_text(&mut row, &rest[..cut], segment.emphasis);
           rows.push(std::mem::take(&mut row));
           rest = &rest[cut..];

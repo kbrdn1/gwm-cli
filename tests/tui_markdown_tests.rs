@@ -622,3 +622,22 @@ fn wrapping_measures_terminal_cells_not_characters() {
   }
   assert!(render(&line, 40).len() > 1, "and it actually wrapped");
 }
+
+#[test]
+fn a_bracket_that_is_not_a_link_does_not_hide_the_links_after_it() {
+  // Codex review, pass 8 (P2), on the memo added in pass 7. Failing to find
+  // a `(` after a `]` says nothing about the rest of the line, and marking
+  // the whole suffix as link-free on that basis made a perfectly good link
+  // render as source. `[draft]` before a real link is not exotic; a PR
+  // title writes it.
+  assert_eq!(
+    roles("[draft] then [docs](https://example.test)"),
+    vec![
+      ("[draft] then ".to_string(), Emphasis::Plain),
+      ("docs".to_string(), Emphasis::Link),
+    ]
+  );
+  // The memo may only record what proves there is no LATER link either:
+  // no `]` anywhere, or no `)` anywhere.
+  assert_eq!(plain("[a [b [c"), vec!["[a [b [c"]);
+}
