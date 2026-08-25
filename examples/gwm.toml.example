@@ -347,12 +347,22 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [tui]
 # note_vim = false
 
-# --- Where a mux pane opens (issue #589) -------------------------------------
-# Where the TUI's `t` key puts the worktree it opens, and which half a CLI
-# `--split` takes:
-#   "right"   split side by side (DEFAULT since #589)
-#   "down"    split stacked
-#   "window"  no split: a new tmux window, or a new zellij / herdr tab
+# --- What a mux spawn opens (issues #589 / #608) -----------------------------
+# `mux_open_in` — what the TUI's `t` key opens in the multiplexer:
+#   "pane"       split the current pane (DEFAULT)
+#   "tab"        a whole screen: a tmux window, a zellij or herdr tab
+#   "workspace"  herdr's level above a tab. HERDR ONLY.
+#
+# "workspace" is REFUSED on tmux and zellij, not downgraded: neither has a
+# level there, so `t` says so on the status bar and opens nothing. A silent
+# tab would leave this setting describing something that did not happen.
+# (Both have sessions, the structural analogue, but gwm runs inside one:
+# tmux would need two commands to create and switch to a sibling, and zellij
+# refuses to nest sessions.)
+#
+# `mux_pane_direction` — which half a pane takes, under "pane" only:
+#   "right"  side by side (DEFAULT since #589)
+#   "down"   stacked
 #
 # `right` is a behaviour change for tmux and zellij users, and a deliberate
 # one. Before #589 a split carried no direction at all, so each backend
@@ -364,12 +374,16 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # Two directions, not four: `left` / `up` reach tmux only through
 # `split-window -b`, and herdr declares `[possible values: right, down]`.
 #
-# `gwm tmux|zellij|herdr <pattern> --direction right|down` overrides this for
-# one invocation. A `[tui.macro*]` with `open_in = "mux_pane"` reads it too,
-# with one caveat: under "window" a zellij macro falls back to the PTY overlay,
-# since `zellij action new-tab` takes no trailing command to run.
+# `gwm tmux|zellij|herdr <pattern> --direction right|down` overrides the
+# direction for one invocation. The CLI spells its own target instead (bare is
+# a tab, `-p` is a pane), so `mux_open_in` does not reach it.
+#
+# A `[tui.macro*]` with `open_in = "mux_pane"` reads both, with one caveat:
+# under "tab" a zellij macro and under "workspace" every macro falls back to
+# the PTY overlay, because those verbs take no trailing command to run.
 #
 # [tui]
+# mux_open_in        = "workspace"
 # mux_pane_direction = "down"
 
 # --- TUI clipboard (issue #367) ----------------------------------------------

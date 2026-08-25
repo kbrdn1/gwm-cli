@@ -12,13 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **A setting for which direction a mux pane opens in**
-  ([#589](https://github.com/kbrdn1/gwm-cli/issues/589)). `[tui]
-  mux_pane_direction` decides where the TUI's `t` key puts the worktree it
-  opens: `"right"` (default) or `"down"` to split the current pane, `"window"`
-  for a whole tmux window or zellij / herdr tab. It is also the direction a
-  bare `gwm tmux|zellij|herdr <pattern> --split` takes, and the new
-  `--direction right|down` overrides it for one invocation. The knob cycles
+- **Two settings for what a mux spawn opens, and where**
+  ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
+  [#608](https://github.com/kbrdn1/gwm-cli/issues/608)). The TUI's `t` key
+  took whatever each backend felt like giving it. Two `[tui]` keys now say:
+
+  ```toml
+  [tui]
+  mux_open_in        = "pane"    # "pane" | "tab" | "workspace"
+  mux_pane_direction = "right"   # "right" | "down", pane only
+  ```
+
+  `"tab"` is a whole screen of its own: a tmux window, a zellij or herdr tab,
+  one thing under three names. `"workspace"` is herdr's level above a tab and
+  runs `herdr workspace create --label <name> --cwd <path> --focus`.
+  `mux_pane_direction` is also the direction a bare
+  `gwm tmux|zellij|herdr <pattern> --split` takes, and the new
+  `--direction right|down` overrides it for one invocation. Both keys cycle
   live in the Settings panel under the **TUI** tab.
 
   Two directions rather than four: `left` and `up` reach tmux only through
@@ -26,10 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values: right, down]`, so a fuller compass would be values one backend could
   not honour.
 
-  One caveat, and it is the same shape as the herdr one below: under
-  `"window"` a `[tui.macro*]` with `open_in = "mux_pane"` falls back to the
-  PTY overlay on zellij, because `zellij action new-tab` takes no trailing
-  command to run. The status bar names the backend that refused.
+  **`"workspace"` is refused on tmux and zellij, not downgraded to a tab.**
+  Neither has a level there, and quietly opening something else would leave
+  the setting describing what did not happen. The status bar names the backend
+  that cannot and the one that can. (Both have *sessions*, the structural
+  analogue, but gwm runs inside one: tmux would need two commands to create
+  and switch to a sibling, and zellij refuses to nest sessions.)
+
+  One caveat, the same shape as the herdr one below: a `[tui.macro*]` with
+  `open_in = "mux_pane"` falls back to the PTY overlay under `"tab"` on
+  zellij and under `"workspace"` on every backend, because those verbs take
+  no trailing command to run. The status bar names which one refused.
 
 - **herdr is a third multiplexer backend**
   ([#588](https://github.com/kbrdn1/gwm-cli/issues/588)). `gwm herdr <pattern>`
