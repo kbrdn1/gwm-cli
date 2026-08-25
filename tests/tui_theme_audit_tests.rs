@@ -237,8 +237,9 @@ fn table_marker_resolves_through_theme_roles() {
     "main marker → main role"
   );
 
-  // Issue linked, PR empty: issue dot → `clean`, separator → `muted`, the
-  // empty PR dash → `name` (the neutral white slot).
+  // Issue linked but unfetched, PR empty: issue dot → `name`, separator →
+  // `muted`, the empty PR dash → `name` too. Colour alone cannot tell the two
+  // slots apart here (#596) — the glyph does, and both are asserted.
   let mut issue_only = base_worktree("issue");
   issue_only.link = BranchLink {
     issue: Some(7),
@@ -246,7 +247,8 @@ fn table_marker_resolves_through_theme_roles() {
   };
   let line = table_marker(&issue_only, &t);
   assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
-  assert_eq!(line.spans[0].style.fg, Some(t.clean), "issue dot → clean role");
+  assert_eq!(line.spans[0].content.as_ref(), "●", "linked issue slot → dot");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "unfetched issue dot → name role");
   assert_eq!(line.spans[1].style.fg, Some(t.muted), "separator → muted role");
   assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 
@@ -261,7 +263,12 @@ fn table_marker_resolves_through_theme_roles() {
     "closed issue dot → issue_badge_color closed role"
   );
 
-  // PR linked, issue empty: mirror — empty issue dash → `name`, PR → `locked`.
+  // PR linked, issue empty: mirror — empty issue dash → `name`, PR → `name`.
+  // #596: an unfetched slot takes `name`, the one role in the marker that is
+  // not a status. It used to take `locked` (= `pr_badge_color(Merged)`, the
+  // Closed-issue role, and the locked-worktree badge) while the unfetched
+  // issue slot took `clean` (= both badge maps' Open), so each half of one
+  // marker claimed a different loaded state for the same missing data.
   let mut pr_only = base_worktree("pr");
   pr_only.link = BranchLink {
     pr: Some(8),
@@ -270,7 +277,9 @@ fn table_marker_resolves_through_theme_roles() {
   let line = table_marker(&pr_only, &t);
   assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
   assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
-  assert_eq!(line.spans[2].style.fg, Some(t.locked), "pr dot → locked role");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "unfetched pr dot → name role");
+  assert_ne!(t.name, t.clean, "audit theme must keep name and clean distinct");
+  assert_ne!(t.name, t.locked, "audit theme must keep name and locked distinct");
 
   let mut closed_pr = pr_only.clone();
   closed_pr.pr_state = Some(PrState::Closed);

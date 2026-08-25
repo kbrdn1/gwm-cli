@@ -106,6 +106,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A linked row with nothing fetched yet is white, not green and purple**
+  ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
+  marker painted its two placeholder slots with a different status role each:
+  `clean` green for the issue, `locked` purple for the PR. So one row said two
+  different things about the same missing data, and both colours were on loan
+  from a loaded state (`clean` is an open issue and an open PR, `locked` is a
+  merged PR, a closed issue, and the locked-worktree badge). That is the state
+  every linked row launches in, since nothing is fetched until `F`. Both slots
+  now take `name`, the one role in the marker that neither badge map can
+  produce and the colour the empty slot beside them already uses. The glyph
+  still tells the two apart: `-` is "no link", `●` is "linked, not fetched
+  yet".
+
 - **The note column captions itself**
   ([#595](https://github.com/kbrdn1/gwm-cli/issues/595)). The column shipped
   with an empty header on the grounds that its marker is binary, which left
