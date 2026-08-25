@@ -43,8 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   <path> --focus` and `herdr pane split --current --direction <right|down>
   --cwd <path> --focus`, verified against a live herdr 0.8.2 rather than its
   help text. The split needs a direction because herdr's parser has no default
-  for one; which one it gets is [#589](https://github.com/kbrdn1/gwm-cli/issues/589)
-  below. The other two flags are
+  for one; which one it gets is the `mux_pane_direction` entry above. The other two flags are
   there because herdr's defaults are the opposite of what the names suggest:
   without `--focus` the tab opens where you cannot see it, and without
   `--workspace` it opens in whichever workspace the server had focused, which

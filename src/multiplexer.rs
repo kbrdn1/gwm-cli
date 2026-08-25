@@ -101,9 +101,10 @@ pub enum SpawnMode {
 /// short name so it shows up legibly in tmux's status bar; tmux panes
 /// don't carry a name attribute, so Split intentionally omits `-n`.
 ///
-/// The direction flag is not optional the way it reads: without it tmux
-/// falls back to `-v` and stacks, which is what `--split` did up to 1.9
-/// while its own `--help` promised "a horizontal split" (issue #589).
+/// gwm always passes a direction flag, which tmux does not require:
+/// without one it falls back to `-v` and stacks the pane, and that is what
+/// `--split` did up to 1.9 while its own `--help` promised "a horizontal
+/// split of the current pane" (issue #589).
 pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<String> {
   let path_str = path.display().to_string();
   match mode {
@@ -171,9 +172,9 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
 /// * `pane split` needs `--current` to target the caller's pane. Without
 ///   it herdr has no pane to split from.
 /// * `--direction` has no default in herdr's parser, so it must be
-///   passed. It is the one flag the three backends share by name, and
-///   since #589 the value comes from [`SplitDirection`] rather than from
-///   the `right` this builder used to hardcode.
+///   passed. zellij spells it the same way; tmux spells the same choice
+///   `-h` / `-v`. Since #589 the value comes from [`SplitDirection`]
+///   rather than from the `right` this builder used to hardcode.
 /// * **`--focus` is not the default.** `tab create` and `pane split` both
 ///   come back `"focused": false` when the flag is omitted, where
 ///   `tmux new-window` and `zellij action new-tab` move the user to what
@@ -251,10 +252,10 @@ pub fn detect_multiplexer(tmux: Option<String>, zellij: Option<String>, herdr: O
   }
 }
 
-/// Dispatch to the right `build_*_command` for `mux`. The three call sites
-/// (the CLI verb, the TUI's `t`, a `mux_pane` macro) all had this match
-/// written out, and the CLI's copy is the one that knows about
-/// `$HERDR_WORKSPACE_ID`.
+/// Dispatch to the right `build_*_command` for `mux`. The CLI verb wrote
+/// this match out and the two TUI call sites reached a second copy of it
+/// inside `detect_split_command`; both now come here. The CLI's copy is
+/// the one that knew about `$HERDR_WORKSPACE_ID`.
 ///
 /// `workspace` is forwarded unconditionally: [`build_herdr_command`] drops
 /// it on a `Split`, where `--current` already resolves the workspace, and

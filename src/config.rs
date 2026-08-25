@@ -939,8 +939,7 @@ impl MuxPaneDirection {
     MuxPaneDirection::Window,
   ];
 
-  /// Status-bar / Settings-panel label, equal to the serialised TOML
-  /// spelling.
+  /// Settings-panel label, equal to the serialised TOML spelling.
   pub const fn label(self) -> &'static str {
     match self {
       MuxPaneDirection::Right => SplitDirection::Right.label(),
