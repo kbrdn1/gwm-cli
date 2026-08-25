@@ -453,6 +453,34 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
+/// Header text style for a compact pane (issue #605).
+///
+/// The colour is `theme.accent` in both states and focus adds `BOLD`,
+/// nothing else. A pane's name is how you find the pane to `Tab` into, so
+/// it cannot dim to `muted` the moment the pane loses focus; the fill under
+/// it ([`Chrome::fill`]) carries the focus signal — that is what the fill
+/// was added for — and the weight is all the text adds on top.
+///
+/// `accent` rather than `name`, the other candidate, for two reasons. It is
+/// the role's documented job ("General accent: header title, …"), so a
+/// header keeps reading as chrome instead of as another line of body text.
+/// And a focused header is painted on `selection_bg`, which is exactly the
+/// selected row's background: fixing the text to `name` + `BOLD` would have
+/// given the header the *same* fg, bg and weight as the cursor row's name
+/// cell, which is the collision `Theme::section_bg`'s invariant exists to
+/// avoid on the unfocused half.
+///
+/// Pure like [`panel_border_color`] so the focus→theme wiring is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn compact_header_style(focused: bool, theme: &super::theme::Theme) -> Style {
+  let base = Style::default().fg(theme.accent);
+  if focused {
+    base.add_modifier(Modifier::BOLD)
+  } else {
+    base
+  }
+}
+
 /// What a pane's frame costs and how it is painted (issue #545).
 ///
 /// Two shapes, resolved once per pane and threaded down rather than
@@ -470,17 +498,23 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
 pub struct Chrome {
   /// `true` when the pane draws a filled header instead of box rules.
   pub compact: bool,
-  /// Focus signal: `theme.focus` when the pane holds focus, `theme.muted`
-  /// otherwise. Paints the border when boxed and the header text when
-  /// compact — with no rules left, the header *is* where focus reads.
+  /// Focus signal for the *boxed* layout: `theme.focus` when the pane holds
+  /// focus, `theme.muted` otherwise. Paints the four rules, and the title
+  /// sitting inside the top one. Compact has no rules and does not read it
+  /// — its header text is focus-independent (issue #605).
   pub accent: Color,
-  /// Header background, compact only. Carries the focus signal too
-  /// (validation feedback on PR #546: the text colour alone did not read
-  /// at a glance): `selection_bg` on the focused pane, `section_bg`
-  /// elsewhere. Both roles already exist and the theme guarantees they
+  /// Header background, compact only: `selection_bg` on the focused pane,
+  /// `section_bg` elsewhere. With the rules gone this is *the* focus
+  /// signal, not a reinforcement of one (it was added in PR #546 because
+  /// the text colour alone did not read at a glance, and #605 removed the
+  /// text half). Both roles already exist and the theme guarantees they
   /// differ, so the two header states are distinct by construction on
   /// every preset — no third background role to keep in tune.
   pub fill: Color,
+  /// Header text style, compact only — see [`compact_header_style`].
+  /// Resolved here rather than at the call sites because `render_section`
+  /// threads a `Chrome` and has no theme of its own.
+  pub header: Style,
   /// `true` when this pane holds focus. Drives [`Self::body_style`].
   pub focused: bool,
   /// `[tui] dim_unfocused` — whether the inactive pane's body is dimmed.
@@ -501,6 +535,7 @@ impl Chrome {
       compact: false,
       accent,
       fill: Color::Reset,
+      header: Style::default(),
       focused: true,
       dim_unfocused: false,
     }
@@ -511,6 +546,7 @@ impl Chrome {
       compact,
       accent: panel_border_color(focused, theme),
       fill: if focused { theme.selection_bg } else { theme.section_bg },
+      header: compact_header_style(focused, theme),
       focused,
       dim_unfocused,
     }
@@ -670,11 +706,12 @@ fn pane_title(compact: bool, label: &str, chord: &str) -> String {
 /// would leave the boundary reading as a stray highlighted word rather
 /// than as the edge of a section.
 ///
-/// `accent` carries the focus signal — with the rules gone, the header
-/// text is where "which pane am I in" now lives. It is applied only to
-/// spans that have no colour of their own; a span that already carries
-/// one (the filter `/` prompt) encodes something other than focus and is
-/// left alone.
+/// `header` is the base style every span is patched onto: the fixed
+/// header colour plus, on the focused pane, `BOLD` (issue #605). A span
+/// that already carries a colour (the filter `/` prompt, the Working Tree
+/// per-category counts) keeps it — `patch` lets the span's own `fg` win —
+/// but it still takes the weight, so the whole line runs one rule rather
+/// than a focus-tracking half beside a fixed one.
 ///
 /// On a pane too narrow for both, the counter is dropped whole rather
 /// than overlapped — the title names the section and carries its focus
@@ -687,21 +724,13 @@ pub fn compact_header_line(
   title: Line<'static>,
   counter: Option<Line<'static>>,
   width: u16,
-  accent: Color,
+  header: Style,
 ) -> Line<'static> {
   let width = width as usize;
-  let accent_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  // Only spans with no colour of their own take the accent; the filter `/`
-  // prompt and the Working Tree's per-category counts already encode
-  // something that is not focus.
-  let accentuate = |s: Span<'static>| {
-    if s.style.fg.is_none() {
-      Span::styled(s.content, accent_style.patch(s.style))
-    } else {
-      s
-    }
-  };
-  let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(accentuate).collect();
+  // `patch`, not an overwrite: the span's own `fg` wins where it has one,
+  // and the modifiers merge either way.
+  let restyle = |s: Span<'static>| Span::styled(s.content, header.patch(s.style));
+  let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(restyle).collect();
 
   // Measured in terminal CELLS, not chars: a CJK glyph or an emoji in a
   // filter query counts one char and draws two columns, and padding
@@ -745,10 +774,10 @@ pub fn compact_header_line(
   let counter = counter.filter(|c| title_w + counter_w(c) <= width);
   let pad = width - title_w - counter.as_ref().map(counter_w).unwrap_or(0);
   if pad > 0 {
-    spans.push(Span::styled(" ".repeat(pad), accent_style));
+    spans.push(Span::styled(" ".repeat(pad), header));
   }
   if let Some(counter) = counter {
-    spans.extend(counter.spans.into_iter().map(accentuate));
+    spans.extend(counter.spans.into_iter().map(restyle));
   }
   Line::from(spans)
 }
@@ -976,7 +1005,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // block at all — one row of chrome instead of two, two columns back.
   let table_area = if chrome.compact {
     let header_area = Rect { height: 1, ..area };
-    let line = compact_header_line(title, counter.map(Line::from), header_area.width, chrome.accent);
+    let line = compact_header_line(title, counter.map(Line::from), header_area.width, chrome.header);
     f.render_widget(
       Paragraph::new(line).style(Style::default().bg(chrome.fill)),
       header_area,
@@ -1403,7 +1432,7 @@ fn render_section(
     // left, the footer (counter / hint) flushed right on that same row
     // rather than in a bottom rule that no longer exists.
     let header_area = Rect { height: 1, ..area };
-    let header = compact_header_line(title.into(), footer, header_area.width, chrome.accent);
+    let header = compact_header_line(title.into(), footer, header_area.width, chrome.header);
     f.render_widget(
       Paragraph::new(header).style(Style::default().bg(chrome.fill)),
       header_area,

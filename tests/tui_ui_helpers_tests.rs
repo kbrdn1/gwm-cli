@@ -6,14 +6,15 @@
 use gwm::bootstrap::{BootstrapReport, StepResult};
 use gwm::tui::keymap::{Action, KeyStroke, Keymap};
 use gwm::tui::state::sidebar::SidebarMode;
-use gwm::tui::theme::Theme;
+use gwm::tui::theme::{preset_names, Theme};
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, confirm_buttons_line,
-  create_buttons_line, ellipsize_middle, field_input_line, form_field_scroll, link_prompt_modal_width,
-  link_target_line, modal_hint_line, pad_cells, pane_counter, recent_items_pane_title, status_pane_title,
-  type_selector_line, working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts,
-  worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, compact_header_style,
+  confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, form_field_scroll,
+  link_prompt_modal_width, link_target_line, modal_hint_line, pad_cells, pane_counter, recent_items_pane_title,
+  status_pane_title, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
@@ -380,7 +381,7 @@ fn compact_header_line_fills_the_width_and_right_aligns_the_counter() {
     ratatui::text::Line::from(" 1 WORKTREES "),
     Some(ratatui::text::Line::from(" 3 of 5 ")),
     30,
-    Color::Cyan,
+    Style::default(),
   );
   let text = title_text(&line);
   assert_eq!(text.chars().count(), 30, "header must span the pane width: {text:?}");
@@ -390,7 +391,7 @@ fn compact_header_line_fills_the_width_and_right_aligns_the_counter() {
 
 #[test]
 fn compact_header_line_without_a_counter_still_spans_the_width() {
-  let line = compact_header_line(ratatui::text::Line::from(" 2 STATUS "), None, 18, Color::Cyan);
+  let line = compact_header_line(ratatui::text::Line::from(" 2 STATUS "), None, 18, Style::default());
   let text = title_text(&line);
   assert_eq!(text.chars().count(), 18, "got {text:?}");
   assert!(text.starts_with(" 2 STATUS "), "got {text:?}");
@@ -405,7 +406,7 @@ fn compact_header_line_drops_the_counter_before_the_title() {
     ratatui::text::Line::from(" 1 WORKTREES "),
     Some(ratatui::text::Line::from(" 3 of 5 ")),
     14,
-    Color::Cyan,
+    Style::default(),
   );
   let text = title_text(&line);
   assert_eq!(text.chars().count(), 14, "got {text:?}");
@@ -414,38 +415,91 @@ fn compact_header_line_drops_the_counter_before_the_title() {
     "counter dropped rather than overlapping: {text:?}"
   );
 
-  let squeezed = compact_header_line(ratatui::text::Line::from(" 1 WORKTREES "), None, 6, Color::Cyan);
+  let squeezed = compact_header_line(ratatui::text::Line::from(" 1 WORKTREES "), None, 6, Style::default());
   let text = title_text(&squeezed);
   assert_eq!(text.chars().count(), 6, "never overflows the pane: {text:?}");
 }
 
-#[test]
-fn compact_header_line_paints_unstyled_spans_with_the_focus_accent() {
-  // Focus indication moves from the border colour to the header text —
-  // that is the whole signal once the rules are gone. Spans that already
-  // carry a colour (the filter `/` prompt) keep theirs: they encode
-  // something other than focus.
+/// A compact header carrying both span kinds: the pane name, which has no
+/// colour of its own, and the filter `/` prompt, which does.
+fn compact_header(focused: bool, theme: &Theme) -> ratatui::text::Line<'static> {
   let title = ratatui::text::Line::from(vec![
     ratatui::text::Span::raw(" 1 WORKTREES "),
     ratatui::text::Span::styled("/", Style::default().fg(Color::Yellow)),
   ]);
-  let line = compact_header_line(title, None, 30, Color::Magenta);
-  let plain = line
+  compact_header_line(title, None, 30, compact_header_style(focused, theme))
+}
+
+/// The span of `line` whose content contains `needle`.
+fn header_span(line: &ratatui::text::Line<'static>, needle: &str) -> ratatui::text::Span<'static> {
+  line
     .spans
     .iter()
-    .find(|s| s.content.contains("WORKTREES"))
-    .expect("title span");
-  assert_eq!(plain.style.fg, Some(Color::Magenta), "unstyled title wears the accent");
-  let slash = line
-    .spans
-    .iter()
-    .find(|s| s.content.as_ref() == "/")
-    .expect("slash span");
-  assert_eq!(
-    slash.style.fg,
-    Some(Color::Yellow),
-    "an already-coloured span is left alone"
-  );
+    .find(|s| s.content.contains(needle))
+    .unwrap_or_else(|| panic!("span {needle:?} in {:?}", title_text(line)))
+    .clone()
+}
+
+#[test]
+fn compact_header_text_keeps_one_colour_whatever_the_focus() {
+  // #605: the fill under the header already carries focus, so the text
+  // must not carry it a second time. A pane's name is how you find the
+  // pane to `Tab` into — it cannot dim to `muted` the moment the pane
+  // loses focus. The colour is `theme.accent` in both states.
+  //
+  // Over every palette, because neither half of the claim discriminates
+  // on its own theme: the default one has `accent == focus`, so only its
+  // unfocused header proves anything, while `claude-dark` separates all
+  // three of `accent` / `focus` / `muted` and pins both states.
+  let mut themes = vec![("default", Theme::default())];
+  for name in preset_names() {
+    themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
+  }
+  for (name, theme) in themes {
+    let focused = compact_header(true, &theme);
+    let unfocused = compact_header(false, &theme);
+    for (state, line) in [("focused", &focused), ("unfocused", &unfocused)] {
+      assert_eq!(
+        header_span(line, "WORKTREES").style.fg,
+        Some(theme.accent),
+        "theme {name:?} / {state}: the pane name wears the accent role"
+      );
+      // Unchanged half: a span that already carries a colour encodes
+      // something other than focus and keeps its own.
+      assert_eq!(
+        header_span(line, "/").style.fg,
+        Some(Color::Yellow),
+        "theme {name:?} / {state}: an already-coloured span keeps its colour"
+      );
+    }
+  }
+}
+
+#[test]
+fn compact_header_weight_tracks_focus_across_the_whole_line() {
+  // #605: with the colour fixed, weight is what the header itself adds to
+  // the fill — and it applies to *every* span, coloured ones included, so
+  // one header line runs one rule rather than two side by side.
+  let theme = Theme::default();
+  let focused = compact_header(true, &theme);
+  let unfocused = compact_header(false, &theme);
+
+  for needle in ["WORKTREES", "/"] {
+    assert!(
+      header_span(&focused, needle)
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD),
+      "focused: {needle:?} is bold"
+    );
+    assert!(
+      !header_span(&unfocused, needle)
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD),
+      "unfocused: {needle:?} is not bold"
+    );
+  }
 }
 
 #[test]
@@ -1479,7 +1533,7 @@ fn compact_header_line_measures_in_terminal_cells_not_chars() {
   // — that one sums `Span::width()`, the measure the helper itself uses, so
   // it would agree with a wrong implementation (issue #562).
   let title = ratatui::text::Line::from(" [1] WORKTREES /界 ");
-  let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Color::Cyan);
+  let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Style::default());
   assert_eq!(
     painted_line(&line),
     40,
@@ -1495,7 +1549,7 @@ fn compact_header_line_truncates_wide_glyphs_by_cell_budget() {
   // cut to the cell budget, never past it. Cutting by char count would
   // leave a line twice as wide as the pane.
   let title = ratatui::text::Line::from("界界界界界界界界");
-  let line = compact_header_line(title, None, 9, Color::Cyan);
+  let line = compact_header_line(title, None, 9, Style::default());
   assert!(
     painted_line(&line) <= 9,
     "must never exceed the pane width in cells, got {}",
@@ -1529,7 +1583,7 @@ fn compact_header_line_pads_against_the_cells_the_renderer_paints() {
       ratatui::text::Line::from(title.to_string()),
       Some(counter),
       20,
-      Color::Cyan,
+      Style::default(),
     );
     // Padding computed against the undercount leaves the line wider than the
     // pane, which pushes the right-aligned counter off it.
@@ -1553,7 +1607,7 @@ fn compact_header_line_truncates_by_the_cells_the_renderer_paints() {
       ratatui::text::Line::from(title.to_string()),
       None,
       width as u16,
-      Color::Cyan,
+      Style::default(),
     );
     assert!(
       painted_line(&line) <= width,
@@ -1571,7 +1625,7 @@ fn compact_header_line_truncates_sequences_whole_not_char_by_char() {
   // so every one of these was free and the whole title survived its budget.
   let title = "*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}";
   assert_eq!(painted(title), 10, "fixture must paint two cells per sequence");
-  let line = compact_header_line(ratatui::text::Line::from(title), None, 5, Color::Cyan);
+  let line = compact_header_line(ratatui::text::Line::from(title), None, 5, Style::default());
   assert!(
     painted_line(&line) <= 5,
     "title painted {} cells into a 5-cell pane: {:?}",
