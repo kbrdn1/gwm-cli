@@ -2688,7 +2688,10 @@ impl App {
     use super::ui::HintContext;
     match self.view {
       View::Create => self.create_hint_context(),
-      View::Confirm => HintContext::Confirm,
+      View::Confirm => match self.confirm_kind {
+        ConfirmKind::DeleteWorktree => HintContext::Confirm,
+        ConfirmKind::MergePr => HintContext::ConfirmMerge,
+      },
       View::OpenMenu => HintContext::OpenMenu,
       // #219: the two link-prompt stages advertise different keys — the
       // choose-target picker vs the number-input submit/cancel — so the
@@ -5949,6 +5952,33 @@ impl App {
         self.status = format!("merge failed: {}", e.trim());
       }
     }
+  }
+
+  /// Cycle the method the open merge confirmation will use (issue #551).
+  ///
+  /// On the modal rather than only in `.gwm.toml`, because the choice is
+  /// per-merge as often as it is per-project: the config sets what you do
+  /// by default, this is for the one PR where the default is wrong. Inert
+  /// unless a merge is what the modal is holding, and inert while it runs.
+  ///
+  /// Re-arming the countdown is deliberate: the summary now describes a
+  /// different consequence, so the moment of friction is owed again.
+  pub fn cycle_merge_method(&mut self) {
+    use crate::forge::MergeMethod;
+    if self.confirm_kind != ConfirmKind::MergePr || self.is_merge_loading() {
+      return;
+    }
+    let Some(pending) = self.pending_merge.as_mut() else {
+      return;
+    };
+    pending.method = match pending.method {
+      MergeMethod::Merge => MergeMethod::Squash,
+      MergeMethod::Squash => MergeMethod::Rebase,
+      MergeMethod::Rebase => MergeMethod::Merge,
+    };
+    let method = pending.method;
+    self.confirm.reset();
+    self.status = format!("merge method: {} ({})", method.as_str(), method.summary());
   }
 
   /// Fire the merge the confirmation is holding.

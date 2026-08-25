@@ -2693,6 +2693,8 @@ pub enum HintContext {
   CreateFreeform,
   /// Confirm-delete modal.
   Confirm,
+  /// The confirmation modal when it is holding a merge (issue #551).
+  ConfirmMerge,
   /// Open issue/PR URL menu.
   OpenMenu,
   /// Issue/PR link prompt, stage 1 — choose issue vs PR.
@@ -2749,6 +2751,7 @@ impl HintContext {
       HintContext::Picker => "switch",
       HintContext::Create | HintContext::CreateFreeform => "create",
       HintContext::Confirm => "confirm",
+      HintContext::ConfirmMerge => "merge",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
       HintContext::LinkInputNumber => "link",
@@ -2862,6 +2865,17 @@ impl HintContext {
       HintContext::Confirm => &[
         Hint::Modal(ModalAction::ConfirmConfirm, "confirm"),
         Hint::Key(ToggleDeleteBranch, "branch"),
+        Hint::Lit("←/→", "move"),
+        Hint::Modal(ModalAction::ConfirmActivate, "activate"),
+        Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
+      ],
+      // The same modal, a different verb set (validation feedback on
+      // #551). `delete branch` belongs to the delete flow and was being
+      // advertised over a merge, where it means nothing and where the key
+      // does nothing; the merge has its own thing to offer instead.
+      HintContext::ConfirmMerge => &[
+        Hint::Modal(ModalAction::ConfirmConfirm, "merge"),
+        Hint::Modal(ModalAction::ConfirmCycleMethod, "method"),
         Hint::Lit("←/→", "move"),
         Hint::Modal(ModalAction::ConfirmActivate, "activate"),
         Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
@@ -3046,7 +3060,9 @@ impl HintContext {
       HintContext::Create | HintContext::CreateFreeform | HintContext::Rename | HintContext::RenameFreeform => {
         KeyContext::Create
       }
-      HintContext::Confirm => KeyContext::Confirm,
+      // Both render the confirmation modal, so both resolve through its
+      // key context; only the verbs they advertise differ (#551).
+      HintContext::Confirm | HintContext::ConfirmMerge => KeyContext::Confirm,
       HintContext::OpenMenu => KeyContext::OpenMenu,
       HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
       HintContext::LinkInputNumber => KeyContext::LinkInputNumber,
@@ -3798,6 +3814,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
+      modal_entry(
+        ModalAction::ConfirmCycleMethod,
+        "cycle merge / squash / rebase (merge confirmations only)",
+      ),
     ]);
     // #453: one section per modal context, in workflow order, every verb
     // resolved live against the modal keymap so rebinds show through (and
@@ -5431,7 +5451,11 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
     );
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
-        HintContext::Confirm,
+        // The merge's own verbs (validation feedback): `delete branch`
+        // belongs to the other flow and does nothing here, while cycling
+        // the method is the one thing this modal can offer and could not
+        // advertise.
+        HintContext::ConfirmMerge,
         &app.keymap,
         &app.modal_keymap,
         &app.theme,

@@ -277,6 +277,10 @@ define_modal_actions! {
     ConfirmFocusConfirm => "focus_confirm" [ "Left", "h" ],
     ConfirmFocusCancel  => "focus_cancel"  [ "Right", "l" ],
     ConfirmToggleFocus  => "toggle_focus"  [ "Tab" ],
+    // #551: cycle merge / squash / rebase without leaving the modal. Only
+    // does anything while the modal holds a merge, which is also the only
+    // context whose hint bar advertises it.
+    ConfirmCycleMethod  => "cycle_method"  [ "m" ],
   }
   Help {
     HelpClose        => "close"         [ "Esc", "q", "?" ],

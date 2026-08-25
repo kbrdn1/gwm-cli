@@ -628,6 +628,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::ConfirmFocusConfirm) => app.confirm.focus_confirm(),
         Some(ModalAction::ConfirmFocusCancel) => app.confirm.focus_cancel(),
         Some(ModalAction::ConfirmToggleFocus) => app.confirm.toggle_focus(),
+        Some(ModalAction::ConfirmCycleMethod) => app.cycle_merge_method(),
         _ if app.key_matches_action(key, Action::ToggleDeleteBranch) => app.toggle_delete_branch(),
         _ => {}
       },

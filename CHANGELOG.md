@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`y` copies the active tab's URL, `Y` its description.**
   - **Pager motions**: `D` / `U` move half a window, `g` / `G` jump to the
     ends, and `c` opens the same PR's CI checks without leaving the view.
+  - **A modal opened from the view closes back to it**, on the tab that was
+    being read. The CI list and the merge confirmation are both reached from
+    inside it, and landing on the worktree table meant re-selecting the row
+    and pressing `I` again to carry on reading. Opened from the table, both
+    still close to the table.
 
 ### Added
 
@@ -50,8 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flow's confirmation, and it is the same modal: same layout, same countdown,
   same spinner while it runs, same buttons hidden mid-flight. Its summary
   names the PR, `head → base`, the resolved method and what it does to the
-  history, and the CI rollup. A failure keeps the modal up with the forge's
-  own message in it.
+  history, and the CI rollup. `m` cycles the method from inside it, and a
+  failure keeps the modal up with the forge's own message.
 
   The check state is shown rather than enforced: a forge refuses a merge for
   reasons gwm does not model, and its own error says which. **The source

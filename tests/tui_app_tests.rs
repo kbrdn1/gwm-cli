@@ -14198,3 +14198,54 @@ fn a_merge_started_from_the_table_still_ends_on_the_table() {
 
   assert_eq!(app.view, View::List);
 }
+
+#[test]
+fn the_merge_modal_advertises_its_own_verbs_not_the_delete_flows() {
+  // Validation feedback on #551: the merge modal was showing the delete
+  // flow's hint bar, so it advertised `D  branch` — a key that means
+  // nothing over a merge and does nothing when pressed. It has its own
+  // thing to offer instead, and could not say so.
+  use gwm::forge::MergeMethod;
+  use gwm::tui::HintContext;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_confirm_merge();
+  assert_eq!(app.hint_context(), HintContext::ConfirmMerge);
+
+  // And the verb it advertises actually does something.
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Merge);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Rebase);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Merge, "it cycles");
+}
+
+#[test]
+fn a_delete_confirmation_keeps_the_delete_hint_bar() {
+  // The other half: routing on the kind must not take the delete flow's
+  // own verb away from it.
+  use gwm::tui::HintContext;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_confirm_delete();
+  if app.view == View::Confirm {
+    assert_eq!(app.hint_context(), HintContext::Confirm);
+  }
+}
+
+#[test]
+fn cycling_the_method_cannot_touch_a_delete_confirmation() {
+  // The verb lives in the shared `confirm` key context, so it is reachable
+  // while a DELETE modal is up. It has to be inert there rather than
+  // quietly mutating a merge that is not on screen.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_confirm_delete();
+
+  app.cycle_merge_method();
+
+  assert!(app.pending_merge().is_none());
+}
