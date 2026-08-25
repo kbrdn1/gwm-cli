@@ -14092,3 +14092,109 @@ fn a_successful_merge_closes_the_modal_and_forgets_the_target() {
   assert_eq!(app.confirm_kind(), ConfirmKind::DeleteWorktree);
   assert!(app.status.contains("merged"), "status: {}", app.status);
 }
+
+#[test]
+fn closing_the_ci_list_comes_back_to_the_view_it_was_opened_from() {
+  // Validation feedback on #551. `c` is reached from inside the rich view,
+  // so `Esc` there returning to the worktree table threw away where the
+  // reader was: re-select the row, press `I` again, find your place.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.checks = vec![gwm::github::PrCheck {
+    name: "test (ubuntu-latest)".into(),
+    outcome: gwm::github::CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+
+  app.enter_ci_checks();
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+
+  app.close_detail_overlay();
+
+  assert_eq!(app.view, View::DetailOverlay, "not all the way out to the table");
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert!(
+    app
+      .detail_overlay
+      .rows
+      .iter()
+      .any(|r| r.value.contains("worth reading")),
+    "and it is the same view, rebuilt from its own source"
+  );
+}
+
+#[test]
+fn the_ci_list_opened_from_the_table_still_closes_to_the_table() {
+  // The other half: nothing to come back to when `c` was pressed on the
+  // worktree table, and inventing a rich view there would be worse than
+  // the bug this fixes.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.checks = vec![gwm::github::PrCheck {
+    name: "test".into(),
+    outcome: gwm::github::CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+
+  app.enter_ci_checks();
+  app.close_detail_overlay();
+
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn cancelling_a_merge_started_from_the_rich_view_comes_back_to_it() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  // On the issue tab by choice, which the round trip must not undo.
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "the chosen tab survives the round trip"
+  );
+
+  // And the pin with it: a PR landing now must not promote it away.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+}
+
+#[test]
+fn a_merge_started_from_the_table_still_ends_on_the_table() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_confirm_merge();
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List);
+}

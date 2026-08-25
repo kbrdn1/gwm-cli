@@ -715,6 +715,16 @@ pub struct App {
   /// `delete_failure`: the forge's own words, kept where the decision was
   /// made rather than flashed on a status bar the reader may miss.
   merge_failure: Option<String>,
+  /// The rich view to come back to when a modal opened FROM it closes
+  /// (validation feedback on issue #551).
+  ///
+  /// `c` and `m` are reached from inside the view, so returning to the
+  /// worktree table on `Esc` throws away where the reader was: they have to
+  /// re-select the row and press `I` again to get back to the thing they
+  /// were reading. The source is kept rather than re-fetched, for the
+  /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
+  /// invalidates the cache on its way out.
+  rich_return: Option<(RichSource, bool)>,
   /// How many columns the rich view is scrolled right (issue #551).
   ///
   /// Only the rows that cannot be reflowed are wide enough to need it — a
@@ -885,6 +895,7 @@ impl App {
       confirm_kind: ConfirmKind::DeleteWorktree,
       pending_merge: None,
       merge_failure: None,
+      rich_return: None,
       rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
@@ -3285,6 +3296,9 @@ impl App {
         return;
       }
     };
+    // Before the overlay is replaced: `c` is reachable from inside the rich
+    // view, and `Esc` there should come back to it rather than to the table.
+    self.remember_rich_view();
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
@@ -3612,6 +3626,44 @@ impl App {
   /// `h` / `←` inside the rich view.
   pub fn rich_view_scroll_left(&mut self) {
     self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
+  }
+
+  /// Remember the open rich view so a child modal can come back to it.
+  ///
+  /// A no-op when the rich view is not what is on screen, which is what
+  /// makes it safe to call from `enter_ci_checks` and `enter_confirm_merge`
+  /// unconditionally: both are reachable from the worktree table too, and
+  /// from there there is nothing to come back to.
+  fn remember_rich_view(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    let from_rich = self.view == View::DetailOverlay
+      && matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr);
+    if !from_rich {
+      self.rich_return = None;
+      return;
+    }
+    self.rich_return = self.rich_overlay_source.clone().map(|s| (s, self.rich_tab_pinned));
+  }
+
+  /// Reopen the rich view a child modal was opened from, if there was one.
+  ///
+  /// `true` when it took the view back, so the caller knows not to fall
+  /// through to the worktree table.
+  fn restore_rich_view(&mut self) -> bool {
+    let Some((source, pinned)) = self.rich_return.take() else {
+      return false;
+    };
+    let width = self.rich_view_width();
+    let title = match &source {
+      RichSource::Pr(pr) => format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+      RichSource::Issue(issue) => format!("Issue #{} · {}", issue.number, issue.title),
+    };
+    self.open_rich_overlay(source, title, width);
+    // The tab the reader had chosen survives the round trip; without this a
+    // PR landing right after would promote the issue tab out from under
+    // them, which is the bug the pin exists to prevent.
+    self.rich_tab_pinned = pinned;
+    true
   }
 
   /// The URL of the open rich view's ACTIVE tab, for `y`.
@@ -4007,6 +4059,11 @@ impl App {
     self.rich_h_offset = 0;
     self.ci_overlay_checks.clear();
     self.rich_overlay_source = None;
+    // Back to the rich view when this overlay was opened from it, rather
+    // than all the way out to the table (validation feedback on #551).
+    if self.restore_rich_view() {
+      return;
+    }
     self.view = View::List;
   }
 
@@ -5797,6 +5854,7 @@ impl App {
       checks_total: pr.checks_total,
       noun: self.pr_noun_titlecase(),
     });
+    self.remember_rich_view();
     self.confirm_kind = ConfirmKind::MergePr;
     self.view = View::Confirm;
     self.confirm.reset();
@@ -5867,7 +5925,11 @@ impl App {
         let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
         self.confirm_kind = ConfirmKind::DeleteWorktree;
         self.merge_failure = None;
-        self.view = View::List;
+        // A merged PR is still the thing the reader was looking at, and the
+        // refresh below will bring its new state to the same view.
+        if !self.restore_rich_view() {
+          self.view = View::List;
+        }
         // The refresh FIRST, the message second. The PR's state and the
         // branch's divergence both changed, so the cache has to be dropped
         // or the pane keeps saying `open` — but `refresh_github_status`
@@ -6010,6 +6072,9 @@ impl App {
     self.pending_merge = None;
     self.merge_failure = None;
     self.confirm_kind = ConfirmKind::DeleteWorktree;
+    if self.restore_rich_view() {
+      return;
+    }
     self.view = View::List;
   }
 
