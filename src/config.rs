@@ -887,21 +887,32 @@ pub struct TuiConfig {
   #[serde(default = "default_status_one_line")]
   pub status_one_line: bool,
 
-  /// Where the TUI opens a worktree in the multiplexer (issue #589).
+  /// What the TUI opens in the multiplexer: a pane, a whole tab, or a
+  /// workspace (issue #608).
   ///
-  /// Read by the two call sites that ask for a pane — the `t` key and a
-  /// `[tui.macro*]` with `open_in = "mux_pane"` — and by `gwm tmux|zellij|
-  /// herdr --split`, which takes its direction from here unless
-  /// `--direction` overrides it.
+  /// Read by the two call sites that open one — the `t` key and a
+  /// `[tui.macro*]` with `open_in = "mux_pane"`. The CLI spells its own
+  /// target instead (bare is a tab, `--split` is a pane), so this key does
+  /// not reach it.
+  ///
+  /// Default `pane`, which is what `t` has always done.
+  #[serde(default)]
+  pub mux_open_in: MuxTarget,
+
+  /// Which half a mux pane takes (issue #589).
+  ///
+  /// Only meaningful under `mux_open_in = "pane"`. Also the direction
+  /// `gwm tmux|zellij|herdr --split` takes, unless `--direction` overrides
+  /// it for that invocation.
   ///
   /// Default `right`, which is a visible change for tmux and zellij users:
-  /// up to 1.9 `Split` carried no direction, so tmux fell back to `-v` and
+  /// up to 1.9 a split carried no direction, so tmux fell back to `-v` and
   /// stacked the pane. `right` is what the `--split` help has promised
   /// since it shipped ("a horizontal split of the current pane"), what
   /// herdr already hardcoded, and the half that is actually free on a wide
   /// screen. Set `down` for the pre-#589 tmux behaviour.
   #[serde(default)]
-  pub mux_pane_direction: MuxPaneDirection,
+  pub mux_pane_direction: SplitDirection,
 
   /// Give the in-TUI note editor a vim normal mode (issue #557).
   ///
@@ -916,63 +927,52 @@ pub struct TuiConfig {
   pub note_vim: bool,
 }
 
-/// Where a mux pane opens, for the TUI call sites that open one (issue
-/// #589).
+/// What a mux spawn opens (issue #608): the level of the multiplexer's own
+/// hierarchy the worktree lands in.
 ///
-/// Two directions plus an escape hatch: `window` asks for a whole tmux
-/// window / zellij tab / herdr tab instead of a split, which is what the
-/// `t` key gives someone who wants the full screen rather than half of it.
-/// The two directions are [`SplitDirection`]'s, and serialise identically,
-/// so `right` in the config is the `right` in the argv.
+/// Split off `mux_pane_direction`, which carried a `window` value that was
+/// not a direction at all. The two questions are orthogonal: this one says
+/// *what*, [`SplitDirection`] says *which half* when the answer is a pane.
 ///
 /// `kebab-case` for the same reason as [`TuiLayout`]: it keeps the
 /// serialised form equal to [`Self::label`], so a Settings-panel write-back
 /// produces a file that still loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum MuxPaneDirection {
-  /// Split side by side. The default since #589.
+pub enum MuxTarget {
+  /// Split the current pane. The default, and what `t` has always done.
   #[default]
-  Right,
-  /// Split stacked — what tmux did on its own before #589.
-  Down,
-  /// No split at all: a new window (tmux) or tab (zellij, herdr).
-  Window,
+  Pane,
+  /// A whole screen of its own: a tmux window, a zellij or herdr tab. One
+  /// thing under three names, so the value takes the majority spelling and
+  /// [`crate::multiplexer::Multiplexer::window_noun`] renders the local one.
+  Tab,
+  /// herdr's level above a tab. **herdr only**: tmux and zellij have
+  /// nothing at that level, and the builders refuse rather than quietly
+  /// open a tab, which would make this setting lie about what it did.
+  Workspace,
 }
 
-impl MuxPaneDirection {
+impl MuxTarget {
   /// Every variant, default first.
-  pub const ALL: [MuxPaneDirection; 3] = [
-    MuxPaneDirection::Right,
-    MuxPaneDirection::Down,
-    MuxPaneDirection::Window,
-  ];
+  pub const ALL: [MuxTarget; 3] = [MuxTarget::Pane, MuxTarget::Tab, MuxTarget::Workspace];
 
   /// Settings-panel label, equal to the serialised TOML spelling.
   pub const fn label(self) -> &'static str {
     match self {
-      MuxPaneDirection::Right => SplitDirection::Right.label(),
-      MuxPaneDirection::Down => SplitDirection::Down.label(),
-      MuxPaneDirection::Window => "window",
+      MuxTarget::Pane => "pane",
+      MuxTarget::Tab => "tab",
+      MuxTarget::Workspace => "workspace",
     }
   }
 
-  /// What the TUI call sites build from this.
-  pub const fn spawn_mode(self) -> SpawnMode {
+  /// What the TUI call sites build from this. `direction` is consumed only
+  /// by `Pane`; the other two targets have no half to take.
+  pub const fn spawn_mode(self, direction: SplitDirection) -> SpawnMode {
     match self {
-      MuxPaneDirection::Right => SpawnMode::Split(SplitDirection::Right),
-      MuxPaneDirection::Down => SpawnMode::Split(SplitDirection::Down),
-      MuxPaneDirection::Window => SpawnMode::Window,
-    }
-  }
-
-  /// The direction an explicit `--split` takes. `window` has none to give
-  /// and the flag has already said it wants a pane, so it falls back to the
-  /// default rather than overriding the flag the user just typed.
-  pub const fn split_direction(self) -> SplitDirection {
-    match self {
-      MuxPaneDirection::Down => SplitDirection::Down,
-      MuxPaneDirection::Right | MuxPaneDirection::Window => SplitDirection::Right,
+      MuxTarget::Pane => SpawnMode::Split(direction),
+      MuxTarget::Tab => SpawnMode::Window,
+      MuxTarget::Workspace => SpawnMode::Workspace,
     }
   }
 }
@@ -1033,7 +1033,8 @@ impl Default for TuiConfig {
       layout: TuiLayout::Compact,
       dim_unfocused: false,
       status_one_line: default_status_one_line(),
-      mux_pane_direction: MuxPaneDirection::default(),
+      mux_open_in: MuxTarget::default(),
+      mux_pane_direction: SplitDirection::default(),
       note_vim: default_note_vim(),
     }
   }

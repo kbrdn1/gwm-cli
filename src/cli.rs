@@ -4028,12 +4028,7 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool, direction: Op
     // cannot break the two forms that never needed a direction.
     (true, None) => {
       let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
-      SpawnMode::Split(
-        Config::load_for_repo(&workdir)?
-          .tui
-          .mux_pane_direction
-          .split_direction(),
-      )
+      SpawnMode::Split(Config::load_for_repo(&workdir)?.tui.mux_pane_direction)
     }
     (false, None) => SpawnMode::Window,
   };
@@ -4041,13 +4036,19 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool, direction: Op
   // workspace; without it herdr uses whichever workspace the server has
   // focused, which is a different project's window as often as not. The
   // other two backends ignore it, and so does a herdr split.
+  // The refusal is unreachable from here today — this handler never builds a
+  // `Workspace`, because the CLI spells its own target (bare is a tab, `-p`
+  // is a pane) and `--workspace` is taken by the repo-set flag (#36). It is
+  // still surfaced rather than unwrapped: the day a flag does reach it, the
+  // user gets the builder's own sentence instead of a panic.
   let argv = build_command(
     mux,
     &found.name,
     &found.path,
     mode,
     std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
-  );
+  )
+  .map_err(|why| GwmError::Other(why.to_string()))?;
   spawn_multiplexer(mux, &argv)
 }
 

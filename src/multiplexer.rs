@@ -11,6 +11,7 @@
 //! `tui/mod.rs::run_lazygit`.
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Multiplexer the user opted into via `gwm tmux …` / `gwm zellij …` /
@@ -53,9 +54,11 @@ impl Multiplexer {
 /// through `split-window -b`, and herdr 0.8.2 declares its `--direction`
 /// as `[possible values: right, down]` outright, so a fuller compass
 /// would be variants one backend could not honour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SplitDirection {
   /// Side by side. tmux `-h`, `--direction right` on zellij and herdr.
+  #[default]
   Right,
   /// Stacked. tmux `-v`, `--direction down` on zellij and herdr.
   Down,
@@ -88,13 +91,29 @@ impl SplitDirection {
 }
 
 /// How to open the worktree inside the multiplexer.
-/// `Window`   = new tmux window / zellij tab / herdr tab (full screen real estate).
-/// `Split(d)` = split the current pane towards `d` (the `-p` flag — keeps both views visible).
+///
+/// * `Split(d)`  = split the current pane towards `d` (the `-p` flag — keeps
+///   both views visible).
+/// * `Window`    = a whole screen of its own: a tmux **window**, a zellij or
+///   herdr **tab**. One thing under three names, which is why the variant
+///   keeps tmux's word (it is also the verb, `new-window`) while
+///   [`Multiplexer::window_noun`] renders the user's.
+/// * `Workspace` = herdr's level above a tab (issue #608). tmux and zellij
+///   have nothing at that level, so their builders refuse rather than open
+///   something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
   Window,
   Split(SplitDirection),
+  Workspace,
 }
+
+/// The two refusals a target can produce (issue #608). They are the text
+/// the TUI's status bar shows and the CLI's error carries, so they name the
+/// backend rather than the enum: a user who set `mux_open_in = "workspace"`
+/// needs to know which of their three multiplexers cannot honour it.
+const TMUX_HAS_NO_WORKSPACE: &str = "tmux has no workspace level: herdr is the only backend with one";
+const ZELLIJ_HAS_NO_WORKSPACE: &str = "zellij has no workspace level: herdr is the only backend with one";
 
 /// Build `tmux new-window -n <name> -c <path>` (Window) or
 /// `tmux split-window -h|-v -c <path>` (Split). `<name>` is the worktree's
@@ -105,9 +124,10 @@ pub enum SpawnMode {
 /// without one it falls back to `-v` and stacks the pane, and that is what
 /// `--split` did up to 1.9 while its own `--help` promised "a horizontal
 /// split of the current pane" (issue #589).
-pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<String> {
+pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Result<Vec<String>, &'static str> {
   let path_str = path.display().to_string();
-  match mode {
+  Ok(match mode {
+    SpawnMode::Workspace => return Err(TMUX_HAS_NO_WORKSPACE),
     SpawnMode::Window => vec![
       "tmux".into(),
       "new-window".into(),
@@ -123,7 +143,7 @@ pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Strin
       "-c".into(),
       path_str,
     ],
-  }
+  })
 }
 
 /// Build `zellij action new-tab --name <name> --cwd <path>` (Window) or
@@ -136,9 +156,10 @@ pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Strin
 /// space"), so passing it is what makes the choice gwm's rather than the
 /// layout's. It conflicts with `--floating` / `--in-place`, neither of
 /// which gwm passes.
-pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<String> {
+pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Result<Vec<String>, &'static str> {
   let path_str = path.display().to_string();
-  match mode {
+  Ok(match mode {
+    SpawnMode::Workspace => return Err(ZELLIJ_HAS_NO_WORKSPACE),
     SpawnMode::Window => vec![
       "zellij".into(),
       "action".into(),
@@ -157,7 +178,7 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
       "--cwd".into(),
       path_str,
     ],
-  }
+  })
 }
 
 /// Build `herdr tab create --label <name> --cwd <path>` (Window) or
@@ -194,9 +215,29 @@ pub fn build_zellij_command(name: &str, path: &Path, mode: SpawnMode) -> Vec<Str
 /// `Split` mode: passing it bare would be read as the optional `[PANE_ID]`
 /// positional and split someone else's pane. `workspace` is likewise
 /// ignored there.
-pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode, workspace: Option<&str>) -> Vec<String> {
+pub fn build_herdr_command(
+  name: &str,
+  path: &Path,
+  mode: SpawnMode,
+  workspace: Option<&str>,
+) -> Result<Vec<String>, &'static str> {
   let path_str = path.display().to_string();
-  match mode {
+  Ok(match mode {
+    // `herdr workspace create` is `tab create` minus the `--workspace` it
+    // would be creating, and it is the one target the other two backends
+    // cannot match (issue #608). Measured on 0.8.2: `--cwd`, `--label`,
+    // `--env`, `--focus` / `--no-focus`. `--focus` is passed for the same
+    // reason as on a tab: without it the workspace comes back unfocused.
+    SpawnMode::Workspace => vec![
+      "herdr".into(),
+      "workspace".into(),
+      "create".into(),
+      "--label".into(),
+      name.into(),
+      "--cwd".into(),
+      path_str,
+      "--focus".into(),
+    ],
     SpawnMode::Window => {
       let mut argv = vec!["herdr".into(), "tab".into(), "create".into()];
       if let Some(ws) = workspace.filter(|ws| !ws.is_empty()) {
@@ -223,7 +264,7 @@ pub fn build_herdr_command(name: &str, path: &Path, mode: SpawnMode, workspace: 
       path_str,
       "--focus".into(),
     ],
-  }
+  })
 }
 
 /// Resolve which multiplexer the process is inside, in the order tmux,
@@ -268,7 +309,7 @@ pub fn build_command(
   path: &Path,
   mode: SpawnMode,
   workspace: Option<&str>,
-) -> Vec<String> {
+) -> Result<Vec<String>, &'static str> {
   match mux {
     Multiplexer::Tmux => build_tmux_command(name, path, mode),
     Multiplexer::Zellij => build_zellij_command(name, path, mode),
@@ -284,6 +325,7 @@ pub fn spawn_noun(mux: Multiplexer, mode: SpawnMode) -> &'static str {
   match mode {
     SpawnMode::Split(_) => "pane",
     SpawnMode::Window => mux.window_noun(),
+    SpawnMode::Workspace => "workspace",
   }
 }
 
@@ -297,16 +339,23 @@ pub fn spawn_noun(mux: Multiplexer, mode: SpawnMode) -> &'static str {
 /// * `zellij action new-pane -- <cmd>` takes one; `zellij action new-tab`
 ///   does not, so `mux_pane_direction = "window"` has nothing to hand a
 ///   zellij macro (#589).
-/// * neither herdr verb takes one. Running a command in a herdr pane is
+/// * neither herdr verb takes one, `workspace create` included (#608).
+///   Running a command in a herdr pane is
 ///   `herdr pane run <pane-id> <cmd>`, and the id only comes back in the
 ///   JSON `pane split` prints, so it is two processes and a parse, not an
 ///   argv (#599).
+///
+/// This answers "can this backend RUN a command", not "can it open this
+/// target at all" — the builders answer the second, with an `Err`. A macro
+/// asks both, and the caller checks this one first so its status names the
+/// macro's problem rather than the target's.
 ///
 /// Splitting anyway would open an empty pane and silently drop the macro,
 /// so the caller falls back to the PTY overlay and puts the reason in the
 /// status bar.
 pub const fn macro_refusal(mux: Multiplexer, mode: SpawnMode) -> Option<&'static str> {
   match (mux, mode) {
+    (Multiplexer::Herdr, SpawnMode::Workspace) => Some("herdr workspaces take no command"),
     (Multiplexer::Herdr, _) => Some("herdr panes take no command"),
     (Multiplexer::Zellij, SpawnMode::Window) => Some("zellij tabs take no command"),
     _ => None,

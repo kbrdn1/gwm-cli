@@ -1902,45 +1902,86 @@ fn mux_pane_with_no_multiplexer_names_all_three_variables() {
 }
 
 #[test]
-fn the_mux_pane_knob_picks_the_mode_the_t_key_builds() {
-  // `t` reads `[tui] mux_pane_direction` (#589). The spawn itself is not
-  // reachable from a test (it shells out to a multiplexer that is not on the
-  // runner), so this pins the two pure steps the key runs on: the config
-  // value it resolves, and the argv that value produces for the backend the
-  // cascade would have picked.
-  use gwm::config::MuxPaneDirection;
+fn the_mux_knobs_pick_the_mode_the_t_key_builds() {
+  // `t` reads `[tui] mux_open_in` and `mux_pane_direction` (#608 / #589).
+  // The spawn itself is not reachable from a test (it shells out to a
+  // multiplexer that is not on the runner), so this pins the pure steps the
+  // key runs on: the two config values it resolves, and the argv they
+  // produce for the backend the cascade would have picked.
+  use gwm::config::MuxTarget;
   use gwm::multiplexer::{build_command, spawn_noun, Multiplexer, SpawnMode, SplitDirection};
 
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("feat-7-foo")];
   app.list_state.select(Some(0));
   let path = app.worktrees[0].path.clone();
+  let mode_of = |app: &gwm::tui::App| app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
 
   // Default: a pane on the right, where 1.9 and earlier left the choice to
   // the backend and tmux answered "below".
-  assert_eq!(app.config.tui.mux_pane_direction, MuxPaneDirection::Right);
-  let mode = app.config.tui.mux_pane_direction.spawn_mode();
+  assert_eq!(app.config.tui.mux_open_in, MuxTarget::Pane);
+  assert_eq!(app.config.tui.mux_pane_direction, SplitDirection::Right);
+  let mode = mode_of(&app);
   assert_eq!(mode, SpawnMode::Split(SplitDirection::Right));
-  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None);
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None).unwrap();
   assert_eq!(argv[1], "split-window");
   assert_eq!(argv[2], "-h", "the default must reach tmux as `-h`, got: {:?}", argv);
   assert_eq!(spawn_noun(Multiplexer::Tmux, mode), "pane");
 
-  app.config.tui.mux_pane_direction = MuxPaneDirection::Down;
-  let mode = app.config.tui.mux_pane_direction.spawn_mode();
-  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None);
+  app.config.tui.mux_pane_direction = SplitDirection::Down;
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode_of(&app), None).unwrap();
   assert_eq!(argv[2], "-v", "`down` must reach tmux as `-v`, got: {:?}", argv);
 
-  // `window` is the escape hatch: `t` opens a whole window/tab instead of
-  // half a screen, and the status bar has to say so.
-  app.config.tui.mux_pane_direction = MuxPaneDirection::Window;
-  let mode = app.config.tui.mux_pane_direction.spawn_mode();
+  // `tab` is the whole-screen target: a tmux window, a zellij or herdr tab.
+  // The direction is still set and must be ignored rather than leak.
+  app.config.tui.mux_open_in = MuxTarget::Tab;
+  let mode = mode_of(&app);
   assert_eq!(mode, SpawnMode::Window);
-  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None);
-  assert_eq!(argv[1], "new-window", "`window` must not split, got: {:?}", argv);
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None).unwrap();
+  assert_eq!(argv[1], "new-window", "`tab` must not split, got: {:?}", argv);
+  assert!(
+    !argv.iter().any(|a| a == "-v" || a == "-h"),
+    "a leftover direction must not reach a window, got: {:?}",
+    argv
+  );
   assert_eq!(spawn_noun(Multiplexer::Tmux, mode), "window");
   assert_eq!(spawn_noun(Multiplexer::Zellij, mode), "tab");
   assert_eq!(spawn_noun(Multiplexer::Herdr, mode), "tab");
+
+  // `workspace` is herdr's level and nobody else's: the other two refuse
+  // instead of opening a tab, so the setting cannot describe something that
+  // did not happen (#608).
+  app.config.tui.mux_open_in = MuxTarget::Workspace;
+  let mode = mode_of(&app);
+  assert_eq!(mode, SpawnMode::Workspace);
+  let argv = build_command(Multiplexer::Herdr, "feat-7-foo", &path, mode, None).unwrap();
+  assert_eq!(argv[1], "workspace");
+  assert_eq!(argv[2], "create");
+  assert_eq!(spawn_noun(Multiplexer::Herdr, mode), "workspace");
+  for mux in [Multiplexer::Tmux, Multiplexer::Zellij] {
+    assert!(
+      build_command(mux, "feat-7-foo", &path, mode, None).is_err(),
+      "{mux:?} has no workspace level to open"
+    );
+  }
+}
+
+#[test]
+fn the_t_key_puts_a_refused_target_on_the_status_bar() {
+  // The refusal has to reach the user: `t` under `mux_open_in = "workspace"`
+  // inside tmux opens nothing, and a silent no-op reads as a broken key.
+  use gwm::config::MuxTarget;
+
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-7-foo")];
+  app.list_state.select(Some(0));
+  app.config.tui.mux_open_in = MuxTarget::Workspace;
+  app.open_in_mux_pane_from(Some("/tmp/tmux-501/default,1,0".into()), None, None, None);
+  assert!(
+    app.status.contains("tmux") && app.status.contains("workspace"),
+    "the status must name the backend and the level it cannot open, got: {}",
+    app.status
+  );
 }
 
 #[test]

@@ -5542,19 +5542,32 @@ impl App {
     };
     let path = w.path.clone();
     let name = w.name.clone();
-    // `[tui] mux_pane_direction` says which half the pane takes, or asks
-    // for a whole window/tab instead (#589). It used to be a Split with no
+    // `[tui] mux_open_in` says what to open and `mux_pane_direction` which
+    // half a pane takes (#608 / #589). Before them this was a Split with no
     // direction at all, which left the answer to each backend: tmux stacked,
     // zellij took the biggest free space, herdr went right.
     //
     // Herdr comes last in the cascade, so a user running gwm inside both it
     // and tmux keeps what they had before #588.
-    let mode = self.config.tui.mux_pane_direction.spawn_mode();
+    let mode = self
+      .config
+      .tui
+      .mux_open_in
+      .spawn_mode(self.config.tui.mux_pane_direction);
     let Some(mux) = crate::multiplexer::detect_multiplexer(tmux, zellij, herdr) else {
       self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
     };
-    let cmd = crate::multiplexer::build_command(mux, &name, &path, mode, workspace.as_deref());
+    // A target the backend has no level for (`workspace` outside herdr) is
+    // refused here rather than downgraded to a tab: the setting saying one
+    // thing while the screen shows another is the failure worth avoiding.
+    let cmd = match crate::multiplexer::build_command(mux, &name, &path, mode, workspace.as_deref()) {
+      Ok(cmd) => cmd,
+      Err(why) => {
+        self.status = why.into();
+        return;
+      }
+    };
     let bin = cmd[0].as_str();
     // `output()` rather than `spawn()`: both pipes have to be captured
     // because this runs while ratatui owns the screen, and a child that

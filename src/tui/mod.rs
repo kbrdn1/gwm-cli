@@ -1452,7 +1452,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
   // review on PR #292), rather than no-oping.
   let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
     let label = format!("macro{}", n);
-    let mode = app.config.tui.mux_pane_direction.spawn_mode();
+    let mode = app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
     match detect_multiplexer(
       std::env::var("TMUX").ok(),
       std::env::var("ZELLIJ").ok(),
@@ -1464,22 +1464,24 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
       // Opening the pane anyway would run nothing in it and drop the macro
       // silently, so the PTY overlay stays the honest fallback and the
       // status bar says which backend said no.
-      Some(mux) => match macro_refusal(mux, mode) {
-        Some(why) => {
-          app.status = format!("macro{}: {}; falling back to PTY overlay", n, why);
-          None
+      // Two different refusals, asked in this order: `macro_refusal` is
+      // about running a command at all, the builder about opening the
+      // target. A macro's own problem is the more useful thing to name when
+      // both apply.
+      Some(mux) => {
+        let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
+        let built = match macro_refusal(mux, mode) {
+          Some(why) => Err(why),
+          None => build_command(mux, &label, &path, mode, ws.as_deref()).map(|argv| (mux, argv)),
+        };
+        match built {
+          Ok(spawn) => Some(spawn),
+          Err(why) => {
+            app.status = format!("macro{}: {}; falling back to PTY overlay", n, why);
+            None
+          }
         }
-        None => Some((
-          mux,
-          build_command(
-            mux,
-            &label,
-            &path,
-            mode,
-            std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
-          ),
-        )),
-      },
+      }
       None => {
         app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
         None

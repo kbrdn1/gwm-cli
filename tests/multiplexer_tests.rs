@@ -20,7 +20,7 @@ fn tmux_new_window_uses_new_window_subverb() {
   // labels the window (so it's discoverable in tmux's status bar) and
   // `-c` sets the new window's cwd, which is what the user expects when
   // running `gwm tmux <pattern>`.
-  let argv = build_tmux_command("feat-99-auth", Path::new("/tmp/wt/feat-99-auth"), SpawnMode::Window);
+  let argv = build_tmux_command("feat-99-auth", Path::new("/tmp/wt/feat-99-auth"), SpawnMode::Window).unwrap();
   assert_eq!(argv[0], "tmux");
   assert_eq!(argv[1], "new-window");
   // `-n <name>` and `-c <path>` are both required.
@@ -39,7 +39,8 @@ fn tmux_split_pane_uses_split_window_subverb() {
     "feat-12-x",
     Path::new("/tmp/wt/feat-12-x"),
     SpawnMode::Split(SplitDirection::Right),
-  );
+  )
+  .unwrap();
   assert_eq!(argv[0], "tmux");
   assert_eq!(argv[1], "split-window");
   let has_c = argv.windows(2).any(|w| w[0] == "-c" && w[1] == "/tmp/wt/feat-12-x");
@@ -67,7 +68,7 @@ fn zellij_new_tab_uses_action_new_tab() {
   // Zellij is driven by `zellij action <verb>`. The new-tab verb supports
   // both `--name` and `--cwd` since 0.40 — the latter is what makes the
   // tab open inside the worktree.
-  let argv = build_zellij_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window);
+  let argv = build_zellij_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window).unwrap();
   assert_eq!(argv[0], "zellij");
   assert_eq!(argv[1], "action");
   assert_eq!(argv[2], "new-tab");
@@ -85,7 +86,8 @@ fn zellij_split_pane_uses_action_new_pane() {
     "feat-7-foo",
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Split(SplitDirection::Right),
-  );
+  )
+  .unwrap();
   assert_eq!(argv[0], "zellij");
   assert_eq!(argv[1], "action");
   assert_eq!(argv[2], "new-pane");
@@ -113,7 +115,8 @@ fn herdr_new_tab_uses_tab_create() {
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Window,
     Some("w2K"),
-  );
+  )
+  .unwrap();
   assert_eq!(argv[0], "herdr");
   assert_eq!(argv[1], "tab");
   assert_eq!(argv[2], "create");
@@ -136,7 +139,8 @@ fn herdr_new_tab_asks_for_the_focus_tmux_and_zellij_give_for_free() {
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Window,
     Some("w2K"),
-  );
+  )
+  .unwrap();
   assert!(
     argv.iter().any(|a| a == "--focus"),
     "tab create must focus, got: {:?}",
@@ -147,7 +151,8 @@ fn herdr_new_tab_asks_for_the_focus_tmux_and_zellij_give_for_free() {
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Split(SplitDirection::Right),
     None,
-  );
+  )
+  .unwrap();
   assert!(
     argv.iter().any(|a| a == "--focus"),
     "pane split must focus, got: {:?}",
@@ -168,7 +173,8 @@ fn herdr_new_tab_targets_the_callers_workspace() {
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Window,
     Some("w2K"),
-  );
+  )
+  .unwrap();
   let has_ws = argv.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w2K");
   assert!(has_ws, "expected `--workspace w2K` in argv, got: {:?}", argv);
 }
@@ -178,7 +184,7 @@ fn herdr_new_tab_omits_the_workspace_flag_when_the_id_is_unknown() {
   // Outside a managed pane there is no `$HERDR_WORKSPACE_ID` to pass, and
   // `--workspace ""` is an argument herdr would have to reject. Falling back
   // to herdr's own choice of workspace beats failing the whole command.
-  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window, None);
+  let argv = build_herdr_command("feat-7-foo", Path::new("/tmp/wt/feat-7-foo"), SpawnMode::Window, None).unwrap();
   assert!(
     !argv.iter().any(|a| a == "--workspace"),
     "no workspace id means no flag, got: {:?}",
@@ -189,7 +195,8 @@ fn herdr_new_tab_omits_the_workspace_flag_when_the_id_is_unknown() {
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Window,
     Some(""),
-  );
+  )
+  .unwrap();
   assert!(
     !argv.iter().any(|a| a == "--workspace"),
     "an empty workspace id is not an id, got: {:?}",
@@ -209,7 +216,8 @@ fn herdr_split_pane_uses_pane_split_with_direction() {
     Path::new("/tmp/wt/feat-7-foo"),
     SpawnMode::Split(SplitDirection::Right),
     None,
-  );
+  )
+  .unwrap();
   assert_eq!(argv[0], "herdr");
   assert_eq!(argv[1], "pane");
   assert_eq!(argv[2], "split");
@@ -317,12 +325,12 @@ fn tmux_translates_the_direction_into_h_or_v() {
   // `-h` is the HORIZONTAL split, and it puts the new pane to the RIGHT.
   // Getting this pair backwards is silent — both flags are valid, so the
   // only symptom is a pane in the wrong half.
-  let right = build_tmux_command("feat-7-foo", path(), SpawnMode::Split(SplitDirection::Right));
+  let right = build_tmux_command("feat-7-foo", path(), SpawnMode::Split(SplitDirection::Right)).unwrap();
   assert_eq!(right[2], "-h", "right is tmux's horizontal split, got: {:?}", right);
-  let down = build_tmux_command("feat-7-foo", path(), SpawnMode::Split(SplitDirection::Down));
+  let down = build_tmux_command("feat-7-foo", path(), SpawnMode::Split(SplitDirection::Down)).unwrap();
   assert_eq!(down[2], "-v", "down is tmux's vertical split, got: {:?}", down);
   // A window takes neither: `tmux new-window -h` is an error, not a hint.
-  let window = build_tmux_command("feat-7-foo", path(), SpawnMode::Window);
+  let window = build_tmux_command("feat-7-foo", path(), SpawnMode::Window).unwrap();
   assert!(
     !window.iter().any(|a| a == "-h" || a == "-v"),
     "new-window must carry no split flag, got: {:?}",
@@ -336,12 +344,12 @@ fn zellij_passes_the_direction_it_would_otherwise_guess() {
   // will try to use the biggest available space" — a layout-dependent
   // answer, which is exactly what #589 takes away from it.
   for dir in SplitDirection::ALL {
-    let argv = build_zellij_command("feat-7-foo", path(), SpawnMode::Split(dir));
+    let argv = build_zellij_command("feat-7-foo", path(), SpawnMode::Split(dir)).unwrap();
     let has_dir = argv.windows(2).any(|w| w[0] == "--direction" && w[1] == dir.label());
     assert!(has_dir, "expected `--direction {}`, got: {:?}", dir.label(), argv);
   }
   // `new-tab` has no direction to take.
-  let argv = build_zellij_command("feat-7-foo", path(), SpawnMode::Window);
+  let argv = build_zellij_command("feat-7-foo", path(), SpawnMode::Window).unwrap();
   assert!(
     !argv.iter().any(|a| a == "--direction"),
     "new-tab must carry no direction, got: {:?}",
@@ -352,7 +360,7 @@ fn zellij_passes_the_direction_it_would_otherwise_guess() {
 #[test]
 fn herdr_passes_the_direction_it_used_to_hardcode() {
   for dir in SplitDirection::ALL {
-    let argv = build_herdr_command("feat-7-foo", path(), SpawnMode::Split(dir), None);
+    let argv = build_herdr_command("feat-7-foo", path(), SpawnMode::Split(dir), None).unwrap();
     let has_dir = argv.windows(2).any(|w| w[0] == "--direction" && w[1] == dir.label());
     assert!(has_dir, "expected `--direction {}`, got: {:?}", dir.label(), argv);
   }
@@ -382,6 +390,86 @@ fn a_herdr_split_ignores_the_workspace_id_in_either_direction() {
       dir.label()
     );
   }
+}
+
+// --------------------------------------------------------------------------
+// the workspace target (#608)
+// --------------------------------------------------------------------------
+//
+// herdr's hierarchy is workspace > tab > pane and gwm could only reach the
+// bottom two. tmux and zellij stop at the tab (window), so the third target
+// is the one place the three backends are not interchangeable.
+
+#[test]
+fn herdr_opens_a_workspace_of_its_own() {
+  // `workspace create` is `tab create` minus the `--workspace` it would be
+  // creating. Measured on herdr 0.8.2: `--cwd`, `--label`, `--env`,
+  // `--focus` / `--no-focus`.
+  let argv = build_herdr_command("feat-7-foo", path(), SpawnMode::Workspace, None).unwrap();
+  assert_eq!(argv[0], "herdr");
+  assert_eq!(argv[1], "workspace");
+  assert_eq!(argv[2], "create");
+  let has_label = argv.windows(2).any(|w| w[0] == "--label" && w[1] == "feat-7-foo");
+  let has_cwd = argv.windows(2).any(|w| w[0] == "--cwd" && w[1] == "/tmp/wt/feat-7-foo");
+  assert!(has_label, "expected `--label feat-7-foo`, got: {:?}", argv);
+  assert!(has_cwd, "expected `--cwd /tmp/wt/feat-7-foo`, got: {:?}", argv);
+  // Same reason as `tab create`: without it the workspace comes back
+  // `"focused": false` and the worktree opens where the user cannot see it.
+  assert!(
+    argv.iter().any(|a| a == "--focus"),
+    "workspace create must focus, got: {:?}",
+    argv
+  );
+  // The workspace IS the thing being created, so there is no parent id to
+  // pass. A `--workspace` here would be an argument herdr has no arm for.
+  assert!(
+    !argv.iter().any(|a| a == "--workspace"),
+    "a workspace has no parent workspace, got: {:?}",
+    argv
+  );
+  // A workspace id is meaningless on this verb, and passing one must not
+  // change what gets built.
+  assert_eq!(
+    build_herdr_command("feat-7-foo", path(), SpawnMode::Workspace, Some("w2K")).unwrap(),
+    argv,
+    "a workspace id must make no difference to `workspace create`"
+  );
+  assert!(
+    !argv.iter().any(|a| a == "--direction"),
+    "a workspace is not a split, got: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn only_herdr_has_a_workspace_level_and_the_others_say_so() {
+  // The refusal is the point of #608: a tmux or zellij that quietly opened
+  // a window instead would leave `mux_open_in = "workspace"` describing
+  // something that did not happen. The message names the backend that
+  // cannot, and the one that can, because the setting is global while the
+  // capability is not.
+  for (mux, build) in [
+    ("tmux", build_tmux_command("feat-7-foo", path(), SpawnMode::Workspace)),
+    (
+      "zellij",
+      build_zellij_command("feat-7-foo", path(), SpawnMode::Workspace),
+    ),
+  ] {
+    let why = build.expect_err("neither backend has a workspace level");
+    assert!(why.contains(mux), "the refusal must name {mux}, got: {why}");
+    assert!(
+      why.contains("herdr"),
+      "the refusal must name the backend that can: {why}"
+    );
+  }
+  assert!(
+    build_herdr_command("feat-7-foo", path(), SpawnMode::Workspace, None).is_ok(),
+    "herdr is the backend the target exists for"
+  );
+  // And the refusal is per target, not per backend: tmux still opens the
+  // other two.
+  assert!(build_tmux_command("feat-7-foo", path(), SpawnMode::Window).is_ok());
+  assert!(build_tmux_command("feat-7-foo", path(), SpawnMode::Split(SplitDirection::Right)).is_ok());
 }
 
 // --------------------------------------------------------------------------
@@ -458,6 +546,13 @@ fn build_command_dispatches_to_the_matching_backend() {
     build_herdr_command("feat-7-foo", path(), SpawnMode::Window, Some("w2K")),
     "the workspace id must reach `tab create`"
   );
+  // The dispatcher forwards the refusal rather than turning it into a
+  // different argv (#608).
+  assert!(
+    build_command(Multiplexer::Zellij, "feat-7-foo", path(), SpawnMode::Workspace, None).is_err(),
+    "a target zellij has no level for must come back as a refusal"
+  );
+  assert!(build_command(Multiplexer::Herdr, "feat-7-foo", path(), SpawnMode::Workspace, None).is_ok());
 }
 
 // --------------------------------------------------------------------------
@@ -477,10 +572,17 @@ fn a_macro_is_refused_by_the_backends_with_no_trailing_command_form() {
     );
   }
   // `zellij action new-tab` takes no command either, which only became
-  // reachable when `mux_pane_direction = "window"` shipped (#589).
+  // reachable when the tab target shipped (#589 / #608).
   assert!(
     macro_refusal(Multiplexer::Zellij, SpawnMode::Window).is_some(),
     "a zellij tab carries no macro command"
+  );
+  // A workspace is refused for its own reason, and the message says which
+  // level it is talking about rather than reusing the pane sentence (#608).
+  let why = macro_refusal(Multiplexer::Herdr, SpawnMode::Workspace).expect("no trailing command there either");
+  assert!(
+    why.contains("workspace"),
+    "the refusal must name the level it refused, got: {why}"
   );
 }
 

@@ -156,8 +156,8 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → layout / dim unfocused / status one line / note vim / mux pane
-  // opens / sidebar position / sidebar layout / clipboard / open / countdown
+  // Tui tab → layout / dim unfocused / status one line / note vim / mux
+  // opens in / mux pane side / sidebar position / sidebar layout / clipboard / open / countdown
   // / auto refresh in order. `layout` leads since #545: it is the structural
   // choice the rest of the tab refines, and the boolean knobs (#545, #547,
   // #557) sit right under it.
@@ -169,6 +169,8 @@ fn selected_field_follows_the_tab() {
   assert_eq!(panel.selected_field(), Some(SettingField::StatusOneLine));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::NoteVim));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::MuxOpenIn));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::MuxPaneDirection));
   panel.select_next();
@@ -535,6 +537,7 @@ fn every_choice_is_a_value_the_config_can_load_back() {
     SettingField::SidebarPosition,
     SettingField::SidebarOrientation,
     SettingField::Clipboard,
+    SettingField::MuxOpenIn,
     SettingField::MuxPaneDirection,
     SettingField::OpenMode,
   ] {
@@ -569,7 +572,8 @@ fn sidebar_choice_lists_cover_every_variant() {
   // that is the exhaustive `match` in `label()`, which fails to compile on a new
   // variant and forces a visit to the `ALL` right above it. Closing the gap
   // properly would need a derive (strum); not worth a dependency for two enums.
-  use gwm::config::{ClipboardMode, MuxPaneDirection, SidebarOrientation, SidebarPosition};
+  use gwm::config::{ClipboardMode, MuxTarget, SidebarOrientation, SidebarPosition};
+  use gwm::multiplexer::SplitDirection;
 
   for o in SidebarOrientation::ALL {
     assert!(
@@ -597,7 +601,20 @@ fn sidebar_choice_lists_cover_every_variant() {
     "no stale choice left behind"
   );
 
-  for d in MuxPaneDirection::ALL {
+  for t in MuxTarget::ALL {
+    assert!(
+      SettingField::MuxOpenIn.choices().contains(&t.label()),
+      "{t:?} ({}) is missing from the mux target choices",
+      t.label()
+    );
+  }
+  assert_eq!(
+    SettingField::MuxOpenIn.choices().len(),
+    MuxTarget::ALL.len(),
+    "no stale choice left behind"
+  );
+
+  for d in SplitDirection::ALL {
     assert!(
       SettingField::MuxPaneDirection.choices().contains(&d.label()),
       "{d:?} ({}) is missing from the mux pane direction choices",
@@ -606,7 +623,7 @@ fn sidebar_choice_lists_cover_every_variant() {
   }
   assert_eq!(
     SettingField::MuxPaneDirection.choices().len(),
-    MuxPaneDirection::ALL.len(),
+    SplitDirection::ALL.len(),
     "no stale choice left behind"
   );
 
