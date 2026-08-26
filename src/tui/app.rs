@@ -2201,7 +2201,7 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
-        TaskMsg::Commits(generation, path, limit, lines) => {
+        TaskMsg::Commits(generation, path, limit, lines, loaded) => {
           if !self.tasks.complete(TaskKind::Commits, generation) {
             continue;
           }
@@ -2212,7 +2212,7 @@ impl App {
           if self.commits.path.as_deref() != Some(path.as_path()) || self.commits.limit != limit {
             continue;
           }
-          self.commits.load(lines);
+          self.commits.load(lines, loaded);
           applied = true;
         }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
@@ -2897,15 +2897,21 @@ impl App {
     let selected = self.selected().cloned();
     let target = selected.as_ref().map(|w| w.path.as_path());
     // Coalescing is only sound while the in-flight read is for the SAME
-    // worktree at the SAME limit (the #592 lesson, PR #612). Otherwise the
+    // worktree, at the SAME limit, on the SAME tip (the #592 lesson, PR
+    // #612; the tip added by a Codex review on PR #614 — a commit landing
+    // while the overlay is closed mid-read would otherwise be swallowed by
+    // a worker holding the old `head`). Otherwise the
     // request would come back `None` because the slot is still the old
     // read's, no worker would exist for this one, and the old payload is
     // dropped by the checks in the drain — leaving the loader up with
     // nothing left to clear it.
-    if self.commits.loading && (self.commits.path.as_deref() != target || self.commits.limit != COMMITS_PAGE) {
+    let tip = selected.as_ref().and_then(|w| w.head.clone());
+    if self.commits.loading
+      && (self.commits.path.as_deref() != target || self.commits.limit != COMMITS_PAGE || self.commits.head != tip)
+    {
       self.tasks.invalidate(TaskKind::Commits);
     }
-    self.commits.begin(target, COMMITS_PAGE);
+    self.commits.begin(target, COMMITS_PAGE, tip);
     self.view = View::Commits;
     if let Some(w) = selected {
       self.request_commits_read(w, COMMITS_PAGE);
@@ -2978,8 +2984,8 @@ impl App {
     let theme = self.theme;
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let lines = crate::tui::ui::recent_commits_lines(&w, limit, &theme);
-      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, lines));
+      let (lines, loaded) = crate::tui::ui::recent_commits_listing(&w, limit, &theme);
+      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, lines, loaded));
     });
   }
 

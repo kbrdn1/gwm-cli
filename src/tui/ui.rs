@@ -2201,23 +2201,45 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+  recent_commits_listing(w, limit, theme).0
+}
+
+/// As [`recent_commits_lines`], plus the number of commits the rows
+/// describe.
+///
+/// The two are not the same number and the difference is not cosmetic: an
+/// unborn HEAD, an empty history or a failed read all paint exactly ONE
+/// sentinel row, so a caller inferring the count from `lines.len()` reads
+/// them as a repository with one commit (Codex review, PR #614). The
+/// commit-listing overlay (issue #593) titles itself with this count and
+/// decides whether a page is full from it, so it needs the real one; the
+/// sidebar pane only paints rows and keeps the thinner entry point.
+pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
   match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
+      let count = rows.len();
       let graphs = super::commit_graph::render_commits(&rows, theme);
-      rows
+      let lines = rows
         .into_iter()
         .zip(graphs)
         .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
-        .collect()
+        .collect();
+      (lines, count)
     }
-    Ok(_) => vec![Line::from(Span::styled(
-      "(no commits)".to_string(),
-      Style::default().fg(theme.muted),
-    ))],
-    Err(e) => vec![Line::from(Span::styled(
-      format!("! {}", e),
-      Style::default().fg(theme.prunable),
-    ))],
+    Ok(_) => (
+      vec![Line::from(Span::styled(
+        "(no commits)".to_string(),
+        Style::default().fg(theme.muted),
+      ))],
+      0,
+    ),
+    Err(e) => (
+      vec![Line::from(Span::styled(
+        format!("! {}", e),
+        Style::default().fg(theme.prunable),
+      ))],
+      0,
+    ),
   }
 }
 

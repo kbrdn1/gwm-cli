@@ -64,10 +64,10 @@ pub struct CommitsModal {
   pub lines: Vec<Line<'static>>,
   /// The limit [`Self::lines`] was read at.
   pub limit: usize,
-  /// Rows actually returned. `recent_commits_lines` paints exactly one row
-  /// per commit, so this IS the commit count; the `(no commits)` and error
-  /// sentinels are a single row, far under a page, which reads as an
-  /// exhausted history and correctly disables paging on them.
+  /// Commits the listing describes. NOT `lines.len()`: an unborn HEAD, an
+  /// empty history and a failed read each paint one sentinel row, which
+  /// would read as a repository with one commit (Codex review, PR #614).
+  /// [`super::super::ui::recent_commits_listing`] carries the real number.
   pub loaded: usize,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
@@ -81,6 +81,14 @@ pub struct CommitsModal {
   /// The worktree [`Self::lines`] describe, so a payload for a selection the
   /// user has navigated away from can be dropped instead of shown.
   pub path: Option<PathBuf>,
+  /// The branch tip the in-flight (or loaded) read was taken at.
+  ///
+  /// Part of a read's identity alongside the path and the limit: close the
+  /// overlay mid-read, land a commit, reopen on the same worktree, and
+  /// path and limit both still match, so the reopen would ride on a worker
+  /// holding the OLD tip and quietly show a log missing the new commits
+  /// (Codex review, PR #614).
+  pub head: Option<String>,
 }
 
 impl CommitsModal {
@@ -93,13 +101,14 @@ impl CommitsModal {
   /// listing, rewind the scroll, and show the loader until [`Self::load`]
   /// lands. Called on every open, so a previously-scrolled visit starts
   /// fresh and a stale listing is never mistaken for the current one.
-  pub fn begin(&mut self, path: Option<&Path>, limit: usize) {
+  pub fn begin(&mut self, path: Option<&Path>, limit: usize, head: Option<String>) {
     self.lines.clear();
     self.loaded = 0;
     self.limit = limit;
     self.scroll = 0;
     self.max_scroll = 0;
     self.path = path.map(Path::to_path_buf);
+    self.head = head;
     // With nothing selected there is nothing to wait for.
     self.loading = path.is_some();
   }
@@ -113,11 +122,12 @@ impl CommitsModal {
     self.loading = true;
   }
 
-  /// Install the worker's payload and clear the loader. The scroll cursor
+  /// Install the worker's payload and clear the loader. `loaded` is the
+  /// commit count the read reported, not `lines.len()`. The scroll cursor
   /// is whatever [`Self::begin`] (top) or [`Self::begin_more`] (unchanged)
   /// left; the renderer re-clamps it against the new content.
-  pub fn load(&mut self, lines: Vec<Line<'static>>) {
-    self.loaded = lines.len();
+  pub fn load(&mut self, lines: Vec<Line<'static>>, loaded: usize) {
+    self.loaded = loaded;
     self.lines = lines;
     self.loading = false;
   }

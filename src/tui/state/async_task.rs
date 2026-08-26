@@ -403,11 +403,13 @@ pub enum TaskMsg {
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
   /// Commit-listing snapshot (issue #593): the generation, the worktree
-  /// `path` and the `limit` it was read at, and the rendered graph rows.
+  /// `path` and the `limit` it was read at, the rendered graph rows, and
+  /// the commit count they describe (which is NOT `lines.len()` — the
+  /// empty and error cases paint one sentinel row).
   /// The drain hands the rows to `CommitsModal::load`; a result for a path
   /// the user has navigated away from, or for a limit the overlay has since
   /// paged past, is dropped.
-  Commits(u64, PathBuf, usize, Vec<Line<'static>>),
+  Commits(u64, PathBuf, usize, Vec<Line<'static>>, usize),
   /// An agent-session detection result (issue #408): the worker's generation
   /// and the per-worktree-path summary. The drain replaces the app snapshot
   /// atomically; a superseded late result is dropped by

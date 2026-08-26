@@ -15281,7 +15281,7 @@ fn reopening_on_another_worktree_gets_its_own_read() {
   let (dir, mut app) = make_app();
   let other = dir.path().join("elsewhere");
 
-  app.commits.begin(Some(&other), COMMITS_PAGE);
+  app.commits.begin(Some(&other), COMMITS_PAGE, None);
   app.tasks.request(TaskKind::Commits).expect("the slot starts free");
 
   app.enter_commits();
@@ -15298,7 +15298,7 @@ fn reopening_after_a_deeper_page_gets_its_own_read() {
   use gwm::tui::{TaskKind, COMMITS_PAGE};
   let (dir, mut app) = make_app();
 
-  app.commits.begin(Some(dir.path()), COMMITS_PAGE * 2);
+  app.commits.begin(Some(dir.path()), COMMITS_PAGE * 2, None);
   app.tasks.request(TaskKind::Commits).expect("the slot starts free");
 
   app.enter_commits();
@@ -15356,14 +15356,65 @@ fn a_vanished_worktree_stops_advertising_load_more() {
 }
 
 #[test]
+fn a_moved_tip_is_not_coalesced_onto_the_previous_read() {
+  // Codex review, PR #614: close the overlay mid-read, land a commit, and
+  // reopen on the same worktree. Path and limit both match, so the request
+  // coalesced onto the worker already out — which still holds the OLD
+  // `WorktreeInfo.head`, so its payload passes both drain checks and the
+  // reopen silently shows a log missing the new commits. The tip is part
+  // of what identifies a read.
+  //
+  // The in-flight read is staged rather than raced: the fixture's walk
+  // finishes long before a second open could reach the guard.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (_dir, mut app) = make_app();
+  let path = app.selected().expect("the fixture repo is listed").path.clone();
+
+  app.commits.begin(Some(&path), COMMITS_PAGE, Some("0".repeat(40)));
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert!(!app.is_commits_loading(), "the reopen at the new tip got its own read");
+}
+
+#[test]
+fn the_count_is_commits_not_rendered_rows() {
+  // Codex review, PR #614: `recent_commits_lines` paints ONE sentinel row
+  // for an unborn HEAD or a failed read, so counting rows called that
+  // "1 commit" and the title read `Commits (1)` over a repo with none.
+  // The count travels with the rows instead of being inferred from them.
+  use gwm::tui::recent_commits_listing;
+  let dir = tempfile::tempdir().unwrap();
+  git2::Repository::init(dir.path()).unwrap();
+  let w = worktree_pointing_at_dir(dir.path());
+
+  let (lines, count) = recent_commits_listing(&w, 10, &Theme::default());
+  assert_eq!(count, 0, "an unborn HEAD has no commits");
+  assert_eq!(lines.len(), 1, "but it still paints one sentinel row");
+}
+
+#[test]
+fn a_sentinel_row_is_not_a_full_page() {
+  // The consequence that matters: a sentinel counted as a row would make
+  // `loaded >= limit` true at limit 1 and offer a page that does not exist.
+  use gwm::tui::CommitsModal;
+  let mut m = CommitsModal::new();
+  m.begin(Some(std::path::Path::new("/tmp/x")), 1, None);
+  m.load(vec![ratatui::text::Line::from("! unborn HEAD")], 0);
+  assert_eq!(m.loaded, 0, "the sentinel is a row, not a commit");
+  assert!(!m.can_load_more(), "and an empty history has no deeper page");
+}
+
+#[test]
 fn paging_stops_at_the_cap() {
   // #593 notes the memo in `recent_commits_cached` is keyed on the limit
   // and evicts an arbitrary entry when full, so unbounded paging would push
   // other worktrees' sidebar entries out. The cap is what bounds it.
   use gwm::tui::{CommitsModal, COMMITS_MAX, COMMITS_PAGE};
   let mut m = CommitsModal::new();
-  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_MAX);
-  m.load(vec![ratatui::text::Line::from("x"); COMMITS_MAX]);
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_MAX, None);
+  m.load(vec![ratatui::text::Line::from("x"); COMMITS_MAX], COMMITS_MAX);
 
   assert!(!m.can_load_more(), "the cap is a hard stop even on a full page");
 
@@ -15372,8 +15423,8 @@ fn paging_stops_at_the_cap() {
 
   // And the cap leaves room for more than the first page, or load-more
   // would be dead on arrival.
-  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_PAGE);
-  m.load(vec![ratatui::text::Line::from("x"); COMMITS_PAGE]);
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_PAGE, None);
+  m.load(vec![ratatui::text::Line::from("x"); COMMITS_PAGE], COMMITS_PAGE);
   assert!(m.can_load_more(), "a full first page is under the cap");
 }
 
@@ -15385,8 +15436,8 @@ fn a_deeper_page_keeps_the_scroll_position() {
   use gwm::tui::CommitsModal;
   let path = std::path::Path::new("/tmp/x");
   let mut m = CommitsModal::new();
-  m.begin(Some(path), 10);
-  m.load(vec![ratatui::text::Line::from("x"); 10]);
+  m.begin(Some(path), 10, None);
+  m.load(vec![ratatui::text::Line::from("x"); 10], 10);
   m.max_scroll = 8;
   m.scroll_to_bottom();
   assert_eq!(m.scroll, 8);
@@ -15394,10 +15445,10 @@ fn a_deeper_page_keeps_the_scroll_position() {
   m.begin_more(20);
   assert_eq!(m.scroll, 8, "arming a deeper page keeps the cursor and the rows");
   assert_eq!(m.lines.len(), 10, "the rows already read stay up while it loads");
-  m.load(vec![ratatui::text::Line::from("x"); 20]);
+  m.load(vec![ratatui::text::Line::from("x"); 20], 20);
   assert_eq!(m.scroll, 8, "and the payload does not rewind either");
 
-  m.begin(Some(path), 20);
+  m.begin(Some(path), 20, None);
   assert_eq!(m.scroll, 0, "a fresh open still rewinds");
   assert!(m.lines.is_empty(), "and drops the previous listing");
 }
