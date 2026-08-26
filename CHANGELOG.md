@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only be read two rows at a time through `J` / `K`. `5` now opens the same
   file-explorer tree as a full-size overlay: same icons, same per-category
   colours, the same change counts on the bottom rule, scrolled with
-  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `5` again), and
-  rebindable under `[tui.keys.modal.working_tree]`.
+  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `5` again, whatever `5`
+  gets rebound to, see #613 below), and rebindable under
+  `[tui.keys.modal.working_tree]`.
 
   The listing is read when the overlay opens rather than taken from the
   sidebar's cache, so it does not go blank in the two states where that cache
@@ -240,6 +241,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An overlay's toggle key closes it whatever it is bound to**
+  ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `5`
+  each close the overlay they open, but the guard doing it asked
+  `key_matches_action`, which reads a single stroke and only ran after the
+  modal verbs had their turn. Two silent holes: a multi-stroke binding
+  (`working_tree = ["g w"]`) could open the overlay and never shut it, and a
+  binding the overlay's own context already claimed (`= ["j"]`) opened it and
+  then scrolled it. The toggle now resolves first, against that one action
+  rather than the whole keymap, and it accumulates its chord, so a prefix
+  stroke is consumed instead of firing a scroll verb on the way through.
 - **A compact pane's header says where you are, and its name no longer
   dims when it is not**
   ([#605](https://github.com/kbrdn1/gwm-cli/issues/605)). In the default
