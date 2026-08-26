@@ -15537,6 +15537,77 @@ fn a_working_tree_payload_for_a_worktree_left_behind_is_dropped() {
 }
 
 #[test]
+fn the_overlay_never_waits_on_a_worker_that_is_not_there() {
+  // The invariant behind three rounds of review on PR #612, each of which
+  // found a different unenumerated state of this slot: the loader is up if
+  // and only if a read is actually in flight. Every way in is walked here,
+  // rather than waiting for a fourth state to be reported.
+  //
+  // | selection | slot            | what must happen                     |
+  // |-----------|-----------------|--------------------------------------|
+  // | none      | free            | no worker, no loader                 |
+  // | some      | free            | worker spawned, loader up            |
+  // | some      | busy same path  | coalesce onto it, loader stays up    |
+  // | some      | busy other path | invalidate, own worker, loader up    |
+  //
+  // The two drop paths (stale generation, path mismatch) are covered by
+  // `a_working_tree_payload_for_a_worktree_left_behind_is_dropped` and by
+  // `TaskRunner::complete`'s own tests; neither can leave the loader up,
+  // because both only run once the slot has already been settled.
+  //
+  // A worker that dies without sending would break this after the fact
+  // (`let _ = tx.send(..)` swallows the failure and the slot stays claimed),
+  // but `working_tree_lines` is total: every arm of its `git_status_short`
+  // match returns rows, an `Err` included. No defensive machinery for a
+  // state that cannot be reached.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  let inflight = |app: &App| app.tasks.is_loading(TaskKind::WorkingTree);
+
+  // none / free
+  app.worktrees.clear();
+  app.list_state.select(None);
+  app.enter_working_tree();
+  assert!(!app.is_working_tree_loading(), "nothing selected, nothing to wait on");
+  assert_eq!(app.is_working_tree_loading(), inflight(&app));
+
+  // some / free
+  let (_dir2, mut app) = make_app();
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "the loader tracks the worker, both up"
+  );
+  settle_working_tree(&mut app);
+  assert_eq!(app.is_working_tree_loading(), inflight(&app), "and both down");
+
+  // some / busy, same path
+  app.working_tree.begin(Some(&a));
+  let _held = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "coalesced onto the read already out"
+  );
+
+  // some / busy, other path
+  app.worktrees.push(worktree_fixture("elsewhere"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "the stale slot was invalidated and a fresh worker claimed it"
+  );
+  settle_working_tree(&mut app);
+  assert_eq!(app.is_working_tree_loading(), inflight(&app));
+}
+
+#[test]
 fn reopening_on_another_worktree_does_not_wait_on_the_previous_read() {
   // Copilot review, PR #612: the coalescing that makes a held `5` cheap is
   // only sound while the in-flight read is for the SAME worktree. Close a
