@@ -3136,3 +3136,96 @@ note_vim = false
   let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(!cfg.tui.note_vim, "the opt-out is the value worth round-tripping now");
 }
+
+// ---------------------------------------------------------------------------
+// `[tui.agent_resume]` — issue #591
+// ---------------------------------------------------------------------------
+//
+// The four resume incantations belong in config rather than in a `match`
+// because they are four third-party CLIs on their own release cadence: the
+// day `codex resume` grows a flag, a gwm release should not be what stands
+// between the user and a working `o`.
+
+#[test]
+fn agent_resume_defaults_cover_every_detected_backend() {
+  use gwm::agent_sessions::AgentKind;
+  let cfg = Config::default();
+  // Measured against the installed binaries on 2026-08-25, not assumed.
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::ClaudeCode),
+    "claude -r {session}"
+  );
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::Codex),
+    "codex resume {session}"
+  );
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::Opencode),
+    "opencode -s {session}"
+  );
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::Vibe),
+    "vibe --resume {session}"
+  );
+}
+
+#[test]
+fn agent_resume_override_wins_and_an_empty_string_reads_as_unset() {
+  use gwm::agent_sessions::AgentKind;
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.agent_resume]
+claude = "claude --resume {session} --dangerously-skip-permissions"
+codex = ""
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::ClaudeCode),
+    "claude --resume {session} --dangerously-skip-permissions"
+  );
+  // Same `""` == omitted convention `shell_cmd` / `editor_cmd` already use,
+  // so a user who blanks a key gets the default back rather than a pane
+  // running nothing.
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::Codex),
+    "codex resume {session}"
+  );
+  // Untouched backends keep theirs.
+  assert_eq!(
+    cfg.tui.agent_resume.template_for(AgentKind::Vibe),
+    "vibe --resume {session}"
+  );
+}
+
+#[test]
+fn agent_resume_expansion_quotes_the_session_and_runs_one_pass() {
+  use gwm::config::expand_agent_resume;
+  // The line becomes `sh -c <script>` (zellij) or a tmux shell-command
+  // operand, and a session id is read out of a THIRD-PARTY artefact on disk.
+  // Same rule as the hook placeholders after GHSA-fffq-vg6f-gxqm: the value
+  // is data and must not be able to close the command and open its own.
+  let hostile = expand_agent_resume("claude -r {session}", "s1; rm -rf ~");
+  assert!(
+    !hostile.contains("; rm -rf ~") || hostile.contains("'s1; rm -rf ~'"),
+    "the id must reach the shell quoted, got: {hostile}"
+  );
+  assert!(hostile.starts_with("claude -r "), "got: {hostile}");
+
+  // An expansion is a value, not more template. An id that itself contains
+  // the token comes out as ONE literal occurrence: what was written is never
+  // re-examined, so nothing downstream can be fooled into a second round.
+  let recursive = expand_agent_resume("claude -r {session}", "{session}");
+  assert_eq!(recursive, "claude -r {session}");
+  assert_eq!(
+    expand_agent_resume("claude -r {session}", "a b {session}"),
+    "claude -r 'a b {session}'",
+    "the whole id is one quoted word, token and all"
+  );
+
+  // An unknown token is left verbatim, as every other gwm expander does.
+  assert_eq!(expand_agent_resume("claude -r {nope}", "s1"), "claude -r {nope}");
+}

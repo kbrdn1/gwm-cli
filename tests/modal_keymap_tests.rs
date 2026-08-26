@@ -322,3 +322,26 @@ fn backtab_with_shift_modifier_resolves_like_plain_backtab() {
     Some(ModalAction::ConfigPrevTab)
   );
 }
+
+#[test]
+fn detail_context_binds_o_to_the_resume_pane_verb() {
+  // Issue #591. `o` was unbound in the agents context, which is why it was
+  // available; in the list view it is `Action::TerminalPty`, so the letter
+  // already reads as "open a terminal here".
+  let km = ModalKeymap::defaults();
+  assert_eq!(
+    km.resolve(KeyContext::Detail, &ch('o')),
+    Some(ModalAction::DetailOpenPane)
+  );
+  // It joins the other three under `[tui.keys.modal.detail]`, so it stays
+  // rebindable rather than being a hardcoded key in the dispatch.
+  assert_eq!(
+    ModalAction::from_context_verb(KeyContext::Detail, "open_pane"),
+    Some(ModalAction::DetailOpenPane)
+  );
+  // The verb it must not have stolen: `a` is still the pin.
+  assert_eq!(
+    km.resolve(KeyContext::Detail, &ch('a')),
+    Some(ModalAction::DetailAttach)
+  );
+}
