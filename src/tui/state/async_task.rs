@@ -132,6 +132,15 @@ pub enum TaskKind {
   /// slot — a tick that finds a run in flight coalesces; the render reads
   /// the last completed snapshot only.
   AgentSessions,
+  /// Off-thread resume of an agent session in a herdr container (#591).
+  /// Unlike tmux and zellij, which take the command in the same argv that
+  /// opens the pane and return in ~40ms, herdr needs a sequenced round trip:
+  /// open, wait for the new shell to reach its prompt, then type the line
+  /// into it. The wait is the reason this is a task at all — measured at
+  /// ~60s on a worktree with `direnv` and a nix flake, which is 60s of
+  /// frozen TUI if it runs inline. One global slot: a second `o` coalesces
+  /// rather than opening a second pane.
+  AgentPane,
 }
 
 impl TaskKind {
@@ -154,6 +163,7 @@ impl TaskKind {
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
       TaskKind::AgentSessions => "detecting agent sessions…",
+      TaskKind::AgentPane => "opening agent pane…",
     }
   }
 
@@ -399,6 +409,12 @@ pub enum TaskMsg {
     // repo — branch-config I/O stays off the event loop (round P).
     std::collections::BTreeMap<String, Vec<String>>,
   ),
+  /// An agent-resume result for a herdr container (#591): the worker's
+  /// generation, the status line it produced, and whether the open
+  /// succeeded. The line is built in the worker rather than here because
+  /// only it knows which of the three steps failed and what herdr said
+  /// about it.
+  AgentPane(u64, std::result::Result<String, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).

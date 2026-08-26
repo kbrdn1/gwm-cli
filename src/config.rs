@@ -808,6 +808,13 @@ pub struct TuiConfig {
   #[serde(default)]
   pub open: TuiOpenConfig,
 
+  /// `[tui.agent_resume]` sub-table — the command each agent backend
+  /// resumes a session with, used by `o` on the agents overlay (#591).
+  /// Absent keys fall back to the measured defaults, so no `.gwm.toml`
+  /// change is required.
+  #[serde(default)]
+  pub agent_resume: TuiAgentResumeConfig,
+
   /// Which side the worktree-details sidebar sits on in the side-by-side
   /// layout (issue #188). Default `right` preserves pre-#188 behaviour;
   /// `left` flips the split. Toggled live in the TUI with `v`. Ignored by
@@ -1024,6 +1031,7 @@ impl Default for TuiConfig {
       confirm_countdown_secs: default_confirm_countdown_secs(),
       auto_refresh_secs: default_auto_refresh_secs(),
       open: TuiOpenConfig::default(),
+      agent_resume: TuiAgentResumeConfig::default(),
       sidebar_position: SidebarPosition::default(),
       sidebar_orientation: SidebarOrientation::default(),
       clipboard: ClipboardMode::default(),
@@ -1361,6 +1369,137 @@ where
 {
   let opt = Option::<String>::deserialize(d)?;
   Ok(opt.filter(|s| !s.is_empty()))
+}
+
+/// `[tui.agent_resume]` — how `o` on the agents overlay (#591) resumes each
+/// detected backend in the new multiplexer pane.
+///
+/// These are four third-party CLIs on their own release cadence, so the
+/// mapping is configuration with measured defaults rather than a `match`: the
+/// day one of them renames its flag, a gwm release should not be what stands
+/// between the user and a working `o`. Same `"" == omitted` convention as
+/// `[tui.open]`'s `shell_cmd` / `editor_cmd`, so blanking a key gives the
+/// default back instead of a pane that runs nothing.
+///
+/// Each value is a shell line taking the `{session}` placeholder; see
+/// [`expand_agent_resume`] for how the id reaches it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TuiAgentResumeConfig {
+  /// Claude Code. Default `claude -r {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub claude: Option<String>,
+  /// Codex. Default `codex resume {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub codex: Option<String>,
+  /// opencode. Default `opencode -s {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub opencode: Option<String>,
+  /// Mistral Vibe. Default `vibe --resume {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub vibe: Option<String>,
+}
+
+impl TuiAgentResumeConfig {
+  /// The resume template for `kind` — the user's override, else the default.
+  ///
+  /// The defaults were measured against the installed binaries on
+  /// 2026-08-25 (`--help` of each), not assumed:
+  /// `claude --resume` takes a session id or opens a picker, `codex resume`
+  /// takes a uuid or a session name, `opencode --session` takes an id, and
+  /// `vibe --resume` takes a session id.
+  ///
+  /// Written as an exhaustive `match` on purpose: a fifth backend added to
+  /// [`crate::agent_sessions::AgentKind`] does not compile until someone
+  /// gives it a resume line, which beats silently opening a pane that runs
+  /// the wrong tool.
+  pub fn template_for(&self, kind: crate::agent_sessions::AgentKind) -> &str {
+    use crate::agent_sessions::AgentKind;
+    let (configured, default) = match kind {
+      AgentKind::ClaudeCode => (&self.claude, "claude -r {session}"),
+      AgentKind::Codex => (&self.codex, "codex resume {session}"),
+      AgentKind::Opencode => (&self.opencode, "opencode -s {session}"),
+      AgentKind::Vibe => (&self.vibe, "vibe --resume {session}"),
+    };
+    configured.as_deref().unwrap_or(default)
+  }
+}
+
+/// `true` when `id` is safe to interpolate into a shell line **in any
+/// position**, quoted or not, under any shell.
+///
+/// Every id the four backends produce is a UUID or a plain slug, so the set
+/// is ASCII alphanumerics plus `-`, `_` and `.`. Nothing legitimate is
+/// excluded and nothing a shell reads specially is admitted.
+///
+/// This exists because quoting alone does **not** hold the promise
+/// [`expand_agent_resume`] used to make. `shell_words::quote` is only safe
+/// for a value dropped into an *unquoted* POSIX position, and a
+/// `[tui.agent_resume]` template is user-written text: `claude -r
+/// "{session}"` is a natural thing to write, and there
+/// `'$(id)'` sits inside double quotes, where the single quotes are literal
+/// and the substitution runs. `cmd.exe` never honours POSIX single quotes at
+/// all. So the value is constrained instead of trusted to its wrapping.
+pub fn is_shell_safe_session_id(id: &str) -> bool {
+  !id.is_empty()
+    && id
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Substitute `{session}` in a `[tui.agent_resume]` template, in **one pass**,
+/// shell-quoting the value. `None` when `session_id` is not one
+/// [`is_shell_safe_session_id`] admits.
+///
+/// Three properties, and the first is the one that took a review round to get
+/// right.
+///
+/// **Constrained, not merely quoted.** The result becomes a shell line: a
+/// tmux shell-command operand, or the script half of `zellij action new-pane
+/// -- <shell> -c <line>`. A session id is read out of a third-party tool's
+/// artefacts on disk, so it is *data* and must not be able to close the
+/// resume command and open its own. Quoting alone cannot promise that here,
+/// because the template around the placeholder is the user's: put `{session}`
+/// inside double quotes and `shell_words::quote` produces single quotes that
+/// the shell reads as literal characters, leaving `$(…)` live. Rejecting the
+/// id is the only answer that does not depend on where the template put it.
+/// The quoting stays as the second layer.
+///
+/// **Fail closed.** An id outside the set aborts the resume with a message,
+/// rather than running a line nobody can predict. In practice nothing is
+/// refused: every backend's id is a UUID or a slug.
+///
+/// **Single pass**, because chained `str::replace` calls re-scan what the
+/// previous call just wrote: an id that itself contains `{session}` would be
+/// rewritten from the inside, splicing quote characters into the middle of a
+/// value. An expansion is a value, not more template. Same rule
+/// [`crate::lifecycle`] learned in GHSA-fffq-vg6f-gxqm.
+///
+/// An unknown `{token}` is left verbatim, as every other gwm expander does.
+pub fn expand_agent_resume(template: &str, session_id: &str) -> Option<String> {
+  if !is_shell_safe_session_id(session_id) {
+    return None;
+  }
+  let mut out = String::with_capacity(template.len());
+  let mut rest = template;
+  while let Some(open) = rest.find('{') {
+    out.push_str(&rest[..open]);
+    let tail = &rest[open..];
+    let Some(close) = tail.find('}') else {
+      // Unbalanced `{` — nothing left to substitute, keep it verbatim.
+      out.push_str(tail);
+      return Some(out);
+    };
+    let token = &tail[..=close];
+    if token == "{session}" {
+      out.push_str(&shell_words::quote(session_id));
+    } else {
+      out.push_str(token);
+    }
+    rest = &tail[close + 1..];
+  }
+  out.push_str(rest);
+  Some(out)
 }
 
 impl TuiConfig {

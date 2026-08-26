@@ -298,6 +298,10 @@ define_modal_actions! {
     DetailAttach     => "attach"       [ "a" ],
     DetailDetach     => "detach"       [ "d" ],
     DetailInput      => "attach_by_id" [ "i" ],
+    // #591: resume the highlighted session in a multiplexer pane. `o` is the
+    // list view's `mux_pane`-adjacent letter (`Action::TerminalPty`), so it
+    // already reads as "open a terminal here".
+    DetailOpenPane   => "open_pane"    [ "o" ],
   }
   CommandLogs {
     CommandLogsClose        => "close"         [ "Esc", "q" ],

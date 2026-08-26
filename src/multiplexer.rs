@@ -493,3 +493,136 @@ pub fn detect_herdr(env: Option<String>) -> bool {
     None => false,
   }
 }
+
+/// Attach a shell command line to an argv from [`build_command`], or `None`
+/// when the backend has no trailing-command form in that mode.
+///
+/// [`macro_refusal`] answers "can this (backend, mode) run a command at
+/// all"; this answers "how". They were one inline chain in `run_macro`
+/// until the first half moved out in #589, and the second half stayed
+/// behind because it had a single caller. `o` on the agents overlay (#591)
+/// is the second, and two copies that can disagree is the defect the
+/// extractions in #588 and #589 were both aimed at.
+///
+/// The two shapes are not interchangeable:
+///
+/// * **zellij** runs its trailing argv *directly*, not through a shell, so
+///   a command with spaces or shell syntax has to arrive as
+///   `-- <shell> <flag> <line>` or zellij looks for a binary named after
+///   the whole line.
+/// * **tmux** takes the command as a *single* shell-command operand and
+///   hands it to the shell itself, so it is appended whole rather than
+///   pre-split, which would lose everything after the first word.
+///
+/// **herdr gets `None`**, which a caller that asked [`macro_refusal`] first
+/// can never see. It is still spelled out rather than folded into tmux's
+/// arm: appending an operand `herdr pane split` ignores would open an empty
+/// pane and drop the command silently, and that failure is worth being
+/// unrepresentable rather than merely unreachable.
+///
+/// `shell` / `shell_flag` are parameters rather than env reads, the shape
+/// [`detect_multiplexer`] already uses, so the argv can be pinned by a test
+/// on any runner.
+pub fn attach_pane_command(
+  mux: Multiplexer,
+  argv: &[String],
+  command: &str,
+  shell: &str,
+  shell_flag: &str,
+) -> Option<Vec<String>> {
+  let mut argv = argv.to_vec();
+  match mux {
+    Multiplexer::Herdr => return None,
+    Multiplexer::Tmux => argv.push(command.into()),
+    Multiplexer::Zellij => argv.extend(["--".into(), shell.into(), shell_flag.into(), command.into()]),
+  }
+  Some(argv)
+}
+
+// ---------------------------------------------------------------------------
+// herdr: running a command in a container it just opened (issue #591 / #599)
+// ---------------------------------------------------------------------------
+//
+// [`macro_refusal`] says herdr takes no command, and that stays true of the
+// single argv a `[tui.macro*]` can spawn inline. It is not true of herdr as a
+// whole: the command goes in afterwards, through the pane id the create
+// response carries. Three facts, all measured against herdr 0.8.2 rather than
+// read off `--help`, because the help text says none of them:
+//
+// 1. **Every level answers with a pane.** `pane split` nests it under
+//    `result.pane`; `tab create` and `workspace create` under
+//    `result.root_pane`. So all three of `[tui] mux_open_in` can be served.
+// 2. **`pane run` types into the pane's interactive shell, it does not exec.**
+//    It joins its `<COMMAND>...` argv with spaces first, so quoting is lost:
+//    `pane run <id> /bin/sh -c 'echo hi'` arrives as the text
+//    `/bin/sh -c echo hi`, where `sh` runs `echo` with `hi` as `$0` and prints
+//    an empty line. The command must therefore be passed as **one argument**,
+//    already a valid shell line.
+// 3. **It races the shell's startup.** Sent to a pane whose shell is still
+//    running its rc files, the text lands in the middle of that output and is
+//    dropped: measured on a worktree with `direnv` + a nix flake, where the
+//    line vanished and the shell came back to an empty prompt ~60s later.
+//    Hence [`herdr_shell_is_idle`], and hence this whole path runs off the
+//    event loop.
+
+/// The pane id in a herdr create/split response, whichever level produced it.
+///
+/// `pane split` carries `result.pane.pane_id`; `tab create` and
+/// `workspace create` carry `result.root_pane.pane_id`, alongside the `tab` /
+/// `workspace` objects the caller does not need. `None` on anything that is
+/// not one of those shapes, which is what a herdr error response is.
+pub fn herdr_pane_id(json: &str) -> Option<String> {
+  let v: serde_json::Value = serde_json::from_str(json).ok()?;
+  let result = v.get("result")?;
+  ["pane", "root_pane"]
+    .iter()
+    .find_map(|key| result.get(key)?.get("pane_id")?.as_str())
+    .map(str::to_string)
+}
+
+/// `true` when the pane's shell is back at its prompt, from a
+/// `herdr pane process-info` response.
+///
+/// The signal is `foreground_process_group_id == shell_pid`: the shell itself
+/// owns the foreground, so nothing is running in it. Prompt-independent on
+/// purpose — matching the prompt text would break on every theme, and
+/// `pane wait-output` needs a pattern nobody can supply for an arbitrary
+/// user's shell.
+///
+/// `false` on a malformed or error response, which is the fail-closed answer:
+/// it keeps the caller polling rather than typing into a busy shell.
+pub fn herdr_shell_is_idle(json: &str) -> bool {
+  let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+    return false;
+  };
+  let Some(info) = v.get("result").and_then(|r| r.get("process_info")) else {
+    return false;
+  };
+  match (
+    info.get("foreground_process_group_id").and_then(|x| x.as_i64()),
+    info.get("shell_pid").and_then(|x| x.as_i64()),
+  ) {
+    (Some(fg), Some(shell)) => fg == shell,
+    _ => false,
+  }
+}
+
+/// `herdr pane process-info --pane <id>`.
+pub fn build_herdr_process_info_command(pane_id: &str) -> Vec<String> {
+  vec![
+    "herdr".into(),
+    "pane".into(),
+    "process-info".into(),
+    "--pane".into(),
+    pane_id.into(),
+  ]
+}
+
+/// `herdr pane run <pane-id> <line>`, with `line` as **one** argument.
+///
+/// Splitting it into words would be undone anyway — `pane run` re-joins its
+/// argv with spaces before typing it — and would lose exactly the quoting
+/// that keeps the line meaning what it says. One argument in, one line typed.
+pub fn build_herdr_run_command(pane_id: &str, line: &str) -> Vec<String> {
+  vec!["herdr".into(), "pane".into(), "run".into(), pane_id.into(), line.into()]
+}

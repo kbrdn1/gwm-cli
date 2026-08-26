@@ -1984,6 +1984,329 @@ fn the_t_key_puts_a_refused_target_on_the_status_bar() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #591: `o` on the agents overlay resumes the session in a mux pane
+// ---------------------------------------------------------------------------
+
+/// An agents overlay open on one worktree carrying one detected session.
+/// The snapshot is seeded directly rather than through `apply_agent_snapshot`
+/// because what is under test is the overlay's `o`, not the landing path.
+fn app_with_agent_overlay(kind: gwm::agent_sessions::AgentKind, id: &str, age_secs: u64) -> (tempfile::TempDir, App) {
+  use gwm::agent_sessions::{AgentSession, WorktreeAgents};
+  use std::collections::BTreeMap;
+  let (dir, mut app) = make_app();
+  let w = worktree_fixture("feat-591-foo");
+  let mut map = BTreeMap::new();
+  map.insert(
+    gwm::agent_sessions::path_display_key(&w.path),
+    WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind,
+        cwd: w.path.clone(),
+        last_activity: std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs),
+        ended: false,
+        id: id.into(),
+        name: None,
+      }],
+    },
+  );
+  app.agent_snapshot = Some(map);
+  app.worktrees = vec![w];
+  app.list_state.select(Some(0));
+  app.open_agent_overlay();
+  (dir, app)
+}
+
+#[test]
+fn agent_pane_with_no_multiplexer_names_all_three_variables() {
+  // #591 is multiplexer-only BY DESIGN: no PTY-overlay fallback, because the
+  // point is to put the session next to gwm and an overlay that covers gwm
+  // is not that. So the refusal is all the user gets, and it names what gwm
+  // looked for — the same sentence `t` shows, not the macro path's shorter
+  // "no multiplexer".
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::ClaudeCode, "s1", 10);
+  app.open_selected_agent_pane_from(None, None, None, None);
+  assert!(
+    app.status.contains("$TMUX") && app.status.contains("$ZELLIJ") && app.status.contains("$HERDR_ENV"),
+    "the hint must name all three probes, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn agent_pane_inside_herdr_plans_the_sequenced_round_trip() {
+  // #591 after the herdr measurement. herdr takes no command in the argv
+  // that opens the container, which is why `macro_refusal` refuses it for a
+  // `[tui.macro*]`. It is not unable to run one: the command goes in
+  // afterwards through the pane id the response carries (#599).
+  //
+  // Planned rather than driven: the sequenced path spawns a worker that
+  // talks to a real herdr, and a test must not open a pane in the developer's
+  // session. What the worker does with this plan is covered by the parser
+  // tests in `multiplexer_tests.rs` and by the drain test below.
+  use gwm::agent_sessions::{AgentKind, AgentSession};
+  let session = AgentSession {
+    kind: AgentKind::Codex,
+    cwd: std::path::PathBuf::from("/tmp/gwm-test/feat-591-foo"),
+    last_activity: std::time::SystemTime::now(),
+    ended: true,
+    id: "s1".into(),
+    name: None,
+  };
+  let plan = gwm::tui::plan_agent_pane(
+    &session,
+    std::path::Path::new("/tmp/gwm-test/feat-591-foo"),
+    &gwm::config::TuiConfig::default(),
+    None,
+    None,
+    Some("1".into()),
+    None,
+  )
+  .expect("herdr can resume, it just needs two steps");
+  let gwm::tui::AgentPanePlan::Sequenced { open, line, noun } = plan else {
+    panic!("herdr must plan the sequenced round trip, not a one-shot argv");
+  };
+  assert_eq!(open[0], "herdr");
+  assert!(
+    open.iter().any(|a| a == "split") && open.iter().any(|a| a == "/tmp/gwm-test/feat-591-foo"),
+    "the container opens in the overlay's worktree, got: {open:?}"
+  );
+  assert!(
+    !open.iter().any(|a| a.contains("codex resume")),
+    "the command must NOT ride the opening argv: herdr ignores it there, got: {open:?}"
+  );
+  assert_eq!(line, "codex resume s1", "the line is typed in afterwards");
+  assert_eq!(noun, "pane");
+}
+
+#[test]
+fn agent_pane_under_a_zellij_tab_is_still_refused() {
+  // The refusal families herdr no longer belongs to are untouched: a zellij
+  // TAB takes no trailing command in any shape, and there is no pane id to
+  // type into afterwards either.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::Opencode, "s1", 10);
+  app.config.tui.mux_open_in = gwm::config::MuxTarget::Tab;
+  app.open_selected_agent_pane_from(None, Some("0".into()), None, None);
+  assert!(
+    app.status.contains("zellij") && app.status.contains("no command"),
+    "expected the zellij-tab refusal, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn agent_pane_worker_result_reaches_the_status_bar() {
+  // The herdr path answers through the task drain, so the worker's wording
+  // is what the user reads. Both arms, because a failure at step 2 or 3
+  // leaves a container open and saying "opened" there would be a lie.
+  let (_d, mut app) = make_app();
+  let generation = app.tasks.request(gwm::tui::TaskKind::AgentPane).unwrap();
+  app.apply_agent_pane_result(generation, Ok("opened codex session in new pane".into()));
+  assert_eq!(app.status, "opened codex session in new pane");
+
+  let generation = app.tasks.request(gwm::tui::TaskKind::AgentPane).unwrap();
+  app.apply_agent_pane_result(generation, Err("herdr refused the resume: no such pane".into()));
+  assert!(
+    app.status.contains("no such pane") && !app.status.starts_with("opened"),
+    "a refusal must not read as a success, got: {}",
+    app.status
+  );
+
+  // A superseded worker cannot clobber a newer one's status.
+  let stale = 0;
+  app.status = "current".into();
+  app.apply_agent_pane_result(stale, Ok("late arrival".into()));
+  assert_eq!(app.status, "current", "a stale generation is dropped");
+}
+
+#[test]
+fn agent_pane_refuses_a_zellij_tab_because_the_level_is_a_setting_now() {
+  // `o` reads `[tui] mux_open_in` like `t` does (#608), so its refusals are
+  // the whole `macro_refusal` set, not just herdr: a zellij TAB takes no
+  // trailing command either. Hardcoding the herdr sentence would make `o`
+  // lie under a setting the user can already flip for `t`.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::Opencode, "s1", 10);
+  app.config.tui.mux_open_in = gwm::config::MuxTarget::Tab;
+  app.open_selected_agent_pane_from(None, Some("0".into()), None, None);
+  assert!(
+    app.status.contains("zellij") && app.status.contains("no command"),
+    "expected the zellij-tab refusal, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn agent_pane_without_a_selected_session_refuses() {
+  // `agent_detail_rows` emits a `no agent session found` placeholder with no
+  // meta. `attach` deliberately falls through to the attach-by-id prompt
+  // there; `o` has nothing to resume, so it refuses instead — opening a
+  // prompt from a key that promises a pane would be a different verb.
+  let (_d, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-591-foo")];
+  app.list_state.select(Some(0));
+  app.open_agent_overlay();
+  app.open_selected_agent_pane_from(None, None, Some("1".into()), None);
+  assert!(
+    app.status.contains("no agent session"),
+    "expected a refusal naming the missing session, got: {}",
+    app.status
+  );
+  assert_eq!(
+    app.detail_overlay.mode,
+    gwm::tui::state::detail_overlay::DetailMode::List,
+    "`o` must not open the attach-by-id prompt the way `a` does"
+  );
+}
+
+#[test]
+fn agent_pane_opens_at_the_overlay_target_not_the_recorded_cwd() {
+  // The defect the obvious reading of #591 ships. The overlay lists PINNED
+  // sessions too, and a pin exists exactly when the recorded directory names
+  // the wrong tree — `gwm agents attach` right after `gwm create` is the
+  // documented workflow, so this is the common row, not the exotic one.
+  // `overlay_pins` leaves `cwd` alone "purely as provenance", and for a
+  // pinned Claude session resolved by the id sweep it is the slug directory
+  // under `~/.claude/projects`: resuming there drops the agent inside its own
+  // artefact store.
+  use gwm::agent_sessions::{AgentKind, AgentSession};
+  let session = AgentSession {
+    kind: AgentKind::ClaudeCode,
+    cwd: std::path::PathBuf::from("/home/u/.claude/projects/-home-u-main-checkout"),
+    last_activity: std::time::SystemTime::now(),
+    ended: true,
+    id: "s1".into(),
+    name: None,
+  };
+  let target = std::path::Path::new("/tmp/gwm-test/feat-591-foo");
+  let plan = gwm::tui::plan_agent_pane(
+    &session,
+    target,
+    &gwm::config::TuiConfig::default(),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+  )
+  .expect("tmux takes a command");
+  let gwm::tui::AgentPanePlan::OneShot { argv, .. } = plan else {
+    panic!("tmux carries its command in the opening argv");
+  };
+  assert!(
+    argv.iter().any(|a| a == "/tmp/gwm-test/feat-591-foo"),
+    "the pane must open in the worktree the overlay is about, got: {argv:?}"
+  );
+  assert!(
+    !argv.iter().any(|a| a.contains(".claude/projects")),
+    "the recorded cwd is provenance, not a place to run an agent: {argv:?}"
+  );
+  // And it resumes the session rather than landing a bare shell there.
+  assert_eq!(argv.last().map(String::as_str), Some("claude -r s1"), "got: {argv:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn agent_pane_spawn_hands_the_planned_command_to_the_multiplexer() {
+  // Copilot review on PR #610: every other test here stops at a refusal or
+  // at pure argv planning, so a regression that plans correctly and then
+  // never launches — or launches with the wrong cwd, or builds the status
+  // from the wrong session — would pass. This one drives the real spawn
+  // against a recording fake `tmux`, the same shape `cli_binary.rs` uses for
+  // the CLI verb.
+  //
+  // Unix-only for the same reason the `glab` fake is: what is under test is
+  // gwm's argv and status, and a `.cmd` shim would mostly exercise `cmd.exe`
+  // quoting rules instead.
+  use std::os::unix::fs::PermissionsExt;
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let fake = tempfile::TempDir::new().unwrap();
+  let log = fake.path().join("argv.log");
+  let tmux = fake.path().join("tmux");
+  std::fs::write(
+    &tmux,
+    format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n", log.display()),
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&tmux).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&tmux, perms).unwrap();
+
+  // An IDLE session (2h old), so the status must NOT carry the live warning.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::ClaudeCode, "s1", 7200);
+
+  let previous = std::env::var("PATH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` above.
+  unsafe {
+    std::env::set_var(
+      "PATH",
+      format!("{}:{}", fake.path().display(), previous.clone().unwrap_or_default()),
+    );
+  }
+  app.open_selected_agent_pane_from(Some("/tmp/tmux-501/default,1,0".into()), None, None, None);
+  unsafe {
+    match previous {
+      Some(v) => std::env::set_var("PATH", v),
+      None => std::env::remove_var("PATH"),
+    }
+  }
+
+  let argv = std::fs::read_to_string(&log).unwrap_or_default();
+  assert!(
+    argv.contains("split-window"),
+    "the planned argv must actually reach the multiplexer, got: {argv:?} / status: {}",
+    app.status
+  );
+  assert!(
+    argv.contains("claude -r s1"),
+    "the pane must run the RESUME command, not a bare shell, got: {argv:?}"
+  );
+  assert!(
+    argv.contains("/tmp/gwm-test/feat-591-foo"),
+    "the pane must open in the overlay's worktree, got: {argv:?}"
+  );
+  // The status is built from the spawn's own outcome and this session's
+  // freshness, which is the wiring the planning tests cannot see.
+  assert_eq!(
+    app.status, "opened claude session in new pane",
+    "an idle session opens without the live warning"
+  );
+}
+
+#[test]
+fn agent_pane_status_warns_when_the_session_is_still_active() {
+  // A session with `ended = true` resumes without comment: that is what
+  // resume is for. A LIVE one is the interesting case — resuming it in a
+  // second pane while it runs elsewhere may fork or refuse depending on the
+  // tool, so the status says so rather than leaving a silent second pane.
+  let live = gwm::tui::agent_pane_status("claude", "pane", true, true, "", "");
+  assert!(
+    live.contains("still active"),
+    "a live session must be flagged, got: {}",
+    live
+  );
+  let idle = gwm::tui::agent_pane_status("claude", "pane", false, true, "", "");
+  assert!(
+    !idle.contains("still active"),
+    "an idle session resumes without a warning, got: {}",
+    idle
+  );
+  assert!(idle.contains("claude"), "the status names the backend, got: {}", idle);
+  // The noun comes from `spawn_noun`, so `mux_open_in = "tab"` does not leave
+  // the status describing a pane the user is not looking at (#589).
+  let tab = gwm::tui::agent_pane_status("claude", "tab", false, true, "", "");
+  assert!(tab.contains("tab") && !tab.contains("pane"), "got: {}", tab);
+
+  // A refusal keeps the multiplexer's own words and gains no warning: what
+  // failed is the spawn, and "still active elsewhere" would read as a cause.
+  let refused = gwm::tui::agent_pane_status("claude", "pane", true, false, "", "no server running");
+  assert!(
+    refused.contains("no server running") && !refused.contains("still active"),
+    "got: {}",
+    refused
+  );
+}
+
 #[test]
 fn filtered_indices_returns_all_when_query_empty() {
   let (_dir, mut app) = make_app();

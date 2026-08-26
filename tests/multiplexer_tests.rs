@@ -4,8 +4,10 @@
 //! the runner — they assert against the produced argv vectors.
 
 use gwm::multiplexer::{
-  build_command, build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer,
-  detect_tmux, detect_zellij, macro_mux_command, macro_refusal, spawn_noun, Multiplexer, SpawnMode, SplitDirection,
+  attach_pane_command, build_command, build_herdr_command, build_herdr_process_info_command, build_herdr_run_command,
+  build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer, detect_tmux, detect_zellij,
+  herdr_pane_id, herdr_shell_is_idle, macro_mux_command, macro_refusal, spawn_noun, Multiplexer, SpawnMode,
+  SplitDirection,
 };
 use std::path::Path;
 
@@ -811,4 +813,162 @@ fn multiplexer_binary_matches_verb() {
   assert_eq!(Multiplexer::Tmux.binary(), "tmux");
   assert_eq!(Multiplexer::Zellij.binary(), "zellij");
   assert_eq!(Multiplexer::Herdr.binary(), "herdr");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #591: a pane that runs a command
+// ---------------------------------------------------------------------------
+//
+// `macro_refusal` answers "can this (backend, mode) run a command at all";
+// `attach_pane_command` answers "how". The second half stayed inline in
+// `run_macro` when #589 extracted the first, because it had a single caller.
+// `o` on the agents overlay is the second, and two copies that can disagree
+// is the defect both extractions were aimed at.
+
+#[test]
+fn attach_pane_command_gives_tmux_one_trailing_operand() {
+  // tmux takes the command as a SINGLE shell-command operand and hands it to
+  // the shell itself, so pre-splitting into `sh -c <cmd>` would pass the
+  // pieces as separate operands and lose everything after the first.
+  let mode = SpawnMode::Split(SplitDirection::Right);
+  let split = build_command(Multiplexer::Tmux, "feat-7-foo", path(), mode, None).unwrap();
+  let argv = attach_pane_command(Multiplexer::Tmux, &split, "claude -r s1", "/bin/zsh", "-c").unwrap();
+  assert_eq!(argv.last().map(String::as_str), Some("claude -r s1"));
+  assert_eq!(
+    argv.len(),
+    split.len() + 1,
+    "one operand, not a shell wrapper: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn attach_pane_command_wraps_zellij_in_a_shell() {
+  // `zellij action new-pane` runs its trailing argv DIRECTLY rather than
+  // through a shell, so a command with spaces has to arrive as
+  // `-- <shell> -c <line>` or zellij looks for a binary called `claude -r s1`.
+  let mode = SpawnMode::Split(SplitDirection::Right);
+  let split = build_command(Multiplexer::Zellij, "feat-7-foo", path(), mode, None).unwrap();
+  let argv = attach_pane_command(Multiplexer::Zellij, &split, "claude -r s1", "/bin/zsh", "-c").unwrap();
+  assert_eq!(
+    &argv[split.len()..],
+    &[
+      "--".to_string(),
+      "/bin/zsh".to_string(),
+      "-c".to_string(),
+      "claude -r s1".to_string()
+    ],
+    "got: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn attach_pane_command_refuses_herdr_in_step_with_macro_refusal() {
+  // `herdr pane split` has no trailing-command form: running one takes
+  // `herdr pane run <pane-id> <cmd>`, and the id only comes back in the JSON
+  // `pane split` prints. Appending an operand it ignores would open an EMPTY
+  // pane and drop the command silently.
+  //
+  // The property worth pinning is an IMPLICATION, not an equivalence: every
+  // (backend, mode) `macro_refusal` lets through has to be one
+  // `attach_pane_command` can build, or a caller that asked the first would
+  // trip on the second. The converse is not owed and does not hold — a
+  // zellij TAB takes no command either, but that is `macro_refusal`'s to
+  // know; teaching it to `attach_pane_command` too would be the second copy
+  // this function exists to avoid.
+  let modes = [
+    SpawnMode::Split(SplitDirection::Right),
+    SpawnMode::Split(SplitDirection::Down),
+    SpawnMode::Window,
+    SpawnMode::Workspace,
+  ];
+  for mux in [Multiplexer::Tmux, Multiplexer::Zellij, Multiplexer::Herdr] {
+    for mode in modes {
+      let Ok(split) = build_command(mux, "feat-7-foo", path(), mode, Some("w2K")) else {
+        continue; // the backend has no level for this target at all
+      };
+      let attached = attach_pane_command(mux, &split, "claude -r s1", "/bin/zsh", "-c");
+      if macro_refusal(mux, mode).is_none() {
+        assert!(
+          attached.is_some(),
+          "{mux:?} / {mode:?}: macro_refusal lets a command through that attach_pane_command cannot build"
+        );
+      }
+      // The herdr half stated directly, so the loop cannot pass by never
+      // reaching a backend that refuses.
+      if mux == Multiplexer::Herdr {
+        assert!(attached.is_none(), "{mode:?}: a herdr pane must never carry an operand");
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #591 / #599: herdr runs a command through the pane it just opened
+// ---------------------------------------------------------------------------
+//
+// Every literal below is a response herdr 0.8.2 actually returned, captured
+// from a live server rather than written from the help text — which documents
+// none of these shapes.
+
+#[test]
+fn herdr_pane_id_reads_all_three_levels() {
+  // `pane split` nests the pane under `result.pane`...
+  let split = r#"{"id":"cli:pane:split","result":{"pane":{"cwd":"/w","focused":false,"pane_id":"w2K:p2C","tab_id":"w2K:t1","workspace_id":"w2K"},"type":"pane_info"}}"#;
+  assert_eq!(herdr_pane_id(split).as_deref(), Some("w2K:p2C"));
+
+  // ...while `tab create` and `workspace create` nest it under
+  // `result.root_pane`, alongside the `tab` / `workspace` objects. Reading
+  // only the first shape would leave `mux_open_in = "tab"` opening a
+  // container and never finding the shell to resume in.
+  let tab = r#"{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"w2K:p2D","tab_id":"w2K:t5"},"tab":{"label":"probe-tab","tab_id":"w2K:t5"},"type":"tab_created"}}"#;
+  assert_eq!(herdr_pane_id(tab).as_deref(), Some("w2K:p2D"));
+
+  let ws = r#"{"id":"cli:workspace:create","result":{"root_pane":{"pane_id":"w2R:p1","tab_id":"w2R:t1"},"tab":{"tab_id":"w2R:t1"},"type":"workspace_created","workspace":{"workspace_id":"w2R"}}}"#;
+  assert_eq!(herdr_pane_id(ws).as_deref(), Some("w2R:p1"));
+
+  // An error body names no pane, and neither does junk.
+  assert_eq!(herdr_pane_id(r#"{"error":{"message":"unknown workspace w9Z"}}"#), None);
+  assert_eq!(herdr_pane_id("not json"), None);
+}
+
+#[test]
+fn herdr_shell_is_idle_compares_the_foreground_group_to_the_shell() {
+  // The pane's shell owns the foreground process group exactly when nothing
+  // is running in it, which is prompt-independent — matching prompt text
+  // would break on every theme.
+  let idle = r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":84369,"foreground_processes":[{"argv":["-zsh"],"name":"zsh","pid":84369}],"pane_id":"w2K:p2C","shell_pid":84369},"type":"pane_process_info"}}"#;
+  assert!(herdr_shell_is_idle(idle));
+
+  // Still running its rc files: this is the state in which a typed line is
+  // swallowed by the rc output and never executes (measured on direnv+nix).
+  let busy = r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":84999,"pane_id":"w2K:p2C","shell_pid":84369},"type":"pane_process_info"}}"#;
+  assert!(!herdr_shell_is_idle(busy));
+
+  // Fail closed: an unreadable answer keeps the caller waiting rather than
+  // typing into a shell it knows nothing about.
+  assert!(!herdr_shell_is_idle(r#"{"error":{"message":"no such pane"}}"#));
+  assert!(!herdr_shell_is_idle("not json"));
+  assert!(!herdr_shell_is_idle(""));
+}
+
+#[test]
+fn herdr_run_takes_the_command_as_one_argument() {
+  // `herdr pane run` joins its `<COMMAND>...` argv with spaces and TYPES the
+  // result into the pane's interactive shell — it does not exec. Measured:
+  // `pane run <id> /bin/sh -c 'echo hi'` arrives as the text
+  // `/bin/sh -c echo hi`, where `sh` runs `echo` with `hi` as `$0` and prints
+  // an empty line. So the line goes in whole, already valid shell.
+  let argv = build_herdr_run_command("w2K:p2C", "codex resume s1 && echo done");
+  assert_eq!(
+    argv,
+    vec!["herdr", "pane", "run", "w2K:p2C", "codex resume s1 && echo done"]
+  );
+  assert_eq!(argv.len(), 5, "the line must stay ONE argument, got: {argv:?}");
+
+  assert_eq!(
+    build_herdr_process_info_command("w2K:p2C"),
+    vec!["herdr", "pane", "process-info", "--pane", "w2K:p2C"]
+  );
 }

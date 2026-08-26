@@ -12,6 +12,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`o` on the agents overlay resumes the session in the multiplexer**
+  ([#591](https://github.com/kbrdn1/gwm-cli/issues/591)). The overlay told you
+  which agent was working where and then left you to get there by hand. `a`
+  did not help: it is a pin, it changes gwm's bookkeeping, not where the
+  session runs. `o` opens a pane running the selected session.
+
+  **In the worktree the overlay is about**, not in the session's recorded
+  directory. A pinned session is pinned precisely because that directory names
+  the wrong tree, and for a pinned Claude session it can be the slug directory
+  under `~/.claude/projects` rather than a worktree at all.
+
+  **Multiplexer only**, deliberately. With none active the key says so and
+  does nothing, because the point is to put the session next to gwm and the
+  PTY overlay would cover gwm instead. It opens at the level `mux_open_in`
+  names, exactly as `t` does. One target stays refused: a zellij **tab** takes
+  no trailing command in any form.
+
+  **herdr works too, in two steps.** None of its levels accepts a trailing
+  command, so gwm opens the container, waits for its new shell to reach a
+  prompt, then types the line in through the pane id herdr's response carries.
+  All three of `pane split`, `tab create` and `workspace create` name a pane
+  to run in. The wait is load-bearing rather than defensive: `herdr pane run`
+  types into the interactive shell instead of exec'ing, so a line sent while
+  the shell is still running its rc files lands in the middle of that output
+  and is dropped, measured on a worktree with `direnv` and a nix flake where
+  it took about a minute to settle. The whole sequence therefore runs off the
+  event loop, the status bar reads `opening agent pane…` meanwhile, and it
+  gives up after two minutes rather than leave a worker running.
+
+  What the pane runs is `[tui.agent_resume]`, defaulting to
+  `claude -r {session}`, `codex resume {session}`, `opencode -s {session}` and
+  `vibe --resume {session}`, measured against the installed binaries. They are
+  configuration rather than a hardcoded table because they are four
+  third-party CLIs on their own release cadence. The session id is read out of
+  each tool's own artefacts, so it reaches the shell quoted through a
+  single-pass expander, the same rule the hook placeholders learned in
+  GHSA-fffq-vg6f-gxqm.
+
+  A session that has ended resumes without comment; a live one is flagged on
+  the status bar, since resuming it in a second pane while it runs elsewhere
+  may fork or refuse depending on the tool.
+
 - **Two settings for what a mux spawn opens, and where**
   ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
   [#608](https://github.com/kbrdn1/gwm-cli/issues/608),

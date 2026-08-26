@@ -2116,6 +2116,12 @@ impl App {
           // Delete owns the status line this tick.
           refresh_applied = true;
         }
+        TaskMsg::AgentPane(generation, result) => {
+          if !self.apply_agent_pane_result(generation, result) {
+            continue;
+          }
+          applied = true;
+        }
         TaskMsg::Pull(generation, name, result) => {
           if !self.tasks.complete(TaskKind::Pull, generation) {
             continue;
@@ -4039,6 +4045,159 @@ impl App {
       }
     }
     self.refresh_agent_overlay_rows(&path);
+  }
+
+  /// The session behind the highlighted overlay row **and the worktree the
+  /// overlay is about**, resolved from the SAME pool the rows were built
+  /// from.
+  ///
+  /// That is the whole point of going through `detail_overlay_target`:
+  /// [`Self::agent_all_sessions`] is a *different* collection with a
+  /// different refresh trigger (the attach-by-id prompt fills it on open),
+  /// so reading the id back from there would hand out a session whose `cwd`
+  /// is another repo, or nothing at all on a user who never pressed `i`.
+  fn selected_agent_session(&self) -> Option<(crate::agent_sessions::AgentSession, PathBuf)> {
+    let sid = self.detail_overlay.selected_meta()?;
+    let (path, _) = self.detail_overlay_target.as_ref()?;
+    let session = self
+      .agent_snapshot
+      .as_ref()?
+      .get(&crate::agent_sessions::path_display_key(path))?
+      .sessions
+      .iter()
+      .find(|s| s.id == sid)
+      .cloned()?;
+    Some((session, path.clone()))
+  }
+
+  /// Resume the selected session in a new multiplexer pane (`o` inside the
+  /// agents overlay, issue #591).
+  pub fn open_selected_agent_pane(&mut self) {
+    self.open_selected_agent_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+      std::env::var("HERDR_WORKSPACE_ID").ok(),
+    );
+  }
+
+  /// [`Self::open_selected_agent_pane`] with the env probes passed in, the
+  /// shape [`Self::open_in_mux_pane_from`] already uses so a state test can
+  /// drive every refusal without rewriting a process-global variable.
+  ///
+  /// **Multiplexer only, deliberately.** With none detected the key says so
+  /// and does nothing: the point of `o` is to put the session *next to* gwm,
+  /// and the PTY overlay the `[tui.macro*]` path falls back to would cover
+  /// gwm instead, which is not that.
+  pub fn open_selected_agent_pane_from(
+    &mut self,
+    tmux: Option<String>,
+    zellij: Option<String>,
+    herdr: Option<String>,
+    workspace: Option<String>,
+  ) {
+    let Some((session, target)) = self.selected_agent_session() else {
+      // The `no agent session found` placeholder row carries no meta.
+      // `attach` falls through to the attach-by-id prompt there; `o` has
+      // nothing to resume, and opening a prompt from a key that promises a
+      // pane would be a different verb.
+      self.status = "no agent session selected to resume".into();
+      return;
+    };
+    let plan = match plan_agent_pane(
+      &session,
+      &target,
+      &self.config.tui,
+      tmux,
+      zellij,
+      herdr,
+      workspace.as_deref(),
+    ) {
+      Ok(plan) => plan,
+      Err(refusal) => {
+        self.status = refusal;
+        return;
+      }
+    };
+    let kind = session.kind.display().to_string();
+    let active = matches!(
+      crate::agent_sessions::Freshness::classify(session.last_activity, session.ended, std::time::SystemTime::now()),
+      crate::agent_sessions::Freshness::Active
+    );
+    match plan {
+      AgentPanePlan::OneShot { argv, noun } => {
+        // `output()` rather than `spawn()`, for the reason spelled out in
+        // [`Self::open_in_mux_pane_from`]: this runs while ratatui owns the
+        // screen, so a child that inherits the pipes draws over the frame.
+        // Affordable inline because both verbs return as soon as the pane
+        // exists, without waiting on the shell they start.
+        match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+          Ok(out) => {
+            self.status = agent_pane_status(
+              &kind,
+              noun,
+              active,
+              out.status.success(),
+              &String::from_utf8_lossy(&out.stdout),
+              &String::from_utf8_lossy(&out.stderr),
+            )
+          }
+          Err(e) => self.status = format!("mux-pane failed: {}", e),
+        }
+      }
+      AgentPanePlan::Sequenced { open, line, noun } => {
+        let Some(generation) = self.tasks.request(TaskKind::AgentPane) else {
+          // A resume is already in flight: coalesce rather than open a
+          // second container for the same keypress.
+          return;
+        };
+        self.spinner.reset();
+        self.status = TaskKind::AgentPane.loading_label().into();
+        self.spawn_agent_pane(generation, open, line, kind, noun, active);
+      }
+    }
+  }
+
+  /// Land a herdr resume worker's answer on the status bar (#591). `false`
+  /// for a superseded generation, whose late result must not clobber a newer
+  /// keypress's status.
+  ///
+  /// Split from the drain so the landing is drivable by a state test: the
+  /// worker itself talks to a real herdr and cannot be.
+  ///
+  /// The worker worded both arms, because it is the only side that knows
+  /// which of open / wait / run answered.
+  pub fn apply_agent_pane_result(&mut self, generation: u64, result: std::result::Result<String, String>) -> bool {
+    if !self.tasks.complete(TaskKind::AgentPane, generation) {
+      return false;
+    }
+    self.status = match result {
+      Ok(line) => line,
+      Err(e) => e,
+    };
+    true
+  }
+
+  /// The herdr half of `o` (#591), off the event loop: open the container,
+  /// wait for its shell to reach a prompt, then type the resume line into it.
+  ///
+  /// Every step is a separate `herdr` process, and every step can fail with
+  /// something worth reading, so the status line is built here rather than in
+  /// the drain: only this side knows which of the three said no.
+  fn spawn_agent_pane(
+    &self,
+    generation: u64,
+    open: Vec<String>,
+    line: String,
+    kind: String,
+    noun: &'static str,
+    active: bool,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = run_herdr_agent_pane(&open, &line, &kind, noun, active);
+      let _ = tx.send(TaskMsg::AgentPane(generation, result));
+    });
   }
 
   /// Rebuild the open overlay's rows after a pin change, refresh the
@@ -7692,4 +7851,226 @@ pub fn mux_pane_status(name: &str, noun: &str, ok: bool, stdout: &str, stderr: &
     .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
     .unwrap_or("no output");
   format!("mux-pane refused: {}", detail)
+}
+
+/// Everything `o` on the agents overlay (#591) decides before a process is
+/// spawned: which multiplexer, at what level, what the pane runs, and where.
+/// `Ok` carries the argv plus the pair the status line needs to name what it
+/// opened; `Err` is the refusal, worded for the status bar.
+///
+/// Split out of [`App::open_selected_agent_pane_from`] for the reason
+/// [`mux_pane_status`] was: the spawn cannot be exercised from a test without
+/// opening a real pane, but every decision leading to it can.
+///
+/// The three steps are [`detect_multiplexer`], [`macro_refusal`] and
+/// [`build_command`], in that order, which is what
+/// [`crate::multiplexer::macro_mux_command`] does for a `[tui.macro*]`. It is
+/// not called directly for one reason: its "no multiplexer" wording is the
+/// macro's, and `o` shares its sentence with `t` instead, naming the three
+/// variables gwm actually probed. Every *decision* still comes from those
+/// three shared functions, so a fourth backend or a fifth mode is answered
+/// once.
+///
+/// **`target` is the worktree the overlay is about, not `session.cwd`.** The
+/// recorded cwd looks like the obvious answer and is the wrong one, because
+/// the overlay lists **pinned** sessions too, and a pin exists precisely when
+/// the recorded directory names the wrong tree (it is why `gwm agents attach`
+/// is in the workflow at all). `overlay_pins` deliberately leaves `cwd`
+/// alone, "purely as provenance", so for a pinned Claude session resolved by
+/// the id sweep it is not even a worktree: it is the slug directory under
+/// `~/.claude/projects`. Resuming there would drop the agent inside its own
+/// artefact store. An auto-matched row has `cwd == target` anyway, and for a
+/// pinned one the target is the user's own explicit override, so the overlay
+/// target is right in both cases and the pinned case is only right this way.
+///
+/// The level comes from `[tui] mux_open_in` and `[tui] mux_pane_direction`,
+/// the same pair `t` reads (#589 / #608), so the two keys cannot open at
+/// different levels from the same overlay. That is also why the refusals
+/// multiply: under `mux_open_in = "tab"` a zellij tab takes no command
+/// either, and [`macro_refusal`] is what knows.
+pub fn plan_agent_pane(
+  session: &crate::agent_sessions::AgentSession,
+  target: &Path,
+  tui: &crate::config::TuiConfig,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+) -> std::result::Result<AgentPanePlan, String> {
+  use crate::multiplexer as mux_mod;
+  let kind = session.kind.display();
+  let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
+  let Some(mux) = mux_mod::detect_multiplexer(tmux, zellij, herdr) else {
+    return Err("no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into());
+  };
+  // "Can this backend run a command here" comes before "can it open this
+  // target at all", so a zellij user hears about the tab rather than about a
+  // workspace flag they never set. Same order `macro_mux_command` asks in.
+  //
+  // `macro_refusal` answers for the backends that take their command in the
+  // SAME argv that opens the container, the only shape a `[tui.macro*]` can
+  // spawn inline. herdr is not one of them and is deliberately not asked: it
+  // takes the command afterwards, through the pane id its response carries
+  // (#599), which is a sequenced round trip rather than an argv.
+  if mux != mux_mod::Multiplexer::Herdr {
+    if let Some(why) = mux_mod::macro_refusal(mux, mode) {
+      return Err(format!("{why}: cannot resume a session there"));
+    }
+  }
+  let argv = mux_mod::build_command(mux, kind, target, mode, workspace).map_err(str::to_string)?;
+  // Fail closed on an id no shell can be trusted with. Nothing real is
+  // refused here (every backend's id is a UUID or a slug); what this rules
+  // out is a hostile artefact on disk meeting a template that happens to
+  // quote the placeholder, where quoting alone would not save us.
+  let Some(command) = crate::config::expand_agent_resume(tui.agent_resume.template_for(session.kind), &session.id)
+  else {
+    return Err(format!(
+      "session id {:?} is not safe to pass to a shell: refusing to resume",
+      session.id
+    ));
+  };
+  // The shell is read here rather than injected: it is only consumed by the
+  // zellij wrapping, which `attach_pane_command` owns and its own tests pin
+  // with an explicit shell. Threading it through this signature bought a
+  // parameter and no coverage.
+  let noun = mux_mod::spawn_noun(mux, mode);
+  // herdr: the container opens empty and the line is typed into it once its
+  // shell reaches a prompt. That wait is the reason this shape exists.
+  if mux == mux_mod::Multiplexer::Herdr {
+    return Ok(AgentPanePlan::Sequenced {
+      open: argv,
+      line: command,
+      noun,
+    });
+  }
+  let (shell, shell_flag) = crate::tui::platform_shell();
+  let argv = mux_mod::attach_pane_command(mux, &argv, &command, &shell, shell_flag)
+    .ok_or_else(|| "this backend's panes take no command".to_string())?;
+  Ok(AgentPanePlan::OneShot { argv, noun })
+}
+
+/// The two shapes a resume can take, because the backends genuinely differ
+/// (#591).
+///
+/// tmux and zellij carry the command in the argv that opens the pane and
+/// return as soon as it exists (~40ms measured), so that spawn stays inline.
+/// herdr opens an empty container and the command goes in afterwards,
+/// through the pane id the response carries, and only once the new shell has
+/// reached its prompt: sent earlier the text lands in the middle of the rc
+/// files' output and is dropped. That wait was ~60s on a worktree with
+/// `direnv` and a nix flake, so running it inline would freeze the TUI for a
+/// minute; it becomes a [`crate::tui::TaskKind::AgentPane`] worker instead.
+///
+/// One enum rather than two functions, so a caller cannot forget the second
+/// shape exists.
+pub enum AgentPanePlan {
+  /// One control command that both opens and runs (tmux, zellij).
+  OneShot {
+    argv: Vec<String>,
+    /// What was opened, for the status line: pane / window / tab.
+    noun: &'static str,
+  },
+  /// Open, wait for the shell, then type the line (herdr).
+  Sequenced {
+    open: Vec<String>,
+    line: String,
+    noun: &'static str,
+  },
+}
+
+/// Status-bar line for a finished agent-resume spawn (#591).
+///
+/// The mux wording is [`mux_pane_status`]'s, `noun` included, so a refusal
+/// still reads out of the multiplexer's own words and one place decides what
+/// a pane spawn sounds like.
+///
+/// The one thing added is the warning a **live** session earns. A session
+/// with `ended = true` resumes without comment, which is what resume is for;
+/// resuming one that is still running elsewhere may fork or refuse depending
+/// on the tool, and the user deserves to hear that rather than find a silent
+/// second pane. A refusal gains no warning: what failed is the spawn, and
+/// "still active" appended there would read as its cause.
+pub fn agent_pane_status(kind: &str, noun: &str, active: bool, ok: bool, stdout: &str, stderr: &str) -> String {
+  let base = mux_pane_status(&format!("{kind} session"), noun, ok, stdout, stderr);
+  if ok && active {
+    format!("{base}; still active elsewhere, the agent may fork or refuse")
+  } else {
+    base
+  }
+}
+
+/// How long the herdr resume waits for the freshly-opened shell to reach its
+/// prompt before giving up (#591).
+///
+/// Sized from measurement, not taste: a worktree with `direnv` and a nix
+/// flake took ~60s to finish its rc files, and the resume line is dropped if
+/// it is typed before then. Double that leaves room for a cold nix store
+/// without leaving a stuck worker running for the rest of the session.
+const HERDR_SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Gap between two `pane process-info` polls while waiting.
+const HERDR_POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Open a herdr container, wait for its shell, and type the resume line into
+/// it (#591). Runs on a worker thread; returns the status line to show.
+///
+/// The three steps are separate `herdr` processes and each has its own way of
+/// failing, so each is reported in its own words rather than folded into one
+/// "it did not work".
+fn run_herdr_agent_pane(
+  open: &[String],
+  line: &str,
+  kind: &str,
+  noun: &'static str,
+  active: bool,
+) -> std::result::Result<String, String> {
+  let run = |argv: &[String]| -> std::result::Result<String, String> {
+    let out = std::process::Command::new(&argv[0])
+      .args(&argv[1..])
+      .output()
+      .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if out.status.success() {
+      Ok(stdout)
+    } else {
+      // herdr answers over its socket API, so a refusal arrives as a JSON
+      // body on stdout with a non-zero exit; stderr is the fallback.
+      let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+      Err(first_line(&stderr).unwrap_or_else(|| first_line(&stdout).unwrap_or_else(|| "no output".into())))
+    }
+  };
+
+  // 1. Open the container. Its response carries the pane the shell runs in,
+  //    whichever level was opened.
+  let opened = run(open).map_err(|e| format!("mux-pane refused: {e}"))?;
+  let Some(pane) = crate::multiplexer::herdr_pane_id(&opened) else {
+    return Err("herdr opened a container but named no pane to run in".into());
+  };
+
+  // 2. Wait for that pane's shell to reach its prompt. Typing earlier loses
+  //    the line inside the rc files' own output (measured on direnv + nix).
+  let info_cmd = crate::multiplexer::build_herdr_process_info_command(&pane);
+  let deadline = std::time::Instant::now() + HERDR_SHELL_WAIT;
+  loop {
+    if crate::multiplexer::herdr_shell_is_idle(&run(&info_cmd).unwrap_or_default()) {
+      break;
+    }
+    if std::time::Instant::now() >= deadline {
+      return Err(format!(
+        "{pane} is open but its shell was still busy after {}s: nothing was resumed",
+        HERDR_SHELL_WAIT.as_secs()
+      ));
+    }
+    std::thread::sleep(HERDR_POLL_EVERY);
+  }
+
+  // 3. Type the line. One argument: `pane run` re-joins its argv with spaces
+  //    before typing, so pre-splitting would undo the quoting.
+  run(&crate::multiplexer::build_herdr_run_command(&pane, line))
+    .map_err(|e| format!("herdr refused the resume: {e}"))?;
+  Ok(agent_pane_status(kind, noun, active, true, "", ""))
+}
+
+/// First non-empty trimmed line, for a one-row status bar.
+fn first_line(s: &str) -> Option<String> {
+  s.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
 }
