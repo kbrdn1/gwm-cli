@@ -2976,13 +2976,25 @@ impl App {
   /// reads as a dead key.
   pub fn enter_working_tree(&mut self) {
     let selected = self.selected().cloned();
-    self.working_tree.begin(selected.as_ref().map(|w| w.path.as_path()));
+    let target = selected.as_ref().map(|w| w.path.as_path());
+    // Coalescing is only sound while the in-flight read is for the SAME
+    // worktree (Copilot review, PR #612). Close a slow snapshot for A,
+    // select B, reopen: the request would come back `None` because the slot
+    // is still A's, no worker would exist for B, and A's payload is dropped
+    // on the path check below — leaving the loader up with nothing left to
+    // clear it. `invalidate` bumps the generation and frees the slot, so A's
+    // late result is discarded and B gets its own read.
+    if self.working_tree.loading && self.working_tree.path.as_deref() != target {
+      self.tasks.invalidate(TaskKind::WorkingTree);
+    }
+    self.working_tree.begin(target);
     self.view = View::WorkingTree;
     let Some(w) = selected else {
       return;
     };
     let Some(generation) = self.tasks.request(TaskKind::WorkingTree) else {
-      // A read is already in flight for this open; coalesce onto it.
+      // A read for this same worktree is already out; ride on it, which is
+      // what keeps a held `5` from spawning a `git status` per repeat.
       return;
     };
     let theme = self.theme;
