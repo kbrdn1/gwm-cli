@@ -2890,6 +2890,17 @@ impl App {
   /// is the sidebar's own limit, so a sidebar that already walked this tip
   /// makes the worker a hash lookup.
   ///
+  /// The tip comes from `WorktreeInfo.head`, the snapshot `worktree::list`
+  /// took at the last refresh, NOT from resolving HEAD here. A commit
+  /// landing between two refreshes is therefore invisible to the overlay
+  /// until the next one — which is exactly what the sidebar's Commits pane
+  /// shows, since it hands the same `WorktreeInfo` to the same memo
+  /// (`ui.rs`, `SidebarMode::Commits`). Resolving HEAD at open would make
+  /// the overlay disagree with the pane it is a full-size view of, and the
+  /// staleness window is one auto-refresh interval. Raised twice by Codex
+  /// on PR #614 and declined both times: the snapshot is the contract of
+  /// `recent_commits_cached`, not an oversight here.
+  ///
   /// With nothing selected the overlay still opens, empty — the
   /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
   /// reads as a dead key.
