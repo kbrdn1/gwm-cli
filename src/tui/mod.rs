@@ -28,8 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  mux_pane_status, read_pins_from_sources, App, ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey,
-  LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, View, WorkspaceState,
+  mux_pane_status, read_pins_from_sources, App, ConfirmKind, CreateKey,
+  ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta,
+  View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -1432,7 +1433,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  use crate::multiplexer::{macro_mux_command, spawn_noun, Multiplexer};
+  use crate::multiplexer::{macro_mux_command, spawn_noun};
   // Macros run in the selected worktree. With nothing selected (e.g. a filter
   // with no matches), refuse rather than silently running in the main repo —
   // a destructive command must not hit the wrong tree (Codex review on #292).
@@ -1441,11 +1442,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     return Ok(());
   };
 
-  #[cfg(windows)]
-  let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-  #[cfg(not(windows))]
-  let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-  let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+  let (shell, shell_flag) = platform_shell();
 
   // Resolve the mux command up front so a `mux_pane` macro can fall back to the
   // PTY overlay when no multiplexer is active (the documented behaviour — Codex
@@ -1481,24 +1478,16 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     None
   };
 
-  if let Some((mux, cmd)) = mux_cmd {
-    let bin = cmd[0].as_str();
-    let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-    if mux == Multiplexer::Zellij {
-      // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
-      // shell, so a command with spaces/shell syntax must be wrapped in
-      // `-- <shell> -c <cmd>` (Codex review on PR #292).
-      full_cmd.push("--");
-      full_cmd.push(shell.as_str());
-      full_cmd.push(shell_flag);
-      full_cmd.push(macro_cfg.command.as_str());
-    } else {
-      // tmux takes the command as a SINGLE shell-command operand and hands it
-      // to the shell itself, so we pass it as one trailing argument rather than
-      // pre-splitting into `sh -c <cmd>`.
-      full_cmd.push(macro_cfg.command.as_str());
-    }
-    match std::process::Command::new(bin).args(&full_cmd).spawn() {
+  // How a command rides along an argv moved next to the refusal that gates
+  // it (#591): `o` on the agents overlay needs the same two shapes, and the
+  // pair is one decision. `None` is herdr, which `macro_mux_command` already
+  // refused above, so this falls into the PTY overlay the same way.
+  let mux_argv = mux_cmd.and_then(|(mux, cmd)| {
+    crate::multiplexer::attach_pane_command(mux, &cmd, &macro_cfg.command, &shell, shell_flag).map(|argv| (mux, argv))
+  });
+
+  if let Some((mux, full_cmd)) = mux_argv {
+    match std::process::Command::new(&full_cmd[0]).args(&full_cmd[1..]).spawn() {
       Ok(_) => app.status = format!("macro{} opened in new {}", n, spawn_noun(mux, mode)),
       Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
     }
@@ -1514,6 +1503,21 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     }
   }
   Ok(())
+}
+
+/// The interactive shell a command line is handed to, and its "run this
+/// string" flag.
+///
+/// Shared by the `[tui.macro*]` runner and the agent-resume pane (#591):
+/// both have a shell *line* to run and a backend that wants an argv, and a
+/// second copy of the `cfg!(windows)` pair is a second place to forget
+/// `/C`.
+pub(crate) fn platform_shell() -> (String, &'static str) {
+  #[cfg(windows)]
+  let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+  #[cfg(not(windows))]
+  let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+  (shell, if cfg!(windows) { "/C" } else { "-c" })
 }
 
 /// Copy the Command Logs transcript to the clipboard (issue #279, `y`).

@@ -493,3 +493,48 @@ pub fn detect_herdr(env: Option<String>) -> bool {
     None => false,
   }
 }
+
+/// Attach a shell command line to an argv from [`build_command`], or `None`
+/// when the backend has no trailing-command form in that mode.
+///
+/// [`macro_refusal`] answers "can this (backend, mode) run a command at
+/// all"; this answers "how". They were one inline chain in `run_macro`
+/// until the first half moved out in #589, and the second half stayed
+/// behind because it had a single caller. `o` on the agents overlay (#591)
+/// is the second, and two copies that can disagree is the defect the
+/// extractions in #588 and #589 were both aimed at.
+///
+/// The two shapes are not interchangeable:
+///
+/// * **zellij** runs its trailing argv *directly*, not through a shell, so
+///   a command with spaces or shell syntax has to arrive as
+///   `-- <shell> <flag> <line>` or zellij looks for a binary named after
+///   the whole line.
+/// * **tmux** takes the command as a *single* shell-command operand and
+///   hands it to the shell itself, so it is appended whole rather than
+///   pre-split, which would lose everything after the first word.
+///
+/// **herdr gets `None`**, which a caller that asked [`macro_refusal`] first
+/// can never see. It is still spelled out rather than folded into tmux's
+/// arm: appending an operand `herdr pane split` ignores would open an empty
+/// pane and drop the command silently, and that failure is worth being
+/// unrepresentable rather than merely unreachable.
+///
+/// `shell` / `shell_flag` are parameters rather than env reads, the shape
+/// [`detect_multiplexer`] already uses, so the argv can be pinned by a test
+/// on any runner.
+pub fn attach_pane_command(
+  mux: Multiplexer,
+  argv: &[String],
+  command: &str,
+  shell: &str,
+  shell_flag: &str,
+) -> Option<Vec<String>> {
+  let mut argv = argv.to_vec();
+  match mux {
+    Multiplexer::Herdr => return None,
+    Multiplexer::Tmux => argv.push(command.into()),
+    Multiplexer::Zellij => argv.extend(["--".into(), shell.into(), shell_flag.into(), command.into()]),
+  }
+  Some(argv)
+}
