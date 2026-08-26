@@ -4041,6 +4041,101 @@ impl App {
     self.refresh_agent_overlay_rows(&path);
   }
 
+  /// The session behind the highlighted overlay row **and the worktree the
+  /// overlay is about**, resolved from the SAME pool the rows were built
+  /// from.
+  ///
+  /// That is the whole point of going through `detail_overlay_target`:
+  /// [`Self::agent_all_sessions`] is a *different* collection with a
+  /// different refresh trigger (the attach-by-id prompt fills it on open),
+  /// so reading the id back from there would hand out a session whose `cwd`
+  /// is another repo, or nothing at all on a user who never pressed `i`.
+  fn selected_agent_session(&self) -> Option<(crate::agent_sessions::AgentSession, PathBuf)> {
+    let sid = self.detail_overlay.selected_meta()?;
+    let (path, _) = self.detail_overlay_target.as_ref()?;
+    let session = self
+      .agent_snapshot
+      .as_ref()?
+      .get(&crate::agent_sessions::path_display_key(path))?
+      .sessions
+      .iter()
+      .find(|s| s.id == sid)
+      .cloned()?;
+    Some((session, path.clone()))
+  }
+
+  /// Resume the selected session in a new multiplexer pane (`o` inside the
+  /// agents overlay, issue #591).
+  pub fn open_selected_agent_pane(&mut self) {
+    self.open_selected_agent_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+      std::env::var("HERDR_WORKSPACE_ID").ok(),
+    );
+  }
+
+  /// [`Self::open_selected_agent_pane`] with the env probes passed in, the
+  /// shape [`Self::open_in_mux_pane_from`] already uses so a state test can
+  /// drive every refusal without rewriting a process-global variable.
+  ///
+  /// **Multiplexer only, deliberately.** With none detected the key says so
+  /// and does nothing: the point of `o` is to put the session *next to* gwm,
+  /// and the PTY overlay the `[tui.macro*]` path falls back to would cover
+  /// gwm instead, which is not that.
+  pub fn open_selected_agent_pane_from(
+    &mut self,
+    tmux: Option<String>,
+    zellij: Option<String>,
+    herdr: Option<String>,
+    workspace: Option<String>,
+  ) {
+    let Some((session, target)) = self.selected_agent_session() else {
+      // The `no agent session found` placeholder row carries no meta.
+      // `attach` falls through to the attach-by-id prompt there; `o` has
+      // nothing to resume, and opening a prompt from a key that promises a
+      // pane would be a different verb.
+      self.status = "no agent session selected to resume".into();
+      return;
+    };
+    let (mux, mode, argv) = match plan_agent_pane(
+      &session,
+      &target,
+      &self.config.tui,
+      tmux,
+      zellij,
+      herdr,
+      workspace.as_deref(),
+    ) {
+      Ok(plan) => plan,
+      Err(refusal) => {
+        self.status = refusal;
+        return;
+      }
+    };
+    let kind = session.kind.display();
+    let active = matches!(
+      crate::agent_sessions::Freshness::classify(session.last_activity, session.ended, std::time::SystemTime::now()),
+      crate::agent_sessions::Freshness::Active
+    );
+    // `output()` rather than `spawn()`, for the reason spelled out in
+    // [`Self::open_in_mux_pane_from`]: this runs while ratatui owns the
+    // screen, so a child that inherits the pipes draws over the frame.
+    match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+      Ok(out) => {
+        self.status = agent_pane_status(
+          kind,
+          crate::multiplexer::spawn_noun(mux, mode),
+          active,
+          out.status.success(),
+          &String::from_utf8_lossy(&out.stdout),
+          &String::from_utf8_lossy(&out.stderr),
+        )
+      }
+      Err(e) => self.status = format!("mux-pane failed: {}", e),
+    }
+  }
+
   /// Rebuild the open overlay's rows after a pin change, refresh the
   /// render-side pins copy (the Agents pane shows pinned-only), and push
   /// the new pin state to every other surface (snapshot re-detection).
@@ -7692,4 +7787,100 @@ pub fn mux_pane_status(name: &str, noun: &str, ok: bool, stdout: &str, stderr: &
     .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
     .unwrap_or("no output");
   format!("mux-pane refused: {}", detail)
+}
+
+/// Everything `o` on the agents overlay (#591) decides before a process is
+/// spawned: which multiplexer, at what level, what the pane runs, and where.
+/// `Ok` carries the argv plus the pair the status line needs to name what it
+/// opened; `Err` is the refusal, worded for the status bar.
+///
+/// Split out of [`App::open_selected_agent_pane_from`] for the reason
+/// [`mux_pane_status`] was: the spawn cannot be exercised from a test without
+/// opening a real pane, but every decision leading to it can.
+///
+/// The three steps are [`detect_multiplexer`], [`macro_refusal`] and
+/// [`build_command`], in that order, which is what
+/// [`crate::multiplexer::macro_mux_command`] does for a `[tui.macro*]`. It is
+/// not called directly for one reason: its "no multiplexer" wording is the
+/// macro's, and `o` shares its sentence with `t` instead, naming the three
+/// variables gwm actually probed. Every *decision* still comes from those
+/// three shared functions, so a fourth backend or a fifth mode is answered
+/// once.
+///
+/// **`target` is the worktree the overlay is about, not `session.cwd`.** The
+/// recorded cwd looks like the obvious answer and is the wrong one, because
+/// the overlay lists **pinned** sessions too, and a pin exists precisely when
+/// the recorded directory names the wrong tree (it is why `gwm agents attach`
+/// is in the workflow at all). `overlay_pins` deliberately leaves `cwd`
+/// alone, "purely as provenance", so for a pinned Claude session resolved by
+/// the id sweep it is not even a worktree: it is the slug directory under
+/// `~/.claude/projects`. Resuming there would drop the agent inside its own
+/// artefact store. An auto-matched row has `cwd == target` anyway, and for a
+/// pinned one the target is the user's own explicit override, so the overlay
+/// target is right in both cases and the pinned case is only right this way.
+///
+/// The level comes from `[tui] mux_open_in` and `[tui] mux_pane_direction`,
+/// the same pair `t` reads (#589 / #608), so the two keys cannot open at
+/// different levels from the same overlay. That is also why the refusals
+/// multiply: under `mux_open_in = "tab"` a zellij tab takes no command
+/// either, and [`macro_refusal`] is what knows.
+pub fn plan_agent_pane(
+  session: &crate::agent_sessions::AgentSession,
+  target: &Path,
+  tui: &crate::config::TuiConfig,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+) -> std::result::Result<
+  (
+    crate::multiplexer::Multiplexer,
+    crate::multiplexer::SpawnMode,
+    Vec<String>,
+  ),
+  String,
+> {
+  use crate::multiplexer as mux_mod;
+  let kind = session.kind.display();
+  let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
+  let Some(mux) = mux_mod::detect_multiplexer(tmux, zellij, herdr) else {
+    return Err("no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into());
+  };
+  // "Can this backend run a command here" comes before "can it open this
+  // target at all", so a herdr user hears about herdr rather than about a
+  // workspace flag they never set. Same order `macro_mux_command` asks in.
+  if let Some(why) = mux_mod::macro_refusal(mux, mode) {
+    return Err(format!("{why}: cannot resume a session there"));
+  }
+  let argv = mux_mod::build_command(mux, kind, target, mode, workspace).map_err(str::to_string)?;
+  let command = crate::config::expand_agent_resume(tui.agent_resume.template_for(session.kind), &session.id);
+  // The shell is read here rather than injected: it is only consumed by the
+  // zellij wrapping, which `attach_pane_command` owns and its own tests pin
+  // with an explicit shell. Threading it through this signature bought a
+  // parameter and no coverage.
+  let (shell, shell_flag) = crate::tui::platform_shell();
+  let argv = mux_mod::attach_pane_command(mux, &argv, &command, &shell, shell_flag)
+    .ok_or_else(|| "this backend's panes take no command".to_string())?;
+  Ok((mux, mode, argv))
+}
+
+/// Status-bar line for a finished agent-resume spawn (#591).
+///
+/// The mux wording is [`mux_pane_status`]'s, `noun` included, so a refusal
+/// still reads out of the multiplexer's own words and one place decides what
+/// a pane spawn sounds like.
+///
+/// The one thing added is the warning a **live** session earns. A session
+/// with `ended = true` resumes without comment, which is what resume is for;
+/// resuming one that is still running elsewhere may fork or refuse depending
+/// on the tool, and the user deserves to hear that rather than find a silent
+/// second pane. A refusal gains no warning: what failed is the spawn, and
+/// "still active" appended there would read as its cause.
+pub fn agent_pane_status(kind: &str, noun: &str, active: bool, ok: bool, stdout: &str, stderr: &str) -> String {
+  let base = mux_pane_status(&format!("{kind} session"), noun, ok, stdout, stderr);
+  if ok && active {
+    format!("{base}; still active elsewhere, the agent may fork or refuse")
+  } else {
+    base
+  }
 }

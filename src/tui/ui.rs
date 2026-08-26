@@ -2954,6 +2954,7 @@ impl HintContext {
         Hint::Modal(ModalAction::DetailAttach, "attach"),
         Hint::Modal(ModalAction::DetailDetach, "detach"),
         Hint::Modal(ModalAction::DetailInput, "by id"),
+        Hint::Modal(ModalAction::DetailOpenPane, "resume"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
       HintContext::CiChecks => &[
@@ -4009,6 +4010,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::DetailAttach, "attach to the selected session"),
       modal_entry(ModalAction::DetailDetach, "detach the selected session"),
       modal_entry(ModalAction::DetailInput, "attach by id (palette-style prompt)"),
+      modal_entry(
+        ModalAction::DetailOpenPane,
+        "resume the selected session in a multiplexer pane",
+      ),
       fixed("any char", "attach prompt: type to filter the session ids"),
       fixed("Backspace", "attach prompt: delete the last character"),
       fixed("Up/Down", "attach prompt: move the highlight"),

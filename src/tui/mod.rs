@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  mux_pane_status, read_pins_from_sources, App, ConfirmKind, CreateKey,
+  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, App, ConfirmKind, CreateKey,
   ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta,
   View, WorkspaceState,
 };
@@ -860,6 +860,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::DetailAttach) => app.attach_selected_agent(),
         Some(ModalAction::DetailDetach) => app.detach_selected_agent(),
         Some(ModalAction::DetailInput) => app.open_agent_input(),
+        Some(ModalAction::DetailOpenPane) => app.open_selected_agent_pane(),
         _ => {}
       },
       View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {
