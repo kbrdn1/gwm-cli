@@ -2,10 +2,11 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
+use gwm::tui::keymap::Action;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
-  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, View,
+  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, ToggleStroke, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -15138,6 +15139,15 @@ fn emptying_the_buffer_with_dd_removes_the_note_too() {
   assert!(!path.exists(), "an emptied note is removed, not blanked");
 }
 
+/// Rebind `action` to `chords` on a live `App`, the way a `[tui.keys]`
+/// override would. Used by the #613 toggle tests, which are exactly about
+/// what a rebind does to the dispatch.
+fn rebind(app: &mut App, action: Action, chords: &[&str]) {
+  use gwm::tui::keymap::KeyStroke;
+  let parsed: Vec<Vec<KeyStroke>> = chords.iter().map(|c| KeyStroke::parse_chord(c).unwrap()).collect();
+  app.keymap.apply_override(action, parsed).unwrap();
+}
+
 /// Flatten a rendered sidebar/modal line into its plain text.
 fn line_text(l: &ratatui::text::Line<'_>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -15171,17 +15181,194 @@ fn working_tree_modal_snapshots_the_dirty_tree_on_open() {
 
 #[test]
 fn the_working_tree_open_key_is_also_what_closes_it() {
-  // `5` toggles: the dispatch arm closing the overlay resolves the key
-  // through the global keymap, so a rebind of `working_tree` moves both the
-  // open and the close with it. Pinned here rather than through the run
-  // loop, which owns the dispatch.
+  // `5` toggles. The dispatch resolves the toggle before the modal verbs
+  // and against the action alone, so this is the pin for the default: one
+  // stroke, `Fired`.
   let (_dir, mut app) = make_app();
   app.enter_working_tree();
 
-  assert!(app.key_matches_action(
-    KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
-    gwm::tui::keymap::Action::WorkingTree
-  ));
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+      gwm::tui::keymap::Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+}
+
+#[test]
+fn a_multi_stroke_toggle_closes_the_overlay_it_opened() {
+  // Issue #613, first hole: the old guard asked `key_matches_action`, which
+  // looks up ONE stroke, so `working_tree = ["g w"]` opened the overlay
+  // through the chord-aware list dispatch and then had no way to shut it.
+  // The prefix must be consumed (`Pending`), not handed to the modal verbs,
+  // or `g` jumps the listing to the top on its way through.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Pending
+  );
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+}
+
+#[test]
+fn a_stray_prefix_stroke_does_not_arm_a_phantom_toggle() {
+  // The other half of the chord contract: a `g` that is not followed by the
+  // toggle's own continuation must drop the buffer, or the next unrelated
+  // stroke would complete a chord the user never typed.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Pending
+  );
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed,
+    "`j` is not the continuation, so it falls through to the modal verbs"
+  );
+  assert!(app.pending_chord_is_empty(), "the half-typed prefix is dropped");
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed,
+    "a bare `w` must not complete the chord the dropped `g` started"
+  );
+}
+
+#[test]
+fn a_toggle_rebound_onto_a_modal_verbs_key_still_closes() {
+  // Issue #613, second hole: the guard used to run AFTER the modal
+  // resolution, so `working_tree = ["j"]` opened the overlay and then
+  // scrolled it. The toggle wins now, which is what the user asked for by
+  // binding it there.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["j"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+  // `k` is untouched: only the rebound key is taken from the context.
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed
+  );
+}
+
+#[test]
+fn a_rebound_toggle_beats_the_scroll_verb_it_shadows() {
+  // The precedence itself, not just the resolver: `handle_working_tree_key`
+  // asks the toggle first. With `working_tree = ["j"]`, `j` closes and the
+  // listing does NOT scroll. Put the modal resolution back in front and the
+  // scroll assertion below goes red.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["j"]);
+  app.enter_working_tree();
+  app.working_tree.max_scroll = 10;
+
+  let close = app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+  assert!(close, "the rebound toggle closes the overlay");
+  assert_eq!(app.working_tree.scroll, 0, "and the shadowed scroll verb never ran");
+}
+
+#[test]
+fn an_unclaimed_key_still_reaches_the_modal_verbs() {
+  // The other side of that precedence: taking the toggle first must not
+  // swallow the rest of the context.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  app.working_tree.max_scroll = 10;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.working_tree.scroll, 1);
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+}
+
+#[test]
+fn a_chord_prefix_does_not_reach_the_scroll_verbs() {
+  // `working_tree = ["g w"]`: the `g` is consumed as a prefix. Were it
+  // handed to the modal verbs it would fire `scroll_top`, so the listing
+  // would jump to the top on the way to closing.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+  app.working_tree.max_scroll = 10;
+  app.working_tree.scroll = 7;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert_eq!(app.working_tree.scroll, 7, "the prefix did not fire `scroll_top`");
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+}
+
+#[test]
+fn the_modal_toggle_never_fires_another_global_action() {
+  // The reason this is not `dispatch_key`: inside an overlay the toggle is
+  // the ONE global binding allowed through. `d` would otherwise open the
+  // delete confirm from behind the modal.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+
+  for c in ['d', 'n', 'q', 'x', '3', '4'] {
+    assert_eq!(
+      app.modal_toggle_stroke(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), Action::WorkingTree),
+      ToggleStroke::Unclaimed,
+      "`{c}` is not the working_tree toggle and must not resolve here"
+    );
+  }
+}
+
+#[test]
+fn every_overlay_that_advertises_a_toggle_resolves_one() {
+  // The three overlays whose docs promise "the open key closes it too"
+  // (issue #613 fixed all of them at once, not just #592's). Enumerated so
+  // a fourth overlay copying the shape has a place to declare itself.
+  let (_dir, mut app) = make_app();
+  for (action, chord, ch) in [
+    (Action::CommandLogs, "3", '3'),
+    (Action::ConfigPanel, "4", '4'),
+    (Action::WorkingTree, "5", '5'),
+  ] {
+    assert_eq!(
+      app.keymap.primary_chord(action).as_deref(),
+      Some(chord),
+      "{action:?} default chord moved; update this table"
+    );
+    assert_eq!(
+      app.modal_toggle_stroke(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), action),
+      ToggleStroke::Fired
+    );
+  }
 }
 
 #[test]
