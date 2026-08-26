@@ -171,6 +171,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::LinkPrompt => draw_link_prompt(f, app),
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
+    View::WorkingTree => draw_working_tree(f, app),
     View::Config => draw_config_panel(f, app),
     View::Pty => draw_pty_overlay(f, app),
     View::Note => draw_note_editor(f, app),
@@ -1921,7 +1922,14 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
+/// Build the Working Tree file-explorer rows for one worktree plus their
+/// per-category counts, from one `git status --porcelain -z` read.
+///
+/// `pub(super)` since #592: the full-size overlay snapshots the same rows
+/// the sidebar pane paints, and it is deliberately NOT routed through
+/// [`build_sidebar_sections`], which would also run `git log` / `git stash
+/// list` / the diff-vs-base stat for panes the overlay does not show.
+pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
     Ok((s, _)) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
@@ -3385,6 +3393,21 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   hints
 }
 
+/// Full-size Working Tree overlay footer hints (issue #592). Same shape as
+/// [`command_logs_footer_hints`] minus the copy verb: `close` resolves from
+/// `[tui.keys.modal.working_tree]` so a rebind shows through, the movement
+/// pairs stay literal.
+pub fn working_tree_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  if let Some(k) = modal.primary_key(ModalAction::WorkingTreeClose) {
+    hints.push((k, "close".to_string()));
+  }
+  hints
+}
+
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
 }
@@ -3894,6 +3917,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
+  rows.push(entry(Action::WorkingTree, "show the working tree listing at full size"));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
@@ -4202,6 +4226,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::CommandLogsClose, "close"),
       HelpRow::Blank,
+      HelpRow::Section("Working Tree".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::WorkingTreeScrollDown, "scroll down"),
+      modal_entry(ModalAction::WorkingTreeScrollUp, "scroll up"),
+      modal_entry(ModalAction::WorkingTreeScrollTop, "jump to the top"),
+      modal_entry(ModalAction::WorkingTreeScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::WorkingTreeClose, "close"),
+      HelpRow::Blank,
       HelpRow::Section("Settings".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::ConfigNextTab, "next tab"),
@@ -4426,6 +4458,59 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
+/// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
+/// given the whole modal area.
+///
+/// Same shell as the Command Logs overlay: a fixed title on the top rule,
+/// a scrollable body with a scrollbar when it overflows, and a fixed footer
+/// hint line. The pane's change-count line (issue #287) rides the bottom
+/// rule right-aligned, exactly where the bordered sidebar pane puts it, so
+/// the two surfaces read as the same block at two sizes.
+///
+/// The rows are NOT rebuilt here — they are the snapshot
+/// [`App::enter_working_tree`] took, so this frame shells out to nothing
+/// (the #343 rule).
+fn draw_working_tree(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let theme = app.theme;
+  let block = match working_tree_counts_footer(&app.working_tree.counts, &theme) {
+    Some(counts) => overlay_block_titled("Working Tree", theme.accent).title_bottom(counts.right_aligned()),
+    None => overlay_block_titled("Working Tree", theme.accent),
+  };
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  // Publish the scroll bound against the BODY viewport only, then clamp the
+  // cursor the key handler moved (the help / command-logs contract).
+  let rows = app.working_tree.lines.len();
+  app.working_tree.max_scroll = (rows.saturating_sub(body_area.height as usize)) as u16;
+  app.working_tree.scroll = app.working_tree.scroll.min(app.working_tree.max_scroll);
+  let scroll = app.working_tree.scroll;
+
+  let text_area = scrollable_body_area(f, body_area, scroll, rows, &theme);
+  // One leading space per row, as the sidebar pane pads its own body, so the
+  // tree does not touch the left border. Spans borrow from the snapshot.
+  let padded: Vec<Line<'_>> = app
+    .working_tree
+    .lines
+    .iter()
+    .map(|l| {
+      let mut spans = Vec::with_capacity(l.spans.len() + 1);
+      spans.push(Span::raw(" "));
+      spans.extend(l.spans.iter().map(|s| Span::styled(s.content.as_ref(), s.style)));
+      Line::from(spans)
+    })
+    .collect();
+  f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), text_area);
+
+  let footer_owned = working_tree_footer_hints(&app.modal_keymap);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &theme), footer_area);
+}
+
 fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;

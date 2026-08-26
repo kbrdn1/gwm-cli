@@ -262,6 +262,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "show the resolved configuration panel",
     },
     PaletteEntry {
+      action: Action::WorkingTree,
+      name: "working-tree",
+      description: "show the working tree listing at full size",
+    },
+    PaletteEntry {
       action: Action::ExecOverlay,
       name: "exec",
       description: "pick an [exec.profiles] profile and run it in a PTY",

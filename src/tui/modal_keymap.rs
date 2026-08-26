@@ -89,6 +89,10 @@ pub enum KeyContext {
   Detail,
   /// Command-logs overlay (issue #226, scroll-only + copy).
   CommandLogs,
+  /// Full-size Working Tree listing (issue #592, scroll-only). Its own
+  /// context rather than a share of [`Self::CommandLogs`]: the two look
+  /// alike but rebinding one must not silently rebind the other.
+  WorkingTree,
   /// Settings panel navigation (issue #232).
   Config,
   /// Settings panel while a numeric field is being edited (sub-mode of
@@ -170,6 +174,7 @@ impl KeyContext {
       KeyContext::Help => "help",
       KeyContext::Detail => "detail",
       KeyContext::CommandLogs => "command_logs",
+      KeyContext::WorkingTree => "working_tree",
       KeyContext::Config => "config",
       KeyContext::ConfigEdit => "config.edit",
       KeyContext::Report => "report",
@@ -200,6 +205,7 @@ impl KeyContext {
       Help,
       Detail,
       CommandLogs,
+      WorkingTree,
       Config,
       ConfigEdit,
       Report,
@@ -312,6 +318,13 @@ define_modal_actions! {
     CommandLogsScrollLeft   => "scroll_left"   [ "Left", "h" ],
     CommandLogsScrollTop    => "scroll_top"    [ "Home", "g" ],
     CommandLogsScrollBottom => "scroll_bottom" [ "End", "G" ],
+  }
+  WorkingTree {
+    WorkingTreeClose        => "close"         [ "Esc", "q" ],
+    WorkingTreeScrollDown   => "scroll_down"   [ "Down", "j" ],
+    WorkingTreeScrollUp     => "scroll_up"     [ "Up", "k" ],
+    WorkingTreeScrollTop    => "scroll_top"    [ "Home", "g" ],
+    WorkingTreeScrollBottom => "scroll_bottom" [ "End", "G" ],
   }
   Config {
     ConfigClose        => "close"         [ "Esc", "q" ],

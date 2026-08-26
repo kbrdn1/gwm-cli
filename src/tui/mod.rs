@@ -49,6 +49,7 @@ pub use state::link_prompt::LinkPrompt;
 pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
+pub use state::working_tree::WorkingTreeModal;
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -524,6 +525,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::CommandLogsScrollTop) => app.command_logs.scroll_to_top(),
         Some(ModalAction::CommandLogsScrollBottom) => app.command_logs.scroll_to_bottom(),
         _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
+        _ => {}
+      },
+      // Full-size Working Tree listing (issue #592). A read-only overlay
+      // over an already-taken snapshot: it scrolls like the command logs,
+      // and the bound global `working_tree` key (default `5`) toggles it
+      // shut even when rebound.
+      View::WorkingTree => match app.resolve_modal(KeyContext::WorkingTree, key) {
+        Some(ModalAction::WorkingTreeClose) => app.view = View::List,
+        Some(ModalAction::WorkingTreeScrollDown) => app.working_tree.scroll_down(),
+        Some(ModalAction::WorkingTreeScrollUp) => app.working_tree.scroll_up(),
+        Some(ModalAction::WorkingTreeScrollTop) => app.working_tree.scroll_to_top(),
+        Some(ModalAction::WorkingTreeScrollBottom) => app.working_tree.scroll_to_bottom(),
+        _ if app.key_matches_action(key, Action::WorkingTree) => app.view = View::List,
         _ => {}
       },
       // Settings panel (issue #232; editable in #279). While a numeric input
@@ -1165,6 +1179,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // overlay it is read-only and not picker-gated — harmless inside
     // `gwm switch`, opening from any List state.
     Action::ConfigPanel => app.enter_config_panel(),
+    // Issue #592: `5` opens the Working Tree listing at full size. Read-only
+    // like the two overlays above, so it is not picker-gated either.
+    Action::WorkingTree => app.enter_working_tree(),
     // Issue #325: `x` opens the exec profile picker. Picker-gated —
     // running a profile in a PTY is a focus-mode action, meaningless in
     // the stripped-down `gwm switch` picker.

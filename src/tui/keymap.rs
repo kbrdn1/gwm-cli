@@ -150,6 +150,8 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  // #592: the sidebar's Working Tree pane, given the whole terminal.
+  WorkingTree       => "working_tree",
   // #436: CI checks overlay — also reachable via `c` in the status context.
   CiChecks          => "ci_checks",
   // #420: rich PR / issue view — description, checks, reviews, comments.
@@ -519,6 +521,9 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #592: `5` keeps the "numbers open panels" family going — the
+      // Working Tree listing at full size.
+      def(Action::WorkingTree, &["5"]),
       // #436: `C` opens the CI checks overlay from anywhere in the list
       // view; `c` does the same while the status pane holds the focus
       // (contextual routing, same mechanism as j/k sidebar scroll).

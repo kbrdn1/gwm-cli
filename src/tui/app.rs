@@ -17,6 +17,7 @@ use super::state::link_prompt::LinkPrompt;
 use super::state::pty_overlay::PtyOverlay;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
+use super::state::working_tree::WorkingTreeModal;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
@@ -118,6 +119,12 @@ pub enum View {
   /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
   /// state lives on [`App::command_logs`].
   CommandLogs,
+  /// Full-size Working Tree listing (issue #592). A ~90% fullscreen modal
+  /// showing the same file-explorer tree the sidebar pane paints, given the
+  /// whole screen so a large change set reads in one go instead of two rows
+  /// at a time through `J` / `K`. Opened on `5`, scrolled like the help
+  /// overlay; state lives on [`App::working_tree`].
+  WorkingTree,
   /// Configuration panel (issue #232). A ~90% fullscreen modal over a
   /// dimmed list showing the resolved `.gwm.toml` (user-level global
   /// deep-merged under the repo file) with a per-row source column
@@ -596,6 +603,10 @@ pub struct App {
   /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
   pub config_panel: ConfigPanel,
 
+  /// Full-size Working Tree overlay state (issue #592): the scroll cursor
+  /// plus the snapshotted tree rows, filled by [`Self::enter_working_tree`].
+  pub working_tree: WorkingTreeModal,
+
   /// The user-level global config path this `App` was constructed with
   /// (issue #232). Stored so [`Self::enter_config_panel`] resolves the
   /// panel's source attribution against the *same* layers the running
@@ -878,6 +889,7 @@ impl App {
       task_rx,
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
+      working_tree: WorkingTreeModal::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
@@ -2719,6 +2731,8 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
+      // Same for the full-size Working Tree listing (issue #592).
+      View::WorkingTree => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
       // #557: the note bar follows the mode. With the knob off there is no
@@ -2838,6 +2852,34 @@ impl App {
     self.command_logs.sync();
     self.command_logs.reset();
     self.view = View::CommandLogs;
+  }
+
+  /// Open the full-size Working Tree listing (issue #592). Reads the
+  /// selected worktree's `git status` and builds the same file-explorer
+  /// rows the sidebar pane paints, then rewinds the scroll so a re-open
+  /// starts at the top. The renderer republishes `max_scroll` against the
+  /// live viewport.
+  ///
+  /// The read is synchronous, unlike the sidebar's (issue #343): that rule
+  /// bans shelling out from `terminal.draw`, and this runs once per
+  /// keypress, not once per frame. It is bounded — `git_status_short` kills
+  /// git at [`crate::worktree::STATUS_SCAN_CAP`] records rather than letting
+  /// a pathological untracked tree walk forever.
+  /// ponytail: sync `git status` on open; move to a `TaskKind` worker if the
+  /// keypress ever feels slow on a huge repo.
+  ///
+  /// With nothing selected the overlay still opens, empty — the
+  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
+  /// reads as a dead key.
+  pub fn enter_working_tree(&mut self) {
+    match self.selected() {
+      Some(w) => {
+        let (lines, counts) = super::ui::working_tree_lines(w, &self.theme);
+        self.working_tree.load(lines, counts);
+      }
+      None => self.working_tree.load(Vec::new(), Default::default()),
+    }
+    self.view = View::WorkingTree;
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective
