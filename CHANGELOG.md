@@ -295,6 +295,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bordered mode is otherwise untouched: there the accent still paints the
   four rules and the title inside the top one.
 
+  Each of the three overlays routes its keys through an `App` method now
+  (the shape the create overlay has had since #217), because the ordering
+  is the fix and a `match` in the run loop cannot be tested. `d` still
+  cannot reach the delete confirm from behind an overlay: the toggle
+  resolves against its one action, not the whole keymap.
+
 - **A linked row with nothing fetched yet is white, not green and purple**
   ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
   marker painted its two placeholder slots with a different status role each:

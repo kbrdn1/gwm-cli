@@ -6,7 +6,7 @@ use gwm::tui::keymap::Action;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
-  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, ToggleStroke, View,
+  CommandLogsKey, ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, SettingsTab, ToggleStroke, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -15346,6 +15346,85 @@ fn the_modal_toggle_never_fires_another_global_action() {
       "`{c}` is not the working_tree toggle and must not resolve here"
     );
   }
+}
+
+#[test]
+fn the_command_logs_toggle_beats_the_verb_it_shadows() {
+  // #613's precedence, pinned on the second of the three overlays rather
+  // than assumed from the first. `command_logs = ["j"]`: `j` closes, and
+  // the transcript does not scroll on the way out.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::CommandLogs, &["j"]);
+  app.enter_command_logs();
+  app.command_logs.max_scroll = 10;
+
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CommandLogsKey::Close
+  );
+  assert_eq!(app.command_logs.scroll, 0, "the shadowed scroll verb never ran");
+
+  // And the rest of the context is untouched.
+  rebind(&mut app, Action::CommandLogs, &["3"]);
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CommandLogsKey::Handled
+  );
+  assert_eq!(app.command_logs.scroll, 1);
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+    CommandLogsKey::Copy,
+    "the clipboard side effect still comes back for the run loop to perform"
+  );
+}
+
+#[test]
+fn the_settings_toggle_beats_the_verb_it_shadows() {
+  // Third of the three. `config_panel = ["j"]`: `j` closes instead of
+  // moving the selection.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::ConfigPanel, &["j"]);
+  app.enter_config_panel();
+  // The read-only `All` tab routes select onto scroll, so pick an editable
+  // tab and watch the field cursor, which is what `j` moves there.
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+
+  assert!(app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.selected, 0, "the shadowed select verb never ran");
+
+  rebind(&mut app, Action::ConfigPanel, &["4"]);
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.selected, 1, "and `j` navigates again once unbound");
+}
+
+#[test]
+fn a_multi_stroke_toggle_closes_every_overlay_that_has_one() {
+  // The chord half, across all three. Each takes the prefix without firing
+  // a verb, then closes on the continuation.
+  // Distinct chords per action: the keymap refuses one chord bound twice,
+  // which is itself the guarantee that makes a per-action lookup sound.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::CommandLogs, &["g l"]);
+  rebind(&mut app, Action::ConfigPanel, &["g c"]);
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_command_logs();
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+    CommandLogsKey::Handled
+  );
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+    CommandLogsKey::Close
+  );
+
+  app.enter_config_panel();
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert!(app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+
+  app.enter_working_tree();
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
 }
 
 #[test]

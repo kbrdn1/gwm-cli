@@ -7,6 +7,7 @@ use super::state::async_task::{
 };
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
+use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field, Mode};
@@ -94,6 +95,18 @@ pub struct PendingMerge {
   pub checks_total: u32,
   /// `PR` / `MR`, resolved by the caller.
   pub noun: String,
+}
+
+/// Outcome of [`App::handle_command_logs_key`] (issue #613): the two side
+/// effects the run loop owns, since neither belongs in a state transition.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CommandLogsKey {
+  /// Close the overlay.
+  Close,
+  /// Write the transcript to the clipboard (the run loop owns the I/O).
+  Copy,
+  /// Consumed; nothing for the caller to do.
+  Handled,
 }
 
 /// Outcome of [`App::modal_toggle_stroke`] (issue #613): what a modal
@@ -2941,6 +2954,86 @@ impl App {
       None => self.working_tree.load(Vec::new(), Default::default()),
     }
     self.view = View::WorkingTree;
+  }
+
+  /// Route one keystroke through the Command Logs overlay (issues #226,
+  /// #613). The two side effects the run loop owns (close, clipboard write)
+  /// come back as [`CommandLogsKey`] rather than firing here, so the routing
+  /// stays a pure state transition, the way [`Self::handle_create_key`] does
+  /// (issue #217).
+  ///
+  /// Same precedence as [`Self::handle_working_tree_key`]: the toggle first,
+  /// then the modal verbs.
+  pub fn handle_command_logs_key(&mut self, key: KeyEvent) -> CommandLogsKey {
+    match self.modal_toggle_stroke(key, Action::CommandLogs) {
+      ToggleStroke::Fired => return CommandLogsKey::Close,
+      ToggleStroke::Pending => return CommandLogsKey::Handled,
+      ToggleStroke::Unclaimed => {}
+    }
+    match self.resolve_modal(KeyContext::CommandLogs, key) {
+      Some(ModalAction::CommandLogsClose) => return CommandLogsKey::Close,
+      Some(ModalAction::CommandLogsCopy) => return CommandLogsKey::Copy,
+      Some(ModalAction::CommandLogsScrollDown) => self.command_logs.scroll_down(),
+      Some(ModalAction::CommandLogsScrollUp) => self.command_logs.scroll_up(),
+      Some(ModalAction::CommandLogsScrollRight) => self.command_logs.scroll_right(),
+      Some(ModalAction::CommandLogsScrollLeft) => self.command_logs.scroll_left(),
+      Some(ModalAction::CommandLogsScrollTop) => self.command_logs.scroll_to_top(),
+      Some(ModalAction::CommandLogsScrollBottom) => self.command_logs.scroll_to_bottom(),
+      _ => {}
+    }
+    CommandLogsKey::Handled
+  }
+
+  /// Route one keystroke through the Settings panel's navigation mode
+  /// (issues #232, #613). Returns `true` when the panel should close.
+  ///
+  /// Navigation ONLY: the capture and edit sub-modes own every stroke while
+  /// they are live and stay routed ahead of this in the run loop, so a
+  /// `config_panel` key rebound to a digit still types into a numeric field
+  /// instead of closing the panel out from under the edit.
+  pub fn handle_config_nav_key(&mut self, key: KeyEvent) -> bool {
+    match self.modal_toggle_stroke(key, Action::ConfigPanel) {
+      ToggleStroke::Fired => return true,
+      ToggleStroke::Pending => return false,
+      ToggleStroke::Unclaimed => {}
+    }
+    let on_all = self.config_panel.tab == SettingsTab::All;
+    match self.resolve_modal(KeyContext::Config, key) {
+      Some(ModalAction::ConfigClose) => return true,
+      Some(ModalAction::ConfigNextTab) => self.config_panel.next_tab(),
+      Some(ModalAction::ConfigPrevTab) => self.config_panel.prev_tab(),
+      Some(ModalAction::ConfigToggleLayer) => self.config_panel.toggle_layer(),
+      // On the Keys tab `activate` arms a live keystroke capture for the
+      // selected binding (issue #294); elsewhere it cycles a choice or
+      // opens the numeric/text edit buffer.
+      Some(ModalAction::ConfigActivate) => {
+        if self.config_panel.tab == SettingsTab::Keys {
+          self.config_panel.begin_capture();
+        } else {
+          self.activate_selected_setting();
+        }
+      }
+      Some(ModalAction::ConfigSelectNext) => {
+        if on_all {
+          self.config_panel.scroll_down();
+        } else {
+          self.config_panel.select_next();
+        }
+      }
+      Some(ModalAction::ConfigSelectPrev) => {
+        if on_all {
+          self.config_panel.scroll_up();
+        } else {
+          self.config_panel.select_prev();
+        }
+      }
+      Some(ModalAction::ConfigScrollRight) if on_all => self.config_panel.scroll_right(),
+      Some(ModalAction::ConfigScrollLeft) if on_all => self.config_panel.scroll_left(),
+      Some(ModalAction::ConfigScrollTop) if on_all => self.config_panel.scroll_to_top(),
+      Some(ModalAction::ConfigScrollBottom) if on_all => self.config_panel.scroll_to_bottom(),
+      _ => {}
+    }
+    false
   }
 
   /// Route one keystroke through the full-size Working Tree overlay

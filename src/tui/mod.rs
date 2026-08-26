@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, AgentPanePlan, App, ConfirmKind,
-  CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget,
+  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, AgentPanePlan, App, CommandLogsKey,
+  ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget,
   PendingMerge, RepoMeta, ToggleStroke, View, WorkspaceState,
 };
 pub use state::async_task::{
@@ -514,21 +514,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // so the open key toggles it shut even when rebound.
       // #219: keys resolved through the `command_logs` modal context. The
       // bound global `command_logs` key still toggles the overlay shut.
-      View::CommandLogs => match app.modal_toggle_stroke(key, Action::CommandLogs) {
-        ToggleStroke::Fired => app.view = View::List,
-        ToggleStroke::Pending => {}
-        ToggleStroke::Unclaimed => match app.resolve_modal(KeyContext::CommandLogs, key) {
-          Some(ModalAction::CommandLogsClose) => app.view = View::List,
-          // `y` copies the whole transcript to the clipboard (issue #279).
-          Some(ModalAction::CommandLogsCopy) => copy_command_logs_to_clipboard(&mut app),
-          Some(ModalAction::CommandLogsScrollDown) => app.command_logs.scroll_down(),
-          Some(ModalAction::CommandLogsScrollUp) => app.command_logs.scroll_up(),
-          Some(ModalAction::CommandLogsScrollRight) => app.command_logs.scroll_right(),
-          Some(ModalAction::CommandLogsScrollLeft) => app.command_logs.scroll_left(),
-          Some(ModalAction::CommandLogsScrollTop) => app.command_logs.scroll_to_top(),
-          Some(ModalAction::CommandLogsScrollBottom) => app.command_logs.scroll_to_bottom(),
-          _ => {}
-        },
+      View::CommandLogs => match app.handle_command_logs_key(key) {
+        CommandLogsKey::Close => app.view = View::List,
+        // `y` copies the whole transcript to the clipboard (issue #279).
+        CommandLogsKey::Copy => copy_command_logs_to_clipboard(&mut app),
+        CommandLogsKey::Handled => {}
       },
       // Full-size Working Tree listing (issue #592). A read-only overlay
       // over an already-taken snapshot: it scrolls like the command logs,
@@ -576,47 +566,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         // this arm: the capture and edit sub-modes above own every stroke
         // while they are live, so a `config_panel` key rebound to a digit
         // must still type into a numeric field.
-        match app.modal_toggle_stroke(key, Action::ConfigPanel) {
-          ToggleStroke::Fired => app.view = View::List,
-          ToggleStroke::Pending => {}
-          ToggleStroke::Unclaimed => {
-            let on_all = app.config_panel.tab == SettingsTab::All;
-            match app.resolve_modal(KeyContext::Config, key) {
-              Some(ModalAction::ConfigClose) => app.view = View::List,
-              Some(ModalAction::ConfigNextTab) => app.config_panel.next_tab(),
-              Some(ModalAction::ConfigPrevTab) => app.config_panel.prev_tab(),
-              Some(ModalAction::ConfigToggleLayer) => app.config_panel.toggle_layer(),
-              // On the Keys tab `activate` arms a live keystroke capture for the
-              // selected binding (issue #294); elsewhere it cycles a choice or
-              // opens the numeric/text edit buffer.
-              Some(ModalAction::ConfigActivate) => {
-                if app.config_panel.tab == SettingsTab::Keys {
-                  app.config_panel.begin_capture();
-                } else {
-                  app.activate_selected_setting();
-                }
-              }
-              Some(ModalAction::ConfigSelectNext) => {
-                if on_all {
-                  app.config_panel.scroll_down();
-                } else {
-                  app.config_panel.select_next();
-                }
-              }
-              Some(ModalAction::ConfigSelectPrev) => {
-                if on_all {
-                  app.config_panel.scroll_up();
-                } else {
-                  app.config_panel.select_prev();
-                }
-              }
-              Some(ModalAction::ConfigScrollRight) if on_all => app.config_panel.scroll_right(),
-              Some(ModalAction::ConfigScrollLeft) if on_all => app.config_panel.scroll_left(),
-              Some(ModalAction::ConfigScrollTop) if on_all => app.config_panel.scroll_to_top(),
-              Some(ModalAction::ConfigScrollBottom) if on_all => app.config_panel.scroll_to_bottom(),
-              _ => {}
-            }
-          }
+        if app.handle_config_nav_key(key) {
+          app.view = View::List;
         }
       }
       // Create-overlay keys live in a testable `App` method (issue #217);
