@@ -145,22 +145,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grey levels apart on `claude-dark`) and that read as a permutation of grey
   rather than as a place.
 
-  The fill now carries focus on its own, as a **tinted focus band**: the
-  `focus` role pulled most of the way back toward the `section_bg` it
-  replaces, so it is unmistakably not grey without being the loudest thing
-  on screen. It is mixed from the two roles rather than added as a sixth
-  background role, so a `[theme]` override of either stays in tune; a
-  palette with nothing to mix — an ANSI name, whose value belongs to the
-  terminal, or a 256-palette index, which is the default theme's case —
-  keeps the `focus` role itself rather than falling back to a grey.
+  The two states now trade the same pair of roles instead of dimming one of
+  them. An inactive header is `accent` text on the `section_bg` band; the
+  focused one is that band's tone written on an **`accent` band**, bold —
+  the same dark-on-colour treatment the version chip and the footer's
+  context anchor already use. `muted` appears in neither, the focused pane
+  is findable without hunting, and the header no longer borrows
+  `selection_bg` from the cursor row.
 
-  The header text is `accent` in both states, and focus adds weight to the
-  whole line on top of the fill — so an inactive header is no longer bold,
-  which is what makes the weight a signal. Spans that carry their own
-  colour keep it on either band, which is exactly what the band is tinted
-  for. The right-flushed counter follows the title for the same reason: it
-  shares the line, and bordered mode already paints it in the border
-  colour.
+  `accent` and not `focus` for the band: `focus` is the border tone, darker
+  and more saturated, and a full-width band in it is the first thing the eye
+  lands on every frame. The band is the colour the header title already
+  wore, moved from the text to the ground under it.
+
+  Spans that carry their own colour keep it on either band — the header
+  style is patched onto them, not substituted — so a filter prompt or a
+  per-category count still says what it says. The right-flushed counter
+  follows the title, which bordered mode already does with the border
+  colour. An inactive header is no longer bold, which is what makes the
+  weight a signal.
 
   Bordered mode is otherwise untouched: there the accent still paints the
   four rules and the title inside the top one.

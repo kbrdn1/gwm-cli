@@ -444,33 +444,44 @@ fn header_span(line: &ratatui::text::Line<'static>, needle: &str) -> ratatui::te
 }
 
 #[test]
-fn compact_header_text_keeps_one_colour_whatever_the_focus() {
-  // #605: the fill under the header carries focus, so the text must not
-  // carry it a second time. A pane's name is how you find the pane to
-  // `Tab` into — it cannot dim to `muted` the moment the pane goes
-  // inactive. The colour is `theme.accent` in both states, and the header
-  // never paints its own background: the band comes from `Chrome::fill`.
+fn compact_header_trades_its_two_roles_on_focus_and_never_dims() {
+  // #605: the header stops carrying focus as a *dimming*. The two states
+  // trade the same pair of roles instead — `accent` text on the quiet
+  // `section_bg` band when inactive, dark `section_bg` text on the
+  // `accent` band when focused — so a pane's name never goes secondary.
+  // `muted` is in neither: it is how you find the pane to `Tab` into.
   //
-  // Over every palette, because neither half of the claim discriminates on
-  // its own theme: the default one has `accent == focus`, so only its
-  // inactive header proves anything, while `claude-dark` separates all
-  // three of `accent` / `focus` / `muted` and pins both states.
+  // Over every palette, because one theme cannot discriminate the claim:
+  // the default has `accent == focus`, so only its inactive header proves
+  // anything, while `claude-dark` separates all three of `accent` /
+  // `focus` / `muted` and pins both states.
   let mut themes = vec![("default", Theme::default())];
   for name in preset_names() {
     themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
   }
   for (name, theme) in themes {
-    for (state, focused) in [("focused", true), ("inactive", false)] {
-      let style = header_span(&compact_header(focused, &theme), "WORKTREES").style;
-      assert_eq!(
-        (style.fg, style.bg),
-        (Some(theme.accent), None),
-        "theme {name:?} / {state}: the pane name is accent text, over whatever band the pane paints"
-      );
+    let inactive = header_span(&compact_header(false, &theme), "WORKTREES").style;
+    let focused = header_span(&compact_header(true, &theme), "WORKTREES").style;
+
+    assert_eq!(
+      inactive.fg,
+      Some(theme.accent),
+      "theme {name:?}: the inactive header is accent text over the section band"
+    );
+    assert_eq!(
+      focused.fg,
+      Some(theme.section_bg),
+      "theme {name:?}: the focused header is dark text over the accent band"
+    );
+    for (state, style) in [("focused", focused), ("inactive", inactive)] {
       assert_ne!(
         style.fg,
         Some(theme.muted),
         "theme {name:?} / {state}: a pane's name is never the muted role"
+      );
+      assert_eq!(
+        style.bg, None,
+        "theme {name:?} / {state}: the band comes from `Chrome::fill`, not from the text style"
       );
     }
   }
@@ -478,79 +489,49 @@ fn compact_header_text_keeps_one_colour_whatever_the_focus() {
 
 #[test]
 fn a_coloured_span_keeps_its_colour_on_either_band() {
-  // The filter `/` prompt, the Working Tree per-category counts and the
-  // diff-ish spans encode a category, not focus, so neither band may
-  // repaint them. This is what keeps the focus fill *tinted* rather than
-  // saturated: a band that had to be written on in one colour only would
-  // have to swallow these.
+  // The filter `/` prompt and the Working Tree per-category counts encode
+  // a category, not focus, so neither band may repaint them — the header
+  // style is *patched* onto a span rather than replacing it.
   let theme = Theme::preset("claude-dark").expect("preset must resolve");
   for (state, focused) in [("focused", true), ("inactive", false)] {
     let style = header_span(&compact_header(focused, &theme), "/").style;
     assert_eq!(
-      (style.fg, style.bg),
-      (Some(Color::Yellow), None),
+      style.fg,
+      Some(Color::Yellow),
       "{state}: an already-coloured span keeps its own colour"
     );
   }
 }
 
 #[test]
-fn the_focused_header_band_is_a_muted_tint_not_the_focus_role_itself() {
-  // #605 validation: a saturated focus band is loud enough to be the first
-  // thing the eye lands on every frame, and nothing else can be written on
-  // it in its own colour. The band is `focus` pulled most of the way back
-  // toward the `section_bg` it replaces — still unmistakably not grey, and
-  // still not the cursor row's `selection_bg`.
+fn the_focused_header_band_is_the_accent_role() {
+  // `accent`, not `focus`: `focus` is the *border* tone, darker and more
+  // saturated, and a full-width band in it is the first thing the eye
+  // lands on every frame. `accent` is the softer of the two oranges each
+  // preset carries and is the colour the header title already wore, so
+  // the band is the same colour the header always was — moved from the
+  // text to the ground under it.
+  let mut themes = vec![("default", Theme::default())];
   for name in preset_names() {
-    let theme = Theme::preset(name).expect("listed preset must resolve");
-    let (Color::Rgb(fr, fg, fb), Color::Rgb(gr, gg, gb)) = (theme.focus, theme.section_bg) else {
-      panic!("preset {name:?} must carry RGB for both roles, or the tint silently falls back");
-    };
-    let Color::Rgb(br, bg_, bb) = compact_header_fill(&theme) else {
-      panic!("preset {name:?}: an RGB pair must mix to RGB");
-    };
-
-    assert_ne!(
+    themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
+  }
+  for (name, theme) in themes {
+    assert_eq!(
       compact_header_fill(&theme),
-      theme.section_bg,
-      "preset {name:?}: the band has to differ from the inactive one, or it signals nothing"
+      theme.accent,
+      "theme {name:?}: the band is the accent role"
     );
     assert_ne!(
       compact_header_fill(&theme),
-      theme.focus,
-      "preset {name:?}: and from the focus role, or it was not muted at all"
+      theme.section_bg,
+      "theme {name:?}: it has to differ from the inactive band, or it signals nothing"
     );
     assert_ne!(
       compact_header_fill(&theme),
       theme.selection_bg,
-      "preset {name:?}: never the cursor row's background"
+      "theme {name:?}: and it is never the cursor row's background"
     );
-    for (chan, f, g, b) in [("r", fr, gr, br), ("g", fg, gg, bg_), ("b", fb, gb, bb)] {
-      let (lo, hi) = if f < g { (f, g) } else { (g, f) };
-      assert!(
-        (lo..=hi).contains(&b),
-        "preset {name:?} / {chan}: the tint must sit between the two roles, got {b} outside {lo}..={hi}"
-      );
-      assert!(
-        b.abs_diff(g) <= b.abs_diff(f),
-        "preset {name:?} / {chan}: the tint leans on the section band, not on the focus role"
-      );
-    }
   }
-}
-
-#[test]
-fn a_theme_without_rgb_keeps_the_focus_role_as_its_band() {
-  // The default theme's `focus` is an ANSI name whose value belongs to the
-  // terminal and its `section_bg` a palette index: there are no components
-  // to mix. Falling back to `focus` keeps a coloured band; falling back to
-  // a grey would put that theme back where #605 started.
-  let theme = Theme::default();
-  assert_eq!(
-    compact_header_fill(&theme),
-    theme.focus,
-    "with nothing to mix the band stays the focus role"
-  );
 }
 
 #[test]

@@ -453,57 +453,46 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
-/// The focused compact header's fill (issue #605): `theme.focus` pulled
-/// most of the way back toward the `section_bg` band it replaces.
+/// The focused compact header's fill (issue #605): the `accent` role,
+/// painted solid.
 ///
-/// A *saturated* focus band reads as a place at a glance — which is the
-/// point, two adjacent greys did not — but it is loud enough to be the
-/// first thing the eye lands on every frame, and nothing else can be
-/// written on it in its own colour. Muting it keeps the "you are here"
-/// while leaving room for the header's own text and for the spans that
-/// carry information of their own.
-///
-/// Mixed rather than added as a sixth background role: it is not a
-/// decision a preset should have to make separately, and derived from the
-/// two roles it sits between it stays in tune with any `[theme]` override
-/// of either. A colour with no components to mix — an ANSI name, whose
-/// value belongs to the terminal, or a 256-palette index — comes back
-/// unchanged; only the shipped presets carry RGB for both roles, and the
-/// default theme falls back to the saturated band rather than to a grey.
+/// `accent` rather than `focus`, the other orange each preset carries:
+/// `focus` is the *border* tone, darker and more saturated (`#C15F3C`
+/// against `#D4825D` on `claude-dark`), and a full-width band in it is the
+/// first thing the eye lands on every frame. `accent` is the softer of the
+/// two and is already the role the header title used, so the band is the
+/// same colour the header always was — just moved from the text to the
+/// ground under it.
 pub fn compact_header_fill(theme: &super::theme::Theme) -> Color {
-  match (theme.focus, theme.section_bg) {
-    (Color::Rgb(fr, fg, fb), Color::Rgb(gr, gg, gb)) => {
-      // Weight on `focus`. Low enough that the band reads as a tinted
-      // ground rather than as a block of colour, high enough that it is
-      // unmistakably not grey.
-      const FOCUS: u16 = 40;
-      let mix = |f: u8, g: u8| ((f as u16 * FOCUS + g as u16 * (100 - FOCUS)) / 100) as u8;
-      Color::Rgb(mix(fr, gr), mix(fg, gg), mix(fb, gb))
-    }
-    (focus, _) => focus,
-  }
+  theme.accent
 }
 
 /// Header text style for a compact pane (issue #605).
 ///
-/// The colour is `theme.accent` in both states and focus adds `BOLD`,
-/// nothing else. A pane's name is how you find the pane to `Tab` into, so
-/// it cannot dim to `muted` the moment the pane loses focus; the fill under
-/// it ([`Chrome::fill`]) carries the focus signal — that is what the fill
-/// was added for — and the weight is all the text adds on top.
+/// Focused: `section_bg` on the [`compact_header_fill`] band, bold — dark
+/// text on the coloured ground, the treatment the version chip and the
+/// footer's context anchor already use. Inactive: `accent` on the quiet
+/// `section_bg` band. The two states trade the same pair of roles rather
+/// than dimming one of them, so `muted` appears in neither: a pane's name
+/// is how you find the pane to `Tab` into and it cannot go secondary the
+/// moment the pane does.
 ///
-/// `accent` rather than `name`, the other candidate: it is the role's
-/// documented job ("General accent: header title, …"), so a header keeps
-/// reading as chrome instead of as another line of body text.
+/// `section_bg` as the focused foreground because the theme owns no
+/// background role beyond it — it is the darkest tone each preset reserves
+/// for chrome, so it is the one colour guaranteed to read on the band
+/// without naming a hex the palette does not have.
+///
+/// It is applied by *patching*, so a span that carries a colour of its own
+/// keeps it on either band (the filter `/` prompt, the Working Tree
+/// per-category counts): those encode a category, not focus.
 ///
 /// Pure like [`panel_border_color`] so the focus→theme wiring is pinned by
 /// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
 pub fn compact_header_style(focused: bool, theme: &super::theme::Theme) -> Style {
-  let base = Style::default().fg(theme.accent);
   if focused {
-    base.add_modifier(Modifier::BOLD)
+    Style::default().fg(theme.section_bg).add_modifier(Modifier::BOLD)
   } else {
-    base
+    Style::default().fg(theme.accent)
   }
 }
 
@@ -529,8 +518,8 @@ pub struct Chrome {
   /// sitting inside the top one. Compact has no rules and does not read it
   /// — its header text is focus-independent (issue #605).
   pub accent: Color,
-  /// Header background, compact only: a tinted [`compact_header_fill`]
-  /// band on the focused pane, `section_bg` elsewhere. With the rules gone
+  /// Header background, compact only: the [`compact_header_fill`] band on
+  /// the focused pane, `section_bg` elsewhere. With the rules gone
   /// this is *the* focus signal (PR #546 added it because the text colour
   /// alone did not read at a glance; #605 removed the text half and made
   /// the band carry it alone), so it is a coloured role and not the
