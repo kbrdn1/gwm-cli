@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`5` opens the Working Tree listing at full size**
+  ([#592](https://github.com/kbrdn1/gwm-cli/issues/592)). The sidebar's
+  Working Tree pane is one block among five in a column that is a fraction of
+  the screen, so a worktree with more than a handful of changed files could
+  only be read two rows at a time through `J` / `K`. `5` now opens the same
+  file-explorer tree as a full-size overlay: same icons, same per-category
+  colours, the same change counts on the bottom rule, scrolled with
+  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `5` again), and
+  rebindable under `[tui.keys.modal.working_tree]`.
+
+  The listing is read when the overlay opens rather than taken from the
+  sidebar's cache, so it does not go blank in the two states where that cache
+  is never built: sidebar hidden, or the Details panel showing stashes.
 - **`o` on the agents overlay resumes the session in the multiplexer**
   ([#591](https://github.com/kbrdn1/gwm-cli/issues/591)). The overlay told you
   which agent was working where and then left you to get there by hand. `a`
