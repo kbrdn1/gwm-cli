@@ -162,6 +162,15 @@ fn digit_keys_dispatch_pane_focus_actions() {
 }
 
 #[test]
+fn the_sixth_digit_opens_the_commit_listing() {
+  // Issue #593: `6` continues the "numbers open panels" family (`3` command
+  // logs, `4` settings). Pinned here because the chord is what the docs,
+  // the help overlay and the footer all advertise.
+  let (_dir, mut app) = make_app();
+  assert_eq!(app.dispatch_key(press('6')), Some(Action::Commits));
+}
+
+#[test]
 fn focus_actions_respect_user_keymap_override() {
   // `[tui.keys]` must be able to rebind the new focus verbs like any other
   // action — the override replaces the default `2`.
@@ -545,6 +554,7 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       KeyContext::Help => "Help Overlay",
       KeyContext::Detail => "Agent Sessions",
       KeyContext::CommandLogs => "Command Logs",
+      KeyContext::Commits => "Commits",
       KeyContext::Config | KeyContext::ConfigEdit => "Settings",
       KeyContext::Report => "Bootstrap Report",
       KeyContext::OpenMenu => "Browse Links",

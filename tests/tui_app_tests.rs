@@ -15137,3 +15137,218 @@ fn emptying_the_buffer_with_dd_removes_the_note_too() {
 
   assert!(!path.exists(), "an emptied note is removed, not blanked");
 }
+
+// ---- full-size commit listing (issue #593) ---------------------------------
+
+/// Flatten a rendered modal line into its plain text.
+fn commits_line_text(l: &ratatui::text::Line<'_>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Drain until the commit-listing worker lands, or fail loudly.
+fn settle_commits(app: &mut App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_commits_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_commits_loading(),
+    "the commit-listing worker never landed within 10s"
+  );
+}
+
+#[test]
+fn commits_modal_snapshots_the_log_on_open() {
+  // Issue #593: `6` opens the commit listing full size. The snapshot is
+  // taken AT OPEN, not read from the sidebar cache — the sidebar is a
+  // hidden pane here (`open = false`), the state in which that cache is
+  // never rebuilt, and the overlay must still show the log.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+
+  app.enter_commits();
+  assert_eq!(app.view, View::Commits);
+  assert!(
+    app.is_commits_loading(),
+    "the overlay opens on a loader; the revwalk is on a worker, not the keypress"
+  );
+  settle_commits(&mut app);
+
+  let text: Vec<String> = app.commits.lines.iter().map(commits_line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("init")),
+    "the repo's only commit subject is listed — got {text:?}"
+  );
+  assert_eq!(app.commits.limit, COMMITS_PAGE, "the first page reads one page deep");
+  assert_eq!(app.commits.loaded, 1, "one row per commit — got {text:?}");
+  assert_eq!(app.commits.scroll, 0, "a fresh open starts at the top");
+}
+
+#[test]
+fn load_more_is_refused_once_history_runs_out() {
+  // The revwalk returned fewer rows than the limit asked for, so the whole
+  // history is already on screen: raising the limit would re-walk the same
+  // graph for the same rows. This is the common case — most worktrees have
+  // far fewer than a page of commits.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  assert!(
+    !app.commits.can_load_more(),
+    "1 row against a {COMMITS_PAGE}-row limit is an exhausted history"
+  );
+  app.load_more_commits();
+  assert_eq!(
+    app.commits.limit, COMMITS_PAGE,
+    "a refused page must not raise the limit"
+  );
+}
+
+#[test]
+fn load_more_raises_the_limit_by_one_page() {
+  // A full first page means there is probably more behind it. `loaded` is
+  // forced here rather than committing 300 times: the fixture repo cannot
+  // fill a page, and this pins the App-level wiring (limit -> worker ->
+  // payload), not the revwalk.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  assert!(app.commits.can_load_more(), "a full page can be paged past");
+  app.load_more_commits();
+  assert_eq!(app.commits.limit, COMMITS_PAGE * 2, "load-more reads one page deeper");
+  assert!(app.is_commits_loading(), "the deeper read is on a worker too");
+  assert!(
+    !app.commits.lines.is_empty(),
+    "the rows already read stay on screen while the deeper page loads"
+  );
+
+  settle_commits(&mut app);
+  assert_eq!(
+    app.commits.limit,
+    COMMITS_PAGE * 2,
+    "the payload lands on the deeper page"
+  );
+  assert!(
+    !app.commits.lines.is_empty(),
+    "the deeper page is installed, not left blank"
+  );
+}
+
+#[test]
+fn a_second_load_more_cannot_queue_while_the_first_is_out() {
+  // `loaded` still describes the previous page while the worker runs, so
+  // without the loading gate a held `m` would raise the limit again and
+  // queue a duplicate walk — and the slot would coalesce the second onto
+  // the first, whose payload the drain then drops on the limit check,
+  // leaving the loader up forever.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  app.load_more_commits();
+  app.load_more_commits();
+  assert_eq!(
+    app.commits.limit,
+    COMMITS_PAGE * 2,
+    "the second press while a read is out must not page again"
+  );
+  settle_commits(&mut app);
+}
+
+#[test]
+fn reopening_on_another_worktree_gets_its_own_read() {
+  // Coalescing is only sound for the same worktree at the same limit: the
+  // drain drops a payload whose path does not match, so without freeing the
+  // slot the reopen waits on a worker whose result it will never accept and
+  // the loader never clears.
+  //
+  // The in-flight read is staged by hand rather than raced against a real
+  // worker: on a one-commit fixture the thread finishes before the second
+  // open, so a raced version passes with the invalidate removed. Occupying
+  // the slot is what makes the guard the only thing standing between this
+  // test and a 10s timeout.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (dir, mut app) = make_app();
+  let other = dir.path().join("elsewhere");
+
+  app.commits.begin(Some(&other), COMMITS_PAGE);
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert!(!app.is_commits_loading(), "the reopen's own read cleared the loader");
+}
+
+#[test]
+fn reopening_after_a_deeper_page_gets_its_own_read() {
+  // Same hole, reached by the limit rather than the path: close the overlay
+  // while a 600-commit page is out, reopen, and the first page's request
+  // would coalesce onto a read whose payload the drain drops on the limit
+  // check.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (dir, mut app) = make_app();
+
+  app.commits.begin(Some(dir.path()), COMMITS_PAGE * 2);
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert_eq!(app.commits.limit, COMMITS_PAGE, "the reopen is back at the first page");
+}
+
+#[test]
+fn paging_stops_at_the_cap() {
+  // #593 notes the memo in `recent_commits_cached` is keyed on the limit
+  // and evicts an arbitrary entry when full, so unbounded paging would push
+  // other worktrees' sidebar entries out. The cap is what bounds it.
+  use gwm::tui::{CommitsModal, COMMITS_MAX, COMMITS_PAGE};
+  let mut m = CommitsModal::new();
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_MAX);
+  m.load(vec![ratatui::text::Line::from("x"); COMMITS_MAX]);
+
+  assert!(!m.can_load_more(), "the cap is a hard stop even on a full page");
+
+  m.limit = COMMITS_MAX - 1;
+  assert_eq!(m.next_limit(), COMMITS_MAX, "the last page clamps to the cap");
+
+  // And the cap leaves room for more than the first page, or load-more
+  // would be dead on arrival.
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_PAGE);
+  m.load(vec![ratatui::text::Line::from("x"); COMMITS_PAGE]);
+  assert!(m.can_load_more(), "a full first page is under the cap");
+}
+
+#[test]
+fn a_deeper_page_keeps_the_scroll_position() {
+  // The user pages from the bottom of the list. Rewinding to the top there
+  // would throw away the position they paged from — unlike a fresh open,
+  // which does rewind.
+  use gwm::tui::CommitsModal;
+  let path = std::path::Path::new("/tmp/x");
+  let mut m = CommitsModal::new();
+  m.begin(Some(path), 10);
+  m.load(vec![ratatui::text::Line::from("x"); 10]);
+  m.max_scroll = 8;
+  m.scroll_to_bottom();
+  assert_eq!(m.scroll, 8);
+
+  m.begin_more(20);
+  assert_eq!(m.scroll, 8, "arming a deeper page keeps the cursor and the rows");
+  assert_eq!(m.lines.len(), 10, "the rows already read stay up while it loads");
+  m.load(vec![ratatui::text::Line::from("x"); 20]);
+  assert_eq!(m.scroll, 8, "and the payload does not rewind either");
+
+  m.begin(Some(path), 20);
+  assert_eq!(m.scroll, 0, "a fresh open still rewinds");
+  assert!(m.lines.is_empty(), "and drops the previous listing");
+}
