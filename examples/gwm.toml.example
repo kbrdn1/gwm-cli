@@ -593,6 +593,24 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [clean.profiles.deep]
 # dirs = ["target", "node_modules", "dist", "build", ".cache", ".venv"]
 
+# --- agent resume commands (issue #591) -------------------------------------
+# What `o` runs in the new multiplexer pane when you resume a session from the
+# agents overlay (`a`). `{session}` is the detected session id; it is read out
+# of the tool's own artefacts, so it reaches the shell quoted.
+#
+# The LEVEL the pane opens at is not set here: `o` reads `mux_open_in` and
+# `mux_pane_direction` above, the same pair `t` reads.
+#
+# The values below ARE the defaults, so this block only earns its keep when
+# one of the four CLIs changes its flags before gwm catches up. An empty
+# string reads as unset and restores the default.
+#
+# [tui.agent_resume]
+# claude   = "claude -r {session}"
+# codex    = "codex resume {session}"
+# opencode = "opencode -s {session}"
+# vibe     = "vibe --resume {session}"
+
 # --- `o: open` dispatch (issue #73) -----------------------------------------
 # How the `o` key behaves on the highlighted worktree. Three modes:
 #   "shell"  — suspend the TUI and spawn $SHELL with cwd = worktree.
