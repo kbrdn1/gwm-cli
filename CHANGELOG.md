@@ -26,9 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Multiplexer only**, deliberately. With none active the key says so and
   does nothing, because the point is to put the session next to gwm and the
   PTY overlay would cover gwm instead. It opens at the level `mux_open_in`
-  names, exactly as `t` does, which is also where the rest of its refusals
-  come from: a zellij tab takes no command and neither herdr level does, and
-  the status bar names whichever backend said no.
+  names, exactly as `t` does. One target stays refused: a zellij **tab** takes
+  no trailing command in any form.
+
+  **herdr works too, in two steps.** None of its levels accepts a trailing
+  command, so gwm opens the container, waits for its new shell to reach a
+  prompt, then types the line in through the pane id herdr's response carries.
+  All three of `pane split`, `tab create` and `workspace create` name a pane
+  to run in. The wait is load-bearing rather than defensive: `herdr pane run`
+  types into the interactive shell instead of exec'ing, so a line sent while
+  the shell is still running its rc files lands in the middle of that output
+  and is dropped, measured on a worktree with `direnv` and a nix flake where
+  it took about a minute to settle. The whole sequence therefore runs off the
+  event loop, the status bar reads `opening agent pane…` meanwhile, and it
+  gives up after two minutes rather than leave a worker running.
 
   What the pane runs is `[tui.agent_resume]`, defaulting to
   `claude -r {session}`, `codex resume {session}`, `opencode -s {session}` and
