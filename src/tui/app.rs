@@ -5520,28 +5520,53 @@ impl App {
       std::env::var("TMUX").ok(),
       std::env::var("ZELLIJ").ok(),
       std::env::var("HERDR_ENV").ok(),
+      std::env::var("HERDR_WORKSPACE_ID").ok(),
     );
   }
 
-  /// [`Self::open_in_mux_pane`] with the three env probes passed in, so a
-  /// state test can drive the refusals without rewriting a process-global
+  /// [`Self::open_in_mux_pane`] with the env probes passed in, so a state
+  /// test can drive the refusals without rewriting a process-global
   /// variable (#588). `$TMUX` is read by the clipboard path too, so unsetting
   /// it in a test would put every yank test in the same binary under the env
   /// lock.
-  pub fn open_in_mux_pane_from(&mut self, tmux: Option<String>, zellij: Option<String>, herdr: Option<String>) {
+  pub fn open_in_mux_pane_from(
+    &mut self,
+    tmux: Option<String>,
+    zellij: Option<String>,
+    herdr: Option<String>,
+    workspace: Option<String>,
+  ) {
     let Some(w) = self.selected() else {
       self.status = "no worktree selected".into();
       return;
     };
     let path = w.path.clone();
     let name = w.name.clone();
-    // `mux_pane` promises a pane, so the shared cascade builds a Split (tmux
-    // `split-window` / zellij `new-pane` / herdr `pane split`) rather than a
-    // new window/tab (Codex review on PR #292). Herdr comes last in it, so a
-    // user running gwm inside both keeps what they had before #588.
-    let Some((_, cmd)) = crate::multiplexer::detect_split_command(&name, &path, tmux, zellij, herdr) else {
+    // `[tui] mux_open_in` says what to open and `mux_pane_direction` which
+    // half a pane takes (#608 / #589). Before them this was a Split with no
+    // direction at all, which left the answer to each backend: tmux stacked,
+    // zellij took the biggest free space, herdr went right.
+    //
+    // Herdr comes last in the cascade, so a user running gwm inside both it
+    // and tmux keeps what they had before #588.
+    let mode = self
+      .config
+      .tui
+      .mux_open_in
+      .spawn_mode(self.config.tui.mux_pane_direction);
+    let Some(mux) = crate::multiplexer::detect_multiplexer(tmux, zellij, herdr) else {
       self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
+    };
+    // A target the backend has no level for (`workspace` outside herdr) is
+    // refused here rather than downgraded to a tab: the setting saying one
+    // thing while the screen shows another is the failure worth avoiding.
+    let cmd = match crate::multiplexer::build_command(mux, &name, &path, mode, workspace.as_deref()) {
+      Ok(cmd) => cmd,
+      Err(why) => {
+        self.status = why.into();
+        return;
+      }
     };
     let bin = cmd[0].as_str();
     // `output()` rather than `spawn()`: both pipes have to be captured
@@ -5561,6 +5586,7 @@ impl App {
       Ok(out) => {
         self.status = mux_pane_status(
           &name,
+          crate::multiplexer::spawn_noun(mux, mode),
           out.status.success(),
           &String::from_utf8_lossy(&out.stdout),
           &String::from_utf8_lossy(&out.stderr),
@@ -7657,9 +7683,9 @@ fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
 /// ignored: herdr answers over its socket API, so its error arrives as a JSON
 /// body on stdout with a non-zero exit. The line is trimmed to its first
 /// non-empty line because the status bar is one row.
-pub fn mux_pane_status(name: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+pub fn mux_pane_status(name: &str, noun: &str, ok: bool, stdout: &str, stderr: &str) -> String {
   if ok {
-    return format!("opened {} in new pane", name);
+    return format!("opened {} in new {}", name, noun);
   }
   let detail = [stderr, stdout]
     .iter()

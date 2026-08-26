@@ -1,4 +1,5 @@
 use crate::error::{GwmError, Result};
+use crate::multiplexer::{SpawnMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -886,6 +887,33 @@ pub struct TuiConfig {
   #[serde(default = "default_status_one_line")]
   pub status_one_line: bool,
 
+  /// What the TUI opens in the multiplexer: a pane, a whole tab, or a
+  /// workspace (issue #608).
+  ///
+  /// Read by the two call sites that open one — the `t` key and a
+  /// `[tui.macro*]` with `open_in = "mux_pane"`. The CLI spells its own
+  /// target instead (bare is a tab, `--split` is a pane), so this key does
+  /// not reach it.
+  ///
+  /// Default `pane`, which is what `t` has always done.
+  #[serde(default)]
+  pub mux_open_in: MuxTarget,
+
+  /// Which half a mux pane takes (issue #589).
+  ///
+  /// Only meaningful under `mux_open_in = "pane"`. Also the direction
+  /// `gwm tmux|zellij|herdr --split` takes, unless `--direction` overrides
+  /// it for that invocation.
+  ///
+  /// Default `right`, which is a visible change for tmux and zellij users:
+  /// up to 1.9 a split carried no direction, so tmux fell back to `-v` and
+  /// stacked the pane. `right` is what the `--split` help has promised
+  /// since it shipped ("a horizontal split of the current pane"), what
+  /// herdr already hardcoded, and the half that is actually free on a wide
+  /// screen. Set `down` for the pre-#589 tmux behaviour.
+  #[serde(default)]
+  pub mux_pane_direction: SplitDirection,
+
   /// Give the in-TUI note editor a vim normal mode (issue #557).
   ///
   /// Default `true`: `N` opens in normal mode, `i` / `I` / `a` / `A` / `o`
@@ -897,6 +925,56 @@ pub struct TuiConfig {
   /// printable is text, no modes, and one `Esc` writes and closes.
   #[serde(default = "default_note_vim")]
   pub note_vim: bool,
+}
+
+/// What a mux spawn opens (issue #608): the level of the multiplexer's own
+/// hierarchy the worktree lands in.
+///
+/// Split off `mux_pane_direction`, which carried a `window` value that was
+/// not a direction at all. The two questions are orthogonal: this one says
+/// *what*, [`SplitDirection`] says *which half* when the answer is a pane.
+///
+/// `kebab-case` for the same reason as [`TuiLayout`]: it keeps the
+/// serialised form equal to [`Self::label`], so a Settings-panel write-back
+/// produces a file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MuxTarget {
+  /// Split the current pane. The default, and what `t` has always done.
+  #[default]
+  Pane,
+  /// A whole screen of its own: a tmux window, a zellij or herdr tab. One
+  /// thing under three names, so the value takes the majority spelling and
+  /// [`crate::multiplexer::Multiplexer::window_noun`] renders the local one.
+  Tab,
+  /// herdr's level above a tab. **herdr only**: tmux and zellij have
+  /// nothing at that level, and the builders refuse rather than quietly
+  /// open a tab, which would make this setting lie about what it did.
+  Workspace,
+}
+
+impl MuxTarget {
+  /// Every variant, default first.
+  pub const ALL: [MuxTarget; 3] = [MuxTarget::Pane, MuxTarget::Tab, MuxTarget::Workspace];
+
+  /// Settings-panel label, equal to the serialised TOML spelling.
+  pub const fn label(self) -> &'static str {
+    match self {
+      MuxTarget::Pane => "pane",
+      MuxTarget::Tab => "tab",
+      MuxTarget::Workspace => "workspace",
+    }
+  }
+
+  /// What the TUI call sites build from this. `direction` is consumed only
+  /// by `Pane`; the other two targets have no half to take.
+  pub const fn spawn_mode(self, direction: SplitDirection) -> SpawnMode {
+    match self {
+      MuxTarget::Pane => SpawnMode::Split(direction),
+      MuxTarget::Tab => SpawnMode::Window,
+      MuxTarget::Workspace => SpawnMode::Workspace,
+    }
+  }
 }
 
 /// How the TUI frames its panes and sidebar sections (issue #545).
@@ -955,6 +1033,8 @@ impl Default for TuiConfig {
       layout: TuiLayout::Compact,
       dim_unfocused: false,
       status_one_line: default_status_one_line(),
+      mux_open_in: MuxTarget::default(),
+      mux_pane_direction: SplitDirection::default(),
       note_vim: default_note_vim(),
     }
   }

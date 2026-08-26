@@ -1,8 +1,9 @@
 use gwm::config::{
   expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, ClipboardMode, Config, ConfigRow,
-  ConfigSource, MacroOpenMode, SidebarOrientation, SidebarPosition, TuiLayout, TuiOpenMode, WorktreeConfig,
+  ConfigSource, MacroOpenMode, MuxTarget, SidebarOrientation, SidebarPosition, TuiLayout, TuiOpenMode, WorktreeConfig,
   CONFIG_FILE,
 };
+use gwm::multiplexer::SplitDirection;
 use tempfile::TempDir;
 
 /// Process-global lock guarding every test in this binary that can **observe**
@@ -2981,6 +2982,127 @@ fn handed_repo_bytes_go_through_the_same_validators() {
   assert!(
     format!("{err}").contains("empty `command`"),
     "the semantic validator has to run on handed bytes too, got: {err}"
+  );
+}
+
+#[test]
+fn tui_mux_open_in_defaults_to_a_pane() {
+  // #608. `t` has always opened a pane, so the split of `mux_pane_direction`
+  // into two keys must not move what the key does by default.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.mux_open_in, MuxTarget::Pane);
+  assert_eq!(
+    Config::default().tui.mux_open_in,
+    MuxTarget::Pane,
+    "`Config::default()` must agree with the serde default"
+  );
+}
+
+#[test]
+fn tui_mux_open_in_round_trips_every_documented_value() {
+  for (value, expected) in [
+    ("pane", MuxTarget::Pane),
+    ("tab", MuxTarget::Tab),
+    ("workspace", MuxTarget::Workspace),
+  ] {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+      dir.path().join(CONFIG_FILE),
+      format!("[tui]\nmux_open_in = \"{value}\"\n"),
+    )
+    .unwrap();
+    let cfg = Config::load_layered(dir.path(), None).unwrap();
+    assert_eq!(cfg.tui.mux_open_in, expected, "`{value}` must load back");
+    assert_eq!(expected.label(), value, "the label is the TOML spelling");
+  }
+}
+
+#[test]
+fn tui_mux_open_in_rejects_a_level_no_multiplexer_has() {
+  // `session` is the tempting one: tmux and zellij both have sessions, but
+  // gwm runs *inside* one and none of the three can spawn a sibling from
+  // there. A value the loader accepted would reach a builder with no arm.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nmux_open_in = \"session\"\n").unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("`session` is not a target gwm can open");
+  assert!(
+    format!("{err}").contains("mux_open_in"),
+    "the error must name the key, got: {err}"
+  );
+}
+
+#[test]
+fn tui_mux_pane_direction_is_a_direction_and_nothing_else() {
+  // #608 took `window` out of this key: it said *what* to open, not *which
+  // half*, and it now lives in `mux_open_in = "tab"`. The old spelling must
+  // fail at load rather than parse as something else, so a config written
+  // against the unreleased #589 shape is told where the value went.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nmux_pane_direction = \"window\"\n").unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("`window` is not a direction");
+  assert!(
+    format!("{err}").contains("mux_pane_direction"),
+    "the error must name the key, got: {err}"
+  );
+}
+
+#[test]
+fn tui_mux_pane_direction_defaults_to_right() {
+  // #589. Up to 1.9 a split carried no direction and each backend answered
+  // for itself: tmux stacked, zellij took the biggest free space, herdr went
+  // right. `right` is the deliberate default — it is what the `--split` help
+  // has promised since it shipped, and the half that is free on a wide
+  // screen. `down` is the value that restores tmux's old behaviour.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[worktree]\nbase = \"~/wt\"\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.mux_pane_direction, SplitDirection::Right);
+  assert_eq!(
+    Config::default().tui.mux_pane_direction,
+    SplitDirection::Right,
+    "`Config::default()` must agree with the serde default"
+  );
+}
+
+#[test]
+fn tui_mux_pane_direction_round_trips_every_documented_value() {
+  // Both values are what the Settings panel writes back, so each one has to
+  // load from the file it produces.
+  for (value, expected) in [
+    ("right", SplitDirection::Right),
+    ("down", SplitDirection::Down),
+    ("left", SplitDirection::Left),
+    ("up", SplitDirection::Up),
+  ] {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+      dir.path().join(CONFIG_FILE),
+      format!("[tui]\nmux_pane_direction = \"{value}\"\n"),
+    )
+    .unwrap();
+    let cfg = Config::load_layered(dir.path(), None).unwrap();
+    assert_eq!(cfg.tui.mux_pane_direction, expected, "`{value}` must load back");
+    assert_eq!(expected.label(), value, "the label is the TOML spelling");
+  }
+}
+
+#[test]
+fn tui_mux_pane_direction_rejects_a_value_no_backend_can_honour() {
+  // `left` and `up` joined the set in #611, so the rejected value has to be
+  // one no backend spells. A typo must fail at load rather than silently
+  // fall back to the default.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    "[tui]\nmux_pane_direction = \"sideways\"\n",
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("`sideways` is not a value gwm can honour");
+  assert!(
+    format!("{err}").contains("mux_pane_direction"),
+    "the error must name the key, got: {err}"
   );
 }
 

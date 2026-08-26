@@ -1432,7 +1432,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  use crate::multiplexer::{detect_split_command, Multiplexer};
+  use crate::multiplexer::{macro_mux_command, spawn_noun, Multiplexer};
   // Macros run in the selected worktree. With nothing selected (e.g. a filter
   // with no matches), refuse rather than silently running in the main repo —
   // a destructive command must not hit the wrong tree (Codex review on #292).
@@ -1450,31 +1450,30 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
   // Resolve the mux command up front so a `mux_pane` macro can fall back to the
   // PTY overlay when no multiplexer is active (the documented behaviour — Codex
   // review on PR #292), rather than no-oping.
+  // Resolved outside the `if` because the success line needs it too: a macro
+  // under `mux_open_in = "tab"` opens a tmux window, and saying "pane" there
+  // describes the key rather than the screen (Codex review on PR #606).
+  let mode = app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
   let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
     let label = format!("macro{}", n);
-    match detect_split_command(
+    let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
+    // A multiplexer can be detected and still be unable to carry the macro's
+    // command: herdr in every mode, zellij under a tab, and every backend
+    // under a workspace (#588 / #589 / #608). Opening anyway would run
+    // nothing in it and drop the macro silently, so the PTY overlay is the
+    // honest fallback and the status bar says which backend said no.
+    match macro_mux_command(
       &label,
       &path,
+      mode,
       std::env::var("TMUX").ok(),
       std::env::var("ZELLIJ").ok(),
       std::env::var("HERDR_ENV").ok(),
+      ws.as_deref(),
     ) {
-      // Herdr is detected but its argv is deliberately dropped (#588): a
-      // macro needs the pane to run a command, and `herdr pane split` has no
-      // trailing-command form the way `tmux split-window <cmd>` and
-      // `zellij action new-pane -- <cmd>` do. Running one takes
-      // `herdr pane run <pane-id> <cmd>`, and the id only comes back in the
-      // JSON `pane split` prints, so it is two processes and a parse, not an
-      // argv (#599). Splitting anyway would open an empty pane and silently
-      // drop the macro, so the PTY overlay stays the honest fallback and the
-      // status says why.
-      Some((Multiplexer::Herdr, _)) => {
-        app.status = format!("macro{}: herdr panes take no command; falling back to PTY overlay", n);
-        None
-      }
-      Some((_, cmd)) => Some(cmd),
-      None => {
-        app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
+      Ok(spawn) => Some(spawn),
+      Err(why) => {
+        app.status = format!("macro{}: {}; falling back to PTY overlay", n, why);
         None
       }
     }
@@ -1482,10 +1481,10 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     None
   };
 
-  if let Some(cmd) = mux_cmd {
+  if let Some((mux, cmd)) = mux_cmd {
     let bin = cmd[0].as_str();
     let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-    if bin == "zellij" {
+    if mux == Multiplexer::Zellij {
       // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
       // shell, so a command with spaces/shell syntax must be wrapped in
       // `-- <shell> -c <cmd>` (Codex review on PR #292).
@@ -1500,7 +1499,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
       full_cmd.push(macro_cfg.command.as_str());
     }
     match std::process::Command::new(bin).args(&full_cmd).spawn() {
-      Ok(_) => app.status = format!("macro{} opened in mux pane", n),
+      Ok(_) => app.status = format!("macro{} opened in new {}", n, spawn_noun(mux, mode)),
       Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
     }
   } else {

@@ -19,7 +19,10 @@
 //! the cursor lives here, `max_scroll` / `max_x_scroll` are republished by
 //! the renderer each frame against the live viewport.
 
-use crate::config::{ClipboardMode, Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition, TuiLayout};
+use crate::config::{
+  ClipboardMode, Config, ConfigRow, ConfigSource, MuxTarget, SidebarOrientation, SidebarPosition, TuiLayout,
+};
+use crate::multiplexer::SplitDirection;
 use crate::tui::keymap::{Action, KeyStroke, Keymap};
 use crate::tui::modal_keymap::{ModalAction, ModalKeymap};
 
@@ -80,6 +83,8 @@ impl SettingsTab {
         SettingField::DimUnfocused,
         SettingField::StatusOneLine,
         SettingField::NoteVim,
+        SettingField::MuxOpenIn,
+        SettingField::MuxPaneDirection,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::Clipboard,
@@ -287,6 +292,17 @@ const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &[
 // `TuiOpenMode` has no `label()` to derive from; the round-trip test
 // (`every_choice_is_a_value_the_config_can_load_back`) guards it instead.
 const OPEN_MODE_CHOICES: &[&str] = &["shell", "editor", "finder"];
+const MUX_OPEN_IN_CHOICES: &[&str] = &[
+  MuxTarget::Pane.label(),
+  MuxTarget::Tab.label(),
+  MuxTarget::Workspace.label(),
+];
+const MUX_PANE_DIRECTION_CHOICES: &[&str] = &[
+  SplitDirection::Right.label(),
+  SplitDirection::Down.label(),
+  SplitDirection::Left.label(),
+  SplitDirection::Up.label(),
+];
 const CLIPBOARD_CHOICES: &[&str] = &[
   ClipboardMode::Auto.label(),
   ClipboardMode::Osc52.label(),
@@ -312,6 +328,10 @@ pub enum SettingField {
   StatusOneLine,
   /// `tui.note_vim` — the note editor's vim normal mode (issue #557).
   NoteVim,
+  /// `tui.mux_open_in` — pane / tab / workspace (issue #608).
+  MuxOpenIn,
+  /// `tui.mux_pane_direction` — right / down / left / up (issues #589 / #611).
+  MuxPaneDirection,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,
   /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
@@ -343,6 +363,8 @@ impl SettingField {
       SettingField::DimUnfocused => "dim unfocused pane",
       SettingField::StatusOneLine => "status on one line",
       SettingField::NoteVim => "note vim mode",
+      SettingField::MuxOpenIn => "mux opens in",
+      SettingField::MuxPaneDirection => "mux pane side",
       SettingField::SidebarOrientation => "sidebar layout",
       SettingField::Clipboard => "clipboard",
       SettingField::OpenMode => "open mode",
@@ -365,6 +387,8 @@ impl SettingField {
       SettingField::DimUnfocused => "tui.dim_unfocused",
       SettingField::StatusOneLine => "tui.status_one_line",
       SettingField::NoteVim => "tui.note_vim",
+      SettingField::MuxOpenIn => "tui.mux_open_in",
+      SettingField::MuxPaneDirection => "tui.mux_pane_direction",
       SettingField::SidebarOrientation => "tui.sidebar_orientation",
       SettingField::Clipboard => "tui.clipboard",
       SettingField::OpenMode => "tui.open.mode",
@@ -383,6 +407,8 @@ impl SettingField {
       | SettingField::SidebarPosition
       | SettingField::SidebarOrientation
       | SettingField::Clipboard
+      | SettingField::MuxOpenIn
+      | SettingField::MuxPaneDirection
       | SettingField::OpenMode => FieldKind::Choice,
       SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
@@ -411,6 +437,8 @@ impl SettingField {
       SettingField::Layout => LAYOUT_CHOICES,
       SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => BOOL_CHOICES,
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
+      SettingField::MuxOpenIn => MUX_OPEN_IN_CHOICES,
+      SettingField::MuxPaneDirection => MUX_PANE_DIRECTION_CHOICES,
       SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
       _ => &[],
@@ -429,6 +457,8 @@ impl SettingField {
       SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
       SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
       SettingField::NoteVim => cfg.tui.note_vim.to_string(),
+      SettingField::MuxOpenIn => cfg.tui.mux_open_in.label().into(),
+      SettingField::MuxPaneDirection => cfg.tui.mux_pane_direction.label().into(),
       SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
       SettingField::Clipboard => cfg.tui.clipboard.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {
