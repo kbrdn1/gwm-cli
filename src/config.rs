@@ -1425,25 +1425,61 @@ impl TuiAgentResumeConfig {
   }
 }
 
+/// `true` when `id` is safe to interpolate into a shell line **in any
+/// position**, quoted or not, under any shell.
+///
+/// Every id the four backends produce is a UUID or a plain slug, so the set
+/// is ASCII alphanumerics plus `-`, `_` and `.`. Nothing legitimate is
+/// excluded and nothing a shell reads specially is admitted.
+///
+/// This exists because quoting alone does **not** hold the promise
+/// [`expand_agent_resume`] used to make. `shell_words::quote` is only safe
+/// for a value dropped into an *unquoted* POSIX position, and a
+/// `[tui.agent_resume]` template is user-written text: `claude -r
+/// "{session}"` is a natural thing to write, and there
+/// `'$(id)'` sits inside double quotes, where the single quotes are literal
+/// and the substitution runs. `cmd.exe` never honours POSIX single quotes at
+/// all. So the value is constrained instead of trusted to its wrapping.
+pub fn is_shell_safe_session_id(id: &str) -> bool {
+  !id.is_empty()
+    && id
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 /// Substitute `{session}` in a `[tui.agent_resume]` template, in **one pass**,
-/// shell-quoting the value.
+/// shell-quoting the value. `None` when `session_id` is not one
+/// [`is_shell_safe_session_id`] admits.
 ///
-/// Both properties are load-bearing, and both are the ones
-/// [`crate::lifecycle`] had to learn the hard way in GHSA-fffq-vg6f-gxqm.
+/// Three properties, and the first is the one that took a review round to get
+/// right.
 ///
-/// **Quoting**, because the result becomes a shell line: a tmux
-/// shell-command operand, or the script half of `zellij action new-pane --
-/// <shell> -c <line>`. A session id is read out of a third-party tool's
+/// **Constrained, not merely quoted.** The result becomes a shell line: a
+/// tmux shell-command operand, or the script half of `zellij action new-pane
+/// -- <shell> -c <line>`. A session id is read out of a third-party tool's
 /// artefacts on disk, so it is *data* and must not be able to close the
-/// resume command and open its own.
+/// resume command and open its own. Quoting alone cannot promise that here,
+/// because the template around the placeholder is the user's: put `{session}`
+/// inside double quotes and `shell_words::quote` produces single quotes that
+/// the shell reads as literal characters, leaving `$(…)` live. Rejecting the
+/// id is the only answer that does not depend on where the template put it.
+/// The quoting stays as the second layer.
+///
+/// **Fail closed.** An id outside the set aborts the resume with a message,
+/// rather than running a line nobody can predict. In practice nothing is
+/// refused: every backend's id is a UUID or a slug.
 ///
 /// **Single pass**, because chained `str::replace` calls re-scan what the
 /// previous call just wrote: an id that itself contains `{session}` would be
 /// rewritten from the inside, splicing quote characters into the middle of a
-/// value. An expansion is a value, not more template.
+/// value. An expansion is a value, not more template. Same rule
+/// [`crate::lifecycle`] learned in GHSA-fffq-vg6f-gxqm.
 ///
 /// An unknown `{token}` is left verbatim, as every other gwm expander does.
-pub fn expand_agent_resume(template: &str, session_id: &str) -> String {
+pub fn expand_agent_resume(template: &str, session_id: &str) -> Option<String> {
+  if !is_shell_safe_session_id(session_id) {
+    return None;
+  }
   let mut out = String::with_capacity(template.len());
   let mut rest = template;
   while let Some(open) = rest.find('{') {
@@ -1452,7 +1488,7 @@ pub fn expand_agent_resume(template: &str, session_id: &str) -> String {
     let Some(close) = tail.find('}') else {
       // Unbalanced `{` — nothing left to substitute, keep it verbatim.
       out.push_str(tail);
-      return out;
+      return Some(out);
     };
     let token = &tail[..=close];
     if token == "{session}" {
@@ -1463,7 +1499,7 @@ pub fn expand_agent_resume(template: &str, session_id: &str) -> String {
     rest = &tail[close + 1..];
   }
   out.push_str(rest);
-  out
+  Some(out)
 }
 
 impl TuiConfig {

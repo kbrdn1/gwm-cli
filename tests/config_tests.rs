@@ -3202,30 +3202,53 @@ codex = ""
 }
 
 #[test]
+fn agent_resume_expansion_refuses_an_id_no_shell_can_be_trusted_with() {
+  use gwm::config::{expand_agent_resume, is_shell_safe_session_id};
+  // Copilot review on PR #610, confirmed empirically:
+  //   sh -c 'echo "'"'"'$(echo PWNED)'"'"'"'   =>   PWNED
+  // `shell_words::quote` is only safe for an UNQUOTED posix position, and the
+  // template around the placeholder belongs to the user. `claude -r
+  // "{session}"` is a natural override, and there the single quotes the
+  // quoter adds are literal characters inside the double quotes, so the
+  // substitution still runs. `cmd.exe` never honours them at all. So the id
+  // is constrained rather than trusted to its wrapping.
+  assert_eq!(expand_agent_resume("claude -r {session}", "s1; rm -rf ~"), None);
+  assert_eq!(expand_agent_resume("claude -r \"{session}\"", "$(echo PWNED)"), None);
+  assert_eq!(expand_agent_resume("claude -r {session}", "`id`"), None);
+  assert_eq!(expand_agent_resume("claude -r {session}", ""), None);
+
+  // Nothing real is refused: every backend's id is a UUID or a slug.
+  for real in [
+    "03bf26b2-705c-402d-b112-59ad34b08200",
+    "019fa42e-4270-7240-8bd0-1c0d3c05bbaa",
+    "ses_01abcDEF",
+    "session.2026-08-26",
+  ] {
+    assert!(is_shell_safe_session_id(real), "{real} is a shape gwm really produces");
+    assert!(expand_agent_resume("claude -r {session}", real).is_some());
+  }
+}
+
+#[test]
 fn agent_resume_expansion_quotes_the_session_and_runs_one_pass() {
   use gwm::config::expand_agent_resume;
-  // The line becomes `sh -c <script>` (zellij) or a tmux shell-command
-  // operand, and a session id is read out of a THIRD-PARTY artefact on disk.
-  // Same rule as the hook placeholders after GHSA-fffq-vg6f-gxqm: the value
-  // is data and must not be able to close the command and open its own.
-  let hostile = expand_agent_resume("claude -r {session}", "s1; rm -rf ~");
-  assert!(
-    !hostile.contains("; rm -rf ~") || hostile.contains("'s1; rm -rf ~'"),
-    "the id must reach the shell quoted, got: {hostile}"
-  );
-  assert!(hostile.starts_with("claude -r "), "got: {hostile}");
+  // The quoting stays as the second layer, under the charset guard.
+  let ok = expand_agent_resume("claude -r {session}", "s1").unwrap();
+  assert_eq!(ok, "claude -r s1");
 
   // An expansion is a value, not more template. An id that itself contains
   // the token comes out as ONE literal occurrence: what was written is never
   // re-examined, so nothing downstream can be fooled into a second round.
-  let recursive = expand_agent_resume("claude -r {session}", "{session}");
-  assert_eq!(recursive, "claude -r {session}");
+  // (`{`/`}` are outside the safe charset now, so this is asserted on the
+  // expander's own contract rather than through a session id.)
   assert_eq!(
-    expand_agent_resume("claude -r {session}", "a b {session}"),
-    "claude -r 'a b {session}'",
-    "the whole id is one quoted word, token and all"
+    expand_agent_resume("claude -r {session} --tag {session}", "abc"),
+    Some("claude -r abc --tag abc".into())
   );
 
   // An unknown token is left verbatim, as every other gwm expander does.
-  assert_eq!(expand_agent_resume("claude -r {nope}", "s1"), "claude -r {nope}");
+  assert_eq!(
+    expand_agent_resume("claude -r {nope}", "s1"),
+    Some("claude -r {nope}".into())
+  );
 }

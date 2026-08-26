@@ -7853,7 +7853,17 @@ pub fn plan_agent_pane(
     return Err(format!("{why}: cannot resume a session there"));
   }
   let argv = mux_mod::build_command(mux, kind, target, mode, workspace).map_err(str::to_string)?;
-  let command = crate::config::expand_agent_resume(tui.agent_resume.template_for(session.kind), &session.id);
+  // Fail closed on an id no shell can be trusted with. Nothing real is
+  // refused here (every backend's id is a UUID or a slug); what this rules
+  // out is a hostile artefact on disk meeting a template that happens to
+  // quote the placeholder, where quoting alone would not save us.
+  let Some(command) = crate::config::expand_agent_resume(tui.agent_resume.template_for(session.kind), &session.id)
+  else {
+    return Err(format!(
+      "session id {:?} is not safe to pass to a shell: refusing to resume",
+      session.id
+    ));
+  };
   // The shell is read here rather than injected: it is only consumed by the
   // zellij wrapping, which `attach_pane_command` owns and its own tests pin
   // with an explicit shell. Threading it through this signature bought a
