@@ -25,7 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The listing is read when the overlay opens rather than taken from the
   sidebar's cache, so it does not go blank in the two states where that cache
-  is never built: sidebar hidden, or the Details panel showing stashes.
+  is never built: sidebar hidden, or the Details panel showing stashes. The
+  read runs on a worker and the overlay opens on a loader, so a repository
+  whose untracked walk is slow does not freeze the event loop on the
+  keypress.
 - **`o` on the agents overlay resumes the session in the multiplexer**
   ([#591](https://github.com/kbrdn1/gwm-cli/issues/591)). The overlay told you
   which agent was working where and then left you to get there by hand. `a`
