@@ -172,6 +172,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Commits => draw_commits(f, app),
     View::Pty => draw_pty_overlay(f, app),
     View::Note => draw_note_editor(f, app),
     // #325: exec profile picker renders as a small centred modal.
@@ -3385,6 +3386,37 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   hints
 }
 
+/// Commit-listing overlay footer hints (issue #593). `load more` / `close`
+/// resolve from the `Commits*` modal bindings so a rebind of
+/// `[tui.keys.modal.commits]` shows through; the scroll / top-bottom
+/// movement pairs stay literal, as the Command Logs footer does.
+///
+/// `load more` is dropped when `more` is false — there is no deeper page,
+/// either because the revwalk ran out of history or because the paging cap
+/// was reached. Advertising a key that does nothing is how a working
+/// overlay reads as broken. While `loading`, the slot says so instead: the
+/// key is equally inert there, but for a reason that resolves on its own.
+pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  if loading {
+    // `more` is false while a read is out, so without this the hint slot
+    // would simply go blank and a deeper page would look refused rather
+    // than under way.
+    hints.push(("…".to_string(), "loading".to_string()));
+  } else if more {
+    if let Some(k) = modal.primary_key(ModalAction::CommitsLoadMore) {
+      hints.push((k, "load more".to_string()));
+    }
+  }
+  if let Some(k) = modal.primary_key(ModalAction::CommitsClose) {
+    hints.push((k, "close".to_string()));
+  }
+  hints
+}
+
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
 }
@@ -3894,6 +3926,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
+  rows.push(entry(
+    Action::Commits,
+    "show the commit listing full size, with load-more",
+  ));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
@@ -4202,6 +4238,15 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::CommandLogsClose, "close"),
       HelpRow::Blank,
+      HelpRow::Section("Commits".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommitsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommitsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommitsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommitsScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::CommitsLoadMore, "read one page deeper"),
+      modal_entry(ModalAction::CommitsClose, "close"),
+      HelpRow::Blank,
       HelpRow::Section("Settings".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::ConfigNextTab, "next tab"),
@@ -4426,6 +4471,70 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
+/// Render the full-size commit listing (issue #593).
+///
+/// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the
+/// snapshot `App::enter_commits` took — one row per commit, short hash /
+/// author initials / `o`-`@` graph / subject, exactly as the sidebar pane
+/// paints them.
+///
+/// No horizontal pan: `recent_commits_lines` deliberately leaves subjects
+/// untruncated and relies on ratatui's hard clip at the right edge, which is
+/// lazygit's behaviour. The whole point of the overlay is that the canvas is
+/// wide enough for that clip to stop mattering.
+///
+/// The title carries the row count so `load more` has visible feedback; a
+/// trailing `+` means a deeper page exists. It rides the top rule, which is
+/// clipped from the LEFT when centred, so the count sits last on purpose.
+fn draw_commits(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+
+  let more = app.commits.can_load_more();
+  let loading = app.commits.loading;
+  // The `+` tracks "a deeper page exists", which is true while one is being
+  // read too: `can_load_more` is false then only because the read is out.
+  let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
+  let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
+  let block = overlay_block_titled(&title, accent);
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  // A muted loader rather than an empty canvas while the first page is
+  // being walked: blank reads as "no commits", which is the one answer this
+  // overlay must not give by accident. A deeper page keeps the rows it
+  // already has on screen instead, and says `loading` in the footer.
+  let lines: Vec<Line<'static>> = if !app.commits.lines.is_empty() {
+    app.commits.lines.clone()
+  } else if loading {
+    vec![Line::from(Span::styled(
+      " loading…".to_string(),
+      Style::default().fg(muted),
+    ))]
+  } else {
+    vec![Line::from(Span::styled(
+      "No commits.".to_string(),
+      Style::default().fg(muted),
+    ))]
+  };
+
+  // Publish the scroll bound against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.commits.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
+  app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
+  let scroll = app.commits.scroll;
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+  f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area);
+
+  let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
+}
+
 fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;

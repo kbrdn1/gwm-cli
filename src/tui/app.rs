@@ -7,6 +7,7 @@ use super::state::async_task::{
 };
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
+use super::state::commits::{CommitsModal, COMMITS_PAGE};
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field, Mode};
@@ -118,6 +119,13 @@ pub enum View {
   /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
   /// state lives on [`App::command_logs`].
   CommandLogs,
+  /// Full-size commit listing (issue #593). A ~90% fullscreen modal
+  /// showing the same graph the sidebar's Commits pane paints, given the
+  /// whole screen, plus a load-more key that re-reads at a deeper limit so
+  /// history is paged rather than capped at
+  /// [`super::ui::RECENT_COMMITS_LIMIT`]. Opened on `6`, scrolled like the
+  /// help overlay; state lives on [`App::commits`].
+  Commits,
   /// Configuration panel (issue #232). A ~90% fullscreen modal over a
   /// dimmed list showing the resolved `.gwm.toml` (user-level global
   /// deep-merged under the repo file) with a per-row source column
@@ -592,6 +600,11 @@ pub struct App {
   /// renders off `App` state rather than locking the global mid-frame.
   pub command_logs: CommandLogs,
 
+  /// Full-size commit listing overlay state (issue #593): the scroll
+  /// cursor plus the paged graph snapshot, filled by
+  /// [`Self::enter_commits`] and deepened by [`Self::load_more_commits`].
+  pub commits: CommitsModal,
+
   /// Configuration panel overlay state (issue #232): the scroll cursor
   /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
   pub config_panel: ConfigPanel,
@@ -878,6 +891,7 @@ impl App {
       task_rx,
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
+      commits: CommitsModal::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
@@ -2187,6 +2201,20 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
+        TaskMsg::Commits(generation, path, limit, lines) => {
+          if !self.tasks.complete(TaskKind::Commits, generation) {
+            continue;
+          }
+          // Two ways this payload can be stale: the selection moved while
+          // the walk ran (or the overlay was closed and reopened elsewhere),
+          // and the overlay paged past the limit this result was read at.
+          // Both describe a listing the overlay is no longer showing.
+          if self.commits.path.as_deref() != Some(path.as_path()) || self.commits.limit != limit {
+            continue;
+          }
+          self.commits.load(lines);
+          applied = true;
+        }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
           // Late result — the selection moved and `refresh` bumped the slot's
           // generation (a mutation invalidated a pre-mutation rebuild), so this
@@ -2719,6 +2747,8 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
+      // Same for the full-size commit listing (issue #593).
+      View::Commits => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
       // #557: the note bar follows the mode. With the knob off there is no
@@ -2838,6 +2868,98 @@ impl App {
     self.command_logs.sync();
     self.command_logs.reset();
     self.view = View::CommandLogs;
+  }
+
+  /// Open the full-size commit listing (issue #593).
+  ///
+  /// The overlay opens immediately on a loader and the revwalk runs on a
+  /// [`TaskKind::Commits`] worker. It is deliberately NOT inline: the walk
+  /// sorts `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph
+  /// before yielding a row. Measured on this repo, asking for 300 commits
+  /// costs the same as asking for all 2058 — the limit truncates the
+  /// output, it bounds nothing about the latency, so an inline call would
+  /// freeze the event loop for as long as the history is deep. Same
+  /// boundary as the sidebar's own preview (#343), reached from a keypress
+  /// rather than from navigation.
+  ///
+  /// The rows are read fresh rather than taken from `SidebarState::cache`:
+  /// that cache is keyed by `(path, mode)` and only rebuilt while the
+  /// sidebar is open and in commits mode, so it is empty in the two states
+  /// where the overlay is most useful. The read still goes through
+  /// [`crate::worktree::recent_commits_cached`] at [`COMMITS_PAGE`], which
+  /// is the sidebar's own limit, so a sidebar that already walked this tip
+  /// makes the worker a hash lookup.
+  ///
+  /// With nothing selected the overlay still opens, empty — the
+  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
+  /// reads as a dead key.
+  pub fn enter_commits(&mut self) {
+    let selected = self.selected().cloned();
+    let target = selected.as_ref().map(|w| w.path.as_path());
+    // Coalescing is only sound while the in-flight read is for the SAME
+    // worktree at the SAME limit (the #592 lesson, PR #612). Otherwise the
+    // request would come back `None` because the slot is still the old
+    // read's, no worker would exist for this one, and the old payload is
+    // dropped by the checks in the drain — leaving the loader up with
+    // nothing left to clear it.
+    if self.commits.loading && (self.commits.path.as_deref() != target || self.commits.limit != COMMITS_PAGE) {
+      self.tasks.invalidate(TaskKind::Commits);
+    }
+    self.commits.begin(target, COMMITS_PAGE);
+    self.view = View::Commits;
+    if let Some(w) = selected {
+      self.request_commits_read(w, COMMITS_PAGE);
+    }
+  }
+
+  /// Re-read the commit listing one page deeper (issue #593).
+  ///
+  /// A re-read rather than an append: the graph renderer resolves a row's
+  /// connectors against the parents of the rows below it, so a page tacked
+  /// onto the end would draw its topology against nothing. The memo in
+  /// [`crate::worktree::recent_commits_cached`] is keyed on the limit, so
+  /// the deeper read is a fresh entry rather than an invalidation of the
+  /// sidebar's.
+  ///
+  /// The rows already on screen stay up while the worker runs, so paging
+  /// keeps its place instead of blanking. A no-op when
+  /// [`CommitsModal::can_load_more`] is false: a read is in flight, the
+  /// history ran out, or the paging cap was reached. The footer drops the
+  /// `load more` hint on the same predicate, so the key is never advertised
+  /// where it would do nothing.
+  pub fn load_more_commits(&mut self) {
+    if !self.commits.can_load_more() {
+      return;
+    }
+    let Some(w) = self.selected().cloned() else {
+      return;
+    };
+    let limit = self.commits.next_limit();
+    self.commits.begin_more(limit);
+    self.request_commits_read(w, limit);
+  }
+
+  /// Spawn the worker that walks `w`'s log to `limit` and renders it.
+  ///
+  /// A `None` from the slot means a read for this same worktree and limit
+  /// is already out: ride on it, which is what keeps a held `6` from
+  /// spawning a revwalk per repeat. Callers that need a *different* read
+  /// invalidate the slot first.
+  fn request_commits_read(&mut self, w: WorktreeInfo, limit: usize) {
+    let Some(generation) = self.tasks.request(TaskKind::Commits) else {
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let lines = crate::tui::ui::recent_commits_lines(&w, limit, &theme);
+      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, lines));
+    });
+  }
+
+  /// `true` while the commit listing is waiting on its worker.
+  pub fn is_commits_loading(&self) -> bool {
+    self.commits.loading
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective

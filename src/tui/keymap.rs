@@ -150,6 +150,9 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  // #593: the sidebar's Commits pane, given the whole terminal, with a
+  // load-more key so history is paged rather than capped.
+  Commits           => "commits",
   // #436: CI checks overlay — also reachable via `c` in the status context.
   CiChecks          => "ci_checks",
   // #420: rich PR / issue view — description, checks, reviews, comments.
@@ -519,6 +522,9 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #593: `6` keeps the "numbers open panels" family going — the commit
+      // listing at full size. `5` is the Working Tree listing (#592).
+      def(Action::Commits, &["6"]),
       // #436: `C` opens the CI checks overlay from anywhere in the list
       // view; `c` does the same while the status pane holds the focus
       // (contextual routing, same mechanism as j/k sidebar scroll).

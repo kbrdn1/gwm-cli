@@ -37,6 +37,7 @@ pub use state::async_task::{
 };
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
+pub use state::commits::{CommitsModal, COMMITS_MAX, COMMITS_PAGE};
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
 };
@@ -524,6 +525,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::CommandLogsScrollTop) => app.command_logs.scroll_to_top(),
         Some(ModalAction::CommandLogsScrollBottom) => app.command_logs.scroll_to_bottom(),
         _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
+        _ => {}
+      },
+      // Full-size commit listing (issue #593). Scrolls like the Command
+      // Logs overlay; `m` re-reads one page deeper. Closes on Esc / `q` or
+      // the bound `commits` key (default `6`) so the open key toggles it
+      // shut.
+      View::Commits => match app.resolve_modal(KeyContext::Commits, key) {
+        Some(ModalAction::CommitsClose) => app.view = View::List,
+        Some(ModalAction::CommitsLoadMore) => app.load_more_commits(),
+        Some(ModalAction::CommitsScrollDown) => app.commits.scroll_down(),
+        Some(ModalAction::CommitsScrollUp) => app.commits.scroll_up(),
+        Some(ModalAction::CommitsScrollTop) => app.commits.scroll_to_top(),
+        Some(ModalAction::CommitsScrollBottom) => app.commits.scroll_to_bottom(),
+        _ if app.key_matches_action(key, Action::Commits) => app.view = View::List,
         _ => {}
       },
       // Settings panel (issue #232; editable in #279). While a numeric input
@@ -1165,6 +1180,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // overlay it is read-only and not picker-gated — harmless inside
     // `gwm switch`, opening from any List state.
     Action::ConfigPanel => app.enter_config_panel(),
+    // Issue #593: `6` opens the commit listing full size. Read-only like
+    // the two overlays above, so it is not picker-gated either.
+    Action::Commits => app.enter_commits(),
     // Issue #325: `x` opens the exec profile picker. Picker-gated —
     // running a profile in a PTY is a focus-mode action, meaningless in
     // the stripped-down `gwm switch` picker.
