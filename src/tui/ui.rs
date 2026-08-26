@@ -4451,13 +4451,6 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   );
 }
 
-/// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
-/// over the dimmed list showing the lazygit-style transcript of the
-/// external commands gwm ran, newest-first. Scrolls like the help overlay —
-/// the renderer republishes `command_logs.max_scroll` / `max_x_scroll`
-/// against the live viewport so `App`'s scroll cursor can never run past
-/// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
-/// fail / `muted` output) so a theme override applies here too.
 /// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
 /// given the whole modal area.
 ///
@@ -4482,6 +4475,24 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   f.render_widget(block, area);
 
   let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  // While the worker is out, a muted loader rather than an empty canvas:
+  // blank reads as "nothing changed", which is the one answer this overlay
+  // must not give by accident (Copilot review, PR #612). Same word the
+  // sidebar's cold cache uses.
+  if app.working_tree.loading {
+    f.render_widget(
+      Paragraph::new(Line::from(Span::styled(
+        " loading…".to_string(),
+        Style::default().fg(theme.muted),
+      ))),
+      body_area,
+    );
+    let footer_owned = working_tree_footer_hints(&app.modal_keymap);
+    let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+    f.render_widget(modal_hint_line(&footer_hints, &theme), footer_area);
+    return;
+  }
 
   // Publish the scroll bound against the BODY viewport only, then clamp the
   // cursor the key handler moved (the help / command-logs contract).
@@ -4511,6 +4522,13 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   f.render_widget(modal_hint_line(&footer_hints, &theme), footer_area);
 }
 
+/// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
+/// over the dimmed list showing the lazygit-style transcript of the
+/// external commands gwm ran, newest-first. Scrolls like the help overlay —
+/// the renderer republishes `command_logs.max_scroll` / `max_x_scroll`
+/// against the live viewport so `App`'s scroll cursor can never run past
+/// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
+/// fail / `muted` output) so a theme override applies here too.
 fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;

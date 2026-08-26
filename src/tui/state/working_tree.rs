@@ -5,12 +5,19 @@
 //! files can only be read two rows at a time through `J` / `K`. This is the
 //! same listing given the whole terminal.
 //!
-//! The rows are an owned snapshot taken when the overlay opens
+//! The rows are an owned snapshot requested when the overlay opens
 //! ([`crate::tui::App::enter_working_tree`]) rather than a read of
 //! `SidebarState::cache`: that cache is keyed by `(path, mode)` and is only
 //! rebuilt while the sidebar is *open* and in `Commits` mode, so reading it
 //! would leave the overlay blank in exactly the two states — sidebar hidden,
 //! or `Stashes` selected — where seeing the change set is most useful.
+//!
+//! The read itself runs on a worker (`TaskKind::WorkingTree`), not inline on
+//! the keypress. `STATUS_SCAN_CAP` bounds how many records `git status`
+//! yields, not how long git takes to reach the first one, so on a cold or
+//! network filesystem an inline call would freeze the event loop for the
+//! length of the walk. The overlay opens on `loading` and fills in when the
+//! worker lands (Copilot review, PR #612).
 //!
 //! Scroll follows the help / command-logs contract: the cursor lives here,
 //! but `max_scroll` is republished by the renderer each frame against the
@@ -19,6 +26,7 @@
 
 use super::super::ui::WorkingTreeCounts;
 use ratatui::text::Line;
+use std::path::{Path, PathBuf};
 
 /// Owned state for the full-size Working Tree overlay: the snapshotted
 /// file-explorer rows, their per-category counts, and the scroll cursor
@@ -37,6 +45,12 @@ pub struct WorkingTreeModal {
   /// Maximum vertical scroll offset, republished by the renderer each
   /// frame as `content_rows.saturating_sub(viewport_rows)`.
   pub max_scroll: u16,
+  /// `true` between the open and the worker's payload. The renderer paints
+  /// a loader rather than an empty canvas, which would read as "no changes".
+  pub loading: bool,
+  /// The worktree [`Self::lines`] describe, so a payload for a selection the
+  /// user has navigated away from can be dropped instead of shown.
+  pub path: Option<PathBuf>,
 }
 
 impl WorkingTreeModal {
@@ -45,13 +59,26 @@ impl WorkingTreeModal {
     Self::default()
   }
 
-  /// Replace the listing and rewind to the top. Called on every open so a
-  /// previously-scrolled visit starts fresh and the rows track a change set
-  /// that moved while the overlay was closed.
+  /// Arm the overlay for `path`: drop the previous listing, rewind the
+  /// scroll, and show the loader until [`Self::load`] lands. Called on every
+  /// open, so a previously-scrolled visit starts fresh and a stale change
+  /// set is never mistaken for the current one.
+  pub fn begin(&mut self, path: Option<&Path>) {
+    self.lines.clear();
+    self.counts = WorkingTreeCounts::default();
+    self.scroll = 0;
+    self.max_scroll = 0;
+    self.path = path.map(Path::to_path_buf);
+    // With nothing selected there is nothing to wait for.
+    self.loading = path.is_some();
+  }
+
+  /// Install the worker's payload and clear the loader.
   pub fn load(&mut self, lines: Vec<Line<'static>>, counts: WorkingTreeCounts) {
     self.lines = lines;
     self.counts = counts;
     self.scroll = 0;
+    self.loading = false;
   }
 
   /// Scroll down one row, never past the last line.

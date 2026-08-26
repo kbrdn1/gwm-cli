@@ -2226,6 +2226,19 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
+        TaskMsg::WorkingTree(generation, path, lines, counts) => {
+          if !self.tasks.complete(TaskKind::WorkingTree, generation) {
+            continue;
+          }
+          // The selection moved while the read ran (or the overlay was
+          // closed and reopened elsewhere): this payload describes a
+          // worktree the overlay is no longer showing.
+          if self.working_tree.path.as_deref() != Some(path.as_path()) {
+            continue;
+          }
+          self.working_tree.load(lines, counts);
+          applied = true;
+        }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
           // Late result — the selection moved and `refresh` bumped the slot's
           // generation (a mutation invalidated a pre-mutation rebuild), so this
@@ -2509,26 +2522,41 @@ impl App {
   pub fn modal_toggle_stroke(&mut self, key: KeyEvent, action: Action) -> ToggleStroke {
     let stroke = KeyStroke::from_event(&key);
     let mut tentative = self.pending_chord.clone();
-    tentative.push(stroke);
+    tentative.push(stroke.clone());
 
+    let outcome = match self.resolve_toggle_buffer(action, &tentative) {
+      ToggleStroke::Unclaimed if !self.pending_chord.is_empty() => {
+        // Mismatched continuation. Drop the in-flight prefix and retry the
+        // stroke on its own, the vim-style fallback `dispatch_key` does:
+        // one action can hold several chords, so with
+        // `working_tree = ["g w", "j k"]` a `g` followed by `j` has to start
+        // the second chord rather than fall through to a scroll verb.
+        self.pending_chord.clear();
+        self.resolve_toggle_buffer(action, &[stroke])
+      }
+      other => other,
+    };
+    match &outcome {
+      ToggleStroke::Pending => {}
+      // Fired or Unclaimed: nothing is in flight either way.
+      _ => self.pending_chord.clear(),
+    }
+    self.sync_legacy_pending_flag();
+    outcome
+  }
+
+  /// Resolve one buffer against the chords bound to `action` alone, arming
+  /// [`Self::pending_chord`] on a strict prefix. The inner step of
+  /// [`Self::modal_toggle_stroke`], which owns the retry and the clears.
+  fn resolve_toggle_buffer(&mut self, action: Action, buffer: &[KeyStroke]) -> ToggleStroke {
     let chords = self.keymap.chords_for(action);
-    if chords.iter().any(|c| c == &tentative) {
-      self.pending_chord.clear();
-      self.sync_legacy_pending_flag();
+    if chords.iter().any(|c| c.as_slice() == buffer) {
       return ToggleStroke::Fired;
     }
-    if chords
-      .iter()
-      .any(|c| c.len() > tentative.len() && c.starts_with(&tentative))
-    {
-      self.pending_chord = tentative;
-      self.sync_legacy_pending_flag();
+    if chords.iter().any(|c| c.len() > buffer.len() && c.starts_with(buffer)) {
+      self.pending_chord = buffer.to_vec();
       return ToggleStroke::Pending;
     }
-    // Not this action's key. Drop any half-typed toggle prefix so a stray
-    // `g` does not turn the next stroke into a phantom match.
-    self.pending_chord.clear();
-    self.sync_legacy_pending_flag();
     ToggleStroke::Unclaimed
   }
 
@@ -2928,32 +2956,46 @@ impl App {
     self.view = View::CommandLogs;
   }
 
-  /// Open the full-size Working Tree listing (issue #592). Reads the
-  /// selected worktree's `git status` and builds the same file-explorer
-  /// rows the sidebar pane paints, then rewinds the scroll so a re-open
-  /// starts at the top. The renderer republishes `max_scroll` against the
-  /// live viewport.
+  /// Open the full-size Working Tree listing (issues #592, #613).
   ///
-  /// The read is synchronous, unlike the sidebar's (issue #343): that rule
-  /// bans shelling out from `terminal.draw`, and this runs once per
-  /// keypress, not once per frame. It is bounded — `git_status_short` kills
-  /// git at [`crate::worktree::STATUS_SCAN_CAP`] records rather than letting
-  /// a pathological untracked tree walk forever.
-  /// ponytail: sync `git status` on open; move to a `TaskKind` worker if the
-  /// keypress ever feels slow on a huge repo.
+  /// The overlay opens immediately on a loader and the `git status` read
+  /// runs on a [`TaskKind::WorkingTree`] worker. It is deliberately NOT
+  /// inline: `STATUS_SCAN_CAP` bounds how many records git yields, not how
+  /// long it takes to produce the first one, so an untracked tree on a cold
+  /// or network filesystem would freeze the event loop for the length of the
+  /// walk (Copilot review, PR #612). Same boundary as the sidebar's own
+  /// preview (#343), reached from a keypress rather than from navigation.
+  ///
+  /// The rows are read fresh rather than taken from `SidebarState::cache`:
+  /// that cache is keyed by `(path, mode)` and only rebuilt while the
+  /// sidebar is open and in commits mode, so it is empty in the two states
+  /// where the overlay is most useful.
   ///
   /// With nothing selected the overlay still opens, empty — the
   /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
   /// reads as a dead key.
   pub fn enter_working_tree(&mut self) {
-    match self.selected() {
-      Some(w) => {
-        let (lines, counts) = super::ui::working_tree_lines(w, &self.theme);
-        self.working_tree.load(lines, counts);
-      }
-      None => self.working_tree.load(Vec::new(), Default::default()),
-    }
+    let selected = self.selected().cloned();
+    self.working_tree.begin(selected.as_ref().map(|w| w.path.as_path()));
     self.view = View::WorkingTree;
+    let Some(w) = selected else {
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::WorkingTree) else {
+      // A read is already in flight for this open; coalesce onto it.
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let (lines, counts) = crate::tui::ui::working_tree_lines(&w, &theme);
+      let _ = tx.send(TaskMsg::WorkingTree(generation, w.path, lines, counts));
+    });
+  }
+
+  /// `true` while the Working Tree overlay is waiting on its worker.
+  pub fn is_working_tree_loading(&self) -> bool {
+    self.working_tree.loading
   }
 
   /// Route one keystroke through the Command Logs overlay (issues #226,

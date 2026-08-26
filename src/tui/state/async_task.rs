@@ -38,8 +38,9 @@ use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
 use crate::tui::state::sidebar::SidebarMode;
-use crate::tui::ui::SidebarSections;
+use crate::tui::ui::{SidebarSections, WorkingTreeCounts};
 use crate::worktree::WorktreeInfo;
+use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -126,6 +127,15 @@ pub enum TaskKind {
   /// per row; the render key-check discards a result for a since-moved
   /// selection and the next tick requests the settled one.
   Sidebar,
+  /// Off-thread snapshot for the full-size Working Tree overlay (issues
+  /// #592, #613). The same `git status --porcelain -z` the sidebar pane
+  /// runs, but requested by a keypress rather than by navigation, and it
+  /// cannot run inline: `STATUS_SCAN_CAP` bounds how many records are read,
+  /// not how long git takes to produce the first one, so an untracked tree
+  /// on a cold or network filesystem would freeze the event loop for as
+  /// long as the walk takes. A single global slot; a second `5` while one
+  /// is in flight coalesces onto it.
+  WorkingTree,
   /// Off-thread agent-session detection (issue #408): the four artefact
   /// scans under the user's home (`agent_sessions::detect_all`) touch the
   /// filesystem and must never run inside `terminal.draw()`. A single global
@@ -162,6 +172,7 @@ impl TaskKind {
       TaskKind::EditWorktree => "renaming worktree…",
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
+      TaskKind::WorkingTree => "reading the working tree…",
       TaskKind::AgentSessions => "detecting agent sessions…",
       TaskKind::AgentPane => "opening agent pane…",
     }
@@ -392,6 +403,11 @@ pub enum TaskMsg {
   /// `SidebarState::cache`; a result whose selection has since moved is dropped
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
+  /// Working Tree overlay snapshot (issues #592, #613): the generation, the
+  /// worktree `path` it was read for, the file-explorer rows and their
+  /// per-category counts. The drain hands it to `WorkingTreeModal::load`;
+  /// a result for a path the user has since navigated away from is dropped.
+  WorkingTree(u64, PathBuf, Vec<Line<'static>>, WorkingTreeCounts),
   /// An agent-session detection result (issue #408): the worker's generation
   /// and the per-worktree-path summary. The drain replaces the app snapshot
   /// atomically; a superseded late result is dropped by
