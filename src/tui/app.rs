@@ -2922,7 +2922,9 @@ impl App {
   /// sidebar's.
   ///
   /// The rows already on screen stay up while the worker runs, so paging
-  /// keeps its place instead of blanking. A no-op when
+  /// keeps its place instead of blanking. The deeper read targets the
+  /// worktree captured at open rather than the live selection, which the
+  /// auto-refresh can move out from under an open overlay. A no-op when
   /// [`CommitsModal::can_load_more`] is false: a read is in flight, the
   /// history ran out, or the paging cap was reached. The footer drops the
   /// `load more` hint on the same predicate, so the key is never advertised
@@ -2931,7 +2933,17 @@ impl App {
     if !self.commits.can_load_more() {
       return;
     }
-    let Some(w) = self.selected().cloned() else {
+    // Page the worktree the overlay OPENED on, not the live selection: the
+    // auto-refresh moves the selection while the overlay is up, and a read
+    // fired for another worktree is dropped by the drain on the path check
+    // — after `complete` freed the slot — so nothing would be left to clear
+    // the loader (Codex review, PR #614). Gone from the list entirely
+    // (deleted while the overlay was open) is a no-op: `can_load_more`
+    // required `!loading`, so there is no loader to strand.
+    let Some(path) = self.commits.path.clone() else {
+      return;
+    };
+    let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() else {
       return;
     };
     let limit = self.commits.next_limit();

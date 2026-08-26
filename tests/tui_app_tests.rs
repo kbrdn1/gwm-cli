@@ -15307,6 +15307,30 @@ fn reopening_after_a_deeper_page_gets_its_own_read() {
 }
 
 #[test]
+fn load_more_pages_the_worktree_the_overlay_opened_on() {
+  // Codex review, PR #614: the auto-refresh can move the selection while
+  // the overlay is up. Paging from `selected()` would fire a read for the
+  // NEW worktree, which the drain then drops on the path check — after
+  // `complete` freed the slot — so nothing is ever left to clear the
+  // loader. The target captured at open is the only sound one.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  // The selection drifts, the overlay does not.
+  app.worktrees.push(worktree_fixture("feat-0-elsewhere"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+
+  app.load_more_commits();
+  settle_commits(&mut app);
+  assert!(
+    !app.is_commits_loading(),
+    "the deeper page landed on the captured target"
+  );
+}
+
+#[test]
 fn paging_stops_at_the_cap() {
   // #593 notes the memo in `recent_commits_cached` is keyed on the limit
   // and evicts an arbitrary entry when full, so unbounded paging would push
