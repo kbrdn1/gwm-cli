@@ -345,3 +345,44 @@ fn detail_context_binds_o_to_the_resume_pane_verb() {
     Some(ModalAction::DetailAttach)
   );
 }
+
+#[test]
+fn the_working_tree_overlay_binds_its_own_scroll_and_exit() {
+  // Issue #592: the full-size Working Tree listing is a scroll-only overlay,
+  // so it ships the same verb set as the other read-only modals — and under
+  // its own context, so rebinding `[tui.keys.modal.working_tree]` does not
+  // reach into `command_logs`.
+  let km = ModalKeymap::defaults();
+  assert_eq!(KeyContext::WorkingTree.config_path(), "working_tree");
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &stroke(KeyCode::Esc)),
+    Some(ModalAction::WorkingTreeClose)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('q')),
+    Some(ModalAction::WorkingTreeClose)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('j')),
+    Some(ModalAction::WorkingTreeScrollDown)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('k')),
+    Some(ModalAction::WorkingTreeScrollUp)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('G')),
+    Some(ModalAction::WorkingTreeScrollBottom)
+  );
+  // The copy verb belongs to the command logs, not here.
+  assert_eq!(km.resolve(KeyContext::WorkingTree, &ch('y')), None);
+  // The open key closes the overlay too, and the dispatch arm that does it
+  // sits AFTER the modal resolution: it is only reachable while the context
+  // leaves `5` unclaimed. Binding a verb to `5` here would shadow the arm
+  // with nothing going red, so the gap is the assertion.
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('5')),
+    None,
+    "the context must leave `5` to the global keymap, which is what closes the overlay"
+  );
+}

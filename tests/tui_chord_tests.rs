@@ -545,6 +545,7 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       KeyContext::Help => "Help Overlay",
       KeyContext::Detail => "Agent Sessions",
       KeyContext::CommandLogs => "Command Logs",
+      KeyContext::WorkingTree => "Working Tree",
       KeyContext::Config | KeyContext::ConfigEdit => "Settings",
       KeyContext::Report => "Bootstrap Report",
       KeyContext::OpenMenu => "Browse Links",

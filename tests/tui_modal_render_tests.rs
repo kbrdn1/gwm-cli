@@ -1538,6 +1538,16 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
       180,
     ),
     (
+      "working-tree",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.view = View::WorkingTree;
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
       "note-editor",
       Box::new(|| {
         let (d, mut a) = make_app();
@@ -2524,4 +2534,55 @@ fn the_mode_badge_is_absent_with_the_mode_off() {
     "no badge without the mode, row:\n{}",
     (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
   );
+}
+
+#[test]
+fn working_tree_modal_renders_its_title_body_and_footer() {
+  use gwm::tui::{WorkingTreeCounts, WT_CREATED_ICON, WT_MODIFIED_ICON};
+  use ratatui::text::Line;
+
+  // Issue #592: the sidebar pane's tree, given the whole screen. The rows
+  // are injected as owned state (the same boundary the command-logs render
+  // test pins) so this stays offline and deterministic — `enter_working_tree`
+  // is what shells out, and `tui_app_tests` covers that half.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("src/tui/"), Line::from("└─ ui.rs"), Line::from("README.md")];
+  app.working_tree.counts = WorkingTreeCounts {
+    created: 1,
+    modified: 2,
+    deleted: 0,
+  };
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+  assert_present(&buf, "ui.rs", "a tree row from the injected listing");
+  assert_present(&buf, "README.md", "a second tree row");
+  // The pane's change-count footer travels with the listing (issue #287) —
+  // the same `<glyph> <n>` segments the bordered sidebar pane puts on its
+  // bottom rule, asserted through the constants so a glyph change here is a
+  // deliberate edit rather than a silently-passing literal.
+  assert_present(
+    &buf,
+    &format!("{WT_CREATED_ICON} 1"),
+    "the created count follows the tree",
+  );
+  assert_present(
+    &buf,
+    &format!("{WT_MODIFIED_ICON} 2"),
+    "the modified count follows the tree",
+  );
+  assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
+fn working_tree_modal_renders_an_empty_listing_without_panicking() {
+  // A worktree whose snapshot came back with nothing at all (an errored
+  // `git status` leaves no rows): the overlay still opens on its frame.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines.clear();
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
 }

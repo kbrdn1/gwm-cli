@@ -15137,3 +15137,107 @@ fn emptying_the_buffer_with_dd_removes_the_note_too() {
 
   assert!(!path.exists(), "an emptied note is removed, not blanked");
 }
+
+/// Flatten a rendered sidebar/modal line into its plain text.
+fn line_text(l: &ratatui::text::Line<'_>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn working_tree_modal_snapshots_the_dirty_tree_on_open() {
+  // Issue #592: `5` opens the Working Tree listing full size. The snapshot
+  // is taken AT OPEN, not read from the sidebar cache — the sidebar is a
+  // hidden pane here (`open = false`), the state in which that cache is
+  // never rebuilt, and the overlay must still show the change set.
+  let (dir, mut app) = make_app();
+  std::fs::write(dir.path().join("scratch.rs"), "fn main() {}\n").unwrap();
+  app.sidebar.open = false;
+
+  app.enter_working_tree();
+
+  assert_eq!(app.view, View::WorkingTree);
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("scratch.rs")),
+    "the untracked file is listed — got {text:?}"
+  );
+  assert_eq!(app.working_tree.scroll, 0, "a fresh open starts at the top");
+  assert_eq!(
+    app.working_tree.counts.created, 1,
+    "the footer counts come with the snapshot — got {:?}",
+    app.working_tree.counts
+  );
+}
+
+#[test]
+fn the_working_tree_open_key_is_also_what_closes_it() {
+  // `5` toggles: the dispatch arm closing the overlay resolves the key
+  // through the global keymap, so a rebind of `working_tree` moves both the
+  // open and the close with it. Pinned here rather than through the run
+  // loop, which owns the dispatch.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+
+  assert!(app.key_matches_action(
+    KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+    gwm::tui::keymap::Action::WorkingTree
+  ));
+}
+
+#[test]
+fn working_tree_modal_reports_a_clean_tree() {
+  // The empty-state: `init_repo` leaves no dirty file, so the overlay says
+  // so rather than rendering a blank canvas.
+  let (_dir, mut app) = make_app();
+
+  app.enter_working_tree();
+
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("clean")),
+    "a clean worktree gets the clean row — got {text:?}"
+  );
+}
+
+#[test]
+fn reopening_the_working_tree_modal_rewinds_the_scroll_and_resnapshots() {
+  // Two invariants in one gesture: a stale scroll offset from the previous
+  // visit does not survive the re-open (the `enter_help` / `enter_command_logs`
+  // contract), and the listing is re-read, so a file created while the
+  // overlay was closed shows up on the next open.
+  let (dir, mut app) = make_app();
+  app.enter_working_tree();
+  app.working_tree.max_scroll = 40;
+  app.working_tree.scroll = 12;
+
+  std::fs::write(dir.path().join("late.rs"), "// added after the first open\n").unwrap();
+  app.enter_working_tree();
+
+  assert_eq!(app.working_tree.scroll, 0);
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("late.rs")),
+    "the re-open re-reads the tree — got {text:?}"
+  );
+}
+
+#[test]
+fn the_working_tree_modal_scroll_clamps_to_the_published_bound() {
+  // Same scroll contract as the help overlay: the renderer publishes
+  // `max_scroll` against the live viewport and the cursor never passes it.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  app.working_tree.max_scroll = 2;
+
+  for _ in 0..5 {
+    app.working_tree.scroll_down();
+  }
+  assert_eq!(app.working_tree.scroll, 2);
+
+  app.working_tree.scroll_to_top();
+  assert_eq!(app.working_tree.scroll, 0);
+  app.working_tree.scroll_up();
+  assert_eq!(app.working_tree.scroll, 0, "the top is a floor, not a wrap");
+  app.working_tree.scroll_to_bottom();
+  assert_eq!(app.working_tree.scroll, 2);
+}
