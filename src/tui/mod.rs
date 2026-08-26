@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, App, ConfirmKind, CreateKey,
-  ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta,
-  View, WorkspaceState,
+  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, AgentPanePlan, App, ConfirmKind,
+  CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget,
+  PendingMerge, RepoMeta, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,

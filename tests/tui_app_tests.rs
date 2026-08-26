@@ -2034,23 +2034,89 @@ fn agent_pane_with_no_multiplexer_names_all_three_variables() {
 }
 
 #[test]
-fn agent_pane_inside_herdr_says_its_panes_take_no_command() {
-  // The one outcome a reader of #591 would not predict. Inside herdr a
-  // multiplexer IS detected, so the `$TMUX / $ZELLIJ / $HERDR_ENV` line would
-  // be a lie; `herdr pane split` simply has no trailing-command form, and
-  // splitting anyway opens an empty pane that silently drops the resume.
-  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::Codex, "s1", 10);
-  app.open_selected_agent_pane_from(None, None, Some("1".into()), None);
+fn agent_pane_inside_herdr_plans_the_sequenced_round_trip() {
+  // #591 after the herdr measurement. herdr takes no command in the argv
+  // that opens the container, which is why `macro_refusal` refuses it for a
+  // `[tui.macro*]`. It is not unable to run one: the command goes in
+  // afterwards through the pane id the response carries (#599).
+  //
+  // Planned rather than driven: the sequenced path spawns a worker that
+  // talks to a real herdr, and a test must not open a pane in the developer's
+  // session. What the worker does with this plan is covered by the parser
+  // tests in `multiplexer_tests.rs` and by the drain test below.
+  use gwm::agent_sessions::{AgentKind, AgentSession};
+  let session = AgentSession {
+    kind: AgentKind::Codex,
+    cwd: std::path::PathBuf::from("/tmp/gwm-test/feat-591-foo"),
+    last_activity: std::time::SystemTime::now(),
+    ended: true,
+    id: "s1".into(),
+    name: None,
+  };
+  let plan = gwm::tui::plan_agent_pane(
+    &session,
+    std::path::Path::new("/tmp/gwm-test/feat-591-foo"),
+    &gwm::config::TuiConfig::default(),
+    None,
+    None,
+    Some("1".into()),
+    None,
+  )
+  .expect("herdr can resume, it just needs two steps");
+  let gwm::tui::AgentPanePlan::Sequenced { open, line, noun } = plan else {
+    panic!("herdr must plan the sequenced round trip, not a one-shot argv");
+  };
+  assert_eq!(open[0], "herdr");
   assert!(
-    app.status.contains("herdr"),
-    "the refusal must name the backend that cannot do it, got: {}",
-    app.status
+    open.iter().any(|a| a == "split") && open.iter().any(|a| a == "/tmp/gwm-test/feat-591-foo"),
+    "the container opens in the overlay's worktree, got: {open:?}"
   );
   assert!(
-    !app.status.contains("$TMUX"),
-    "a detected multiplexer must not be reported as no multiplexer, got: {}",
+    !open.iter().any(|a| a.contains("codex resume")),
+    "the command must NOT ride the opening argv: herdr ignores it there, got: {open:?}"
+  );
+  assert_eq!(line, "codex resume s1", "the line is typed in afterwards");
+  assert_eq!(noun, "pane");
+}
+
+#[test]
+fn agent_pane_under_a_zellij_tab_is_still_refused() {
+  // The refusal families herdr no longer belongs to are untouched: a zellij
+  // TAB takes no trailing command in any shape, and there is no pane id to
+  // type into afterwards either.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::Opencode, "s1", 10);
+  app.config.tui.mux_open_in = gwm::config::MuxTarget::Tab;
+  app.open_selected_agent_pane_from(None, Some("0".into()), None, None);
+  assert!(
+    app.status.contains("zellij") && app.status.contains("no command"),
+    "expected the zellij-tab refusal, got: {}",
     app.status
   );
+}
+
+#[test]
+fn agent_pane_worker_result_reaches_the_status_bar() {
+  // The herdr path answers through the task drain, so the worker's wording
+  // is what the user reads. Both arms, because a failure at step 2 or 3
+  // leaves a container open and saying "opened" there would be a lie.
+  let (_d, mut app) = make_app();
+  let generation = app.tasks.request(gwm::tui::TaskKind::AgentPane).unwrap();
+  app.apply_agent_pane_result(generation, Ok("opened codex session in new pane".into()));
+  assert_eq!(app.status, "opened codex session in new pane");
+
+  let generation = app.tasks.request(gwm::tui::TaskKind::AgentPane).unwrap();
+  app.apply_agent_pane_result(generation, Err("herdr refused the resume: no such pane".into()));
+  assert!(
+    app.status.contains("no such pane") && !app.status.starts_with("opened"),
+    "a refusal must not read as a success, got: {}",
+    app.status
+  );
+
+  // A superseded worker cannot clobber a newer one's status.
+  let stale = 0;
+  app.status = "current".into();
+  app.apply_agent_pane_result(stale, Ok("late arrival".into()));
+  assert_eq!(app.status, "current", "a stale generation is dropped");
 }
 
 #[test]
@@ -2112,7 +2178,7 @@ fn agent_pane_opens_at_the_overlay_target_not_the_recorded_cwd() {
     name: None,
   };
   let target = std::path::Path::new("/tmp/gwm-test/feat-591-foo");
-  let (_mux, _mode, argv) = gwm::tui::plan_agent_pane(
+  let plan = gwm::tui::plan_agent_pane(
     &session,
     target,
     &gwm::config::TuiConfig::default(),
@@ -2122,6 +2188,9 @@ fn agent_pane_opens_at_the_overlay_target_not_the_recorded_cwd() {
     None,
   )
   .expect("tmux takes a command");
+  let gwm::tui::AgentPanePlan::OneShot { argv, .. } = plan else {
+    panic!("tmux carries its command in the opening argv");
+  };
   assert!(
     argv.iter().any(|a| a == "/tmp/gwm-test/feat-591-foo"),
     "the pane must open in the worktree the overlay is about, got: {argv:?}"
