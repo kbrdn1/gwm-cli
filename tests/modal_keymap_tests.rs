@@ -376,10 +376,11 @@ fn the_working_tree_overlay_binds_its_own_scroll_and_exit() {
   );
   // The copy verb belongs to the command logs, not here.
   assert_eq!(km.resolve(KeyContext::WorkingTree, &ch('y')), None);
-  // The open key closes the overlay too, and the dispatch arm that does it
-  // sits AFTER the modal resolution: it is only reachable while the context
-  // leaves `5` unclaimed. Binding a verb to `5` here would shadow the arm
-  // with nothing going red, so the gap is the assertion.
+  // The open key closes the overlay too. Since #613 the toggle resolves
+  // BEFORE the modal verbs, so a verb bound to `5` no longer shadows the
+  // close: it is the verb that becomes unreachable. Still worth pinning
+  // that the default context leaves `5` alone, because a context claiming
+  // its own overlay's opener would silently cost the user that verb.
   assert_eq!(
     km.resolve(KeyContext::WorkingTree, &ch('5')),
     None,

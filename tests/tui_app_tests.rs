@@ -15139,6 +15139,21 @@ fn emptying_the_buffer_with_dd_removes_the_note_too() {
   assert!(!path.exists(), "an emptied note is removed, not blanked");
 }
 
+/// Drain until the Working Tree overlay's worker lands (issues #592, #613).
+/// The snapshot runs off-thread, so a test that reads the rows has to wait
+/// for the payload the same way the event loop does.
+fn settle_working_tree(app: &mut App) {
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_working_tree_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_working_tree_loading(),
+    "the working-tree worker never landed within 10s"
+  );
+}
+
 /// Rebind `action` to `chords` on a live `App`, the way a `[tui.keys]`
 /// override would. Used by the #613 toggle tests, which are exactly about
 /// what a rebind does to the dispatch.
@@ -15164,6 +15179,11 @@ fn working_tree_modal_snapshots_the_dirty_tree_on_open() {
   app.sidebar.open = false;
 
   app.enter_working_tree();
+  assert!(
+    app.is_working_tree_loading(),
+    "the overlay opens on a loader; the git read is on a worker, not the keypress"
+  );
+  settle_working_tree(&mut app);
 
   assert_eq!(app.view, View::WorkingTree);
   let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
@@ -15294,6 +15314,7 @@ fn a_rebound_toggle_beats_the_scroll_verb_it_shadows() {
   let (_dir, mut app) = make_app();
   rebind(&mut app, Action::WorkingTree, &["j"]);
   app.enter_working_tree();
+  settle_working_tree(&mut app);
   app.working_tree.max_scroll = 10;
 
   let close = app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -15308,6 +15329,7 @@ fn an_unclaimed_key_still_reaches_the_modal_verbs() {
   // swallow the rest of the context.
   let (_dir, mut app) = make_app();
   app.enter_working_tree();
+  settle_working_tree(&mut app);
   app.working_tree.max_scroll = 10;
 
   assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
@@ -15323,6 +15345,7 @@ fn a_chord_prefix_does_not_reach_the_scroll_verbs() {
   let (_dir, mut app) = make_app();
   rebind(&mut app, Action::WorkingTree, &["g w"]);
   app.enter_working_tree();
+  settle_working_tree(&mut app);
   app.working_tree.max_scroll = 10;
   app.working_tree.scroll = 7;
 
@@ -15451,12 +15474,91 @@ fn every_overlay_that_advertises_a_toggle_resolves_one() {
 }
 
 #[test]
+fn a_second_chord_bound_to_the_same_action_can_start_after_a_failed_one() {
+  // Copilot review, PR #612: one action may hold several chords. With two of
+  // them, a first stroke that is not followed by its own continuation must
+  // not just drop the buffer, it has to retry that stroke as the start of
+  // the other chord. `dispatch_key` does this for the list view; the toggle
+  // now does too.
+  //
+  // `6` / `7` because the keymap refuses a chord whose prefix is another
+  // action's key, so `j k` cannot be used here: `j` is `down`.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["6 w", "7 k"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+  app.working_tree.scroll = 5;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)));
+  // `7` is not `6`'s continuation, but it IS the start of the second chord,
+  // so it must arm rather than fall through to the modal verbs.
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)));
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)));
+  assert_eq!(
+    app.working_tree.scroll, 5,
+    "neither the retried stroke nor the continuation reached `scroll_up`"
+  );
+}
+
+#[test]
+fn a_working_tree_payload_for_a_worktree_left_behind_is_dropped() {
+  // The read is off-thread, so the user can navigate (or reopen elsewhere)
+  // while it runs. A payload that describes a worktree the overlay is no
+  // longer showing must not be painted as if it were the current one.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  let real = app.working_tree.lines.clone();
+
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let generation = app.tasks.request(TaskKind::WorkingTree).expect("a free slot");
+  app
+    .task_result_sender()
+    .send(TaskMsg::WorkingTree(
+      generation,
+      PathBuf::from("/tmp/gwm-test/some-other-worktree"),
+      vec![ratatui::text::Line::from("rows from the wrong worktree")],
+      Default::default(),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    !text.iter().any(|l| l.contains("wrong worktree")),
+    "a payload for another path is dropped, not shown — got {text:?}"
+  );
+  assert_eq!(
+    app.working_tree.lines.len(),
+    real.len(),
+    "and the listing that was already there survives"
+  );
+}
+
+#[test]
+fn opening_the_overlay_with_nothing_selected_does_not_wait_on_a_worker() {
+  // The empty-selection path spawns nothing, so the loader would never
+  // clear: `begin` must leave `loading` false when there is no worktree.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.enter_working_tree();
+
+  assert_eq!(app.view, View::WorkingTree);
+  assert!(!app.is_working_tree_loading(), "nothing to wait for, so no loader");
+  assert!(app.working_tree.lines.is_empty());
+}
+
+#[test]
 fn working_tree_modal_reports_a_clean_tree() {
   // The empty-state: `init_repo` leaves no dirty file, so the overlay says
   // so rather than rendering a blank canvas.
   let (_dir, mut app) = make_app();
 
   app.enter_working_tree();
+  settle_working_tree(&mut app);
 
   let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
   assert!(
@@ -15473,11 +15575,13 @@ fn reopening_the_working_tree_modal_rewinds_the_scroll_and_resnapshots() {
   // overlay was closed shows up on the next open.
   let (dir, mut app) = make_app();
   app.enter_working_tree();
+  settle_working_tree(&mut app);
   app.working_tree.max_scroll = 40;
   app.working_tree.scroll = 12;
 
   std::fs::write(dir.path().join("late.rs"), "// added after the first open\n").unwrap();
   app.enter_working_tree();
+  settle_working_tree(&mut app);
 
   assert_eq!(app.working_tree.scroll, 0);
   let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
@@ -15493,6 +15597,7 @@ fn the_working_tree_modal_scroll_clamps_to_the_published_bound() {
   // `max_scroll` against the live viewport and the cursor never passes it.
   let (_dir, mut app) = make_app();
   app.enter_working_tree();
+  settle_working_tree(&mut app);
   app.working_tree.max_scroll = 2;
 
   for _ in 0..5 {

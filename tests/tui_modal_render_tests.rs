@@ -2600,6 +2600,25 @@ fn working_tree_modal_renders_its_title_body_and_footer() {
 }
 
 #[test]
+fn working_tree_modal_renders_a_loader_while_the_worker_is_out() {
+  // The read moved to a worker (Copilot review, PR #612), so there is a
+  // frame with no rows yet. It must say so: an empty canvas reads as "no
+  // changes", which is the one answer this overlay must not give by
+  // accident.
+  let (_dir, mut app) = make_app();
+  app
+    .working_tree
+    .begin(Some(std::path::Path::new("/tmp/gwm-test/pending")));
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+  assert_present(&buf, "loading", "the loader, not a blank canvas");
+  // The exit is still advertised while it waits.
+  assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
 fn working_tree_modal_renders_an_empty_listing_without_panicking() {
   // The empty snapshot is what `enter_working_tree` loads when nothing is
   // selected. It is NOT the errored-`git status` case: that one still
