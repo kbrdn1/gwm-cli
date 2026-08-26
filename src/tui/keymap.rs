@@ -752,6 +752,24 @@ impl Keymap {
       .map(|chord| format_chord(chord))
   }
 
+  /// Every chord bound to `action`, as the parsed stroke sequences, or an
+  /// empty slice when the action is unbound.
+  ///
+  /// [`Self::lookup`] answers "what does this buffer resolve to", which is
+  /// the wrong question inside a modal: there, the only binding that may
+  /// fire is the overlay's own toggle, and every other global action has to
+  /// stay unreachable. Issue #613 needs the inverse lookup, so a caller can
+  /// ask whether a buffer matches (or is a prefix of) one specific action
+  /// without letting the rest of the keymap through.
+  pub fn chords_for(&self, action: Action) -> &[Vec<KeyStroke>] {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.chords.as_slice())
+      .unwrap_or(&[])
+  }
+
   /// Every chord bound to `action`, comma-joined (`"j, Down"`) or empty when
   /// unbound — the help-overlay / Keys-tab row form. Mirrors
   /// [`crate::tui::modal_keymap::ModalKeymap::keys_display`].

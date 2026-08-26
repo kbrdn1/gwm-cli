@@ -96,6 +96,20 @@ pub struct PendingMerge {
   pub noun: String,
 }
 
+/// Outcome of [`App::modal_toggle_stroke`] (issue #613): what a modal
+/// should do with a keystroke offered to its toggle key before the modal
+/// verbs get a look at it.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ToggleStroke {
+  /// The buffer completed the toggle chord. Close the overlay.
+  Fired,
+  /// The buffer is a strict prefix of the toggle chord. The stroke is
+  /// consumed; wait for the next one and do not run the modal verbs.
+  Pending,
+  /// Nothing to do with the toggle. Fall through to the modal verbs.
+  Unclaimed,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
   List,
@@ -2458,6 +2472,53 @@ impl App {
     outcome
   }
 
+  /// What one keystroke means for a modal's own toggle key (issue #613).
+  ///
+  /// [`Self::key_matches_action`] answers the same question for a single
+  /// stroke, which left two silent holes in every overlay that closes on
+  /// its opener:
+  ///
+  /// - a **multi-stroke** binding (`working_tree = ["g w"]`) could open the
+  ///   overlay through the chord-aware list dispatch but never match here,
+  ///   because the lookup only ever saw the last stroke;
+  /// - a binding the overlay's own context already claims (`= ["j"]`) was
+  ///   resolved as a modal verb first, so the key opened the overlay and
+  ///   then scrolled it instead of closing.
+  ///
+  /// This resolves against `action` **alone** rather than the whole keymap:
+  /// inside a modal the toggle is the one global binding allowed to fire,
+  /// and letting [`Self::dispatch_key`] run there would make `d` open the
+  /// delete confirm from behind an overlay.
+  ///
+  /// [`ToggleStroke::Pending`] means the stroke was consumed as the prefix
+  /// of the toggle chord: the caller must NOT hand it to the modal verbs,
+  /// or `g` would scroll to the top on its way to `g w`.
+  pub fn modal_toggle_stroke(&mut self, key: KeyEvent, action: Action) -> ToggleStroke {
+    let stroke = KeyStroke::from_event(&key);
+    let mut tentative = self.pending_chord.clone();
+    tentative.push(stroke);
+
+    let chords = self.keymap.chords_for(action);
+    if chords.iter().any(|c| c == &tentative) {
+      self.pending_chord.clear();
+      self.sync_legacy_pending_flag();
+      return ToggleStroke::Fired;
+    }
+    if chords
+      .iter()
+      .any(|c| c.len() > tentative.len() && c.starts_with(&tentative))
+    {
+      self.pending_chord = tentative;
+      self.sync_legacy_pending_flag();
+      return ToggleStroke::Pending;
+    }
+    // Not this action's key. Drop any half-typed toggle prefix so a stray
+    // `g` does not turn the next stroke into a phantom match.
+    self.pending_chord.clear();
+    self.sync_legacy_pending_flag();
+    ToggleStroke::Unclaimed
+  }
+
   pub fn key_matches_action(&self, key: KeyEvent, action: Action) -> bool {
     matches!(
       self.keymap.lookup(&[KeyStroke::from_event(&key)]),
@@ -2880,6 +2941,32 @@ impl App {
       None => self.working_tree.load(Vec::new(), Default::default()),
     }
     self.view = View::WorkingTree;
+  }
+
+  /// Route one keystroke through the full-size Working Tree overlay
+  /// (issues #592, #613). Returns `true` when the overlay should close.
+  ///
+  /// The routing lives here rather than in the event loop, the way
+  /// [`Self::handle_create_key`] does (issue #217), so the ONE thing a
+  /// `match` in the run loop cannot express in a test is pinned: the
+  /// toggle resolves **before** the modal verbs. Move the two blocks and
+  /// `a_rebound_toggle_beats_the_scroll_verb_it_shadows` goes red.
+  pub fn handle_working_tree_key(&mut self, key: KeyEvent) -> bool {
+    match self.modal_toggle_stroke(key, Action::WorkingTree) {
+      ToggleStroke::Fired => return true,
+      // Consumed as a chord prefix: the modal verbs must not see it.
+      ToggleStroke::Pending => return false,
+      ToggleStroke::Unclaimed => {}
+    }
+    match self.resolve_modal(KeyContext::WorkingTree, key) {
+      Some(ModalAction::WorkingTreeClose) => return true,
+      Some(ModalAction::WorkingTreeScrollDown) => self.working_tree.scroll_down(),
+      Some(ModalAction::WorkingTreeScrollUp) => self.working_tree.scroll_up(),
+      Some(ModalAction::WorkingTreeScrollTop) => self.working_tree.scroll_to_top(),
+      Some(ModalAction::WorkingTreeScrollBottom) => self.working_tree.scroll_to_bottom(),
+      _ => {}
+    }
+    false
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective
