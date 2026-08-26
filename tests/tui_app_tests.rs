@@ -2135,6 +2135,76 @@ fn agent_pane_opens_at_the_overlay_target_not_the_recorded_cwd() {
 }
 
 #[test]
+#[cfg(unix)]
+fn agent_pane_spawn_hands_the_planned_command_to_the_multiplexer() {
+  // Copilot review on PR #610: every other test here stops at a refusal or
+  // at pure argv planning, so a regression that plans correctly and then
+  // never launches — or launches with the wrong cwd, or builds the status
+  // from the wrong session — would pass. This one drives the real spawn
+  // against a recording fake `tmux`, the same shape `cli_binary.rs` uses for
+  // the CLI verb.
+  //
+  // Unix-only for the same reason the `glab` fake is: what is under test is
+  // gwm's argv and status, and a `.cmd` shim would mostly exercise `cmd.exe`
+  // quoting rules instead.
+  use std::os::unix::fs::PermissionsExt;
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let fake = tempfile::TempDir::new().unwrap();
+  let log = fake.path().join("argv.log");
+  let tmux = fake.path().join("tmux");
+  std::fs::write(
+    &tmux,
+    format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n", log.display()),
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&tmux).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&tmux, perms).unwrap();
+
+  // An IDLE session (2h old), so the status must NOT carry the live warning.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::ClaudeCode, "s1", 7200);
+
+  let previous = std::env::var("PATH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` above.
+  unsafe {
+    std::env::set_var(
+      "PATH",
+      format!("{}:{}", fake.path().display(), previous.clone().unwrap_or_default()),
+    );
+  }
+  app.open_selected_agent_pane_from(Some("/tmp/tmux-501/default,1,0".into()), None, None, None);
+  unsafe {
+    match previous {
+      Some(v) => std::env::set_var("PATH", v),
+      None => std::env::remove_var("PATH"),
+    }
+  }
+
+  let argv = std::fs::read_to_string(&log).unwrap_or_default();
+  assert!(
+    argv.contains("split-window"),
+    "the planned argv must actually reach the multiplexer, got: {argv:?} / status: {}",
+    app.status
+  );
+  assert!(
+    argv.contains("claude -r s1"),
+    "the pane must run the RESUME command, not a bare shell, got: {argv:?}"
+  );
+  assert!(
+    argv.contains("/tmp/gwm-test/feat-591-foo"),
+    "the pane must open in the overlay's worktree, got: {argv:?}"
+  );
+  // The status is built from the spawn's own outcome and this session's
+  // freshness, which is the wiring the planning tests cannot see.
+  assert_eq!(
+    app.status, "opened claude session in new pane",
+    "an idle session opens without the live warning"
+  );
+}
+
+#[test]
 fn agent_pane_status_warns_when_the_session_is_still_active() {
   // A session with `ended = true` resumes without comment: that is what
   // resume is for. A LIVE one is the interesting case — resuming it in a
