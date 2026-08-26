@@ -47,26 +47,47 @@ impl Multiplexer {
   }
 }
 
-/// Which half of the split a new pane takes (issue #589).
+/// Which half of the split a new pane takes (issues #589 / #611).
 ///
-/// Two variants rather than four: `right` and `down` are the intersection
-/// of what the three backends accept. tmux reaches `left` / `up` only
-/// through `split-window -b`, and herdr 0.8.2 declares its `--direction`
-/// as `[possible values: right, down]` outright, so a fuller compass
-/// would be variants one backend could not honour.
+/// All four compass points, which two of the three backends honour
+/// directly. Measured on tmux 3.7c by reading the *new* pane's geometry
+/// back through `split-window -P -F`, rather than inferring it from pane
+/// order: `-h` puts it at `left=101`, `-h -b` at `left=0`, `-v` at
+/// `top=26`, `-v -b` at `top=1`. zellij takes the four words on
+/// `new-pane --direction`.
+///
+/// **herdr 0.8.2 takes only two**: `herdr pane split --help` declares
+/// `--direction [possible values: right, down]`, so [`Left`] and [`Up`]
+/// are refused there the way `Workspace` is refused on tmux and zellij
+/// (#608). Same mechanism, opposite backend.
+///
+/// [`Left`]: SplitDirection::Left
+/// [`Up`]: SplitDirection::Up
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SplitDirection {
-  /// Side by side. tmux `-h`, `--direction right` on zellij and herdr.
+  /// Side by side, to the right. tmux `-h`, `--direction right` on zellij
+  /// and herdr.
   #[default]
   Right,
-  /// Stacked. tmux `-v`, `--direction down` on zellij and herdr.
+  /// Stacked, below. tmux `-v`, `--direction down` on zellij and herdr.
   Down,
+  /// Side by side, to the left. tmux `-h -b`, `--direction left` on
+  /// zellij. Refused by herdr.
+  Left,
+  /// Stacked, above. tmux `-v -b`, `--direction up` on zellij. Refused by
+  /// herdr.
+  Up,
 }
 
 impl SplitDirection {
-  /// Every variant, default first.
-  pub const ALL: [SplitDirection; 2] = [SplitDirection::Right, SplitDirection::Down];
+  /// Every variant, default first, then the two herdr cannot honour.
+  pub const ALL: [SplitDirection; 4] = [
+    SplitDirection::Right,
+    SplitDirection::Down,
+    SplitDirection::Left,
+    SplitDirection::Up,
+  ];
 
   /// The serialised spelling — equal to the `[tui] mux_pane_direction`
   /// value, to the `--direction` flag's value, and to the argument zellij
@@ -75,17 +96,29 @@ impl SplitDirection {
     match self {
       SplitDirection::Right => "right",
       SplitDirection::Down => "down",
+      SplitDirection::Left => "left",
+      SplitDirection::Up => "up",
     }
   }
 
-  /// tmux's own spelling. `-h` is a *horizontal split*, which puts the new
-  /// pane to the RIGHT, and `-v` stacks it BELOW: tmux names the axis the
-  /// divider runs along, not the direction the pane goes. The two
-  /// vocabularies meet here and nowhere else.
-  pub const fn tmux_flag(self) -> &'static str {
+  /// `true` for the two directions herdr's parser has no value for.
+  pub const fn is_herdr_capable(self) -> bool {
+    matches!(self, SplitDirection::Right | SplitDirection::Down)
+  }
+
+  /// tmux's own spelling, which needs two words for half the compass.
+  ///
+  /// `-h` is a *horizontal split* and puts the new pane to the RIGHT; `-v`
+  /// stacks it BELOW. tmux names the axis the divider runs along, not the
+  /// direction the pane goes, and `-b` ("before") flips the side on
+  /// whichever axis was picked. The two vocabularies meet here and nowhere
+  /// else.
+  pub const fn tmux_flags(self) -> &'static [&'static str] {
     match self {
-      SplitDirection::Right => "-h",
-      SplitDirection::Down => "-v",
+      SplitDirection::Right => &["-h"],
+      SplitDirection::Down => &["-v"],
+      SplitDirection::Left => &["-h", "-b"],
+      SplitDirection::Up => &["-v", "-b"],
     }
   }
 }
@@ -114,6 +147,9 @@ pub enum SpawnMode {
 /// needs to know which of their three multiplexers cannot honour it.
 const TMUX_HAS_NO_WORKSPACE: &str = "tmux has no workspace level: herdr is the only backend with one";
 const ZELLIJ_HAS_NO_WORKSPACE: &str = "zellij has no workspace level: herdr is the only backend with one";
+/// herdr 0.8.2 declares `--direction [possible values: right, down]`, so the
+/// other half of the compass is a tmux and zellij capability (issue #611).
+const HERDR_SPLITS_RIGHT_OR_DOWN: &str = "herdr splits only right or down: left and up are tmux and zellij directions";
 
 /// Build `tmux new-window -n <name> -c <path>` (Window) or
 /// `tmux split-window -h|-v -c <path>` (Split). `<name>` is the worktree's
@@ -136,13 +172,12 @@ pub fn build_tmux_command(name: &str, path: &Path, mode: SpawnMode) -> Result<Ve
       "-c".into(),
       path_str,
     ],
-    SpawnMode::Split(dir) => vec![
-      "tmux".into(),
-      "split-window".into(),
-      dir.tmux_flag().into(),
-      "-c".into(),
-      path_str,
-    ],
+    SpawnMode::Split(dir) => {
+      let mut argv: Vec<String> = vec!["tmux".into(), "split-window".into()];
+      argv.extend(dir.tmux_flags().iter().map(|f| (*f).to_string()));
+      argv.extend(["-c".into(), path_str]);
+      argv
+    }
   })
 }
 
@@ -253,6 +288,7 @@ pub fn build_herdr_command(
       ]);
       argv
     }
+    SpawnMode::Split(dir) if !dir.is_herdr_capable() => return Err(HERDR_SPLITS_RIGHT_OR_DOWN),
     SpawnMode::Split(dir) => vec![
       "herdr".into(),
       "pane".into(),

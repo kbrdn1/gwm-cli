@@ -362,7 +362,9 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # `mux_pane_direction` — which half a pane takes, under "pane" only:
 #   "right"  side by side (DEFAULT since #589)
-#   "down"   stacked
+#   "down"   stacked below
+#   "left"   side by side, other side  (tmux `-h -b`, zellij; REFUSED by herdr)
+#   "up"     stacked above             (tmux `-v -b`, zellij; REFUSED by herdr)
 #
 # `right` is a behaviour change for tmux and zellij users, and a deliberate
 # one. Before #589 a split carried no direction at all, so each backend
@@ -371,10 +373,11 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # is what the `--split` help has promised since it shipped, and the half that
 # is free on a wide screen. Set "down" for the old tmux behaviour.
 #
-# Two directions, not four: `left` / `up` reach tmux only through
-# `split-window -b`, and herdr declares `[possible values: right, down]`.
+# `-b` ("before") flips the side on the axis `-h` / `-v` picked, which is where
+# left and up come from on tmux. herdr declares `[possible values: right, down]`
+# and REFUSES the other two rather than substituting one it does have.
 #
-# `gwm tmux|zellij|herdr <pattern> --direction right|down` overrides the
+# `gwm tmux|zellij|herdr <pattern> --direction <dir>` overrides the
 # direction for one invocation. The CLI spells its own target instead (bare is
 # a tab, `-p` is a pane), so `mux_open_in` does not reach it.
 #

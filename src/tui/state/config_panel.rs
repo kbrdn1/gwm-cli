@@ -297,7 +297,12 @@ const MUX_OPEN_IN_CHOICES: &[&str] = &[
   MuxTarget::Tab.label(),
   MuxTarget::Workspace.label(),
 ];
-const MUX_PANE_DIRECTION_CHOICES: &[&str] = &[SplitDirection::Right.label(), SplitDirection::Down.label()];
+const MUX_PANE_DIRECTION_CHOICES: &[&str] = &[
+  SplitDirection::Right.label(),
+  SplitDirection::Down.label(),
+  SplitDirection::Left.label(),
+  SplitDirection::Up.label(),
+];
 const CLIPBOARD_CHOICES: &[&str] = &[
   ClipboardMode::Auto.label(),
   ClipboardMode::Osc52.label(),
@@ -325,7 +330,7 @@ pub enum SettingField {
   NoteVim,
   /// `tui.mux_open_in` — pane / tab / workspace (issue #608).
   MuxOpenIn,
-  /// `tui.mux_pane_direction` — right / down (issue #589).
+  /// `tui.mux_pane_direction` — right / down / left / up (issues #589 / #611).
   MuxPaneDirection,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,

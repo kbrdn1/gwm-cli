@@ -320,6 +320,60 @@ fn detect_herdr_false_when_herdr_env_missing_or_empty() {
 // rather than one shared loop.
 
 #[test]
+fn tmux_spends_two_flags_on_half_the_compass() {
+  // Measured on tmux 3.7c through `split-window -P -F`, which prints the
+  // NEW pane's geometry: `-h` -> left=101, `-h -b` -> left=0, `-v` ->
+  // top=26, `-v -b` -> top=1. `-b` is "before": it flips the side on
+  // whichever axis `-h` / `-v` picked, which is why left and up cost a
+  // second word (#611).
+  for (dir, expected) in [
+    (SplitDirection::Right, vec!["-h"]),
+    (SplitDirection::Down, vec!["-v"]),
+    (SplitDirection::Left, vec!["-h", "-b"]),
+    (SplitDirection::Up, vec!["-v", "-b"]),
+  ] {
+    let argv = build_tmux_command("feat-7-foo", path(), SpawnMode::Split(dir)).unwrap();
+    let flags: Vec<&str> = argv[2..argv.len() - 2].iter().map(String::as_str).collect();
+    assert_eq!(
+      flags,
+      expected,
+      "{} must reach tmux as {expected:?}, got: {argv:?}",
+      dir.label()
+    );
+    // The path still lands after the flags, however many there were.
+    assert_eq!(argv[argv.len() - 2], "-c");
+    assert_eq!(argv[argv.len() - 1], "/tmp/wt/feat-7-foo");
+  }
+}
+
+#[test]
+fn herdr_refuses_the_two_directions_its_parser_has_no_value_for() {
+  // #611, the mirror of #608: there one backend could do something the
+  // other two could not, here two can do something the third cannot. herdr
+  // 0.8.2 declares `--direction [possible values: right, down]`, so passing
+  // `left` would be a call it rejects at the socket rather than a pane in
+  // the wrong half.
+  for dir in [SplitDirection::Left, SplitDirection::Up] {
+    let why = build_herdr_command("feat-7-foo", path(), SpawnMode::Split(dir), None)
+      .expect_err("herdr has no value for this direction");
+    assert!(why.contains("herdr"), "the refusal must name the backend, got: {why}");
+    assert!(
+      why.contains("left") && why.contains("up"),
+      "and the two values it cannot take, got: {why}"
+    );
+  }
+  // The refusal is per direction, not per backend: the other two still work.
+  for dir in [SplitDirection::Right, SplitDirection::Down] {
+    assert!(build_herdr_command("feat-7-foo", path(), SpawnMode::Split(dir), None).is_ok());
+  }
+  // tmux and zellij take all four.
+  for dir in SplitDirection::ALL {
+    assert!(build_tmux_command("feat-7-foo", path(), SpawnMode::Split(dir)).is_ok());
+    assert!(build_zellij_command("feat-7-foo", path(), SpawnMode::Split(dir)).is_ok());
+  }
+}
+
+#[test]
 fn tmux_translates_the_direction_into_h_or_v() {
   // tmux names the axis the divider runs along, not where the pane goes:
   // `-h` is the HORIZONTAL split, and it puts the new pane to the RIGHT.
@@ -359,7 +413,9 @@ fn zellij_passes_the_direction_it_would_otherwise_guess() {
 
 #[test]
 fn herdr_passes_the_direction_it_used_to_hardcode() {
-  for dir in SplitDirection::ALL {
+  // Only the two herdr has a value for; the other two are refused, which
+  // `herdr_refuses_the_two_directions_its_parser_has_no_value_for` pins.
+  for dir in SplitDirection::ALL.into_iter().filter(|d| d.is_herdr_capable()) {
     let argv = build_herdr_command("feat-7-foo", path(), SpawnMode::Split(dir), None).unwrap();
     let has_dir = argv.windows(2).any(|w| w[0] == "--direction" && w[1] == dir.label());
     assert!(has_dir, "expected `--direction {}`, got: {:?}", dir.label(), argv);
@@ -373,6 +429,8 @@ fn the_direction_label_is_the_spelling_every_surface_uses() {
   // here silently desyncs the config from the argv.
   assert_eq!(SplitDirection::Right.label(), "right");
   assert_eq!(SplitDirection::Down.label(), "down");
+  assert_eq!(SplitDirection::Left.label(), "left");
+  assert_eq!(SplitDirection::Up.label(), "up");
 }
 
 #[test]

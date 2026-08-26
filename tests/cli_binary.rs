@@ -1588,21 +1588,22 @@ fn herdr_outside_herdr_session_fails_with_clear_error() {
 /// echoed back), which has no shell in it.
 #[test]
 fn tmux_direction_rejects_a_value_no_backend_can_honour() {
-  // `left` is the tempting one: tmux reaches it through `split-window -b`,
-  // zellij accepts the word, and herdr declares `[possible values: right,
-  // down]`. A value one backend cannot honour must fail at the parse, not
-  // reach a builder that would have to guess.
+  // `left` and `up` joined the set in #611 (tmux `-h -b` / `-v -b`, zellij
+  // takes the words), so the rejected value has to be one no backend
+  // spells. It must fail at the parse rather than reach a builder that
+  // would have to guess.
   let (dir, _repo) = init_repo();
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .env("TMUX", "/fake-socket,1,0")
-    .args(["tmux", "anything", "--direction", "left"])
+    .args(["tmux", "anything", "--direction", "sideways"])
     .assert()
     .failure()
     .code(2)
-    .stderr(predicate::str::contains("left"))
-    .stderr(predicate::str::contains("right").and(predicate::str::contains("down")));
+    .stderr(predicate::str::contains("sideways"))
+    .stderr(predicate::str::contains("right").and(predicate::str::contains("down")))
+    .stderr(predicate::str::contains("left").and(predicate::str::contains("up")));
 }
 
 /// Issue #589. The whole chain the builder tests cannot reach: clap parses
@@ -1676,6 +1677,22 @@ mux_pane_direction = "down"
   assert!(
     argv.contains("split-window -h"),
     "`--direction right` must beat the config and imply a split, got: {argv}"
+  );
+
+  // The two directions #611 added cost tmux a second flag (`-b` flips the
+  // side on the axis `-h` / `-v` picked), so this is where a builder that
+  // dropped one of the two would show up.
+  let out = run(&["tmux", "mux-dir", "--direction", "left"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("split-window -h -b"),
+    "`--direction left` must reach tmux as `-h -b`, got: {argv}"
+  );
+  let out = run(&["tmux", "mux-dir", "--direction", "up"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("split-window -v -b"),
+    "`--direction up` must reach tmux as `-v -b`, got: {argv}"
   );
 
   // No flag at all is still a window, whatever the direction says.

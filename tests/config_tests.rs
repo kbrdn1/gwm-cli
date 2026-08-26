@@ -3070,7 +3070,12 @@ fn tui_mux_pane_direction_defaults_to_right() {
 fn tui_mux_pane_direction_round_trips_every_documented_value() {
   // Both values are what the Settings panel writes back, so each one has to
   // load from the file it produces.
-  for (value, expected) in [("right", SplitDirection::Right), ("down", SplitDirection::Down)] {
+  for (value, expected) in [
+    ("right", SplitDirection::Right),
+    ("down", SplitDirection::Down),
+    ("left", SplitDirection::Left),
+    ("up", SplitDirection::Up),
+  ] {
     let dir = TempDir::new().unwrap();
     std::fs::write(
       dir.path().join(CONFIG_FILE),
@@ -3085,13 +3090,16 @@ fn tui_mux_pane_direction_round_trips_every_documented_value() {
 
 #[test]
 fn tui_mux_pane_direction_rejects_a_value_no_backend_can_honour() {
-  // tmux reaches `left` only through `split-window -b` and herdr 0.8.2
-  // declares `[possible values: right, down]`, so `left` is not a direction
-  // gwm can pass on. A typo has to fail at load rather than silently fall
-  // back to the default.
+  // `left` and `up` joined the set in #611, so the rejected value has to be
+  // one no backend spells. A typo must fail at load rather than silently
+  // fall back to the default.
   let dir = TempDir::new().unwrap();
-  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nmux_pane_direction = \"left\"\n").unwrap();
-  let err = Config::load_layered(dir.path(), None).expect_err("`left` is not a value gwm can honour");
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    "[tui]\nmux_pane_direction = \"sideways\"\n",
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("`sideways` is not a value gwm can honour");
   assert!(
     format!("{err}").contains("mux_pane_direction"),
     "the error must name the key, got: {err}"

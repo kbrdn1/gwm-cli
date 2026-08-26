@@ -14,13 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Two settings for what a mux spawn opens, and where**
   ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
-  [#608](https://github.com/kbrdn1/gwm-cli/issues/608)). The TUI's `t` key
+  [#608](https://github.com/kbrdn1/gwm-cli/issues/608),
+  [#611](https://github.com/kbrdn1/gwm-cli/issues/611)). The TUI's `t` key
   took whatever each backend felt like giving it. Two `[tui]` keys now say:
 
   ```toml
   [tui]
   mux_open_in        = "pane"    # "pane" | "tab" | "workspace"
-  mux_pane_direction = "right"   # "right" | "down", pane only
+  mux_pane_direction = "right"   # "right" | "down" | "left" | "up", pane only
   ```
 
   `"tab"` is a whole screen of its own: a tmux window, a zellij or herdr tab,
@@ -28,13 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs `herdr workspace create --label <name> --cwd <path> --focus`.
   `mux_pane_direction` is also the direction a bare
   `gwm tmux|zellij|herdr <pattern> --split` takes, and the new
-  `--direction right|down` overrides it for one invocation. Both keys cycle
+  `--direction <dir>` overrides it for one invocation. Both keys cycle
   live in the Settings panel under the **TUI** tab.
 
-  Two directions rather than four: `left` and `up` reach tmux only through
-  `split-window -b`, and herdr declares its `--direction` as `[possible
-  values: right, down]`, so a fuller compass would be values one backend could
-  not honour.
+  `mux_pane_direction` takes all four compass points
+  ([#611](https://github.com/kbrdn1/gwm-cli/issues/611)). `left` and `up` are
+  tmux's `-h -b` / `-v -b` (`-b` flips the side on the axis `-h` / `-v`
+  picked, measured on 3.7c through `split-window -P -F`) and zellij's own
+  words. **herdr takes only `right` and `down`**, declaring `[possible values:
+  right, down]`, so the other two are refused there rather than substituted:
+
+  ```
+  herdr splits only right or down: left and up are tmux and zellij directions
+  ```
 
   **`"workspace"` is refused on tmux and zellij, not downgraded to a tab.**
   Neither has a level there, and quietly opening something else would leave
