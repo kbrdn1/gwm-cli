@@ -5,7 +5,7 @@
 
 use gwm::multiplexer::{
   build_command, build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer,
-  detect_tmux, detect_zellij, macro_mux_command, macro_refusal, Multiplexer, SpawnMode, SplitDirection,
+  detect_tmux, detect_zellij, macro_mux_command, macro_refusal, spawn_noun, Multiplexer, SpawnMode, SplitDirection,
 };
 use std::path::Path;
 
@@ -489,6 +489,61 @@ fn a_macro_spawns_where_the_backend_can_carry_its_command() {
   .expect("`zellij action new-pane -- <cmd>` takes one");
   assert_eq!(mux, Multiplexer::Zellij);
   assert_eq!(argv[2], "new-pane");
+}
+
+#[test]
+fn the_noun_the_status_bar_uses_matches_the_verb_in_the_argv() {
+  // The status line names what opened, and what opened is the verb in the
+  // argv. Codex review on PR #606 caught them disagreeing: a macro under
+  // `mux_open_in = "tab"` built `tmux new-window` and said "mux pane".
+  //
+  // Honest limit: this pins the pair, not the call site. `run_macro` takes a
+  // `Terminal` and drives the event loop, so the one thing that could have
+  // caught the hardcoded string is not reachable from a test. What this
+  // stops is the pair drifting apart underneath it.
+  let cases = [
+    (
+      Multiplexer::Tmux,
+      SpawnMode::Split(SplitDirection::Right),
+      "split-window",
+      "pane",
+    ),
+    (
+      Multiplexer::Tmux,
+      SpawnMode::Split(SplitDirection::Left),
+      "split-window",
+      "pane",
+    ),
+    (Multiplexer::Tmux, SpawnMode::Window, "new-window", "window"),
+    (
+      Multiplexer::Zellij,
+      SpawnMode::Split(SplitDirection::Down),
+      "new-pane",
+      "pane",
+    ),
+    (Multiplexer::Zellij, SpawnMode::Window, "new-tab", "tab"),
+    (
+      Multiplexer::Herdr,
+      SpawnMode::Split(SplitDirection::Right),
+      "split",
+      "pane",
+    ),
+    (Multiplexer::Herdr, SpawnMode::Window, "create", "tab"),
+    (Multiplexer::Herdr, SpawnMode::Workspace, "create", "workspace"),
+  ];
+  for (mux, mode, verb, noun) in cases {
+    let argv = build_command(mux, "feat-7-foo", path(), mode, None)
+      .unwrap_or_else(|why| panic!("{mux:?} must open {mode:?}, got: {why}"));
+    assert!(
+      argv.iter().any(|a| a == verb),
+      "{mux:?} {mode:?} must build `{verb}`, got: {argv:?}"
+    );
+    assert_eq!(
+      spawn_noun(mux, mode),
+      noun,
+      "{mux:?} {mode:?} builds `{verb}`, so the status bar must say `{noun}`"
+    );
+  }
 }
 
 #[test]

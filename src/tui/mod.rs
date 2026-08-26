@@ -1432,7 +1432,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  use crate::multiplexer::{macro_mux_command, Multiplexer};
+  use crate::multiplexer::{macro_mux_command, spawn_noun, Multiplexer};
   // Macros run in the selected worktree. With nothing selected (e.g. a filter
   // with no matches), refuse rather than silently running in the main repo —
   // a destructive command must not hit the wrong tree (Codex review on #292).
@@ -1450,9 +1450,12 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
   // Resolve the mux command up front so a `mux_pane` macro can fall back to the
   // PTY overlay when no multiplexer is active (the documented behaviour — Codex
   // review on PR #292), rather than no-oping.
+  // Resolved outside the `if` because the success line needs it too: a macro
+  // under `mux_open_in = "tab"` opens a tmux window, and saying "pane" there
+  // describes the key rather than the screen (Codex review on PR #606).
+  let mode = app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
   let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
     let label = format!("macro{}", n);
-    let mode = app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
     let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
     // A multiplexer can be detected and still be unable to carry the macro's
     // command: herdr in every mode, zellij under a tab, and every backend
@@ -1496,7 +1499,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
       full_cmd.push(macro_cfg.command.as_str());
     }
     match std::process::Command::new(bin).args(&full_cmd).spawn() {
-      Ok(_) => app.status = format!("macro{} opened in mux pane", n),
+      Ok(_) => app.status = format!("macro{} opened in new {}", n, spawn_noun(mux, mode)),
       Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
     }
   } else {
