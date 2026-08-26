@@ -54,6 +54,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the status bar, since resuming it in a second pane while it runs elsewhere
   may fork or refuse depending on the tool.
 
+- **`6` opens the commit listing full size, with load-more**
+  ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)). The sidebar's
+  Commits pane is a fraction of a sidebar shared with four other blocks, and
+  it stops at 300 commits: seeing further meant leaving gwm for lazygit. `6`
+  now paints the same graph on the whole canvas, and `m` re-reads one page
+  deeper, up to 1500 commits, so history is paged rather than capped. The
+  title carries the row count and a trailing `+` while a deeper page exists;
+  the `load more` hint disappears once the revwalk runs out of history or the
+  cap is reached, so the key is never advertised where it would do nothing.
+  The walk runs on a worker, never on the keypress: it sorts
+  `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph before it
+  yields a row and the limit bounds the output, not the latency. The overlay
+  opens on a loader and fills in when the read lands.
+  The rows are snapshotted at open rather than read from the sidebar cache,
+  which is only rebuilt while the sidebar is open and in `commits` mode, so
+  the overlay works with the sidebar hidden or showing stashes. Scroll is
+  `j`/`k`, `g`/`G`, all rebindable under `[tui.keys.modal.commits]`.
+
 - **Two settings for what a mux spawn opens, and where**
   ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
   [#608](https://github.com/kbrdn1/gwm-cli/issues/608),
@@ -293,7 +311,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `≡` to the `nf-oct-markdown` glyph the Working Tree pane already paints
   on a `.md` file, since a note is one. The column stays conditional, so a
   user who never writes a note keeps the exact table they had before.
-
 
 ## Past releases
 
