@@ -15537,6 +15537,70 @@ fn a_working_tree_payload_for_a_worktree_left_behind_is_dropped() {
 }
 
 #[test]
+fn reopening_on_another_worktree_does_not_wait_on_the_previous_read() {
+  // Copilot review, PR #612: the coalescing that makes a held `5` cheap is
+  // only sound while the in-flight read is for the SAME worktree. Close a
+  // slow snapshot for A, select B, reopen: `request` would hand back `None`
+  // (slot busy with A), no worker would exist for B, and A's payload gets
+  // dropped by the path check, so the loader stays up forever.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  // A read for A is out: the slot is claimed and the overlay is waiting.
+  app.working_tree.begin(Some(&a));
+  let _inflight = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+  assert!(app.is_working_tree_loading());
+
+  // The user moves to another worktree and reopens before A lands.
+  app.worktrees.push(worktree_fixture("some-other-worktree"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_working_tree();
+
+  settle_working_tree(&mut app);
+  assert_eq!(
+    app.working_tree.path.as_deref(),
+    Some(app.selected().unwrap().path.as_path()),
+    "the listing that landed is the one the overlay is showing"
+  );
+}
+
+#[test]
+fn reopening_on_the_same_worktree_still_coalesces() {
+  // The other half: same path must NOT invalidate, or a held `5` spawns a
+  // `git status` per repeat.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  app.working_tree.begin(Some(&a));
+  let inflight = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+
+  app.enter_working_tree();
+
+  assert!(
+    app.tasks.request(TaskKind::WorkingTree).is_none(),
+    "the slot is still held by the first read, so the reopen coalesced"
+  );
+  // And the generation was not bumped, which is what `invalidate` would do.
+  app
+    .task_result_sender()
+    .send(gwm::tui::state::async_task::TaskMsg::WorkingTree(
+      inflight,
+      a.clone(),
+      vec![ratatui::text::Line::from("from the coalesced read")],
+      Default::default(),
+    ))
+    .unwrap();
+  app.drain_task_results();
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("coalesced")),
+    "the original worker's payload is still the authoritative one — got {text:?}"
+  );
+}
+
+#[test]
 fn opening_the_overlay_with_nothing_selected_does_not_wait_on_a_worker() {
   // The empty-selection path spawns nothing, so the loader would never
   // clear: `begin` must leave `loading` false when there is no worktree.
