@@ -412,6 +412,19 @@ fn commits_modal_renders_the_graph_and_counts_its_rows() {
 }
 
 #[test]
+fn commits_modal_drops_load_more_when_the_worktree_is_gone() {
+  // The render-side half of the same rule: a full page whose worktree left
+  // the list must not paint the hint, nor the title's `+`.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  app.worktrees.clear();
+  let buf = render(&mut app);
+  assert_absent(&buf, "load more", "load-more hint for a vanished worktree");
+}
+
+#[test]
 fn commits_modal_advertises_load_more_only_when_a_page_is_full() {
   // The footer hint and `App::load_more_commits` read the same predicate,
   // so a key that does nothing is never advertised. Forced rather than

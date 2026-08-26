@@ -4491,7 +4491,7 @@ fn draw_commits(f: &mut Frame, app: &mut App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
 
-  let more = app.commits.can_load_more();
+  let more = app.commits_can_load_more();
   let loading = app.commits.loading;
   // The `+` tracks "a deeper page exists", which is true while one is being
   // read too: `can_load_more` is false then only because the read is out.

@@ -2912,6 +2912,33 @@ impl App {
     }
   }
 
+  /// The worktree the commit overlay opened on, if it is still listed.
+  ///
+  /// Deliberately not [`Self::selected`]: the auto-refresh moves the
+  /// selection while the overlay is up, and the drain matches a payload
+  /// against `commits.path`, so a read fired for the newly-selected
+  /// worktree is dropped on the path check *after* `complete` freed the
+  /// slot, leaving nothing to clear the loader (Codex review, PR #614).
+  ///
+  /// `None` once another process removes the worktree and the refresh drops
+  /// it from the list: there is no longer anything to walk.
+  fn commits_target(&self) -> Option<&WorktreeInfo> {
+    let path = self.commits.path.as_deref()?;
+    self.worktrees.iter().find(|w| w.path == path)
+  }
+
+  /// Whether the commit overlay can page deeper: the listing says a page
+  /// exists AND the worktree it opened on is still there to read.
+  ///
+  /// [`CommitsModal::can_load_more`] owns the arithmetic and cannot see the
+  /// worktree list, so on its own it keeps saying yes for a worktree that
+  /// has been removed underneath the overlay. The renderer and
+  /// [`Self::load_more_commits`] both read *this*, so the advertised key
+  /// and the key that acts can never disagree.
+  pub fn commits_can_load_more(&self) -> bool {
+    self.commits.can_load_more() && self.commits_target().is_some()
+  }
+
   /// Re-read the commit listing one page deeper (issue #593).
   ///
   /// A re-read rather than an append: the graph renderer resolves a row's
@@ -2922,28 +2949,15 @@ impl App {
   /// sidebar's.
   ///
   /// The rows already on screen stay up while the worker runs, so paging
-  /// keeps its place instead of blanking. The deeper read targets the
-  /// worktree captured at open rather than the live selection, which the
-  /// auto-refresh can move out from under an open overlay. A no-op when
-  /// [`CommitsModal::can_load_more`] is false: a read is in flight, the
-  /// history ran out, or the paging cap was reached. The footer drops the
-  /// `load more` hint on the same predicate, so the key is never advertised
+  /// keeps its place instead of blanking. A no-op when
+  /// [`Self::commits_can_load_more`] is false; the footer drops the `load
+  /// more` hint on that same predicate, so the key is never advertised
   /// where it would do nothing.
   pub fn load_more_commits(&mut self) {
-    if !self.commits.can_load_more() {
+    if !self.commits_can_load_more() {
       return;
     }
-    // Page the worktree the overlay OPENED on, not the live selection: the
-    // auto-refresh moves the selection while the overlay is up, and a read
-    // fired for another worktree is dropped by the drain on the path check
-    // — after `complete` freed the slot — so nothing would be left to clear
-    // the loader (Codex review, PR #614). Gone from the list entirely
-    // (deleted while the overlay was open) is a no-op: `can_load_more`
-    // required `!loading`, so there is no loader to strand.
-    let Some(path) = self.commits.path.clone() else {
-      return;
-    };
-    let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() else {
+    let Some(w) = self.commits_target().cloned() else {
       return;
     };
     let limit = self.commits.next_limit();

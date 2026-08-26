@@ -15331,6 +15331,31 @@ fn load_more_pages_the_worktree_the_overlay_opened_on() {
 }
 
 #[test]
+fn a_vanished_worktree_stops_advertising_load_more() {
+  // Codex review, PR #614: another process removes the worktree while the
+  // overlay is up and the auto-refresh drops it from the list. The modal's
+  // own arithmetic still says "a full page, under the cap", so the footer
+  // kept offering `m` for a read that can no longer resolve a target. The
+  // hint and the handler have to agree, or a live key reads as broken.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  assert!(app.commits_can_load_more(), "a full page on a live worktree pages");
+
+  app.worktrees.clear();
+
+  assert!(
+    app.commits.can_load_more(),
+    "the modal's own arithmetic cannot see the list, and still says yes"
+  );
+  assert!(
+    !app.commits_can_load_more(),
+    "but the App knows the target is gone, so the key is not offered"
+  );
+}
+
+#[test]
 fn paging_stops_at_the_cap() {
   // #593 notes the memo in `recent_commits_cached` is keyed on the limit
   // and evicts an arbitrary entry when full, so unbounded paging would push
