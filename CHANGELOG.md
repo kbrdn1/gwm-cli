@@ -153,10 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is findable without hunting, and the header no longer borrows
   `selection_bg` from the cursor row.
 
-  `accent` and not `focus` for the band: `focus` is the border tone, darker
-  and more saturated, and a full-width band in it is the first thing the eye
-  lands on every frame. The band is the colour the header title already
-  wore, moved from the text to the ground under it.
+  The band is `accent` pulled down toward `section_bg` rather than `accent`
+  at full strength, which was too loud, and rather than `focus` — the border
+  tone, which is *more* saturated and so does not fix the half of "too
+  strong" that darkening does. It is mixed from the two roles it sits
+  between rather than declared as a sixth background role, so a `[theme]`
+  override of either keeps them in tune; a palette with nothing to mix — an
+  ANSI name, whose value belongs to the terminal, or a 256-palette index,
+  which is the default theme's case — keeps `accent` itself rather than
+  falling back to a grey. How far it can be pulled down is bounded by the
+  dark text written on it: the two keep the 3:1 WCAG asks of bold display
+  text, which is pinned by a test.
 
   Spans that carry their own colour keep it on either band — the header
   style is patched onto them, not substituted — so a filter prompt or a

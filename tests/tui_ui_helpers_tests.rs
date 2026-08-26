@@ -503,35 +503,100 @@ fn a_coloured_span_keeps_its_colour_on_either_band() {
   }
 }
 
+/// WCAG relative luminance, and the contrast ratio between two colours.
+/// Only meaningful for `Rgb`, which is what every shipped preset uses for
+/// the two roles the band is mixed from.
+fn contrast(a: Color, b: Color) -> f64 {
+  fn luminance(c: Color) -> f64 {
+    let Color::Rgb(r, g, b) = c else {
+      panic!("contrast is only defined on Rgb, got {c:?}");
+    };
+    let chan = |v: u8| {
+      let v = v as f64 / 255.0;
+      if v <= 0.03928 {
+        v / 12.92
+      } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+      }
+    };
+    0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
+  }
+  let (x, y) = (luminance(a), luminance(b));
+  (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
 #[test]
-fn the_focused_header_band_is_the_accent_role() {
-  // `accent`, not `focus`: `focus` is the *border* tone, darker and more
-  // saturated, and a full-width band in it is the first thing the eye
-  // lands on every frame. `accent` is the softer of the two oranges each
-  // preset carries and is the colour the header title already wore, so
-  // the band is the same colour the header always was — moved from the
-  // text to the ground under it.
-  let mut themes = vec![("default", Theme::default())];
+fn the_focused_header_band_is_accent_pulled_down_toward_the_section_tone() {
+  // The band is `accent` darkened toward `section_bg`, not `accent` itself
+  // (too strong at full strength) and not `focus` (the border tone, which
+  // is more saturated — the half of "too strong" that darkening alone does
+  // not fix). Per preset, per channel: it sits between the two roles and
+  // leans on `accent`, so it stays recognisably the header's colour.
   for name in preset_names() {
-    themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
-  }
-  for (name, theme) in themes {
-    assert_eq!(
-      compact_header_fill(&theme),
-      theme.accent,
-      "theme {name:?}: the band is the accent role"
+    let theme = Theme::preset(name).expect("listed preset must resolve");
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(gr, gg, gb)) = (theme.accent, theme.section_bg) else {
+      panic!("preset {name:?} must carry RGB for both roles, or the mix silently falls back");
+    };
+    let band = compact_header_fill(&theme);
+    let Color::Rgb(br, bg, bb) = band else {
+      panic!("preset {name:?}: an RGB pair must mix to RGB");
+    };
+
+    assert_ne!(
+      band, theme.accent,
+      "preset {name:?}: the band is pulled down, not the accent role itself"
     );
     assert_ne!(
-      compact_header_fill(&theme),
-      theme.section_bg,
-      "theme {name:?}: it has to differ from the inactive band, or it signals nothing"
+      band, theme.section_bg,
+      "preset {name:?}: it has to differ from the inactive band, or it signals nothing"
     );
     assert_ne!(
-      compact_header_fill(&theme),
-      theme.selection_bg,
-      "theme {name:?}: and it is never the cursor row's background"
+      band, theme.selection_bg,
+      "preset {name:?}: and it is never the cursor row's background"
+    );
+    for (chan, a, g, b) in [("r", ar, gr, br), ("g", ag, gg, bg), ("b", ab, gb, bb)] {
+      let (lo, hi) = if a < g { (a, g) } else { (g, a) };
+      assert!(
+        (lo..=hi).contains(&b),
+        "preset {name:?} / {chan}: the band must sit between the two roles, got {b} outside {lo}..={hi}"
+      );
+      assert!(
+        b.abs_diff(a) <= b.abs_diff(g),
+        "preset {name:?} / {chan}: it leans on accent, or it stops reading as the header's colour"
+      );
+    }
+  }
+}
+
+#[test]
+fn the_band_stays_legible_under_the_dark_text_written_on_it() {
+  // This is the floor on how far the band may be darkened. The focused
+  // header writes `section_bg` on it, so the two have to keep the 3:1 that
+  // WCAG asks of bold display text — below it the text role would have to
+  // change with the mix, and a passing colour test would not notice.
+  // `claude-dark` is the tight one at 3.1:1, so this is not vacuous.
+  for name in preset_names() {
+    let theme = Theme::preset(name).expect("listed preset must resolve");
+    let ratio = contrast(compact_header_fill(&theme), theme.section_bg);
+    assert!(
+      ratio >= 3.0,
+      "preset {name:?}: band vs its own text is {ratio:.2}:1, under the 3:1 floor"
     );
   }
+}
+
+#[test]
+fn a_theme_without_rgb_keeps_the_accent_role_as_its_band() {
+  // The default theme's `accent` is an ANSI name whose value belongs to
+  // the terminal and its `section_bg` a palette index: there are no
+  // components to mix. Falling back to `accent` keeps a coloured band;
+  // falling back to a grey would put that theme back where #605 started.
+  let theme = Theme::default();
+  assert_eq!(
+    compact_header_fill(&theme),
+    theme.accent,
+    "with nothing to mix the band stays the accent role"
+  );
 }
 
 #[test]

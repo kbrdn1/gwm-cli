@@ -453,19 +453,41 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
-/// The focused compact header's fill (issue #605): the `accent` role,
-/// painted solid.
+/// The focused compact header's fill (issue #605): the `accent` role
+/// darkened toward the `section_bg` band it replaces.
 ///
 /// `accent` rather than `focus`, the other orange each preset carries:
-/// `focus` is the *border* tone, darker and more saturated (`#C15F3C`
-/// against `#D4825D` on `claude-dark`), and a full-width band in it is the
-/// first thing the eye lands on every frame. `accent` is the softer of the
-/// two and is already the role the header title used, so the band is the
-/// same colour the header always was — just moved from the text to the
-/// ground under it.
+/// `focus` is the *border* tone, and it is more saturated, which is the
+/// half of "too strong" that darkening alone does not fix. `accent` is the
+/// colour the header title already wore, so the band is the same colour
+/// the header always was, moved from the text to the ground under it —
+/// pulled down so it sits under the pane rather than on top of it.
+///
+/// Mixed rather than added as a sixth background role: it is not a
+/// decision a preset should have to make separately, and derived from the
+/// two roles it sits between it stays in tune with a `[theme]` override of
+/// either. A colour with no components to mix — an ANSI name, whose value
+/// belongs to the terminal, or a 256-palette index — comes back unchanged,
+/// so the default theme keeps a coloured band rather than a grey one.
+///
+/// The floor on [`ACCENT_MIX`] is the dark text written on it: on
+/// `claude-dark` the band/`section_bg` contrast is 4.9:1 at full strength
+/// and 3.1:1 at 70%, so darkening much further would need the text to
+/// switch to a light role instead.
 pub fn compact_header_fill(theme: &super::theme::Theme) -> Color {
-  theme.accent
+  match (theme.accent, theme.section_bg) {
+    (Color::Rgb(ar, ag, ab), Color::Rgb(gr, gg, gb)) => {
+      let mix = |a: u8, g: u8| ((a as u16 * ACCENT_MIX + g as u16 * (100 - ACCENT_MIX)) / 100) as u8;
+      Color::Rgb(mix(ar, gr), mix(ag, gg), mix(ab, gb))
+    }
+    (accent, _) => accent,
+  }
 }
+
+/// Weight on `accent` in [`compact_header_fill`]. Settled on a capture, not
+/// by arithmetic — a foreground/background pair is not something a test can
+/// judge — and the one knob to turn if the band reads wrong on a palette.
+const ACCENT_MIX: u16 = 70;
 
 /// Header text style for a compact pane (issue #605).
 ///
