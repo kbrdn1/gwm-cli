@@ -6,14 +6,15 @@
 use gwm::bootstrap::{BootstrapReport, StepResult};
 use gwm::tui::keymap::{Action, KeyStroke, Keymap};
 use gwm::tui::state::sidebar::SidebarMode;
-use gwm::tui::theme::Theme;
+use gwm::tui::theme::{preset_names, Theme};
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, bootstrap_report_lines, centered_abs, compact_header_line, confirm_buttons_line,
-  create_buttons_line, ellipsize_middle, field_input_line, form_field_scroll, link_prompt_modal_width,
-  link_target_line, modal_hint_line, pad_cells, pane_counter, recent_items_pane_title, status_pane_title,
-  type_selector_line, working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts,
-  worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  badge_group_width, bootstrap_report_lines, centered_abs, compact_header_fill, compact_header_line,
+  compact_header_style, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line,
+  form_field_scroll, link_prompt_modal_width, link_target_line, modal_hint_line, pad_cells, pane_counter,
+  recent_items_pane_title, status_pane_title, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
@@ -380,7 +381,7 @@ fn compact_header_line_fills_the_width_and_right_aligns_the_counter() {
     ratatui::text::Line::from(" 1 WORKTREES "),
     Some(ratatui::text::Line::from(" 3 of 5 ")),
     30,
-    Color::Cyan,
+    Style::default(),
   );
   let text = title_text(&line);
   assert_eq!(text.chars().count(), 30, "header must span the pane width: {text:?}");
@@ -390,7 +391,7 @@ fn compact_header_line_fills_the_width_and_right_aligns_the_counter() {
 
 #[test]
 fn compact_header_line_without_a_counter_still_spans_the_width() {
-  let line = compact_header_line(ratatui::text::Line::from(" 2 STATUS "), None, 18, Color::Cyan);
+  let line = compact_header_line(ratatui::text::Line::from(" 2 STATUS "), None, 18, Style::default());
   let text = title_text(&line);
   assert_eq!(text.chars().count(), 18, "got {text:?}");
   assert!(text.starts_with(" 2 STATUS "), "got {text:?}");
@@ -405,7 +406,7 @@ fn compact_header_line_drops_the_counter_before_the_title() {
     ratatui::text::Line::from(" 1 WORKTREES "),
     Some(ratatui::text::Line::from(" 3 of 5 ")),
     14,
-    Color::Cyan,
+    Style::default(),
   );
   let text = title_text(&line);
   assert_eq!(text.chars().count(), 14, "got {text:?}");
@@ -414,38 +415,215 @@ fn compact_header_line_drops_the_counter_before_the_title() {
     "counter dropped rather than overlapping: {text:?}"
   );
 
-  let squeezed = compact_header_line(ratatui::text::Line::from(" 1 WORKTREES "), None, 6, Color::Cyan);
+  let squeezed = compact_header_line(ratatui::text::Line::from(" 1 WORKTREES "), None, 6, Style::default());
   let text = title_text(&squeezed);
   assert_eq!(text.chars().count(), 6, "never overflows the pane: {text:?}");
 }
 
-#[test]
-fn compact_header_line_paints_unstyled_spans_with_the_focus_accent() {
-  // Focus indication moves from the border colour to the header text —
-  // that is the whole signal once the rules are gone. Spans that already
-  // carry a colour (the filter `/` prompt) keep theirs: they encode
-  // something other than focus.
+/// A compact header carrying both span kinds: the pane name, which has no
+/// colour of its own, and the filter `/` prompt, which does.
+fn compact_header(focused: bool, theme: &Theme) -> ratatui::text::Line<'static> {
   let title = ratatui::text::Line::from(vec![
     ratatui::text::Span::raw(" 1 WORKTREES "),
     ratatui::text::Span::styled("/", Style::default().fg(Color::Yellow)),
   ]);
-  let line = compact_header_line(title, None, 30, Color::Magenta);
-  let plain = line
+  compact_header_line(title, None, 30, compact_header_style(focused, theme))
+}
+
+/// The span of `line` that *is* `needle`, or failing that the one that
+/// contains it. Exact first so a one-character needle keeps naming the span
+/// it was written for even if a title later grows the same character.
+fn header_span(line: &ratatui::text::Line<'static>, needle: &str) -> ratatui::text::Span<'static> {
+  line
     .spans
     .iter()
-    .find(|s| s.content.contains("WORKTREES"))
-    .expect("title span");
-  assert_eq!(plain.style.fg, Some(Color::Magenta), "unstyled title wears the accent");
-  let slash = line
-    .spans
-    .iter()
-    .find(|s| s.content.as_ref() == "/")
-    .expect("slash span");
+    .find(|s| s.content.as_ref() == needle)
+    .or_else(|| line.spans.iter().find(|s| s.content.contains(needle)))
+    .unwrap_or_else(|| panic!("span {needle:?} in {:?}", title_text(line)))
+    .clone()
+}
+
+#[test]
+fn compact_header_trades_its_two_roles_on_focus_and_never_dims() {
+  // #605: the header stops carrying focus as a *dimming*. The two states
+  // trade the same pair of roles instead — `accent` text on the quiet
+  // `section_bg` band when inactive, dark `section_bg` text on the
+  // `accent` band when focused — so a pane's name never goes secondary.
+  // `muted` is in neither: it is how you find the pane to `Tab` into.
+  //
+  // Over every palette, because one theme cannot discriminate the claim:
+  // the default has `accent == focus`, so only its inactive header proves
+  // anything, while `claude-dark` separates all three of `accent` /
+  // `focus` / `muted` and pins both states.
+  let mut themes = vec![("default", Theme::default())];
+  for name in preset_names() {
+    themes.push((name, Theme::preset(name).expect("listed preset must resolve")));
+  }
+  for (name, theme) in themes {
+    let inactive = header_span(&compact_header(false, &theme), "WORKTREES").style;
+    let focused = header_span(&compact_header(true, &theme), "WORKTREES").style;
+
+    assert_eq!(
+      inactive.fg,
+      Some(theme.accent),
+      "theme {name:?}: the inactive header is accent text over the section band"
+    );
+    assert_eq!(
+      focused.fg,
+      Some(theme.section_bg),
+      "theme {name:?}: the focused header is dark text over the accent band"
+    );
+    for (state, style) in [("focused", focused), ("inactive", inactive)] {
+      assert_ne!(
+        style.fg,
+        Some(theme.muted),
+        "theme {name:?} / {state}: a pane's name is never the muted role"
+      );
+      assert_eq!(
+        style.bg, None,
+        "theme {name:?} / {state}: the band comes from `Chrome::fill`, not from the text style"
+      );
+    }
+  }
+}
+
+#[test]
+fn a_coloured_span_keeps_its_colour_on_either_band() {
+  // The filter `/` prompt and the Working Tree per-category counts encode
+  // a category, not focus, so neither band may repaint them — the header
+  // style is *patched* onto a span rather than replacing it.
+  let theme = Theme::preset("claude-dark").expect("preset must resolve");
+  for (state, focused) in [("focused", true), ("inactive", false)] {
+    let style = header_span(&compact_header(focused, &theme), "/").style;
+    assert_eq!(
+      style.fg,
+      Some(Color::Yellow),
+      "{state}: an already-coloured span keeps its own colour"
+    );
+  }
+}
+
+/// WCAG relative luminance, and the contrast ratio between two colours.
+/// Only meaningful for `Rgb`, which is what every shipped preset uses for
+/// the two roles the band is mixed from.
+fn contrast(a: Color, b: Color) -> f64 {
+  fn luminance(c: Color) -> f64 {
+    let Color::Rgb(r, g, b) = c else {
+      panic!("contrast is only defined on Rgb, got {c:?}");
+    };
+    let chan = |v: u8| {
+      let v = v as f64 / 255.0;
+      if v <= 0.03928 {
+        v / 12.92
+      } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+      }
+    };
+    0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
+  }
+  let (x, y) = (luminance(a), luminance(b));
+  (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+#[test]
+fn the_focused_header_band_is_accent_pulled_down_toward_the_section_tone() {
+  // The band is `accent` darkened toward `section_bg`, not `accent` itself
+  // (too strong at full strength) and not `focus` (the border tone, which
+  // is more saturated — the half of "too strong" that darkening alone does
+  // not fix). Per preset, per channel: it sits between the two roles and
+  // leans on `accent`, so it stays recognisably the header's colour.
+  for name in preset_names() {
+    let theme = Theme::preset(name).expect("listed preset must resolve");
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(gr, gg, gb)) = (theme.accent, theme.section_bg) else {
+      panic!("preset {name:?} must carry RGB for both roles, or the mix silently falls back");
+    };
+    let band = compact_header_fill(&theme);
+    let Color::Rgb(br, bg, bb) = band else {
+      panic!("preset {name:?}: an RGB pair must mix to RGB");
+    };
+
+    assert_ne!(
+      band, theme.accent,
+      "preset {name:?}: the band is pulled down, not the accent role itself"
+    );
+    assert_ne!(
+      band, theme.section_bg,
+      "preset {name:?}: it has to differ from the inactive band, or it signals nothing"
+    );
+    assert_ne!(
+      band, theme.selection_bg,
+      "preset {name:?}: and it is never the cursor row's background"
+    );
+    for (chan, a, g, b) in [("r", ar, gr, br), ("g", ag, gg, bg), ("b", ab, gb, bb)] {
+      let (lo, hi) = if a < g { (a, g) } else { (g, a) };
+      assert!(
+        (lo..=hi).contains(&b),
+        "preset {name:?} / {chan}: the band must sit between the two roles, got {b} outside {lo}..={hi}"
+      );
+      assert!(
+        b.abs_diff(a) <= b.abs_diff(g),
+        "preset {name:?} / {chan}: it leans on accent, or it stops reading as the header's colour"
+      );
+    }
+  }
+}
+
+#[test]
+fn the_band_stays_legible_under_the_dark_text_written_on_it() {
+  // This is the floor on how far the band may be darkened. The focused
+  // header writes `section_bg` on it, so the two have to keep the 3:1 that
+  // WCAG asks of bold display text — below it the text role would have to
+  // change with the mix, and a passing colour test would not notice.
+  // `claude-dark` is the tight one at 3.1:1, so this is not vacuous.
+  for name in preset_names() {
+    let theme = Theme::preset(name).expect("listed preset must resolve");
+    let ratio = contrast(compact_header_fill(&theme), theme.section_bg);
+    assert!(
+      ratio >= 3.0,
+      "preset {name:?}: band vs its own text is {ratio:.2}:1, under the 3:1 floor"
+    );
+  }
+}
+
+#[test]
+fn a_theme_without_rgb_keeps_the_accent_role_as_its_band() {
+  // The default theme's `accent` is an ANSI name whose value belongs to
+  // the terminal and its `section_bg` a palette index: there are no
+  // components to mix. Falling back to `accent` keeps a coloured band;
+  // falling back to a grey would put that theme back where #605 started.
+  let theme = Theme::default();
   assert_eq!(
-    slash.style.fg,
-    Some(Color::Yellow),
-    "an already-coloured span is left alone"
+    compact_header_fill(&theme),
+    theme.accent,
+    "with nothing to mix the band stays the accent role"
   );
+}
+
+#[test]
+fn compact_header_weight_tracks_focus_across_the_whole_line() {
+  // #605: weight is what the header line adds on top of the fill, and it
+  // reaches *every* span, coloured ones included, so one header line runs
+  // one rule rather than two side by side.
+  let theme = Theme::default();
+  let focused = compact_header(true, &theme);
+  let unfocused = compact_header(false, &theme);
+
+  for needle in ["WORKTREES", "/"] {
+    assert!(
+      header_span(&focused, needle)
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD),
+      "focused: {needle:?} is bold"
+    );
+    assert!(
+      !header_span(&unfocused, needle)
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD),
+      "unfocused: {needle:?} is not bold"
+    );
+  }
 }
 
 #[test]
@@ -1479,7 +1657,7 @@ fn compact_header_line_measures_in_terminal_cells_not_chars() {
   // — that one sums `Span::width()`, the measure the helper itself uses, so
   // it would agree with a wrong implementation (issue #562).
   let title = ratatui::text::Line::from(" [1] WORKTREES /界 ");
-  let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Color::Cyan);
+  let line = compact_header_line(title, Some(ratatui::text::Line::from(" 3 of 5 ")), 40, Style::default());
   assert_eq!(
     painted_line(&line),
     40,
@@ -1495,7 +1673,7 @@ fn compact_header_line_truncates_wide_glyphs_by_cell_budget() {
   // cut to the cell budget, never past it. Cutting by char count would
   // leave a line twice as wide as the pane.
   let title = ratatui::text::Line::from("界界界界界界界界");
-  let line = compact_header_line(title, None, 9, Color::Cyan);
+  let line = compact_header_line(title, None, 9, Style::default());
   assert!(
     painted_line(&line) <= 9,
     "must never exceed the pane width in cells, got {}",
@@ -1529,7 +1707,7 @@ fn compact_header_line_pads_against_the_cells_the_renderer_paints() {
       ratatui::text::Line::from(title.to_string()),
       Some(counter),
       20,
-      Color::Cyan,
+      Style::default(),
     );
     // Padding computed against the undercount leaves the line wider than the
     // pane, which pushes the right-aligned counter off it.
@@ -1553,7 +1731,7 @@ fn compact_header_line_truncates_by_the_cells_the_renderer_paints() {
       ratatui::text::Line::from(title.to_string()),
       None,
       width as u16,
-      Color::Cyan,
+      Style::default(),
     );
     assert!(
       painted_line(&line) <= width,
@@ -1571,7 +1749,7 @@ fn compact_header_line_truncates_sequences_whole_not_char_by_char() {
   // so every one of these was free and the whole title survived its budget.
   let title = "*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}*\u{FE0F}";
   assert_eq!(painted(title), 10, "fixture must paint two cells per sequence");
-  let line = compact_header_line(ratatui::text::Line::from(title), None, 5, Color::Cyan);
+  let line = compact_header_line(ratatui::text::Line::from(title), None, 5, Style::default());
   assert!(
     painted_line(&line) <= 5,
     "title painted {} cells into a 5-cell pane: {:?}",

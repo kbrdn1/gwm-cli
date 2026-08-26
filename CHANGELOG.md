@@ -185,6 +185,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A compact pane's header says where you are, and its name no longer
+  dims when it is not**
+  ([#605](https://github.com/kbrdn1/gwm-cli/issues/605)). In the default
+  compact layout the header carried the focus signal twice, and both halves
+  were weak. The text was repainted from `focus` to `muted` — so a pane's
+  name, the thing you read to know which pane to `Tab` into, was rendered in
+  the role reserved for deliberately secondary text the moment it went
+  inactive, while the spans that already carry a colour (the filter `/`
+  prompt, the Working Tree counts) did not follow, leaving one header line
+  running two rules side by side. And the fill under it stepped from
+  `section_bg` to `selection_bg`, two tones that are adjacent by design (14
+  grey levels apart on `claude-dark`) and that read as a permutation of grey
+  rather than as a place.
+
+  The two states now trade the same pair of roles instead of dimming one of
+  them. An inactive header is `accent` text on the `section_bg` band; the
+  focused one is that band's tone written on an **`accent` band**, bold —
+  the same dark-on-colour treatment the version chip and the footer's
+  context anchor already use. `muted` appears in neither, the focused pane
+  is findable without hunting, and the header no longer borrows
+  `selection_bg` from the cursor row.
+
+  The band is `accent` pulled down toward `section_bg` rather than `accent`
+  at full strength, which was too loud, and rather than `focus` — the border
+  tone, which is *more* saturated and so does not fix the half of "too
+  strong" that darkening does. It is mixed from the two roles it sits
+  between rather than declared as a sixth background role, so a `[theme]`
+  override of either keeps them in tune; a palette with nothing to mix — an
+  ANSI name, whose value belongs to the terminal, or a 256-palette index,
+  which is the default theme's case — keeps `accent` itself rather than
+  falling back to a grey. How far it can be pulled down is bounded by the
+  dark text written on it: the two keep the 3:1 WCAG asks of bold display
+  text, which is pinned by a test.
+
+  Spans that carry their own colour keep it on either band — the header
+  style is patched onto them, not substituted — so a filter prompt or a
+  per-category count still says what it says. The right-flushed counter
+  follows the title, which bordered mode already does with the border
+  colour. An inactive header is no longer bold, which is what makes the
+  weight a signal.
+
+  Bordered mode is otherwise untouched: there the accent still paints the
+  four rules and the title inside the top one.
+
 - **A linked row with nothing fetched yet is white, not green and purple**
   ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
   marker painted its two placeholder slots with a different status role each:
