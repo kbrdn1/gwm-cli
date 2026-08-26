@@ -1432,7 +1432,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  use crate::multiplexer::{build_command, detect_multiplexer, macro_refusal, Multiplexer};
+  use crate::multiplexer::{macro_mux_command, Multiplexer};
   // Macros run in the selected worktree. With nothing selected (e.g. a filter
   // with no matches), refuse rather than silently running in the main repo —
   // a destructive command must not hit the wrong tree (Codex review on #292).
@@ -1453,37 +1453,24 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
   let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
     let label = format!("macro{}", n);
     let mode = app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
-    match detect_multiplexer(
+    let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
+    // A multiplexer can be detected and still be unable to carry the macro's
+    // command: herdr in every mode, zellij under a tab, and every backend
+    // under a workspace (#588 / #589 / #608). Opening anyway would run
+    // nothing in it and drop the macro silently, so the PTY overlay is the
+    // honest fallback and the status bar says which backend said no.
+    match macro_mux_command(
+      &label,
+      &path,
+      mode,
       std::env::var("TMUX").ok(),
       std::env::var("ZELLIJ").ok(),
       std::env::var("HERDR_ENV").ok(),
+      ws.as_deref(),
     ) {
-      // A multiplexer can be detected and still be unable to carry the
-      // macro's command: herdr in either mode, and zellij once
-      // `mux_pane_direction = "window"` asks for a tab (#588 / #589).
-      // Opening the pane anyway would run nothing in it and drop the macro
-      // silently, so the PTY overlay stays the honest fallback and the
-      // status bar says which backend said no.
-      // Two different refusals, asked in this order: `macro_refusal` is
-      // about running a command at all, the builder about opening the
-      // target. A macro's own problem is the more useful thing to name when
-      // both apply.
-      Some(mux) => {
-        let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
-        let built = match macro_refusal(mux, mode) {
-          Some(why) => Err(why),
-          None => build_command(mux, &label, &path, mode, ws.as_deref()).map(|argv| (mux, argv)),
-        };
-        match built {
-          Ok(spawn) => Some(spawn),
-          Err(why) => {
-            app.status = format!("macro{}: {}; falling back to PTY overlay", n, why);
-            None
-          }
-        }
-      }
-      None => {
-        app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
+      Ok(spawn) => Some(spawn),
+      Err(why) => {
+        app.status = format!("macro{}: {}; falling back to PTY overlay", n, why);
         None
       }
     }

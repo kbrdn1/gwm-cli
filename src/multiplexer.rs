@@ -317,6 +317,47 @@ pub fn build_command(
   }
 }
 
+/// What a `[tui.macro*]` with `open_in = "mux_pane"` should spawn, or the
+/// reason it has to fall back to the PTY overlay.
+///
+/// The three steps a macro runs on (detect, refuse, build) were an inline
+/// chain in `run_macro`, which is the one place they could not be tested:
+/// the function takes a `Terminal` and drives the event loop. Extracting
+/// them makes the decision a value, and the fallback is the branch worth
+/// pinning, since getting it wrong drops the user's command into a pane
+/// nobody looks at (Codex review on PR #609).
+///
+/// Two refusals in one, asked in the order that produces the more useful
+/// sentence: [`macro_refusal`] answers "can this backend run a command at
+/// all", [`build_command`] answers "can it open this target". A macro's own
+/// problem is what the status bar should name when both apply.
+///
+/// The env values are parameters for the same reason as in
+/// [`detect_multiplexer`]: `$TMUX` is read by the clipboard path too, so a
+/// test that unset it would pull every yank test in the same binary under
+/// the env lock.
+pub fn macro_mux_command(
+  label: &str,
+  path: &Path,
+  mode: SpawnMode,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+) -> Result<(Multiplexer, Vec<String>), &'static str> {
+  let Some(mux) = detect_multiplexer(tmux, zellij, herdr) else {
+    return Err(NO_MULTIPLEXER);
+  };
+  if let Some(why) = macro_refusal(mux, mode) {
+    return Err(why);
+  }
+  build_command(mux, label, path, mode, workspace).map(|argv| (mux, argv))
+}
+
+/// The one refusal that is not a backend's fault. Kept next to the others so
+/// the status bar's four sentences read as one set.
+const NO_MULTIPLEXER: &str = "no multiplexer";
+
 /// What `mode` just opened, for a status line that names the thing the
 /// user is looking at rather than the thing the key is called: `t` can now
 /// open a whole window or tab (#589), and "opened <name> in new pane" was

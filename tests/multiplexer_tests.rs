@@ -5,7 +5,7 @@
 
 use gwm::multiplexer::{
   build_command, build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer,
-  detect_tmux, detect_zellij, macro_refusal, Multiplexer, SpawnMode, SplitDirection,
+  detect_tmux, detect_zellij, macro_mux_command, macro_refusal, Multiplexer, SpawnMode, SplitDirection,
 };
 use std::path::Path;
 
@@ -388,6 +388,87 @@ fn a_herdr_split_ignores_the_workspace_id_in_either_direction() {
       build_herdr_command("feat-7-foo", path(), SpawnMode::Split(dir), None),
       "a workspace id must make no difference to a split ({})",
       dir.label()
+    );
+  }
+}
+
+// --------------------------------------------------------------------------
+// what a macro actually spawns, or why it does not (#609 review)
+// --------------------------------------------------------------------------
+//
+// `run_macro` takes a `Terminal` and drives the event loop, so the three
+// steps it ran on (detect, refuse, build) were the one decision in the mux
+// path with no test. Getting the fallback wrong does not crash: it opens a
+// pane and drops the user's command into it, which nobody sees.
+
+#[test]
+fn a_macro_spawns_where_the_backend_can_carry_its_command() {
+  let (mux, argv) = macro_mux_command(
+    "macro1",
+    path(),
+    SpawnMode::Split(SplitDirection::Right),
+    Some("/tmp/tmux-501/default,1,0".into()),
+    None,
+    None,
+    None,
+  )
+  .expect("tmux takes a trailing command on split-window");
+  assert_eq!(mux, Multiplexer::Tmux);
+  assert_eq!(argv[1], "split-window");
+  // The label reaches the argv only where the backend has somewhere to put
+  // it; a split has none, which is what `run_macro` relies on.
+  assert!(argv.iter().any(|a| a == "/tmp/wt/feat-7-foo"), "got: {argv:?}");
+
+  let (mux, argv) = macro_mux_command(
+    "macro1",
+    path(),
+    SpawnMode::Split(SplitDirection::Down),
+    None,
+    Some("0".into()),
+    None,
+    None,
+  )
+  .expect("`zellij action new-pane -- <cmd>` takes one");
+  assert_eq!(mux, Multiplexer::Zellij);
+  assert_eq!(argv[2], "new-pane");
+}
+
+#[test]
+fn a_macro_falls_back_with_the_reason_the_status_bar_shows() {
+  // Four sentences, one per way this can refuse. Each is what
+  // `run_macro` interpolates into `macro<n>: {}; falling back to PTY
+  // overlay`, so an empty or wrong one leaves the user with a key that
+  // did nothing and said nothing useful.
+  let split = SpawnMode::Split(SplitDirection::Right);
+
+  // No multiplexer at all: not a backend's fault, but still a fallback.
+  let why = macro_mux_command("macro1", path(), split, None, None, None, None)
+    .expect_err("nothing is running, so nothing can carry the command");
+  assert!(why.contains("multiplexer"), "got: {why}");
+
+  // herdr: `pane split` has no trailing-command form (#599).
+  let why = macro_mux_command("macro1", path(), split, None, None, Some("1".into()), None)
+    .expect_err("herdr panes take no command");
+  assert!(why.contains("herdr"), "the sentence must name the backend, got: {why}");
+
+  // zellij under a tab: `new-tab` takes no command either (#589).
+  let why = macro_mux_command("macro1", path(), SpawnMode::Window, None, Some("0".into()), None, None)
+    .expect_err("a zellij tab takes no command");
+  assert!(why.contains("zellij"), "got: {why}");
+
+  // Every backend under a workspace (#608), for two different reasons:
+  // tmux and zellij have no such level, herdr has one but it takes no
+  // command. Both must still come back as a refusal, not as a spawn.
+  for (name, tmux, zellij, herdr) in [
+    ("tmux", Some("/tmp/x,1,0".to_string()), None, None),
+    ("zellij", None, Some("0".to_string()), None),
+    ("herdr", None, None, Some("1".to_string())),
+  ] {
+    let why = macro_mux_command("macro1", path(), SpawnMode::Workspace, tmux, zellij, herdr, None)
+      .expect_err("no backend runs a macro in a workspace");
+    assert!(
+      why.contains(name) || why.contains("workspace"),
+      "the {name} refusal must name the backend or the level, got: {why}"
     );
   }
 }
