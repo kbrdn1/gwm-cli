@@ -1379,6 +1379,12 @@ fn modal_rows(buf: &Buffer) -> Vec<String> {
     .collect()
 }
 
+/// Byte offset of `needle` in `row`, for slicing what precedes it. Panics
+/// when absent, which the caller has already asserted against.
+fn tail_of(row: &str, needle: &str) -> usize {
+  row.find(needle).expect("needle present in row")
+}
+
 fn modal_width_at(setup: &dyn Fn() -> (tempfile::TempDir, App), w: u16, h: u16) -> u16 {
   let (_dir, mut app) = setup();
   let buf = render_at(&mut app, w, h);
@@ -2558,27 +2564,47 @@ fn working_tree_modal_renders_its_title_body_and_footer() {
   assert_present(&buf, "Working Tree", "working tree overlay title");
   assert_present(&buf, "ui.rs", "a tree row from the injected listing");
   assert_present(&buf, "README.md", "a second tree row");
-  // The pane's change-count footer travels with the listing (issue #287) —
+  // The pane's change-count footer travels with the listing (issue #287):
   // the same `<glyph> <n>` segments the bordered sidebar pane puts on its
   // bottom rule, asserted through the constants so a glyph change here is a
   // deliberate edit rather than a silently-passing literal.
-  assert_present(
-    &buf,
-    &format!("{WT_CREATED_ICON} 1"),
-    "the created count follows the tree",
+  //
+  // Scanned on the modal's LAST row and pinned to the right (Copilot review,
+  // PR #612): a whole-buffer `assert_present` catches the counts vanishing,
+  // but not `title_bottom(...)` losing its `.right_aligned()` or the segments
+  // migrating into the body. Placement is the observable part here. The
+  // per-category COLOURS are not re-pinned: `working_tree_counts_footer` owns
+  // them and `tui_ui_helpers_tests::working_tree_counts_footer_shows_only_nonzero_colored_segments`
+  // is where they are asserted, at the shared source both surfaces call.
+  let rows = modal_rows(&buf);
+  let bottom = rows.last().expect("the modal renders at least one row").clone();
+  let created = format!("{WT_CREATED_ICON} 1");
+  let modified = format!("{WT_MODIFIED_ICON} 2");
+  assert!(
+    bottom.contains(&created) && bottom.contains(&modified),
+    "the change counts ride the modal's bottom rule — bottom row was {bottom:?}, modal rows:\n{}",
+    rows.join("\n")
   );
-  assert_present(
-    &buf,
-    &format!("{WT_MODIFIED_ICON} 2"),
-    "the modified count follows the tree",
+  // Right-aligned means nothing but padding and the corner follows the last
+  // segment. Left or centred would leave `─` rule on its right.
+  let last = bottom.find(&modified).expect("modified segment on the bottom rule") + modified.len();
+  assert!(
+    bottom[last..].chars().all(|c| c == ' ' || c == '╯'),
+    "the counts ride the RIGHT of the bottom rule; found rule after them in {bottom:?}"
+  );
+  assert!(
+    bottom[..tail_of(&bottom, &created)].contains('─'),
+    "and the rule runs up to them from the left in {bottom:?}"
   );
   assert_present(&buf, "close", "the modal footer advertises the exit");
 }
 
 #[test]
 fn working_tree_modal_renders_an_empty_listing_without_panicking() {
-  // A worktree whose snapshot came back with nothing at all (an errored
-  // `git status` leaves no rows): the overlay still opens on its frame.
+  // The empty snapshot is what `enter_working_tree` loads when nothing is
+  // selected. It is NOT the errored-`git status` case: that one still
+  // produces a row (`! <error>`, `working_tree_lines`), which is the point
+  // of rendering it. The overlay still opens on its frame either way.
   let (_dir, mut app) = make_app();
   app.working_tree.lines.clear();
   app.view = View::WorkingTree;
