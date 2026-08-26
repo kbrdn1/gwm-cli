@@ -4,8 +4,9 @@
 //! the runner — they assert against the produced argv vectors.
 
 use gwm::multiplexer::{
-  attach_pane_command, build_command, build_herdr_command, build_tmux_command, build_zellij_command, detect_herdr,
-  detect_multiplexer, detect_tmux, detect_zellij, macro_mux_command, macro_refusal, spawn_noun, Multiplexer, SpawnMode,
+  attach_pane_command, build_command, build_herdr_command, build_herdr_process_info_command, build_herdr_run_command,
+  build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer, detect_tmux, detect_zellij,
+  herdr_pane_id, herdr_shell_is_idle, macro_mux_command, macro_refusal, spawn_noun, Multiplexer, SpawnMode,
   SplitDirection,
 };
 use std::path::Path;
@@ -901,4 +902,73 @@ fn attach_pane_command_refuses_herdr_in_step_with_macro_refusal() {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #591 / #599: herdr runs a command through the pane it just opened
+// ---------------------------------------------------------------------------
+//
+// Every literal below is a response herdr 0.8.2 actually returned, captured
+// from a live server rather than written from the help text — which documents
+// none of these shapes.
+
+#[test]
+fn herdr_pane_id_reads_all_three_levels() {
+  // `pane split` nests the pane under `result.pane`...
+  let split = r#"{"id":"cli:pane:split","result":{"pane":{"cwd":"/w","focused":false,"pane_id":"w2K:p2C","tab_id":"w2K:t1","workspace_id":"w2K"},"type":"pane_info"}}"#;
+  assert_eq!(herdr_pane_id(split).as_deref(), Some("w2K:p2C"));
+
+  // ...while `tab create` and `workspace create` nest it under
+  // `result.root_pane`, alongside the `tab` / `workspace` objects. Reading
+  // only the first shape would leave `mux_open_in = "tab"` opening a
+  // container and never finding the shell to resume in.
+  let tab = r#"{"id":"cli:tab:create","result":{"root_pane":{"pane_id":"w2K:p2D","tab_id":"w2K:t5"},"tab":{"label":"probe-tab","tab_id":"w2K:t5"},"type":"tab_created"}}"#;
+  assert_eq!(herdr_pane_id(tab).as_deref(), Some("w2K:p2D"));
+
+  let ws = r#"{"id":"cli:workspace:create","result":{"root_pane":{"pane_id":"w2R:p1","tab_id":"w2R:t1"},"tab":{"tab_id":"w2R:t1"},"type":"workspace_created","workspace":{"workspace_id":"w2R"}}}"#;
+  assert_eq!(herdr_pane_id(ws).as_deref(), Some("w2R:p1"));
+
+  // An error body names no pane, and neither does junk.
+  assert_eq!(herdr_pane_id(r#"{"error":{"message":"unknown workspace w9Z"}}"#), None);
+  assert_eq!(herdr_pane_id("not json"), None);
+}
+
+#[test]
+fn herdr_shell_is_idle_compares_the_foreground_group_to_the_shell() {
+  // The pane's shell owns the foreground process group exactly when nothing
+  // is running in it, which is prompt-independent — matching prompt text
+  // would break on every theme.
+  let idle = r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":84369,"foreground_processes":[{"argv":["-zsh"],"name":"zsh","pid":84369}],"pane_id":"w2K:p2C","shell_pid":84369},"type":"pane_process_info"}}"#;
+  assert!(herdr_shell_is_idle(idle));
+
+  // Still running its rc files: this is the state in which a typed line is
+  // swallowed by the rc output and never executes (measured on direnv+nix).
+  let busy = r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":84999,"pane_id":"w2K:p2C","shell_pid":84369},"type":"pane_process_info"}}"#;
+  assert!(!herdr_shell_is_idle(busy));
+
+  // Fail closed: an unreadable answer keeps the caller waiting rather than
+  // typing into a shell it knows nothing about.
+  assert!(!herdr_shell_is_idle(r#"{"error":{"message":"no such pane"}}"#));
+  assert!(!herdr_shell_is_idle("not json"));
+  assert!(!herdr_shell_is_idle(""));
+}
+
+#[test]
+fn herdr_run_takes_the_command_as_one_argument() {
+  // `herdr pane run` joins its `<COMMAND>...` argv with spaces and TYPES the
+  // result into the pane's interactive shell — it does not exec. Measured:
+  // `pane run <id> /bin/sh -c 'echo hi'` arrives as the text
+  // `/bin/sh -c echo hi`, where `sh` runs `echo` with `hi` as `$0` and prints
+  // an empty line. So the line goes in whole, already valid shell.
+  let argv = build_herdr_run_command("w2K:p2C", "codex resume s1 && echo done");
+  assert_eq!(
+    argv,
+    vec!["herdr", "pane", "run", "w2K:p2C", "codex resume s1 && echo done"]
+  );
+  assert_eq!(argv.len(), 5, "the line must stay ONE argument, got: {argv:?}");
+
+  assert_eq!(
+    build_herdr_process_info_command("w2K:p2C"),
+    vec!["herdr", "pane", "process-info", "--pane", "w2K:p2C"]
+  );
 }
