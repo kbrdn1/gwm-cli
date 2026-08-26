@@ -604,14 +604,12 @@ fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::styl
 }
 
 #[test]
-fn compact_headers_carry_the_focus_signal_in_a_solid_band() {
+fn compact_headers_carry_the_focus_signal_in_their_fill_not_their_text() {
   // Issue #545, unknown #1 — the one the issue calls the real half —
   // as issue #605 settled it. Without rules the focus signal lives on the
-  // header, in its *fill*: the focused pane's header is a solid
-  // `theme.focus` band carrying the section tone as its text, the inactive
-  // one is `accent` on that section tone. The two states swap the same
-  // pair rather than dimming one of them, so a pane's name stays legible
-  // while the pane is inactive, and neither is `muted`.
+  // header, in its *fill* and its weight, never in its colour: the text is
+  // `accent` on both panes so a pane's name stays legible while the pane
+  // is inactive, and `muted` is nowhere.
   //
   // Both panes are checked in both configurations because focus is
   // exclusive: `list_has_focus` is the negation of the sidebar's, so a
@@ -642,19 +640,19 @@ fn compact_headers_carry_the_focus_signal_in_a_solid_band() {
     };
 
     assert_eq!(
-      (focused.fg, focused.bg),
-      (Some(theme.section_bg), Some(theme.focus)),
-      "sidebar_focused={sidebar_focused}: the focused header is a solid focus band"
-    );
-    assert_eq!(
-      (inactive.fg, inactive.bg),
-      (Some(theme.accent), Some(theme.section_bg)),
-      "sidebar_focused={sidebar_focused}: the inactive one is accent on the section band"
+      (focused.fg, inactive.fg),
+      (Some(theme.accent), Some(theme.accent)),
+      "sidebar_focused={sidebar_focused}: neither header repaints its text on focus"
     );
     assert_ne!(
       inactive.fg,
       Some(theme.muted),
       "sidebar_focused={sidebar_focused}: an inactive pane's name is not dimmed"
+    );
+    assert_eq!(
+      (focused.bg, inactive.bg),
+      (Some(gwm::tui::compact_header_fill(&theme)), Some(theme.section_bg)),
+      "sidebar_focused={sidebar_focused}: the fill is what tells the two apart"
     );
     assert!(
       focused.add_modifier.contains(ratatui::style::Modifier::BOLD),
@@ -726,9 +724,9 @@ fn bg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::styl
 fn compact_header_fill_follows_the_focus_too() {
   // Validation feedback on PR #546: moving the focus signal onto the
   // header *text* alone did not read at a glance. The fill carries it —
-  // and since #605 it carries it alone, so it is a solid `theme.focus`
-  // band on the focused pane rather than the `selection_bg` it used to
-  // be: that pair sat 14 grey levels apart on `claude-dark` and read as a
+  // and since #605 it carries it alone, so it is a tinted focus band on
+  // the focused pane rather than the `selection_bg` it used to be: that
+  // pair sat 14 grey levels apart on `claude-dark` and read as a
   // permutation of grey rather than as a place. `section_bg` elsewhere,
   // unchanged.
   let dir = repo_with_commits(4);
@@ -747,15 +745,17 @@ fn compact_header_fill_follows_the_focus_too() {
     )
   };
 
+  let band = gwm::tui::compact_header_fill(&theme);
+
   let (worktrees, status) = fills_when(true);
-  assert_eq!(status, theme.focus, "focused sidebar header takes the loud fill");
+  assert_eq!(status, band, "focused sidebar header takes the coloured fill");
   assert_eq!(worktrees, theme.section_bg, "the unfocused pane keeps the quiet one");
 
   let (worktrees, status) = fills_when(false);
-  assert_eq!(worktrees, theme.focus, "the fill follows focus to the list");
+  assert_eq!(worktrees, band, "the fill follows focus to the list");
   assert_eq!(status, theme.section_bg, "and leaves the sidebar quiet");
   assert_ne!(
-    theme.focus, theme.selection_bg,
+    band, theme.selection_bg,
     "and it is not the cursor row's background, which the header used to borrow"
   );
 }
