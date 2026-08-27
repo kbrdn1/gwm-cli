@@ -1119,6 +1119,17 @@ pub struct CommitRow {
   pub author: String,
   pub parents: Vec<git2::Oid>,
   pub subject: String,
+  /// Commit time, Unix seconds, as git recorded it.
+  ///
+  /// Kept raw rather than as a `Duration` since now: the rows are memoised
+  /// by `(repo, tip, limit)`, so a pre-computed age would be frozen at the
+  /// first read and every later cache hit would serve it. The age is
+  /// derived at render time from this instead.
+  ///
+  /// It can be AHEAD of the local clock — skew, a rewritten history, a
+  /// rebase preserving author dates — so any subtraction against `now`
+  /// saturates at zero rather than underflowing.
+  pub time: i64,
 }
 
 /// Return recent commits for the sidebar using libgit2. This is the uncached
@@ -1193,6 +1204,7 @@ fn recent_commits_revwalk(repo: &Repository, tip: git2::Oid, limit: usize) -> Re
       author: commit.author().name().unwrap_or("").to_string(),
       parents: commit.parent_ids().collect(),
       subject: commit.summary().ok().flatten().unwrap_or("").to_string(),
+      time: commit.time().seconds(),
     });
   }
   Ok(rows)
@@ -1224,6 +1236,7 @@ fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
       author,
       parents,
       subject,
+      time: 0,
     });
   }
   Ok(rows)
@@ -1642,6 +1655,26 @@ pub fn branch_age(repo: &Repository, branch: &str) -> Option<Duration> {
 /// from lazygit: single-character suffix, no plural, capital `M` to
 /// disambiguate from minutes. Bounded at 4 chars for two-digit values in
 /// each unit, which is enough for any realistic branch age.
+/// Age of a commit timestamp against `now`, both in Unix seconds.
+///
+/// Saturates at zero: a commit can be dated in the future (clock skew, a
+/// rewritten history, a rebase that preserved author dates), and the naive
+/// subtraction would underflow into "55 thousand years ago". Zero renders
+/// as `0s`, which reads as "just now" — the least wrong thing to say about
+/// a timestamp the local clock has not reached.
+pub fn commit_age(commit_time: i64, now: i64) -> Duration {
+  Duration::from_secs(now.saturating_sub(commit_time).max(0) as u64)
+}
+
+/// Unix seconds now, or 0 if the system clock predates the epoch. Never
+/// panics: this feeds a user-facing render path.
+pub fn unix_now() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs() as i64)
+    .unwrap_or(0)
+}
+
 pub fn format_relative_duration(d: Duration) -> String {
   const MINUTE: u64 = 60;
   const HOUR: u64 = 60 * MINUTE;
