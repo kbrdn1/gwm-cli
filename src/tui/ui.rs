@@ -3001,6 +3001,12 @@ impl HintContext {
         // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        // #593: reading the log and the checks is the same register as
+        // launching lazygit, and both keys mean this in either pane — so
+        // the worktrees footer advertises the pair the status footer does,
+        // ahead of the verbs that are reached less often.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
         // #515: the note is written far more often than a review is
