@@ -37,10 +37,10 @@
 use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
+use crate::tui::state::commits::CommitsSnapshot;
 use crate::tui::state::sidebar::SidebarMode;
 use crate::tui::ui::SidebarSections;
 use crate::worktree::WorktreeInfo;
-use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -403,13 +403,14 @@ pub enum TaskMsg {
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
   /// Commit-listing snapshot (issue #593): the generation, the worktree
-  /// `path` and the `limit` it was read at, the rendered graph rows, and
-  /// the commit count they describe (which is NOT `lines.len()` — the
-  /// empty and error cases paint one sentinel row).
+  /// `path` and the `limit` it was read at, and everything that read
+  /// produced: the rendered graph rows, the commit count they describe
+  /// (NOT `lines.len()` — the empty and error cases paint one sentinel
+  /// row), and the two right-hand metadata columns.
   /// The drain hands the rows to `CommitsModal::load`; a result for a path
   /// the user has navigated away from, or for a limit the overlay has since
   /// paged past, is dropped.
-  Commits(u64, PathBuf, usize, Vec<Line<'static>>, usize),
+  Commits(u64, PathBuf, usize, CommitsSnapshot),
   /// An agent-session detection result (issue #408): the worker's generation
   /// and the per-worktree-path summary. The drain replaces the app snapshot
   /// atomically; a superseded late result is dropped by

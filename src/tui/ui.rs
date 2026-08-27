@@ -2,6 +2,7 @@ use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
+use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
@@ -2201,45 +2202,120 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
-  recent_commits_listing(w, limit, theme).0
+  // The sidebar pane paints rows only, so the metadata columns it never
+  // shows are built and dropped. Cheap next to the revwalk that precedes
+  // them, and one listing routine is one place for the row format to live.
+  recent_commits_listing(w, limit, worktree::unix_now(), theme).lines
 }
 
-/// As [`recent_commits_lines`], plus the number of commits the rows
-/// describe.
+/// Gap, in cells, between the commit subject and the metadata column.
+pub const COMMITS_META_GAP: usize = 2;
+
+/// Cells the subject must keep for the metadata column to be worth showing.
 ///
-/// The two are not the same number and the difference is not cosmetic: an
+/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
+/// topology), so what the left side needs cannot be derived from a
+/// constant: the policy is stated as a floor on what survives instead. A
+/// merge-heavy history at 80 columns would otherwise leave a subject of ten
+/// cells to buy an author column, which is a worse listing than no column.
+pub const COMMITS_SUBJECT_FLOOR: usize = 30;
+
+/// Pick the widest metadata column that leaves the subject its floor.
+///
+/// `body_w` is the text area AFTER the scrollbar column is reserved.
+/// Returns the chosen column's width, or `None` when even the narrow one
+/// does not fit and the listing renders full-width as it did before.
+///
+/// A pure function on three widths so the policy is testable without a
+/// terminal: the render path only decides which `MetaColumn` this names.
+pub fn commits_meta_pick(body_w: usize, wide: usize, narrow: usize) -> Option<usize> {
+  [wide, narrow]
+    .into_iter()
+    .find(|&w| w > 0 && body_w >= w + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR)
+}
+
+/// Build the two right-hand metadata columns for a commit listing.
+///
+/// `wide` carries `author · age`, `narrow` the age alone — the initials are
+/// already on the left, so the full author is the second tier of
+/// information, not the first. The age is what the listing genuinely lacks
+/// today.
+///
+/// Ages are computed against `now` HERE, not stored on the row: the rows
+/// are memoised by `(repo, tip, limit)`, so an age baked into them would be
+/// frozen at the first read. They are still a snapshot in the sense that
+/// the overlay does not re-read itself while open, so a listing left up for
+/// an hour keeps saying `2m`.
+pub fn commit_meta_columns(rows: &[worktree::CommitRow], now: i64, theme: &Theme) -> (MetaColumn, MetaColumn) {
+  let mut wide = MetaColumn::default();
+  let mut narrow = MetaColumn::default();
+  for row in rows {
+    let age = worktree::format_relative_duration(worktree::commit_age(row.time, now));
+    let age_style = Style::default().fg(freshness_color(worktree::commit_age(row.time, now), theme));
+    let author = row.author.trim();
+
+    narrow.width = narrow.width.max(cells(&age));
+    narrow.lines.push(Line::from(Span::styled(age.clone(), age_style)));
+
+    let wide_line = if author.is_empty() {
+      Line::from(Span::styled(age.clone(), age_style))
+    } else {
+      Line::from(vec![
+        Span::styled(author.to_string(), Style::default().fg(theme.muted)),
+        Span::styled(" · ".to_string(), Style::default().fg(theme.muted)),
+        Span::styled(age.clone(), age_style),
+      ])
+    };
+    wide.width = wide.width.max(wide_line.width());
+    wide.lines.push(wide_line);
+  }
+  (wide, narrow)
+}
+
+/// The full result of one read of the log: the rows, the commit count, and
+/// the two right-hand metadata columns.
+///
+/// The count is not `lines.len()` and the difference is not cosmetic: an
 /// unborn HEAD, an empty history or a failed read all paint exactly ONE
-/// sentinel row, so a caller inferring the count from `lines.len()` reads
-/// them as a repository with one commit (Codex review, PR #614). The
+/// sentinel row, so a caller inferring the count from the rows reads them
+/// as a repository with one commit (Codex review, PR #614). The
 /// commit-listing overlay (issue #593) titles itself with this count and
-/// decides whether a page is full from it, so it needs the real one; the
-/// sidebar pane only paints rows and keeps the thinner entry point.
-pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, theme: &Theme) -> (Vec<Line<'static>>, usize) {
+/// decides whether a page is full from it.
+///
+/// `now` is passed in rather than read here so the ages are deterministic
+/// under test.
+pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, now: i64, theme: &Theme) -> CommitsSnapshot {
   match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
-      let count = rows.len();
+      let loaded = rows.len();
+      let (wide, narrow) = commit_meta_columns(&rows, now, theme);
       let graphs = super::commit_graph::render_commits(&rows, theme);
       let lines = rows
         .into_iter()
         .zip(graphs)
         .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
         .collect();
-      (lines, count)
+      CommitsSnapshot {
+        lines,
+        loaded,
+        wide,
+        narrow,
+      }
     }
-    Ok(_) => (
-      vec![Line::from(Span::styled(
+    Ok(_) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
         "(no commits)".to_string(),
         Style::default().fg(theme.muted),
       ))],
-      0,
-    ),
-    Err(e) => (
-      vec![Line::from(Span::styled(
+      ..Default::default()
+    },
+    Err(e) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
         format!("! {}", e),
         Style::default().fg(theme.prunable),
       ))],
-      0,
-    ),
+      ..Default::default()
+    },
   }
 }
 
@@ -2947,8 +3023,10 @@ impl HintContext {
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
-        // #436: `c` routes to the CI checks overlay in this context.
-        Hint::Key(EditWorktree, "ci checks"),
+        // #593: `c` / `C` mean the same thing in both panes — this one's
+        // own content at full size, and the linked PR's checks.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -4550,7 +4628,41 @@ fn draw_commits(f: &mut Frame, app: &mut App) {
   app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
   let scroll = app.commits.scroll;
   let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
-  f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area);
+
+  // The metadata rides its own rect on the right rather than being appended
+  // to each row: the subject is deliberately hard-clipped without an
+  // ellipsis (lazygit's gocui behaviour, documented on
+  // `recent_commits_lines` and shared with the sidebar pane), so narrowing
+  // the left rect IS that same rule applied at a nearer edge. Both
+  // paragraphs take the same scroll offset, so the columns stay aligned.
+  let meta = commits_meta_pick(
+    text_area.width as usize,
+    app.commits.wide.width,
+    app.commits.narrow.width,
+  );
+
+  match meta {
+    Some(meta_w) => {
+      let meta_w = meta_w as u16;
+      let column = if meta_w as usize == app.commits.wide.width {
+        &app.commits.wide
+      } else {
+        &app.commits.narrow
+      };
+      let [left, _gap, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(COMMITS_META_GAP as u16),
+        Constraint::Length(meta_w),
+      ])
+      .areas(text_area);
+      f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), left);
+      f.render_widget(
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        right,
+      );
+    }
+    None => f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area),
+  }
 
   let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
@@ -7637,22 +7749,14 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
     // #436: advertise the key that opens the CI checks overlay right after
-    // the indicator, resolved live so a rebind shows through. The key is
-    // context-accurate (Codex review #455): the contextual `c`
-    // (EditWorktree's chord) only while the status pane holds the focus —
-    // in the worktrees context that key opens the rename modal, so the
-    // global `ci_checks` binding is advertised instead. An unbound
-    // EditWorktree falls back to the global binding (still live in that
-    // context); only when both are unbound does the suffix disappear. In
-    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
-    // printable keys feed the filter — so no key is advertised at all.
+    // the indicator, resolved live so a rebind shows through. Since #593
+    // that key is `ci_checks` in every context — the pane-dependent form
+    // this used to take existed only because the status pane borrowed
+    // `c`, and `c` now means the commit listing in both panes. In picker
+    // mode (`gwm switch`) run_action drops Action::CiChecks — printable
+    // keys feed the filter — so no key is advertised at all.
     let ci_key = if app.picker_mode {
       None
-    } else if app.sidebar.open && app.sidebar.focused {
-      app
-        .keymap
-        .primary_chord(Action::EditWorktree)
-        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
     } else {
       app.keymap.primary_chord(Action::CiChecks)
     };

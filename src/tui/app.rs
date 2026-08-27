@@ -2201,7 +2201,7 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
-        TaskMsg::Commits(generation, path, limit, lines, loaded) => {
+        TaskMsg::Commits(generation, path, limit, snap) => {
           if !self.tasks.complete(TaskKind::Commits, generation) {
             continue;
           }
@@ -2212,7 +2212,7 @@ impl App {
           if self.commits.path.as_deref() != Some(path.as_path()) || self.commits.limit != limit {
             continue;
           }
-          self.commits.load(lines, loaded);
+          self.commits.load(snap);
           applied = true;
         }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
@@ -2995,8 +2995,8 @@ impl App {
     let theme = self.theme;
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let (lines, loaded) = crate::tui::ui::recent_commits_listing(&w, limit, &theme);
-      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, lines, loaded));
+      let snap = crate::tui::ui::recent_commits_listing(&w, limit, crate::worktree::unix_now(), &theme);
+      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, snap));
     });
   }
 
@@ -3908,23 +3908,6 @@ impl App {
       if let Some(n) = self.github.link.pr {
         self.spawn_github_pr_threads(n);
       }
-    }
-  }
-
-  /// Contextual KEY routing (issue #436) — same mechanism that turns
-  /// `j` / `k` into sidebar scroll: while the status pane holds the
-  /// focus, the `c` keystroke (EditWorktree) opens the CI checks
-  /// overlay instead of the rename modal. Applied by the event loop on
-  /// the **key path only** (Codex review #455): the command palette
-  /// dispatches actions by their NAME, so its `edit-worktree` entry
-  /// must stay a rename in every context (a dedicated `ci-checks`
-  /// entry already exists there). Pure, so the contract is pinned
-  /// without an event loop.
-  pub fn resolve_contextual_action(&self, action: Action) -> Action {
-    if action == Action::EditWorktree && self.sidebar.open && self.sidebar.focused {
-      Action::CiChecks
-    } else {
-      action
     }
   }
 

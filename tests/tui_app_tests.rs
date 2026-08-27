@@ -3487,31 +3487,32 @@ fn pr_line_ci_hint_follows_the_focus_context() {
       .collect()
   };
 
-  app.focus_worktrees();
-  let unfocused = text_of(&app);
-  assert!(
-    unfocused.contains("10/10 [C]"),
-    "worktrees focus advertises the global ci_checks binding: {unfocused}"
-  );
+  // #593: `C` opens the checks in both panes, so the badge no longer
+  // changes under the focus. The pane-dependent form it used to take
+  // existed only because the status pane borrowed `c` for the checks.
+  for focus_status in [false, true] {
+    if focus_status {
+      app.focus_status();
+    } else {
+      app.focus_worktrees();
+    }
+    let text = text_of(&app);
+    assert!(
+      text.contains("10/10 [C]"),
+      "the ci_checks binding is advertised in both panes (status focus = {focus_status}): {text}"
+    );
+  }
 
-  app.focus_status();
-  let focused = text_of(&app);
-  assert!(
-    focused.contains("10/10 [c]"),
-    "status focus advertises the contextual c: {focused}"
-  );
-
-  // Codex review #455 (P2): with `edit_worktree` explicitly unbound the
-  // contextual key is gone, but the global `ci_checks` binding still opens
-  // the overlay — advertise it instead of dropping the hint entirely.
+  // With `ci_checks` explicitly unbound there is no key to advertise and
+  // the suffix disappears rather than naming a phantom one.
   app
     .keymap
-    .apply_override(gwm::tui::keymap::Action::EditWorktree, vec![])
+    .apply_override(gwm::tui::keymap::Action::CiChecks, vec![])
     .unwrap();
   let unbound = text_of(&app);
   assert!(
-    unbound.contains("10/10 [C]"),
-    "unbound edit_worktree falls back to the global ci_checks key: {unbound}"
+    unbound.contains("10/10") && !unbound.contains("10/10 ["),
+    "an unbound ci_checks drops the key suffix: {unbound}"
   );
 }
 
@@ -3640,7 +3641,7 @@ fn ci_filter_enter_on_a_urlless_check_leaves_the_filter_and_signals_it() {
 }
 
 #[test]
-fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
+fn the_ci_overlay_opens_from_the_status_pane() {
   // Issue #436: `c` is contextual, same dispatch mechanism that turns j/k
   // into sidebar scroll — worktrees context keeps the rename modal, status
   // context opens the CI checks overlay.
@@ -3669,31 +3670,9 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
     detail: Default::default(),
   }));
 
-  // Codex review on PR #455: the contextual routing lives on the KEY path
-  // only — a pure pre-resolution the event loop applies before run_action.
-  // The palette's `edit-worktree` entry must stay a rename everywhere, so
-  // accept_command_palette returns the action unresolved.
-  use gwm::tui::keymap::Action;
-  app.focus_status();
-  assert_eq!(
-    app.resolve_contextual_action(Action::EditWorktree),
-    Action::CiChecks,
-    "status focus routes the edit-worktree KEY to the CI overlay"
-  );
-  assert_eq!(
-    app.resolve_contextual_action(Action::Down),
-    Action::Down,
-    "other actions pass through untouched"
-  );
-
-  app.focus_worktrees();
-  assert_eq!(
-    app.resolve_contextual_action(Action::EditWorktree),
-    Action::EditWorktree,
-    "worktrees context keeps the rename on c"
-  );
-
-  // The resolved CiChecks action opens the overlay as before.
+  // #593 replaced the #436 contextual routing: `c` and `C` mean the same
+  // thing in both panes now, so there is nothing left to re-resolve under
+  // the focus, and `enter_ci_checks` is reached the same way from either.
   app.focus_status();
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
@@ -15389,21 +15368,115 @@ fn the_count_is_commits_not_rendered_rows() {
   git2::Repository::init(dir.path()).unwrap();
   let w = worktree_pointing_at_dir(dir.path());
 
-  let (lines, count) = recent_commits_listing(&w, 10, &Theme::default());
-  assert_eq!(count, 0, "an unborn HEAD has no commits");
-  assert_eq!(lines.len(), 1, "but it still paints one sentinel row");
+  let snap = recent_commits_listing(&w, 10, 0, &Theme::default());
+  assert_eq!(snap.loaded, 0, "an unborn HEAD has no commits");
+  assert_eq!(snap.lines.len(), 1, "but it still paints one sentinel row");
+  assert!(snap.wide.lines.is_empty(), "and a sentinel carries no metadata column");
 }
 
 #[test]
 fn a_sentinel_row_is_not_a_full_page() {
   // The consequence that matters: a sentinel counted as a row would make
   // `loaded >= limit` true at limit 1 and offer a page that does not exist.
-  use gwm::tui::CommitsModal;
+  use gwm::tui::{CommitsModal, CommitsSnapshot};
   let mut m = CommitsModal::new();
   m.begin(Some(std::path::Path::new("/tmp/x")), 1, None);
-  m.load(vec![ratatui::text::Line::from("! unborn HEAD")], 0);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("! unborn HEAD")],
+    loaded: 0,
+    ..Default::default()
+  });
   assert_eq!(m.loaded, 0, "the sentinel is a row, not a commit");
   assert!(!m.can_load_more(), "and an empty history has no deeper page");
+}
+
+#[test]
+fn a_commit_dated_in_the_future_reads_as_just_now() {
+  // A commit time can be AHEAD of the local clock: skew, a rewritten
+  // history, a rebase that preserved author dates. The naive subtraction
+  // underflows into "55 thousand years"; saturating at zero renders `0s`,
+  // which is the least wrong thing to say about a timestamp we have not
+  // reached. No panic either, and this is a render path.
+  use gwm::worktree::{commit_age, format_relative_duration};
+  let now = 1_000_000i64;
+  assert_eq!(commit_age(now + 3600, now).as_secs(), 0, "the future saturates");
+  assert_eq!(format_relative_duration(commit_age(now + 3600, now)), "0s");
+  assert_eq!(commit_age(now - 3600, now).as_secs(), 3600, "the past is unaffected");
+}
+
+#[test]
+fn the_metadata_column_only_takes_room_the_subject_can_spare() {
+  // The graph is variable-width, so what the left side needs cannot be a
+  // constant — the policy is a floor on what survives instead. A
+  // merge-heavy history at 80 columns would otherwise buy an author column
+  // with a ten-cell subject, which is a worse listing than no column.
+  use gwm::tui::{commits_meta_pick, COMMITS_META_GAP, COMMITS_SUBJECT_FLOOR};
+  let (wide, narrow) = (20usize, 4usize);
+
+  let room_for_wide = wide + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
+  assert_eq!(commits_meta_pick(room_for_wide, wide, narrow), Some(wide));
+  assert_eq!(
+    commits_meta_pick(room_for_wide - 1, wide, narrow),
+    Some(narrow),
+    "one cell short of the wide column falls back to the narrow one"
+  );
+
+  let room_for_narrow = narrow + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
+  assert_eq!(commits_meta_pick(room_for_narrow, wide, narrow), Some(narrow));
+  assert_eq!(
+    commits_meta_pick(room_for_narrow - 1, wide, narrow),
+    None,
+    "below the floor the listing keeps the whole width"
+  );
+
+  assert_eq!(
+    commits_meta_pick(500, 0, 0),
+    None,
+    "a sentinel row carries no column, however wide the terminal"
+  );
+}
+
+#[test]
+fn the_metadata_columns_carry_the_author_and_the_age() {
+  // `wide` is `author · age`, `narrow` the age alone: the initials are
+  // already on the left, so the full author is the second tier of
+  // information and the age is the first — it is what the listing lacks.
+  use gwm::tui::commit_meta_columns;
+  use gwm::worktree::CommitRow;
+  let now = 1_000_000i64;
+  let row = CommitRow {
+    hash: git2::Oid::ZERO_SHA1,
+    author: "Kylian Bardini".into(),
+    parents: vec![],
+    subject: "whatever".into(),
+    time: now - 3 * 86_400,
+  };
+  let (wide, narrow) = commit_meta_columns(&[row], now, &Theme::default());
+
+  let text = |l: &ratatui::text::Line<'_>| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
+  assert_eq!(text(&wide.lines[0]), "Kylian Bardini · 3d");
+  assert_eq!(text(&narrow.lines[0]), "3d");
+  assert_eq!(wide.width, "Kylian Bardini · 3d".chars().count());
+  assert_eq!(narrow.width, 2);
+}
+
+#[test]
+fn an_authorless_commit_keeps_the_age_alone() {
+  // The `git log` fallback parser can yield an empty author, and a
+  // dangling ` · ` separator with nothing before it reads as a bug.
+  use gwm::tui::commit_meta_columns;
+  use gwm::worktree::CommitRow;
+  let now = 1_000_000i64;
+  let row = CommitRow {
+    hash: git2::Oid::ZERO_SHA1,
+    author: "   ".into(),
+    parents: vec![],
+    subject: String::new(),
+    time: now - 60,
+  };
+  let (wide, _) = commit_meta_columns(&[row], now, &Theme::default());
+  let text: String = wide.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  assert_eq!(text, "1m", "no author, no separator");
 }
 
 #[test]
@@ -15411,10 +15484,14 @@ fn paging_stops_at_the_cap() {
   // #593 notes the memo in `recent_commits_cached` is keyed on the limit
   // and evicts an arbitrary entry when full, so unbounded paging would push
   // other worktrees' sidebar entries out. The cap is what bounds it.
-  use gwm::tui::{CommitsModal, COMMITS_MAX, COMMITS_PAGE};
+  use gwm::tui::{CommitsModal, CommitsSnapshot, COMMITS_MAX, COMMITS_PAGE};
   let mut m = CommitsModal::new();
   m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_MAX, None);
-  m.load(vec![ratatui::text::Line::from("x"); COMMITS_MAX], COMMITS_MAX);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); COMMITS_MAX],
+    loaded: COMMITS_MAX,
+    ..Default::default()
+  });
 
   assert!(!m.can_load_more(), "the cap is a hard stop even on a full page");
 
@@ -15424,7 +15501,11 @@ fn paging_stops_at_the_cap() {
   // And the cap leaves room for more than the first page, or load-more
   // would be dead on arrival.
   m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_PAGE, None);
-  m.load(vec![ratatui::text::Line::from("x"); COMMITS_PAGE], COMMITS_PAGE);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); COMMITS_PAGE],
+    loaded: COMMITS_PAGE,
+    ..Default::default()
+  });
   assert!(m.can_load_more(), "a full first page is under the cap");
 }
 
@@ -15433,11 +15514,15 @@ fn a_deeper_page_keeps_the_scroll_position() {
   // The user pages from the bottom of the list. Rewinding to the top there
   // would throw away the position they paged from — unlike a fresh open,
   // which does rewind.
-  use gwm::tui::CommitsModal;
+  use gwm::tui::{CommitsModal, CommitsSnapshot};
   let path = std::path::Path::new("/tmp/x");
   let mut m = CommitsModal::new();
   m.begin(Some(path), 10, None);
-  m.load(vec![ratatui::text::Line::from("x"); 10], 10);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); 10],
+    loaded: 10,
+    ..Default::default()
+  });
   m.max_scroll = 8;
   m.scroll_to_bottom();
   assert_eq!(m.scroll, 8);
@@ -15445,7 +15530,11 @@ fn a_deeper_page_keeps_the_scroll_position() {
   m.begin_more(20);
   assert_eq!(m.scroll, 8, "arming a deeper page keeps the cursor and the rows");
   assert_eq!(m.lines.len(), 10, "the rows already read stay up while it loads");
-  m.load(vec![ratatui::text::Line::from("x"); 20], 20);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); 20],
+    loaded: 20,
+    ..Default::default()
+  });
   assert_eq!(m.scroll, 8, "and the payload does not rewind either");
 
   m.begin(Some(path), 20, None);

@@ -53,6 +53,35 @@ pub const COMMITS_PAGE: usize = RECENT_COMMITS_LIMIT;
 /// worktree keeps that well inside the budget.
 pub const COMMITS_MAX: usize = COMMITS_PAGE * 5;
 
+/// One right-hand metadata column: its rows and the width they need.
+///
+/// The width is measured once, when the column is built, so it cannot jump
+/// while the user scrolls: every row is padded to the same column.
+#[derive(Debug, Default, Clone)]
+pub struct MetaColumn {
+  pub lines: Vec<Line<'static>>,
+  pub width: usize,
+}
+
+/// Everything one read of the log produces, as it travels from the worker
+/// to the overlay.
+///
+/// One struct rather than a four-field message: the rows, their count and
+/// the two metadata columns are read together and installed together, and
+/// a caller that could install three of the four would be a bug waiting to
+/// happen.
+#[derive(Debug, Default)]
+pub struct CommitsSnapshot {
+  /// The graph rows, or a single sentinel row (empty history, load error).
+  pub lines: Vec<Line<'static>>,
+  /// Commits the rows describe. Zero for either sentinel.
+  pub loaded: usize,
+  /// `author · age` per row, shown when the subject keeps its floor.
+  pub wide: MetaColumn,
+  /// `age` per row, the fallback when `wide` does not fit.
+  pub narrow: MetaColumn,
+}
+
 /// Owned state for the full-size commit listing: the snapshotted graph
 /// rows, the limit they were read at, and the scroll cursor with its
 /// renderer-published bound.
@@ -69,6 +98,10 @@ pub struct CommitsModal {
   /// would read as a repository with one commit (Codex review, PR #614).
   /// [`super::super::ui::recent_commits_listing`] carries the real number.
   pub loaded: usize,
+  /// `author · age` per row, shown when the subject keeps its floor.
+  pub wide: MetaColumn,
+  /// `age` per row, the fallback when `wide` does not fit.
+  pub narrow: MetaColumn,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
   /// Maximum vertical scroll offset, republished by the renderer each
@@ -103,6 +136,8 @@ impl CommitsModal {
   /// fresh and a stale listing is never mistaken for the current one.
   pub fn begin(&mut self, path: Option<&Path>, limit: usize, head: Option<String>) {
     self.lines.clear();
+    self.wide = MetaColumn::default();
+    self.narrow = MetaColumn::default();
     self.loaded = 0;
     self.limit = limit;
     self.scroll = 0;
@@ -126,9 +161,11 @@ impl CommitsModal {
   /// commit count the read reported, not `lines.len()`. The scroll cursor
   /// is whatever [`Self::begin`] (top) or [`Self::begin_more`] (unchanged)
   /// left; the renderer re-clamps it against the new content.
-  pub fn load(&mut self, lines: Vec<Line<'static>>, loaded: usize) {
-    self.loaded = loaded;
-    self.lines = lines;
+  pub fn load(&mut self, snap: CommitsSnapshot) {
+    self.loaded = snap.loaded;
+    self.lines = snap.lines;
+    self.wide = snap.wide;
+    self.narrow = snap.narrow;
     self.loading = false;
   }
 
