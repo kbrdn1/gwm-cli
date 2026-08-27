@@ -320,7 +320,7 @@ define_modal_actions! {
     CommandLogsScrollBottom => "scroll_bottom" [ "End", "G" ],
   }
   Commits {
-    CommitsClose        => "close"         [ "Esc", "q" ],
+    CommitsClose        => "close"         [ "Esc", "q", "c" ],
     CommitsLoadMore     => "load_more"     [ "m" ],
     CommitsScrollDown   => "scroll_down"   [ "Down", "j" ],
     CommitsScrollUp     => "scroll_up"     [ "Up", "k" ],

@@ -162,12 +162,40 @@ fn digit_keys_dispatch_pane_focus_actions() {
 }
 
 #[test]
-fn the_sixth_digit_opens_the_commit_listing() {
-  // Issue #593: `6` continues the "numbers open panels" family (`3` command
-  // logs, `4` settings). Pinned here because the chord is what the docs,
-  // the help overlay and the footer all advertise.
+fn the_commit_and_check_keys_mean_the_same_in_both_panes() {
+  // Issue #593: `c` opens the commit listing, `C` the CI checks, and
+  // neither changes meaning under the focus. That uniformity is the whole
+  // point of the rebind: it replaced the #436 contextual routing, which
+  // gave the status pane its own `c`. It displaced the rename onto `e`,
+  // the letter that names it, and `exit_to_worktree` onto `E`.
   let (_dir, mut app) = make_app();
-  assert_eq!(app.dispatch_key(press('6')), Some(Action::Commits));
+  for focus_status in [false, true] {
+    if focus_status {
+      app.focus_status();
+    } else {
+      app.focus_worktrees();
+    }
+    assert_eq!(
+      app.dispatch_key(press('c')),
+      Some(Action::Commits),
+      "c is the commit listing (status focus = {focus_status})"
+    );
+    assert_eq!(
+      app.dispatch_key(press_shift_upper('C')),
+      Some(Action::CiChecks),
+      "C is the CI checks (status focus = {focus_status})"
+    );
+    assert_eq!(
+      app.dispatch_key(press('e')),
+      Some(Action::EditWorktree),
+      "the rename took the letter that names it (status focus = {focus_status})"
+    );
+    assert_eq!(
+      app.dispatch_key(press_shift_upper('E')),
+      Some(Action::ExitToWorktree),
+      "and the exit took the shifted one (status focus = {focus_status})"
+    );
+  }
 }
 
 #[test]

@@ -54,10 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the status bar, since resuming it in a second pane while it runs elsewhere
   may fork or refuse depending on the tool.
 
-- **`6` opens the commit listing full size, with load-more**
+- **`c` opens the commit listing full size, with load-more**
   ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)). The sidebar's
   Commits pane is a fraction of a sidebar shared with four other blocks, and
-  it stops at 300 commits: seeing further meant leaving gwm for lazygit. `6`
+  it stops at 300 commits: seeing further meant leaving gwm for lazygit. `c`
   now paints the same graph on the whole canvas, and `m` re-reads one page
   deeper, up to 1500 commits, so history is paged rather than capped. The
   title carries the row count and a trailing `+` while a deeper page exists;
@@ -71,6 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is only rebuilt while the sidebar is open and in `commits` mode, so
   the overlay works with the sidebar hidden or showing stashes. Scroll is
   `j`/`k`, `g`/`G`, all rebindable under `[tui.keys.modal.commits]`.
+
+  Each row carries the author and the commit age on its right, coloured by
+  freshness, which is what the hash / initials / subject columns do not say.
+  The column is dropped when the subject cannot spare the room: it narrows
+  to the age alone first, then disappears, so a narrow terminal keeps a
+  readable subject instead of buying a column with it.
 
 - **Two settings for what a mux spawn opens, and where**
   ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
@@ -196,6 +202,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
 ### Changed
+
+- **`c` and `C` now mean the same thing in both panes, which moved three
+  bindings** ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)).
+  `c` opens the commit listing and `C` the CI checks, in the worktrees pane
+  and in the status pane alike. A key that changes meaning under the focus
+  is a key you have to think about, so:
+
+  | Action | Was | Now |
+  |:---|:---|:---|
+  | `commits` | (new) | `c` |
+  | `ci_checks` | `C`, plus a contextual `c` on the status pane | `C` everywhere |
+  | `edit_worktree` (rename) | `c` | `e` |
+  | `exit_to_worktree` | `e` | `E` |
+
+  The contextual routing from
+  [#436](https://github.com/kbrdn1/gwm-cli/issues/436), which existed to give
+  the status pane its own `c` for the checks, is gone with it, and the PR
+  line's CI badge no longer changes between `[c]` and `[C]` under the focus.
+  Existing `[tui.keys]` overrides are untouched; only the defaults moved.
 
 - **The rich PR / issue view (`I`) had its design pass** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)). It was
   built to get the data on screen and had never been laid out; the compact
