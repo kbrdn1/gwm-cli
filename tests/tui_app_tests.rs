@@ -15555,6 +15555,17 @@ fn a_deeper_page_keeps_the_scroll_position() {
   assert!(m.lines.is_empty(), "and drops the previous listing");
 }
 
+/// Drain until the chained diff-stat read lands, or fail loudly.
+fn settle_commit_stats(app: &mut App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !app.commits.stats_loaded && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(app.commits.stats_loaded, "the chained stats read never landed");
+}
+
 #[test]
 fn the_stats_read_is_chained_after_the_rows_and_grows_the_column() {
   // Issue #593: the rows come from a ~0.4s revwalk, the diff counts from a
@@ -15568,13 +15579,7 @@ fn the_stats_read_is_chained_after_the_rows_and_grows_the_column() {
   let before = app.commits.tiers[1].width;
   assert!(!app.commits.stats_loaded, "the rows land without the stats");
 
-  use std::time::{Duration, Instant};
-  let deadline = Instant::now() + Duration::from_secs(20);
-  while !app.commits.stats_loaded && Instant::now() < deadline {
-    app.drain_task_results();
-    std::thread::sleep(Duration::from_millis(10));
-  }
-  assert!(app.commits.stats_loaded, "the chained stats read never landed");
+  settle_commit_stats(&mut app);
   assert!(
     app.commits.tiers[1].width > before,
     "the middle tier grew by the diff counts: {} -> {}",
@@ -15592,6 +15597,12 @@ fn a_stats_payload_for_another_listing_is_dropped() {
   let (_dir, mut app) = make_app();
   app.enter_commits();
   settle_commits(&mut app);
+  // Let the chained read this open fired land FIRST, then pretend it never
+  // did. Injecting while it is still in flight makes the assertion a race
+  // with a worker the test did not start: green locally, red on CI, which
+  // is exactly what happened.
+  settle_commit_stats(&mut app);
+  app.commits.stats_loaded = false;
 
   let fat = MetaColumn {
     lines: vec![ratatui::text::Line::from("XXXXXXXXXXXX")],
@@ -15599,7 +15610,10 @@ fn a_stats_payload_for_another_listing_is_dropped() {
   };
   let tiers = [fat.clone(), fat.clone(), fat];
   let path = app.commits.path.clone().unwrap();
-  let generation = app.tasks.request(TaskKind::CommitStats).unwrap_or(0);
+  let generation = app
+    .tasks
+    .request(TaskKind::CommitStats)
+    .expect("the chained read has landed, so the slot is free");
 
   // Right path, wrong limit — injected through the spine, the path a real
   // worker takes.
