@@ -25,8 +25,23 @@
 //! inner modal height.
 
 use super::super::ui::WorkingTreeCounts;
+use super::commits::MetaColumn;
 use ratatui::text::Line;
 use std::path::{Path, PathBuf};
+
+/// Everything one read of the working tree produces, as it travels from
+/// the worker to the overlay.
+///
+/// One struct rather than a three-field message, the shape the commit
+/// listing settled on (#593): the rows, their counts and the right-hand
+/// column come from one read and are installed together, so a caller able
+/// to install two of the three would be a bug waiting to happen.
+#[derive(Debug, Default)]
+pub struct WorkingTreeSnapshot {
+  pub lines: Vec<Line<'static>>,
+  pub counts: WorkingTreeCounts,
+  pub meta: MetaColumn,
+}
 
 /// Owned state for the full-size Working Tree overlay: the snapshotted
 /// file-explorer rows, their per-category counts, and the scroll cursor
@@ -40,11 +55,18 @@ pub struct WorkingTreeModal {
   /// Created / modified / deleted counts for the footer (issue #287),
   /// captured with the same `git status` read as [`Self::lines`].
   pub counts: WorkingTreeCounts,
+  /// The right-hand `+N -M` column, one entry per row so it scrolls at the
+  /// same offset as [`Self::lines`]. Empty on a row with no counts.
+  pub meta: MetaColumn,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
   /// Maximum vertical scroll offset, republished by the renderer each
   /// frame as `content_rows.saturating_sub(viewport_rows)`.
   pub max_scroll: u16,
+  /// Rows the body can show, republished by the renderer alongside
+  /// `max_scroll`. Only the renderer knows it, and the half-page verbs
+  /// need it to move by something the user can see.
+  pub viewport: u16,
   /// `true` between the open and the worker's payload. The renderer paints
   /// a loader rather than an empty canvas, which would read as "no changes".
   pub loading: bool,
@@ -66,6 +88,7 @@ impl WorkingTreeModal {
   pub fn begin(&mut self, path: Option<&Path>) {
     self.lines.clear();
     self.counts = WorkingTreeCounts::default();
+    self.meta = MetaColumn::default();
     self.scroll = 0;
     self.max_scroll = 0;
     self.path = path.map(Path::to_path_buf);
@@ -74,9 +97,10 @@ impl WorkingTreeModal {
   }
 
   /// Install the worker's payload and clear the loader.
-  pub fn load(&mut self, lines: Vec<Line<'static>>, counts: WorkingTreeCounts) {
-    self.lines = lines;
-    self.counts = counts;
+  pub fn load(&mut self, snap: WorkingTreeSnapshot) {
+    self.lines = snap.lines;
+    self.counts = snap.counts;
+    self.meta = snap.meta;
     self.scroll = 0;
     self.loading = false;
   }
@@ -89,6 +113,24 @@ impl WorkingTreeModal {
   /// Scroll up one row, never above the top.
   pub fn scroll_up(&mut self) {
     self.scroll = self.scroll.saturating_sub(1);
+  }
+
+  /// Scroll down half a screen (`D`), never past the last line.
+  ///
+  /// Half of what the body last showed, and never zero: a viewport the
+  /// renderer has not published yet (nothing drawn) would otherwise make
+  /// the key silently do nothing.
+  pub fn scroll_half_down(&mut self) {
+    self.scroll = self.scroll.saturating_add(self.half_page()).min(self.max_scroll);
+  }
+
+  /// Scroll up half a screen (`U`), never above the top.
+  pub fn scroll_half_up(&mut self) {
+    self.scroll = self.scroll.saturating_sub(self.half_page());
+  }
+
+  fn half_page(&self) -> u16 {
+    (self.viewport / 2).max(1)
   }
 
   /// Jump to the first row (`g`).

@@ -359,10 +359,26 @@ fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
   assert_eq!(
     labels,
     vec![
-      "new", "del", "mark", "boot", // lifecycle
-      "open", "git", "exec", "agents", "note", "review", "yank", // act on the selected worktree
-      "filter", "status", "logs", "settings", // find / navigate
-      "help", "quit", // global
+      "new",
+      "del",
+      "mark",
+      "boot", // lifecycle
+      // #593: `commits` / `ci checks` read the same in both footers.
+      "open",
+      "git",
+      "commits",
+      "ci checks",
+      "exec",
+      "agents",
+      "note",
+      "review",
+      "yank", // act on the selected worktree
+      "filter",
+      "status",
+      "logs",
+      "settings", // find / navigate
+      "help",
+      "quit", // global
     ],
     "worktrees footer hints must follow the grouped order (#453 re-audit: \
      exec and agent sessions joined the act family; clean / mux / macros \
@@ -384,7 +400,10 @@ fn status_hints_are_grouped_read_then_sidebar_then_navigate_then_global() {
       "scroll",
       "wt scroll", // #437: Working Tree pane scroll
       "fetch",     // read the status pane
-      "ci checks", // #436: `c` routes to the CI checks overlay here
+      // #593: this pane's own content at full size, then the linked PR's
+      // checks. The pair reads the same in the worktrees footer.
+      "commits",
+      "ci checks",
       "mode",
       "layout", // sidebar mode / layout
       "worktrees",

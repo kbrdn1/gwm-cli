@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read runs on a worker and the overlay opens on a loader, so a repository
   whose untracked walk is slow does not freeze the event loop on the
   keypress.
+
+  The right of each row says how many lines the file gained and lost
+  (`+120 -34`), from one `git diff` against `HEAD` in the same read, so
+  staged and unstaged changes are counted together. A directory, an untracked
+  file and a binary file carry no counts: the first has no diff of its own,
+  and for the other two git counts no lines. The column rides its own rect on
+  the right and is dropped whole on a terminal too narrow to keep it and a
+  readable file name, so the name is never what goes. `D` / `U` page the
+  listing by half a screen, and the key is advertised in both pane footers,
+  matching the commit listing (#593).
 - **`o` on the agents overlay resumes the session in the multiplexer**
   ([#591](https://github.com/kbrdn1/gwm-cli/issues/591)). The overlay told you
   which agent was working where and then left you to get there by hand. `a`
@@ -70,6 +80,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A session that has ended resumes without comment; a live one is flagged on
   the status bar, since resuming it in a second pane while it runs elsewhere
   may fork or refuse depending on the tool.
+
+- **`c` opens the commit listing full size, with load-more**
+  ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)). The sidebar's
+  Commits pane is a fraction of a sidebar shared with four other blocks, and
+  it stops at 300 commits: seeing further meant leaving gwm for lazygit. `c`
+  now paints the same graph on the whole canvas, and `m` re-reads one page
+  deeper, up to 1500 commits, so history is paged rather than capped. The
+  title carries the row count and a trailing `+` while a deeper page exists;
+  the `load more` hint disappears once the revwalk runs out of history or the
+  cap is reached, so the key is never advertised where it would do nothing.
+  The walk runs on a worker, never on the keypress: it sorts
+  `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph before it
+  yields a row and the limit bounds the output, not the latency. The overlay
+  opens on a loader and fills in when the read lands.
+  The rows are snapshotted at open rather than read from the sidebar cache,
+  which is only rebuilt while the sidebar is open and in `commits` mode, so
+  the overlay works with the sidebar hidden or showing stashes. Scroll is
+  `j`/`k`, `g`/`G`, all rebindable under `[tui.keys.modal.commits]`.
+
+  Each row carries, on its right, what the hash / initials / subject columns
+  do not say: the author, what the commit changed (`3~ 1+ 2- +120 -34`, in
+  the Working Tree pane's colours, empty categories omitted) and how long
+  ago it landed. Three tiers, picked on what the **subject** can spare
+  rather than on the terminal width, since the graph is as wide as the
+  branch topology makes it: `author · counts · age`, `counts · age`, the age
+  alone, nothing.
+
+  The counts arrive from a second, chained read, so the log is on screen
+  immediately and the column grows about a second later (up to three on the
+  deepest page). One `git log --raw --numstat` over the rows already shown
+  costs about a second where a `diff_tree_to_tree` per commit costs
+  thirty-three, measured. `--diff-merges=first-parent` is load-bearing:
+  without it `git log` says nothing at all about a merge, and this project
+  merges rather than squashes.
+
+  `D` / `U` scroll half a screen, matching the rich PR view.
 
 - **Two settings for what a mux spawn opens, and where**
   ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
@@ -195,6 +241,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
 ### Changed
+
+- **`c` and `C` now mean the same thing in both panes, which moved three
+  bindings** ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)).
+  `c` opens the commit listing and `C` the CI checks, in the worktrees pane
+  and in the status pane alike. A key that changes meaning under the focus
+  is a key you have to think about, so:
+
+  | Action | Was | Now |
+  |:---|:---|:---|
+  | `commits` | (new) | `c` |
+  | `ci_checks` | `C`, plus a contextual `c` on the status pane | `C` everywhere |
+  | `edit_worktree` (rename) | `c` | `e` |
+  | `exit_to_worktree` | `e` | `E` |
+
+  The contextual routing from
+  [#436](https://github.com/kbrdn1/gwm-cli/issues/436), which existed to give
+  the status pane its own `c` for the checks, is gone with it, and the PR
+  line's CI badge no longer changes between `[c]` and `[C]` under the focus.
+  Existing `[tui.keys]` overrides are untouched; only the defaults moved.
 
 - **The rich PR / issue view (`I`) had its design pass** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)). It was
   built to get the data on screen and had never been laid out; the compact
@@ -326,7 +391,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `≡` to the `nf-oct-markdown` glyph the Working Tree pane already paints
   on a `.md` file, since a note is one. The column stays conditional, so a
   user who never writes a note keeps the exact table they had before.
-
 
 ## Past releases
 

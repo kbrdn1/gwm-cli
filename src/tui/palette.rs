@@ -267,6 +267,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "show the working tree listing at full size",
     },
     PaletteEntry {
+      action: Action::Commits,
+      name: "commits",
+      description: "show the commit listing full size, with load-more",
+    },
+    PaletteEntry {
       action: Action::ExecOverlay,
       name: "exec",
       description: "pick an [exec.profiles] profile and run it in a PTY",

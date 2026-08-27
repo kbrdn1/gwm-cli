@@ -7,6 +7,7 @@ use super::state::async_task::{
 };
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
+use super::state::commits::{CommitsModal, COMMITS_PAGE};
 use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
@@ -152,6 +153,13 @@ pub enum View {
   /// at a time through `J` / `K`. Opened on `5`, scrolled like the help
   /// overlay; state lives on [`App::working_tree`].
   WorkingTree,
+  /// Full-size commit listing (issue #593). A ~90% fullscreen modal
+  /// showing the same graph the sidebar's Commits pane paints, given the
+  /// whole screen, plus a load-more key that re-reads at a deeper limit so
+  /// history is paged rather than capped at
+  /// [`super::ui::RECENT_COMMITS_LIMIT`]. Opened on `6`, scrolled like the
+  /// help overlay; state lives on [`App::commits`].
+  Commits,
   /// Configuration panel (issue #232). A ~90% fullscreen modal over a
   /// dimmed list showing the resolved `.gwm.toml` (user-level global
   /// deep-merged under the repo file) with a per-row source column
@@ -626,6 +634,11 @@ pub struct App {
   /// renders off `App` state rather than locking the global mid-frame.
   pub command_logs: CommandLogs,
 
+  /// Full-size commit listing overlay state (issue #593): the scroll
+  /// cursor plus the paged graph snapshot, filled by
+  /// [`Self::enter_commits`] and deepened by [`Self::load_more_commits`].
+  pub commits: CommitsModal,
+
   /// Configuration panel overlay state (issue #232): the scroll cursor
   /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
   pub config_panel: ConfigPanel,
@@ -917,6 +930,7 @@ impl App {
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
       working_tree: WorkingTreeModal::new(),
+      commits: CommitsModal::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
@@ -2226,7 +2240,7 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
-        TaskMsg::WorkingTree(generation, path, lines, counts) => {
+        TaskMsg::WorkingTree(generation, path, snap) => {
           if !self.tasks.complete(TaskKind::WorkingTree, generation) {
             continue;
           }
@@ -2236,7 +2250,45 @@ impl App {
           if self.working_tree.path.as_deref() != Some(path.as_path()) {
             continue;
           }
-          self.working_tree.load(lines, counts);
+          self.working_tree.load(snap);
+          applied = true;
+        }
+        TaskMsg::Commits(generation, path, limit, snap) => {
+          if !self.tasks.complete(TaskKind::Commits, generation) {
+            continue;
+          }
+          // Two ways this payload can be stale: the selection moved while
+          // the walk ran (or the overlay was closed and reopened elsewhere),
+          // and the overlay paged past the limit this result was read at.
+          // Both describe a listing the overlay is no longer showing.
+          if self.commits.path.as_deref() != Some(path.as_path()) || self.commits.limit != limit {
+            continue;
+          }
+          self.commits.load(snap);
+          // Chained here rather than from `enter_commits`: the oids to read
+          // are the ones that just landed, and the identity to read them
+          // for is whatever the overlay holds NOW — the user may have
+          // closed and reopened while the rows were in flight.
+          self.request_commit_stats();
+          applied = true;
+        }
+        TaskMsg::CommitStats(generation, path, limit, tip, tiers) => {
+          if !self.tasks.complete(TaskKind::CommitStats, generation) {
+            continue;
+          }
+          // Same three-part identity the rows are matched on. A payload
+          // that fails it describes a listing the overlay is no longer
+          // showing; dropping it is safe here because, unlike the rows,
+          // nothing is waiting on it — the columns already say author and
+          // age, and the next `request_commit_stats` covers the current
+          // listing.
+          if self.commits.path.as_deref() != Some(path.as_path())
+            || self.commits.limit != limit
+            || self.commits.head != tip
+          {
+            continue;
+          }
+          self.commits.load_stats(tiers);
           applied = true;
         }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
@@ -2835,6 +2887,8 @@ impl App {
       View::Config => self.pane_hint_context(),
       // Same for the full-size Working Tree listing (issue #592).
       View::WorkingTree => self.pane_hint_context(),
+      // Same for the full-size commit listing (issue #593).
+      View::Commits => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
       // #557: the note bar follows the mode. With the knob off there is no
@@ -3000,8 +3054,8 @@ impl App {
     let theme = self.theme;
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let (lines, counts) = crate::tui::ui::working_tree_lines(&w, &theme);
-      let _ = tx.send(TaskMsg::WorkingTree(generation, w.path, lines, counts));
+      let snap = crate::tui::ui::working_tree_listing(&w, &theme);
+      let _ = tx.send(TaskMsg::WorkingTree(generation, w.path, snap));
     });
   }
 
@@ -3109,11 +3163,188 @@ impl App {
       Some(ModalAction::WorkingTreeClose) => return true,
       Some(ModalAction::WorkingTreeScrollDown) => self.working_tree.scroll_down(),
       Some(ModalAction::WorkingTreeScrollUp) => self.working_tree.scroll_up(),
+      Some(ModalAction::WorkingTreeHalfDown) => self.working_tree.scroll_half_down(),
+      Some(ModalAction::WorkingTreeHalfUp) => self.working_tree.scroll_half_up(),
       Some(ModalAction::WorkingTreeScrollTop) => self.working_tree.scroll_to_top(),
       Some(ModalAction::WorkingTreeScrollBottom) => self.working_tree.scroll_to_bottom(),
       _ => {}
     }
     false
+  }
+
+  /// Open the full-size commit listing (issue #593).
+  ///
+  /// The overlay opens immediately on a loader and the revwalk runs on a
+  /// [`TaskKind::Commits`] worker. It is deliberately NOT inline: the walk
+  /// sorts `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph
+  /// before yielding a row. Measured on this repo, asking for 300 commits
+  /// costs the same as asking for all 2058 — the limit truncates the
+  /// output, it bounds nothing about the latency, so an inline call would
+  /// freeze the event loop for as long as the history is deep. Same
+  /// boundary as the sidebar's own preview (#343), reached from a keypress
+  /// rather than from navigation.
+  ///
+  /// The rows are read fresh rather than taken from `SidebarState::cache`:
+  /// that cache is keyed by `(path, mode)` and only rebuilt while the
+  /// sidebar is open and in commits mode, so it is empty in the two states
+  /// where the overlay is most useful. The read still goes through
+  /// [`crate::worktree::recent_commits_cached`] at [`COMMITS_PAGE`], which
+  /// is the sidebar's own limit, so a sidebar that already walked this tip
+  /// makes the worker a hash lookup.
+  ///
+  /// The tip comes from `WorktreeInfo.head`, the snapshot `worktree::list`
+  /// took at the last refresh, NOT from resolving HEAD here. A commit
+  /// landing between two refreshes is therefore invisible to the overlay
+  /// until the next one — which is exactly what the sidebar's Commits pane
+  /// shows, since it hands the same `WorktreeInfo` to the same memo
+  /// (`ui.rs`, `SidebarMode::Commits`). Resolving HEAD at open would make
+  /// the overlay disagree with the pane it is a full-size view of, and the
+  /// staleness window is one auto-refresh interval. Raised twice by Codex
+  /// on PR #614 and declined both times: the snapshot is the contract of
+  /// `recent_commits_cached`, not an oversight here.
+  ///
+  /// With nothing selected the overlay still opens, empty — the
+  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
+  /// reads as a dead key.
+  pub fn enter_commits(&mut self) {
+    let selected = self.selected().cloned();
+    let target = selected.as_ref().map(|w| w.path.as_path());
+    // Coalescing is only sound while the in-flight read is for the SAME
+    // worktree, at the SAME limit, on the SAME tip (the #592 lesson, PR
+    // #612; the tip added by a Codex review on PR #614 — a commit landing
+    // while the overlay is closed mid-read would otherwise be swallowed by
+    // a worker holding the old `head`). Otherwise the
+    // request would come back `None` because the slot is still the old
+    // read's, no worker would exist for this one, and the old payload is
+    // dropped by the checks in the drain — leaving the loader up with
+    // nothing left to clear it.
+    let tip = selected.as_ref().and_then(|w| w.head.clone());
+    if self.commits.loading
+      && (self.commits.path.as_deref() != target || self.commits.limit != COMMITS_PAGE || self.commits.head != tip)
+    {
+      self.tasks.invalidate(TaskKind::Commits);
+    }
+    self.commits.begin(target, COMMITS_PAGE, tip);
+    self.view = View::Commits;
+    if let Some(w) = selected {
+      self.request_commits_read(w, COMMITS_PAGE);
+    }
+  }
+
+  /// The worktree the commit overlay opened on, if it is still listed.
+  ///
+  /// Deliberately not [`Self::selected`]: the auto-refresh moves the
+  /// selection while the overlay is up, and the drain matches a payload
+  /// against `commits.path`, so a read fired for the newly-selected
+  /// worktree is dropped on the path check *after* `complete` freed the
+  /// slot, leaving nothing to clear the loader (Codex review, PR #614).
+  ///
+  /// `None` once another process removes the worktree and the refresh drops
+  /// it from the list: there is no longer anything to walk.
+  fn commits_target(&self) -> Option<&WorktreeInfo> {
+    let path = self.commits.path.as_deref()?;
+    self.worktrees.iter().find(|w| w.path == path)
+  }
+
+  /// Whether the commit overlay can page deeper: the listing says a page
+  /// exists AND the worktree it opened on is still there to read.
+  ///
+  /// [`CommitsModal::can_load_more`] owns the arithmetic and cannot see the
+  /// worktree list, so on its own it keeps saying yes for a worktree that
+  /// has been removed underneath the overlay. The renderer and
+  /// [`Self::load_more_commits`] both read *this*, so the advertised key
+  /// and the key that acts can never disagree.
+  pub fn commits_can_load_more(&self) -> bool {
+    self.commits.can_load_more() && self.commits_target().is_some()
+  }
+
+  /// Re-read the commit listing one page deeper (issue #593).
+  ///
+  /// A re-read rather than an append: the graph renderer resolves a row's
+  /// connectors against the parents of the rows below it, so a page tacked
+  /// onto the end would draw its topology against nothing. The memo in
+  /// [`crate::worktree::recent_commits_cached`] is keyed on the limit, so
+  /// the deeper read is a fresh entry rather than an invalidation of the
+  /// sidebar's.
+  ///
+  /// The rows already on screen stay up while the worker runs, so paging
+  /// keeps its place instead of blanking. A no-op when
+  /// [`Self::commits_can_load_more`] is false; the footer drops the `load
+  /// more` hint on that same predicate, so the key is never advertised
+  /// where it would do nothing.
+  pub fn load_more_commits(&mut self) {
+    if !self.commits_can_load_more() {
+      return;
+    }
+    let Some(w) = self.commits_target().cloned() else {
+      return;
+    };
+    let limit = self.commits.next_limit();
+    self.commits.begin_more(limit);
+    self.request_commits_read(w, limit);
+  }
+
+  /// Spawn the worker that walks `w`'s log to `limit` and renders it.
+  ///
+  /// A `None` from the slot means a read for this same worktree and limit
+  /// is already out: ride on it, which is what keeps a held `6` from
+  /// spawning a revwalk per repeat. Callers that need a *different* read
+  /// invalidate the slot first.
+  fn request_commits_read(&mut self, w: WorktreeInfo, limit: usize) {
+    let Some(generation) = self.tasks.request(TaskKind::Commits) else {
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let snap = crate::tui::ui::recent_commits_listing(&w, limit, crate::worktree::unix_now(), &theme);
+      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, snap));
+    });
+  }
+
+  /// `true` while the commit listing is waiting on its worker.
+  pub fn is_commits_loading(&self) -> bool {
+    self.commits.loading
+  }
+
+  /// Spawn the second, slower read: one `git log --raw --numstat` over the
+  /// oids already on screen, rebuilding the metadata columns with the diff
+  /// counts (issue #593).
+  ///
+  /// Chained after the rows rather than folded into them. The revwalk takes
+  /// about 0.4s and this takes one to three seconds depending on the page
+  /// depth, so folding the two would hold the whole listing behind the
+  /// slower half. The rows appear first and the column grows under them.
+  ///
+  /// A no-op with nothing to read, and when the stats for this listing are
+  /// already in place — the drain calls this on every landing, including
+  /// the ones that only re-installed the same rows.
+  pub fn request_commit_stats(&mut self) {
+    if self.commits.stats_loaded || self.commits.rows.is_empty() {
+      return;
+    }
+    let Some(path) = self.commits.path.clone() else {
+      return;
+    };
+    let (limit, tip) = (self.commits.limit, self.commits.head.clone());
+    let oids: Vec<git2::Oid> = self.commits.rows.iter().map(|r| r.hash).collect();
+    let rows = self.commits.rows.clone();
+    // A read for a different listing is still out: free the slot, or this
+    // one never starts and the columns never grow.
+    if self.tasks.is_loading(TaskKind::CommitStats) {
+      self.tasks.invalidate(TaskKind::CommitStats);
+    }
+    let Some(generation) = self.tasks.request(TaskKind::CommitStats) else {
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let stats = crate::worktree::commit_stats(&path, &oids).unwrap_or_default();
+      let now = crate::worktree::unix_now();
+      let tiers = crate::tui::ui::commit_meta_columns(&rows, now, &stats, &theme);
+      let _ = tx.send(TaskMsg::CommitStats(generation, path, limit, tip, tiers));
+    });
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective
@@ -4019,23 +4250,6 @@ impl App {
       if let Some(n) = self.github.link.pr {
         self.spawn_github_pr_threads(n);
       }
-    }
-  }
-
-  /// Contextual KEY routing (issue #436) — same mechanism that turns
-  /// `j` / `k` into sidebar scroll: while the status pane holds the
-  /// focus, the `c` keystroke (EditWorktree) opens the CI checks
-  /// overlay instead of the rename modal. Applied by the event loop on
-  /// the **key path only** (Codex review #455): the command palette
-  /// dispatches actions by their NAME, so its `edit-worktree` entry
-  /// must stay a rename in every context (a dedicated `ci-checks`
-  /// entry already exists there). Pure, so the contract is pinned
-  /// without an event loop.
-  pub fn resolve_contextual_action(&self, action: Action) -> Action {
-    if action == Action::EditWorktree && self.sidebar.open && self.sidebar.focused {
-      Action::CiChecks
-    } else {
-      action
     }
   }
 

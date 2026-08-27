@@ -2,9 +2,12 @@ use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
+use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
+use super::state::working_tree::WorkingTreeSnapshot;
+use std::collections::HashMap;
 
 /// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
 /// default by the hint helpers that have no form in reach (issue #418). Every
@@ -173,6 +176,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandLogs => draw_command_logs(f, app),
     View::WorkingTree => draw_working_tree(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Commits => draw_commits(f, app),
     View::Pty => draw_pty_overlay(f, app),
     View::Note => draw_note_editor(f, app),
     // #325: exec profile picker renders as a small centred modal.
@@ -1930,12 +1934,44 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
 /// [`build_sidebar_sections`], which would also run `git log` / `git stash
 /// list` / the diff-vs-base stat for panes the overlay does not show.
 pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
+  // The sidebar pane paints rows only. It stops here rather than calling
+  // [`working_tree_listing`] on purpose: the column that read adds costs a
+  // second git process, and this one runs on every selection change.
+  let (lines, _, counts) = working_tree_rows(w, theme);
+  (lines, counts)
+}
+
+/// The full result of one read of the working tree: the rows, the
+/// per-category counts, and the right-hand `+N -M` column (issue #592).
+///
+/// The counts come from `git status`, the column from a `git diff
+/// --numstat` in the same worker. Folded into one read rather than chained
+/// the way the commit listing's stats are (#593): there, the second read is
+/// a `git log --raw --numstat` over 300 commits and takes seconds, so the
+/// rows have to appear without it. Here it is a single diff against `HEAD`,
+/// far quicker than the `git status` that precedes it, so splitting would
+/// buy a flicker and cost a whole second identity to match payloads on.
+pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnapshot {
+  let (lines, paths, counts) = working_tree_rows(w, theme);
+  let stats = worktree::working_tree_stats(&w.path).unwrap_or_default();
+  let meta = working_tree_meta_column(&paths, &stats, theme);
+  WorkingTreeSnapshot { lines, counts, meta }
+}
+
+/// Render the working tree of `w` into rows, the repo-relative path each
+/// row describes, and the per-category counts.
+///
+/// `paths` is `None` on a directory row and on each of the three sentinels
+/// (`✓ clean`, `… N more`, a load error), so it always has exactly as many
+/// entries as there are rows.
+fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
     Ok((s, _)) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
       ))],
+      vec![None],
       WorkingTreeCounts::default(),
     ),
     Ok((s, scan_truncated)) => {
@@ -1946,7 +1982,7 @@ pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'
       // remainder as a single muted `… N more` row, so the non-scrollable
       // section can't be sized from tens of thousands of files.
       let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
-      let mut lines = working_tree_tree_lines(&tree, theme);
+      let (mut lines, mut paths) = working_tree_tree_lines(&tree, theme);
       if overflow > 0 {
         // After a scan truncation the real remainder is unknown (git was
         // killed at the cap), so `overflow` is only a lower bound — render
@@ -1957,17 +1993,70 @@ pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'
           format!("… {} more", overflow)
         };
         lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
+        paths.push(None);
       }
-      (lines, counts)
+      (lines, paths, counts)
     }
     Err(e) => (
       vec![Line::from(Span::styled(
         format!("! {}", e),
         Style::default().fg(theme.prunable),
       ))],
+      vec![None],
       WorkingTreeCounts::default(),
     ),
   }
+}
+
+/// Build the right-hand `+N -M` column for a working-tree listing.
+///
+/// One entry per row, in row order, so the column and the rows scroll
+/// together at a single offset. A row with no counts (a directory, a
+/// sentinel, an untracked or binary file) contributes an empty line rather
+/// than being skipped, which is what keeps the two in step.
+pub fn working_tree_meta_column(
+  paths: &[Option<String>],
+  stats: &HashMap<String, worktree::FileStat>,
+  theme: &Theme,
+) -> MetaColumn {
+  let mut col = MetaColumn::default();
+  for key in paths {
+    let spans = key
+      .as_deref()
+      .and_then(|p| stats.get(p))
+      .map(|s| working_tree_stat_spans(*s, theme))
+      .unwrap_or_default();
+    col.lines.push(Line::from(spans));
+  }
+  col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
+  col
+}
+
+/// One file's line counts as coloured spans: `+120 -34`.
+///
+/// The same two roles the commit listing's counts use (#593), so a line
+/// added reads the same colour in both listings. A zero side is left out
+/// rather than printed, and a file with neither renders nothing at all:
+/// unlike a commit, whose silence would read as "not loaded yet", a row
+/// here already carries a badge saying what happened to it.
+pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span<'static>> {
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  if s.insertions > 0 {
+    spans.push(Span::styled(
+      format!("+{}", s.insertions),
+      Style::default().fg(theme.clean),
+    ));
+  }
+  if s.deletions > 0 {
+    if !spans.is_empty() {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(
+      format!("-{}", s.deletions),
+      Style::default().fg(theme.prunable),
+    ));
+  }
+  spans
 }
 
 /// Render the Working Tree file-explorer model (issue #300) into styled
@@ -1987,16 +2076,44 @@ pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'
 /// - An **extra space** follows each nerd-font glyph: most glyphs render
 ///   double-width but occupy a single terminal cell, so the pad keeps the
 ///   following text from being clipped.
-fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> Vec<Line<'static>> {
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>) {
   let mut out = Vec::new();
-  push_wt_nodes(&mut out, nodes, String::new(), theme);
-  out
+  let mut paths = Vec::new();
+  push_wt_nodes(&mut out, &mut paths, nodes, String::new(), String::new(), theme);
+  (out, paths)
+}
+
+/// Join a path prefix and a node name the way git spells a path.
+///
+/// The RAW name, never [`wt_tree::sanitize_name`]'s: this is a lookup key
+/// into `git diff --numstat` output, not something painted on a terminal.
+fn wt_join(prefix: &str, name: &str) -> String {
+  if prefix.is_empty() {
+    name.to_string()
+  } else {
+    format!("{}/{}", prefix, name)
+  }
 }
 
 /// Depth-first walk used by [`working_tree_tree_lines`]. `prefix` is the
 /// accumulated ancestor connector string; each child appends `├─ `/`└─ `
 /// for its own row and `│  `/`   ` for its descendants.
-fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String, theme: &Theme) {
+///
+/// `paths` grows in lockstep with `out`, one entry per rendered row, so the
+/// right-hand column can be keyed by row without a second walk that could
+/// drift out of step with this one. A directory contributes `None`: it has
+/// no diff of its own, and the aggregate its colour already carries is a
+/// category rather than a count. A collapsed chain (`src/tui`) is one node
+/// whose name already holds the separator, so `path_prefix` reconstructs
+/// git's own spelling either way.
+fn push_wt_nodes(
+  out: &mut Vec<Line<'static>>,
+  paths: &mut Vec<Option<String>>,
+  nodes: &[WtNode],
+  prefix: String,
+  path_prefix: String,
+  theme: &Theme,
+) {
   let last = nodes.len().saturating_sub(1);
   for (i, node) in nodes.iter().enumerate() {
     let is_last = i == last;
@@ -2018,8 +2135,9 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String,
             Style::default().fg(color),
           ),
         ]));
+        paths.push(None);
         let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        push_wt_nodes(out, children, child_prefix, theme);
+        push_wt_nodes(out, paths, children, child_prefix, wt_join(&path_prefix, name), theme);
       }
       WtNode::File {
         name,
@@ -2036,6 +2154,7 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String,
             Style::default().fg(color),
           ),
         ]));
+        paths.push(Some(wt_join(&path_prefix, name)));
       }
     }
   }
@@ -2208,23 +2327,202 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+  // The sidebar pane paints rows only, so the metadata columns it never
+  // shows are built and dropped. Cheap next to the revwalk that precedes
+  // them, and one listing routine is one place for the row format to live.
+  recent_commits_listing(w, limit, worktree::unix_now(), theme).lines
+}
+
+/// Gap, in cells, between the commit subject and the metadata column.
+pub const META_GAP: usize = 2;
+
+/// Cells the subject must keep for the metadata column to be worth showing.
+///
+/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
+/// topology), so what the left side needs cannot be derived from a
+/// constant: the policy is stated as a floor on what survives instead. A
+/// merge-heavy history at 80 columns would otherwise leave a subject of ten
+/// cells to buy an author column, which is a worse listing than no column.
+pub const COMMITS_SUBJECT_FLOOR: usize = 30;
+
+/// Pick the widest metadata column that leaves the subject its floor.
+///
+/// `body_w` is the text area AFTER the scrollbar column is reserved. The
+/// tiers are tried widest first; `None` means even the narrowest does not
+/// fit and the listing renders full-width as it did before.
+///
+/// A pure function on widths so the policy is testable without a terminal:
+/// the render path only decides which `MetaColumn` this names.
+pub fn commits_meta_pick(body_w: usize, tiers: [usize; 3]) -> Option<usize> {
+  meta_pick(body_w, &tiers, COMMITS_SUBJECT_FLOOR)
+}
+
+/// Pick the widest metadata column that leaves the left side `floor` cells.
+///
+/// The policy both full-size listings share: the commit listing (#593)
+/// offers three tiers and protects a subject, the Working Tree overlay
+/// (#592) offers one and protects a file name. Only the tier list and the
+/// floor differ, so only those are parameters.
+pub fn meta_pick(body_w: usize, tiers: &[usize], floor: usize) -> Option<usize> {
+  tiers.iter().copied().find(|&w| w > 0 && body_w >= w + META_GAP + floor)
+}
+
+/// Cells a Working Tree row must keep for its `+N -M` column to be worth
+/// showing.
+///
+/// Lower than [`COMMITS_SUBJECT_FLOOR`] because the row is a leaf name
+/// under a connector prefix, not a sentence: `ui.rs` stays readable at a
+/// width where a commit subject would be a fragment. The connectors grow
+/// with the nesting depth, so what a row needs cannot be derived from a
+/// constant here either — the floor states the policy instead.
+pub const WT_NAME_FLOOR: usize = 24;
+
+/// Build the two right-hand metadata columns for a commit listing.
+///
+/// `wide` carries `author · age`, `narrow` the age alone — the initials are
+/// already on the left, so the full author is the second tier of
+/// information, not the first. The age is what the listing genuinely lacks
+/// today.
+///
+/// Ages are computed against `now` HERE, not stored on the row: the rows
+/// are memoised by `(repo, tip, limit)`, so an age baked into them would be
+/// frozen at the first read. They are still a snapshot in the sense that
+/// the overlay does not re-read itself while open, so a listing left up for
+/// an hour keeps saying `2m`.
+pub fn commit_meta_columns(
+  rows: &[worktree::CommitRow],
+  now: i64,
+  stats: &HashMap<git2::Oid, worktree::CommitStat>,
+  theme: &Theme,
+) -> [MetaColumn; 3] {
+  let mut wide = MetaColumn::default();
+  let mut mid = MetaColumn::default();
+  let mut narrow = MetaColumn::default();
+  let sep = || Span::styled(" · ".to_string(), Style::default().fg(theme.muted));
+
+  for row in rows {
+    let age_d = worktree::commit_age(row.time, now);
+    let age = worktree::format_relative_duration(age_d);
+    let age_style = Style::default().fg(freshness_color(age_d, theme));
+    let age_span = || Span::styled(age.clone(), age_style);
+    let author = row.author.trim();
+    // Absent means "not read yet", which is not the same as a commit that
+    // changed nothing — the second read fills the map and the columns are
+    // rebuilt from it.
+    let stat = stats.get(&row.hash).copied();
+
+    narrow.lines.push(Line::from(age_span()));
+
+    let mut mid_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(s) = stat {
+      mid_spans.extend(commit_stat_spans(s, theme));
+      mid_spans.push(sep());
+    }
+    mid_spans.push(age_span());
+    mid.lines.push(Line::from(mid_spans));
+
+    let mut wide_spans: Vec<Span<'static>> = Vec::new();
+    if !author.is_empty() {
+      wide_spans.push(Span::styled(author.to_string(), Style::default().fg(theme.muted)));
+      wide_spans.push(sep());
+    }
+    if let Some(s) = stat {
+      wide_spans.extend(commit_stat_spans(s, theme));
+      wide_spans.push(sep());
+    }
+    wide_spans.push(age_span());
+    wide.lines.push(Line::from(wide_spans));
+  }
+
+  for col in [&mut wide, &mut mid, &mut narrow] {
+    col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
+  }
+  [wide, mid, narrow]
+}
+
+/// One commit's diff counts as coloured spans: `3~ 1+ 1- +120 -34`.
+///
+/// The file counts reuse the working-tree pane's roles (#287) so a created
+/// file reads the same colour here as it does there, and the line counts
+/// reuse the diff pair. A category with nothing in it is omitted rather
+/// than printed as a zero: five zeroes on every quiet commit is noise, and
+/// the row is competing with the subject for width.
+pub fn commit_stat_spans(s: worktree::CommitStat, theme: &Theme) -> Vec<Span<'static>> {
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut push = |text: String, color: Color| {
+    if !spans.is_empty() {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(text, Style::default().fg(color)));
+  };
+  if s.files_modified > 0 {
+    push(format!("{}~", s.files_modified), theme.dirty);
+  }
+  if s.files_added > 0 {
+    push(format!("{}+", s.files_added), theme.clean);
+  }
+  if s.files_deleted > 0 {
+    push(format!("{}-", s.files_deleted), theme.prunable);
+  }
+  if s.insertions > 0 {
+    push(format!("+{}", s.insertions), theme.clean);
+  }
+  if s.deletions > 0 {
+    push(format!("-{}", s.deletions), theme.prunable);
+  }
+  if spans.is_empty() {
+    // An empty commit, or a merge that brought nothing onto its first
+    // parent. Silence would read as "not loaded yet".
+    spans.push(Span::styled("0".to_string(), Style::default().fg(theme.muted)));
+  }
+  spans
+}
+
+/// The full result of one read of the log: the rows, the commit count, and
+/// the two right-hand metadata columns.
+///
+/// The count is not `lines.len()` and the difference is not cosmetic: an
+/// unborn HEAD, an empty history or a failed read all paint exactly ONE
+/// sentinel row, so a caller inferring the count from the rows reads them
+/// as a repository with one commit (Codex review, PR #614). The
+/// commit-listing overlay (issue #593) titles itself with this count and
+/// decides whether a page is full from it.
+///
+/// `now` is passed in rather than read here so the ages are deterministic
+/// under test.
+pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, now: i64, theme: &Theme) -> CommitsSnapshot {
   match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
+      let loaded = rows.len();
+      let tiers = commit_meta_columns(&rows, now, &HashMap::new(), theme);
       let graphs = super::commit_graph::render_commits(&rows, theme);
-      rows
-        .into_iter()
+      let lines = rows
+        .iter()
+        .cloned()
         .zip(graphs)
         .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
-        .collect()
+        .collect();
+      CommitsSnapshot {
+        lines,
+        loaded,
+        rows,
+        tiers,
+      }
     }
-    Ok(_) => vec![Line::from(Span::styled(
-      "(no commits)".to_string(),
-      Style::default().fg(theme.muted),
-    ))],
-    Err(e) => vec![Line::from(Span::styled(
-      format!("! {}", e),
-      Style::default().fg(theme.prunable),
-    ))],
+    Ok(_) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
+        "(no commits)".to_string(),
+        Style::default().fg(theme.muted),
+      ))],
+      ..Default::default()
+    },
+    Err(e) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
+        format!("! {}", e),
+        Style::default().fg(theme.prunable),
+      ))],
+      ..Default::default()
+    },
   }
 }
 
@@ -2910,6 +3208,12 @@ impl HintContext {
         // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        // #593: reading the log and the checks is the same register as
+        // launching lazygit, and both keys mean this in either pane — so
+        // the worktrees footer advertises the pair the status footer does,
+        // ahead of the verbs that are reached less often.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
         // #515: the note is written far more often than a review is
@@ -2932,8 +3236,10 @@ impl HintContext {
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
-        // #436: `c` routes to the CI checks overlay in this context.
-        Hint::Key(EditWorktree, "ci checks"),
+        // #593: `c` / `C` mean the same thing in both panes — this one's
+        // own content at full size, and the linked PR's checks.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -3400,9 +3706,42 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
 pub fn working_tree_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   let mut hints: Vec<(String, String)> = vec![
     ("j/k".to_string(), "scroll".to_string()),
+    ("D/U".to_string(), "half page".to_string()),
     ("g/G".to_string(), "top/bottom".to_string()),
   ];
   if let Some(k) = modal.primary_key(ModalAction::WorkingTreeClose) {
+    hints.push((k, "close".to_string()));
+  }
+  hints
+}
+
+/// Commit-listing overlay footer hints (issue #593). `load more` / `close`
+/// resolve from the `Commits*` modal bindings so a rebind of
+/// `[tui.keys.modal.commits]` shows through; the scroll / top-bottom
+/// movement pairs stay literal, as the Command Logs footer does.
+///
+/// `load more` is dropped when `more` is false — there is no deeper page,
+/// either because the revwalk ran out of history or because the paging cap
+/// was reached. Advertising a key that does nothing is how a working
+/// overlay reads as broken. While `loading`, the slot says so instead: the
+/// key is equally inert there, but for a reason that resolves on its own.
+pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("D/U".to_string(), "half page".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  if loading {
+    // `more` is false while a read is out, so without this the hint slot
+    // would simply go blank and a deeper page would look refused rather
+    // than under way.
+    hints.push(("…".to_string(), "loading".to_string()));
+  } else if more {
+    if let Some(k) = modal.primary_key(ModalAction::CommitsLoadMore) {
+      hints.push((k, "load more".to_string()));
+    }
+  }
+  if let Some(k) = modal.primary_key(ModalAction::CommitsClose) {
     hints.push((k, "close".to_string()));
   }
   hints
@@ -3918,6 +4257,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
   rows.push(entry(Action::WorkingTree, "show the working tree listing at full size"));
+  rows.push(entry(
+    Action::Commits,
+    "show the commit listing full size, with load-more",
+  ));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
@@ -4230,9 +4573,21 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       modal_entry(ModalAction::WorkingTreeScrollDown, "scroll down"),
       modal_entry(ModalAction::WorkingTreeScrollUp, "scroll up"),
+      modal_entry(ModalAction::WorkingTreeHalfDown, "scroll down half a screen"),
+      modal_entry(ModalAction::WorkingTreeHalfUp, "scroll up half a screen"),
       modal_entry(ModalAction::WorkingTreeScrollTop, "jump to the top"),
       modal_entry(ModalAction::WorkingTreeScrollBottom, "jump to the bottom"),
       modal_entry(ModalAction::WorkingTreeClose, "close"),
+      HelpRow::Section("Commits".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommitsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommitsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommitsHalfDown, "scroll down half a screen"),
+      modal_entry(ModalAction::CommitsHalfUp, "scroll up half a screen"),
+      modal_entry(ModalAction::CommitsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommitsScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::CommitsLoadMore, "read one page deeper"),
+      modal_entry(ModalAction::CommitsClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("Settings".to_string()),
       HelpRow::Blank,
@@ -4497,6 +4852,7 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   // Publish the scroll bound against the BODY viewport only, then clamp the
   // cursor the key handler moved (the help / command-logs contract).
   let rows = app.working_tree.lines.len();
+  app.working_tree.viewport = body_area.height;
   app.working_tree.max_scroll = (rows.saturating_sub(body_area.height as usize)) as u16;
   app.working_tree.scroll = app.working_tree.scroll.min(app.working_tree.max_scroll);
   let scroll = app.working_tree.scroll;
@@ -4515,7 +4871,31 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
       Line::from(spans)
     })
     .collect();
-  f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), text_area);
+
+  // The counts ride their own rect on the right rather than being appended
+  // to each row, the shape the commit listing uses (#593): the tree is
+  // hard-clipped without an ellipsis, so narrowing the left rect IS that
+  // same rule applied at a nearer edge. Both paragraphs take the same
+  // scroll offset, so the columns stay aligned.
+  let meta_w = meta_pick(text_area.width as usize, &[app.working_tree.meta.width], WT_NAME_FLOOR);
+  match meta_w {
+    Some(meta_w) => {
+      let [left, _gap, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(META_GAP as u16),
+        Constraint::Length(meta_w as u16),
+      ])
+      .areas(text_area);
+      f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), left);
+      f.render_widget(
+        Paragraph::new(app.working_tree.meta.lines.clone())
+          .right_aligned()
+          .scroll((scroll, 0)),
+        right,
+      );
+    }
+    None => f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), text_area),
+  }
 
   let footer_owned = working_tree_footer_hints(&app.modal_keymap);
   let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
@@ -4529,6 +4909,102 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
+/// Render the full-size commit listing (issue #593).
+///
+/// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the
+/// snapshot `App::enter_commits` took — one row per commit, short hash /
+/// author initials / `o`-`@` graph / subject, exactly as the sidebar pane
+/// paints them.
+///
+/// No horizontal pan: `recent_commits_lines` deliberately leaves subjects
+/// untruncated and relies on ratatui's hard clip at the right edge, which is
+/// lazygit's behaviour. The whole point of the overlay is that the canvas is
+/// wide enough for that clip to stop mattering.
+///
+/// The title carries the row count so `load more` has visible feedback; a
+/// trailing `+` means a deeper page exists. It rides the top rule, which is
+/// clipped from the LEFT when centred, so the count sits last on purpose.
+fn draw_commits(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+
+  let more = app.commits_can_load_more();
+  let loading = app.commits.loading;
+  // The `+` tracks "a deeper page exists", which is true while one is being
+  // read too: `can_load_more` is false then only because the read is out.
+  let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
+  let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
+  let block = overlay_block_titled(&title, accent);
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  // A muted loader rather than an empty canvas while the first page is
+  // being walked: blank reads as "no commits", which is the one answer this
+  // overlay must not give by accident. A deeper page keeps the rows it
+  // already has on screen instead, and says `loading` in the footer.
+  let lines: Vec<Line<'static>> = if !app.commits.lines.is_empty() {
+    app.commits.lines.clone()
+  } else if loading {
+    vec![Line::from(Span::styled(
+      " loading…".to_string(),
+      Style::default().fg(muted),
+    ))]
+  } else {
+    vec![Line::from(Span::styled(
+      "No commits.".to_string(),
+      Style::default().fg(muted),
+    ))]
+  };
+
+  // Publish the scroll bound against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.commits.viewport = body_area.height;
+  app.commits.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
+  app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
+  let scroll = app.commits.scroll;
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+
+  // The metadata rides its own rect on the right rather than being appended
+  // to each row: the subject is deliberately hard-clipped without an
+  // ellipsis (lazygit's gocui behaviour, documented on
+  // `recent_commits_lines` and shared with the sidebar pane), so narrowing
+  // the left rect IS that same rule applied at a nearer edge. Both
+  // paragraphs take the same scroll offset, so the columns stay aligned.
+  let widths = [
+    app.commits.tiers[0].width,
+    app.commits.tiers[1].width,
+    app.commits.tiers[2].width,
+  ];
+  let meta = commits_meta_pick(text_area.width as usize, widths);
+
+  match meta {
+    Some(meta_w) => {
+      let column = &app.commits.tiers[widths.iter().position(|&w| w == meta_w).unwrap_or(2)];
+      let meta_w = meta_w as u16;
+      let [left, _gap, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(META_GAP as u16),
+        Constraint::Length(meta_w),
+      ])
+      .areas(text_area);
+      f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), left);
+      f.render_widget(
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        right,
+      );
+    }
+    None => f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area),
+  }
+
+  let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
+}
+
 fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
@@ -7609,22 +8085,14 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
     // #436: advertise the key that opens the CI checks overlay right after
-    // the indicator, resolved live so a rebind shows through. The key is
-    // context-accurate (Codex review #455): the contextual `c`
-    // (EditWorktree's chord) only while the status pane holds the focus —
-    // in the worktrees context that key opens the rename modal, so the
-    // global `ci_checks` binding is advertised instead. An unbound
-    // EditWorktree falls back to the global binding (still live in that
-    // context); only when both are unbound does the suffix disappear. In
-    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
-    // printable keys feed the filter — so no key is advertised at all.
+    // the indicator, resolved live so a rebind shows through. Since #593
+    // that key is `ci_checks` in every context — the pane-dependent form
+    // this used to take existed only because the status pane borrowed
+    // `c`, and `c` now means the commit listing in both panes. In picker
+    // mode (`gwm switch`) run_action drops Action::CiChecks — printable
+    // keys feed the filter — so no key is advertised at all.
     let ci_key = if app.picker_mode {
       None
-    } else if app.sidebar.open && app.sidebar.focused {
-      app
-        .keymap
-        .primary_chord(Action::EditWorktree)
-        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
     } else {
       app.keymap.primary_chord(Action::CiChecks)
     };

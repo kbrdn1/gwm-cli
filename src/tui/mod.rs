@@ -37,6 +37,7 @@ pub use state::async_task::{
 };
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
+pub use state::commits::{CommitsModal, CommitsSnapshot, MetaColumn, COMMITS_MAX, COMMITS_PAGE};
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
 };
@@ -49,7 +50,7 @@ pub use state::link_prompt::LinkPrompt;
 pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
-pub use state::working_tree::WorkingTreeModal;
+pub use state::working_tree::{WorkingTreeModal, WorkingTreeSnapshot};
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -73,23 +74,25 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 pub use ui::{
   agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, bootstrap_report_lines,
   branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, cells, centered_abs,
-  chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_fill, compact_header_line,
-  compact_header_style, config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints,
-  confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_batch_title,
-  delete_worktree_title, detail_overlay_width, detail_visible_rows, display_path_with_home, ellipsize_middle,
-  field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll, format_status,
-  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
-  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
-  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
-  list_pane_counter, markdown_style, modal_height, modal_hint_for_context, modal_hint_for_context_with_fields,
-  modal_hint_line, modal_width, overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color,
-  picker_window, pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, commit_meta_columns, commits_meta_pick,
+  compact_header_fill, compact_header_line, compact_header_style, config_capture_footer_hints,
+  config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
+  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, detail_overlay_width,
+  detail_visible_rows, display_path_with_home, ellipsize_middle, field_input_line, filled_cells_for_progress,
+  folded_status_line, footer_line, form_field_scroll, format_status, freshness_color, github_status_lines, header_line,
+  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
+  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
+  link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter, markdown_style, meta_pick,
+  modal_height, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
+  overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
+  pr_summary_line, recent_commits_lines, recent_commits_listing, recent_items_pane_title, reclaim_size_color,
   rename_buttons_line, rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker,
-  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON,
-  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_listing,
+  working_tree_meta_column, working_tree_pane_title, working_tree_stat_spans, working_tree_status_counts,
+  working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext,
+  SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMITS_SUBJECT_FLOOR,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -492,7 +495,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             // (c → CI checks while the status pane is focused); the
             // palette path deliberately does not — its entries dispatch
             // by name (Codex review #455).
-            let action = app.resolve_contextual_action(action);
             run_action(terminal, &mut app, action)?;
           }
         }
@@ -531,6 +533,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           app.view = View::List;
         }
       }
+      // Full-size commit listing (issue #593). Scrolls like the Command
+      // Logs overlay; `m` re-reads one page deeper. Closes on Esc, `q` or
+      // `c` — the key that opened it.
+      View::Commits => match app.resolve_modal(KeyContext::Commits, key) {
+        Some(ModalAction::CommitsClose) => app.view = View::List,
+        Some(ModalAction::CommitsLoadMore) => app.load_more_commits(),
+        Some(ModalAction::CommitsScrollDown) => app.commits.scroll_down(),
+        Some(ModalAction::CommitsScrollUp) => app.commits.scroll_up(),
+        Some(ModalAction::CommitsScrollTop) => app.commits.scroll_to_top(),
+        Some(ModalAction::CommitsScrollBottom) => app.commits.scroll_to_bottom(),
+        Some(ModalAction::CommitsHalfDown) => app.commits.scroll_half_down(),
+        Some(ModalAction::CommitsHalfUp) => app.commits.scroll_half_up(),
+        _ => {}
+      },
       // Settings panel (issue #232; editable in #279). While a numeric input
       // is armed, keystrokes route to the edit buffer and only Enter / Esc
       // escape — so `q` / `j` / Tab while typing a countdown never quit or
@@ -1143,6 +1159,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // Issue #592: `5` opens the Working Tree listing at full size. Read-only
     // like the two overlays above, so it is not picker-gated either.
     Action::WorkingTree => app.enter_working_tree(),
+    // Issue #593: `c` opens the commit listing full size, in both panes.
+    // Read-only like the two overlays above, so it is not picker-gated
+    // either.
+    Action::Commits => app.enter_commits(),
     // Issue #325: `x` opens the exec profile picker. Picker-gated —
     // running a profile in a PTY is a focus-mode action, meaningless in
     // the stripped-down `gwm switch` picker.
