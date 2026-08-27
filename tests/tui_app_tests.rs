@@ -15371,7 +15371,10 @@ fn the_count_is_commits_not_rendered_rows() {
   let snap = recent_commits_listing(&w, 10, 0, &Theme::default());
   assert_eq!(snap.loaded, 0, "an unborn HEAD has no commits");
   assert_eq!(snap.lines.len(), 1, "but it still paints one sentinel row");
-  assert!(snap.wide.lines.is_empty(), "and a sentinel carries no metadata column");
+  assert!(
+    snap.tiers.iter().all(|t| t.lines.is_empty()),
+    "and a sentinel carries no metadata column"
+  );
 }
 
 #[test]
@@ -15411,26 +15414,29 @@ fn the_metadata_column_only_takes_room_the_subject_can_spare() {
   // merge-heavy history at 80 columns would otherwise buy an author column
   // with a ten-cell subject, which is a worse listing than no column.
   use gwm::tui::{commits_meta_pick, COMMITS_META_GAP, COMMITS_SUBJECT_FLOOR};
-  let (wide, narrow) = (20usize, 4usize);
+  // author · stats · age / stats · age / age
+  let tiers = [30usize, 14, 4];
+  let room_for = |w: usize| w + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
 
-  let room_for_wide = wide + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
-  assert_eq!(commits_meta_pick(room_for_wide, wide, narrow), Some(wide));
+  assert_eq!(commits_meta_pick(room_for(tiers[0]), tiers), Some(tiers[0]));
   assert_eq!(
-    commits_meta_pick(room_for_wide - 1, wide, narrow),
-    Some(narrow),
-    "one cell short of the wide column falls back to the narrow one"
+    commits_meta_pick(room_for(tiers[0]) - 1, tiers),
+    Some(tiers[1]),
+    "one cell short of the widest tier drops the author, not the stats"
   );
-
-  let room_for_narrow = narrow + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
-  assert_eq!(commits_meta_pick(room_for_narrow, wide, narrow), Some(narrow));
   assert_eq!(
-    commits_meta_pick(room_for_narrow - 1, wide, narrow),
+    commits_meta_pick(room_for(tiers[1]) - 1, tiers),
+    Some(tiers[2]),
+    "one cell short of the middle tier keeps the age alone"
+  );
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[2]) - 1, tiers),
     None,
     "below the floor the listing keeps the whole width"
   );
 
   assert_eq!(
-    commits_meta_pick(500, 0, 0),
+    commits_meta_pick(500, [0, 0, 0]),
     None,
     "a sentinel row carries no column, however wide the terminal"
   );
@@ -15451,10 +15457,16 @@ fn the_metadata_columns_carry_the_author_and_the_age() {
     subject: "whatever".into(),
     time: now - 3 * 86_400,
   };
-  let (wide, narrow) = commit_meta_columns(&[row], now, &Theme::default());
+  let none = std::collections::HashMap::new();
+  let [wide, mid, narrow] = commit_meta_columns(&[row], now, &none, &Theme::default());
 
   let text = |l: &ratatui::text::Line<'_>| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
   assert_eq!(text(&wide.lines[0]), "Kylian Bardini · 3d");
+  assert_eq!(
+    text(&mid.lines[0]),
+    "3d",
+    "with no stats reads the middle tier is the age"
+  );
   assert_eq!(text(&narrow.lines[0]), "3d");
   assert_eq!(wide.width, "Kylian Bardini · 3d".chars().count());
   assert_eq!(narrow.width, 2);
@@ -15474,7 +15486,8 @@ fn an_authorless_commit_keeps_the_age_alone() {
     subject: String::new(),
     time: now - 60,
   };
-  let (wide, _) = commit_meta_columns(&[row], now, &Theme::default());
+  let none = std::collections::HashMap::new();
+  let [wide, _, _] = commit_meta_columns(&[row], now, &none, &Theme::default());
   let text: String = wide.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   assert_eq!(text, "1m", "no author, no separator");
 }
@@ -15540,4 +15553,69 @@ fn a_deeper_page_keeps_the_scroll_position() {
   m.begin(Some(path), 20, None);
   assert_eq!(m.scroll, 0, "a fresh open still rewinds");
   assert!(m.lines.is_empty(), "and drops the previous listing");
+}
+
+#[test]
+fn the_stats_read_is_chained_after_the_rows_and_grows_the_column() {
+  // Issue #593: the rows come from a ~0.4s revwalk, the diff counts from a
+  // one-to-three second `git log`. Folding them into one read would hold
+  // the listing behind the slower half, so the second is chained from the
+  // drain and the column grows under rows already on screen.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  let before = app.commits.tiers[1].width;
+  assert!(!app.commits.stats_loaded, "the rows land without the stats");
+
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !app.commits.stats_loaded && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(app.commits.stats_loaded, "the chained stats read never landed");
+  assert!(
+    app.commits.tiers[1].width > before,
+    "the middle tier grew by the diff counts: {} -> {}",
+    before,
+    app.commits.tiers[1].width
+  );
+}
+
+#[test]
+fn a_stats_payload_for_another_listing_is_dropped() {
+  // Same three-part identity the rows are matched on. Unlike the rows,
+  // dropping one strands nothing: the columns already carry author and
+  // age, and the next chained request covers the current listing.
+  use gwm::tui::{MetaColumn, TaskKind, TaskMsg, COMMITS_PAGE};
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  let fat = MetaColumn {
+    lines: vec![ratatui::text::Line::from("XXXXXXXXXXXX")],
+    width: 12,
+  };
+  let tiers = [fat.clone(), fat.clone(), fat];
+  let path = app.commits.path.clone().unwrap();
+  let generation = app.tasks.request(TaskKind::CommitStats).unwrap_or(0);
+
+  // Right path, wrong limit — injected through the spine, the path a real
+  // worker takes.
+  app
+    .task_result_sender()
+    .send(TaskMsg::CommitStats(
+      generation,
+      path.clone(),
+      COMMITS_PAGE * 2,
+      app.commits.head.clone(),
+      tiers,
+    ))
+    .unwrap();
+  app.drain_task_results();
+  assert!(
+    !app.commits.stats_loaded,
+    "a payload read at another page depth is not this listing's"
+  );
 }

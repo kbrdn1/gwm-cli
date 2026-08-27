@@ -2213,6 +2213,30 @@ impl App {
             continue;
           }
           self.commits.load(snap);
+          // Chained here rather than from `enter_commits`: the oids to read
+          // are the ones that just landed, and the identity to read them
+          // for is whatever the overlay holds NOW — the user may have
+          // closed and reopened while the rows were in flight.
+          self.request_commit_stats();
+          applied = true;
+        }
+        TaskMsg::CommitStats(generation, path, limit, tip, tiers) => {
+          if !self.tasks.complete(TaskKind::CommitStats, generation) {
+            continue;
+          }
+          // Same three-part identity the rows are matched on. A payload
+          // that fails it describes a listing the overlay is no longer
+          // showing; dropping it is safe here because, unlike the rows,
+          // nothing is waiting on it — the columns already say author and
+          // age, and the next `request_commit_stats` covers the current
+          // listing.
+          if self.commits.path.as_deref() != Some(path.as_path())
+            || self.commits.limit != limit
+            || self.commits.head != tip
+          {
+            continue;
+          }
+          self.commits.load_stats(tiers);
           applied = true;
         }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
@@ -3003,6 +3027,46 @@ impl App {
   /// `true` while the commit listing is waiting on its worker.
   pub fn is_commits_loading(&self) -> bool {
     self.commits.loading
+  }
+
+  /// Spawn the second, slower read: one `git log --raw --numstat` over the
+  /// oids already on screen, rebuilding the metadata columns with the diff
+  /// counts (issue #593).
+  ///
+  /// Chained after the rows rather than folded into them. The revwalk takes
+  /// about 0.4s and this takes one to three seconds depending on the page
+  /// depth, so folding the two would hold the whole listing behind the
+  /// slower half. The rows appear first and the column grows under them.
+  ///
+  /// A no-op with nothing to read, and when the stats for this listing are
+  /// already in place — the drain calls this on every landing, including
+  /// the ones that only re-installed the same rows.
+  pub fn request_commit_stats(&mut self) {
+    if self.commits.stats_loaded || self.commits.rows.is_empty() {
+      return;
+    }
+    let Some(path) = self.commits.path.clone() else {
+      return;
+    };
+    let (limit, tip) = (self.commits.limit, self.commits.head.clone());
+    let oids: Vec<git2::Oid> = self.commits.rows.iter().map(|r| r.hash).collect();
+    let rows = self.commits.rows.clone();
+    // A read for a different listing is still out: free the slot, or this
+    // one never starts and the columns never grow.
+    if self.tasks.is_loading(TaskKind::CommitStats) {
+      self.tasks.invalidate(TaskKind::CommitStats);
+    }
+    let Some(generation) = self.tasks.request(TaskKind::CommitStats) else {
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let stats = crate::worktree::commit_stats(&path, &oids).unwrap_or_default();
+      let now = crate::worktree::unix_now();
+      let tiers = crate::tui::ui::commit_meta_columns(&rows, now, &stats, &theme);
+      let _ = tx.send(TaskMsg::CommitStats(generation, path, limit, tip, tiers));
+    });
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective

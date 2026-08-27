@@ -76,10 +76,13 @@ pub struct CommitsSnapshot {
   pub lines: Vec<Line<'static>>,
   /// Commits the rows describe. Zero for either sentinel.
   pub loaded: usize,
-  /// `author · age` per row, shown when the subject keeps its floor.
-  pub wide: MetaColumn,
-  /// `age` per row, the fallback when `wide` does not fit.
-  pub narrow: MetaColumn,
+  /// The commits themselves, kept so the metadata columns can be rebuilt
+  /// when the diff stats land from the second read.
+  pub rows: Vec<crate::worktree::CommitRow>,
+  /// The metadata columns, widest first: `author · stats · age`,
+  /// `stats · age`, `age`. The stats halves are absent until the second
+  /// read fills them in.
+  pub tiers: [MetaColumn; 3],
 }
 
 /// Owned state for the full-size commit listing: the snapshotted graph
@@ -98,15 +101,24 @@ pub struct CommitsModal {
   /// would read as a repository with one commit (Codex review, PR #614).
   /// [`super::super::ui::recent_commits_listing`] carries the real number.
   pub loaded: usize,
-  /// `author · age` per row, shown when the subject keeps its floor.
-  pub wide: MetaColumn,
-  /// `age` per row, the fallback when `wide` does not fit.
-  pub narrow: MetaColumn,
+  /// The commits themselves, kept so [`Self::tiers`] can be rebuilt when
+  /// the diff stats land without a second revwalk.
+  pub rows: Vec<crate::worktree::CommitRow>,
+  /// The metadata columns, widest first. See [`CommitsSnapshot::tiers`].
+  pub tiers: [MetaColumn; 3],
+  /// `true` once the diff-stat read has landed for the current listing.
+  /// The columns are rebuilt then; until it does they carry author and age
+  /// alone.
+  pub stats_loaded: bool,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
   /// Maximum vertical scroll offset, republished by the renderer each
   /// frame as `content_rows.saturating_sub(viewport_rows)`.
   pub max_scroll: u16,
+  /// Rows the body can show, republished by the renderer alongside
+  /// `max_scroll`. Only the renderer knows it, and the half-page verbs
+  /// need it to move by something the user can see.
+  pub viewport: u16,
   /// `true` between the request and the worker's payload. The renderer
   /// paints a loader rather than an empty canvas, which would read as "no
   /// commits".
@@ -136,8 +148,9 @@ impl CommitsModal {
   /// fresh and a stale listing is never mistaken for the current one.
   pub fn begin(&mut self, path: Option<&Path>, limit: usize, head: Option<String>) {
     self.lines.clear();
-    self.wide = MetaColumn::default();
-    self.narrow = MetaColumn::default();
+    self.rows.clear();
+    self.tiers = Default::default();
+    self.stats_loaded = false;
     self.loaded = 0;
     self.limit = limit;
     self.scroll = 0;
@@ -164,9 +177,20 @@ impl CommitsModal {
   pub fn load(&mut self, snap: CommitsSnapshot) {
     self.loaded = snap.loaded;
     self.lines = snap.lines;
-    self.wide = snap.wide;
-    self.narrow = snap.narrow;
+    self.rows = snap.rows;
+    self.tiers = snap.tiers;
+    self.stats_loaded = false;
     self.loading = false;
+  }
+
+  /// Replace the metadata columns with ones that carry the diff stats.
+  ///
+  /// Separate from [`Self::load`] because it lands from a second, slower
+  /// read: the rows are already on screen and only the right-hand column
+  /// grows. The scroll cursor is untouched — the row count did not change.
+  pub fn load_stats(&mut self, tiers: [MetaColumn; 3]) {
+    self.tiers = tiers;
+    self.stats_loaded = true;
   }
 
   /// Whether a deeper page exists and is allowed.
@@ -193,6 +217,24 @@ impl CommitsModal {
   /// Scroll up one row, never above the top.
   pub fn scroll_up(&mut self) {
     self.scroll = self.scroll.saturating_sub(1);
+  }
+
+  /// Scroll down half a screen (`D`), never past the last line.
+  ///
+  /// Half of what the body last showed, and never zero: a viewport the
+  /// renderer has not published yet (nothing drawn) would otherwise make
+  /// the key silently do nothing.
+  pub fn scroll_half_down(&mut self) {
+    self.scroll = self.scroll.saturating_add(self.half_page()).min(self.max_scroll);
+  }
+
+  /// Scroll up half a screen (`U`), never above the top.
+  pub fn scroll_half_up(&mut self) {
+    self.scroll = self.scroll.saturating_sub(self.half_page());
+  }
+
+  fn half_page(&self) -> u16 {
+    (self.viewport / 2).max(1)
   }
 
   /// Jump to the first row (`g`).

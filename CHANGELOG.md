@@ -72,11 +72,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the overlay works with the sidebar hidden or showing stashes. Scroll is
   `j`/`k`, `g`/`G`, all rebindable under `[tui.keys.modal.commits]`.
 
-  Each row carries the author and the commit age on its right, coloured by
-  freshness, which is what the hash / initials / subject columns do not say.
-  The column is dropped when the subject cannot spare the room: it narrows
-  to the age alone first, then disappears, so a narrow terminal keeps a
-  readable subject instead of buying a column with it.
+  Each row carries, on its right, what the hash / initials / subject columns
+  do not say: the author, what the commit changed (`3~ 1+ 2- +120 -34`, in
+  the Working Tree pane's colours, empty categories omitted) and how long
+  ago it landed. Three tiers, picked on what the **subject** can spare
+  rather than on the terminal width, since the graph is as wide as the
+  branch topology makes it: `author · counts · age`, `counts · age`, the age
+  alone, nothing.
+
+  The counts arrive from a second, chained read, so the log is on screen
+  immediately and the column grows about a second later (up to three on the
+  deepest page). One `git log --raw --numstat` over the rows already shown
+  costs about a second where a `diff_tree_to_tree` per commit costs
+  thirty-three, measured. `--diff-merges=first-parent` is load-bearing:
+  without it `git log` says nothing at all about a merge, and this project
+  merges rather than squashes.
+
+  `D` / `U` scroll half a screen, matching the rich PR view.
 
 - **Two settings for what a mux spawn opens, and where**
   ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),

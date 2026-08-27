@@ -326,6 +326,8 @@ define_modal_actions! {
     CommitsScrollUp     => "scroll_up"     [ "Up", "k" ],
     CommitsScrollTop    => "scroll_top"    [ "Home", "g" ],
     CommitsScrollBottom => "scroll_bottom" [ "End", "G" ],
+    CommitsHalfDown     => "half_down"     [ "D" ],
+    CommitsHalfUp       => "half_up"       [ "U" ],
   }
   Config {
     ConfigClose        => "close"         [ "Esc", "q" ],

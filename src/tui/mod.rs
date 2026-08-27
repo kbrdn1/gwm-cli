@@ -537,6 +537,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::CommitsScrollUp) => app.commits.scroll_up(),
         Some(ModalAction::CommitsScrollTop) => app.commits.scroll_to_top(),
         Some(ModalAction::CommitsScrollBottom) => app.commits.scroll_to_bottom(),
+        Some(ModalAction::CommitsHalfDown) => app.commits.scroll_half_down(),
+        Some(ModalAction::CommitsHalfUp) => app.commits.scroll_half_up(),
         _ => {}
       },
       // Settings panel (issue #232; editable in #279). While a numeric input
