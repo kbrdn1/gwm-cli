@@ -89,6 +89,10 @@ pub enum KeyContext {
   Detail,
   /// Command-logs overlay (issue #226, scroll-only + copy).
   CommandLogs,
+  /// Full-size commit listing (issue #593, scroll + load-more). Its own
+  /// context rather than a share of [`Self::CommandLogs`]: the two scroll
+  /// alike but rebinding one must not silently rebind the other.
+  Commits,
   /// Settings panel navigation (issue #232).
   Config,
   /// Settings panel while a numeric field is being edited (sub-mode of
@@ -170,6 +174,7 @@ impl KeyContext {
       KeyContext::Help => "help",
       KeyContext::Detail => "detail",
       KeyContext::CommandLogs => "command_logs",
+      KeyContext::Commits => "commits",
       KeyContext::Config => "config",
       KeyContext::ConfigEdit => "config.edit",
       KeyContext::Report => "report",
@@ -200,6 +205,7 @@ impl KeyContext {
       Help,
       Detail,
       CommandLogs,
+      Commits,
       Config,
       ConfigEdit,
       Report,
@@ -312,6 +318,16 @@ define_modal_actions! {
     CommandLogsScrollLeft   => "scroll_left"   [ "Left", "h" ],
     CommandLogsScrollTop    => "scroll_top"    [ "Home", "g" ],
     CommandLogsScrollBottom => "scroll_bottom" [ "End", "G" ],
+  }
+  Commits {
+    CommitsClose        => "close"         [ "Esc", "q", "c" ],
+    CommitsLoadMore     => "load_more"     [ "m" ],
+    CommitsScrollDown   => "scroll_down"   [ "Down", "j" ],
+    CommitsScrollUp     => "scroll_up"     [ "Up", "k" ],
+    CommitsScrollTop    => "scroll_top"    [ "Home", "g" ],
+    CommitsScrollBottom => "scroll_bottom" [ "End", "G" ],
+    CommitsHalfDown     => "half_down"     [ "D" ],
+    CommitsHalfUp       => "half_up"       [ "U" ],
   }
   Config {
     ConfigClose        => "close"         [ "Esc", "q" ],

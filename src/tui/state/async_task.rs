@@ -37,6 +37,7 @@
 use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
+use crate::tui::state::commits::{CommitsSnapshot, MetaColumn};
 use crate::tui::state::sidebar::SidebarMode;
 use crate::tui::ui::SidebarSections;
 use crate::worktree::WorktreeInfo;
@@ -126,6 +127,21 @@ pub enum TaskKind {
   /// per row; the render key-check discards a result for a since-moved
   /// selection and the next tick requests the settled one.
   Sidebar,
+  /// Off-thread snapshot for the full-size commit listing (issue #593).
+  /// The same revwalk the sidebar's Commits pane runs, but requested by a
+  /// keypress rather than by navigation, and it cannot run inline: the walk
+  /// sorts `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph
+  /// before yielding a row and the limit bounds the output, not the
+  /// latency. A single global slot; a repeated `6` on the same worktree at
+  /// the same limit coalesces onto the read already out.
+  Commits,
+  /// Off-thread diff stats for the commit listing (issue #593). A second,
+  /// slower read chained after [`Self::Commits`]: one `git log --raw
+  /// --numstat` over exactly the oids already on screen, about a second
+  /// for a page and under three for the deepest. It cannot ride the first
+  /// read — that would hold the rows back behind it — so the overlay shows
+  /// the log immediately and the column grows when this lands.
+  CommitStats,
   /// Off-thread agent-session detection (issue #408): the four artefact
   /// scans under the user's home (`agent_sessions::detect_all`) touch the
   /// filesystem and must never run inside `terminal.draw()`. A single global
@@ -162,6 +178,8 @@ impl TaskKind {
       TaskKind::EditWorktree => "renaming worktree…",
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
+      TaskKind::Commits => "reading the log…",
+      TaskKind::CommitStats => "reading the diffs…",
       TaskKind::AgentSessions => "detecting agent sessions…",
       TaskKind::AgentPane => "opening agent pane…",
     }
@@ -392,6 +410,22 @@ pub enum TaskMsg {
   /// `SidebarState::cache`; a result whose selection has since moved is dropped
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
+  /// Commit-listing snapshot (issue #593): the generation, the worktree
+  /// `path` and the `limit` it was read at, and everything that read
+  /// produced: the rendered graph rows, the commit count they describe
+  /// (NOT `lines.len()` — the empty and error cases paint one sentinel
+  /// row), and the two right-hand metadata columns.
+  /// The drain hands the rows to `CommitsModal::load`; a result for a path
+  /// the user has navigated away from, or for a limit the overlay has since
+  /// paged past, is dropped.
+  Commits(u64, PathBuf, usize, CommitsSnapshot),
+  /// Commit-listing diff stats (issue #593): the generation, the worktree
+  /// `path`, the `limit` and the `tip` the listing was read at, and the
+  /// rebuilt metadata columns. All three identity fields travel because
+  /// the listing can be reopened, repaged or moved on while this slower
+  /// read is out, and a column describing another listing is worse than
+  /// no column.
+  CommitStats(u64, PathBuf, usize, Option<String>, [MetaColumn; 3]),
   /// An agent-session detection result (issue #408): the worker's generation
   /// and the per-worktree-path summary. The drain replaces the app snapshot
   /// atomically; a superseded late result is dropped by

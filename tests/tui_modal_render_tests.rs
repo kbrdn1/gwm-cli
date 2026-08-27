@@ -369,6 +369,75 @@ fn command_logs_modal_renders_title_and_entry_argv() {
   assert_present(&buf, "copy", "command logs copy hint");
 }
 
+/// Drain until the commit-listing worker lands, or fail loudly.
+fn settle_commits(app: &mut gwm::tui::App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_commits_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_commits_loading(),
+    "the commit-listing worker never landed within 10s"
+  );
+}
+
+#[test]
+fn commits_modal_paints_a_loader_before_the_walk_lands() {
+  // The revwalk is on a worker, so the first frame has no rows. A blank
+  // canvas there reads as "no commits", which is the one answer this
+  // overlay must not give by accident.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  let buf = render(&mut app);
+  assert_present(&buf, "loading", "loader while the walk is out");
+  assert_absent(&buf, "No commits", "empty-state placeholder during a load");
+  settle_commits(&mut app);
+}
+
+#[test]
+fn commits_modal_renders_the_graph_and_counts_its_rows() {
+  // Issue #593: `6` paints the sidebar's commit graph on the full canvas.
+  // The count rides the title so `load more` has visible feedback; the
+  // fixture repo has one commit, so there is no deeper page and no `+`.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  let buf = render(&mut app);
+  assert_present(&buf, "Commits (1)", "commits title with its row count");
+  assert_present(&buf, "init", "the commit subject");
+  assert_absent(&buf, "load more", "load-more hint on an exhausted history");
+  assert_absent(&buf, "loading", "loader after the walk landed");
+}
+
+#[test]
+fn commits_modal_drops_load_more_when_the_worktree_is_gone() {
+  // The render-side half of the same rule: a full page whose worktree left
+  // the list must not paint the hint, nor the title's `+`.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  app.worktrees.clear();
+  let buf = render(&mut app);
+  assert_absent(&buf, "load more", "load-more hint for a vanished worktree");
+}
+
+#[test]
+fn commits_modal_advertises_load_more_only_when_a_page_is_full() {
+  // The footer hint and `App::load_more_commits` read the same predicate,
+  // so a key that does nothing is never advertised. Forced rather than
+  // committed 300 times: this pins the footer, not the revwalk.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  let buf = render(&mut app);
+  assert_present(&buf, "load more", "load-more hint on a full page");
+  assert_present(&buf, "+", "the title flags that a deeper page exists");
+}
+
 #[test]
 fn command_logs_modal_renders_empty_placeholder() {
   let (_dir, mut app) = make_app();
@@ -1532,6 +1601,17 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
       Box::new(|| {
         let (d, mut a) = make_app();
         a.view = View::CommandLogs;
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
+      "commits",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_commits();
+        settle_commits(&mut a);
         (d, a)
       }),
       72,

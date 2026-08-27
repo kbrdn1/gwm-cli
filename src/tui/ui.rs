@@ -2,9 +2,11 @@ use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
+use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
+use std::collections::HashMap;
 
 /// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
 /// default by the hint helpers that have no form in reach (issue #418). Every
@@ -172,6 +174,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Commits => draw_commits(f, app),
     View::Pty => draw_pty_overlay(f, app),
     View::Note => draw_note_editor(f, app),
     // #325: exec profile picker renders as a small centred modal.
@@ -2200,23 +2203,184 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+  // The sidebar pane paints rows only, so the metadata columns it never
+  // shows are built and dropped. Cheap next to the revwalk that precedes
+  // them, and one listing routine is one place for the row format to live.
+  recent_commits_listing(w, limit, worktree::unix_now(), theme).lines
+}
+
+/// Gap, in cells, between the commit subject and the metadata column.
+pub const COMMITS_META_GAP: usize = 2;
+
+/// Cells the subject must keep for the metadata column to be worth showing.
+///
+/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
+/// topology), so what the left side needs cannot be derived from a
+/// constant: the policy is stated as a floor on what survives instead. A
+/// merge-heavy history at 80 columns would otherwise leave a subject of ten
+/// cells to buy an author column, which is a worse listing than no column.
+pub const COMMITS_SUBJECT_FLOOR: usize = 30;
+
+/// Pick the widest metadata column that leaves the subject its floor.
+///
+/// `body_w` is the text area AFTER the scrollbar column is reserved. The
+/// tiers are tried widest first; `None` means even the narrowest does not
+/// fit and the listing renders full-width as it did before.
+///
+/// A pure function on widths so the policy is testable without a terminal:
+/// the render path only decides which `MetaColumn` this names.
+pub fn commits_meta_pick(body_w: usize, tiers: [usize; 3]) -> Option<usize> {
+  tiers
+    .into_iter()
+    .find(|&w| w > 0 && body_w >= w + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR)
+}
+
+/// Build the two right-hand metadata columns for a commit listing.
+///
+/// `wide` carries `author · age`, `narrow` the age alone — the initials are
+/// already on the left, so the full author is the second tier of
+/// information, not the first. The age is what the listing genuinely lacks
+/// today.
+///
+/// Ages are computed against `now` HERE, not stored on the row: the rows
+/// are memoised by `(repo, tip, limit)`, so an age baked into them would be
+/// frozen at the first read. They are still a snapshot in the sense that
+/// the overlay does not re-read itself while open, so a listing left up for
+/// an hour keeps saying `2m`.
+pub fn commit_meta_columns(
+  rows: &[worktree::CommitRow],
+  now: i64,
+  stats: &HashMap<git2::Oid, worktree::CommitStat>,
+  theme: &Theme,
+) -> [MetaColumn; 3] {
+  let mut wide = MetaColumn::default();
+  let mut mid = MetaColumn::default();
+  let mut narrow = MetaColumn::default();
+  let sep = || Span::styled(" · ".to_string(), Style::default().fg(theme.muted));
+
+  for row in rows {
+    let age_d = worktree::commit_age(row.time, now);
+    let age = worktree::format_relative_duration(age_d);
+    let age_style = Style::default().fg(freshness_color(age_d, theme));
+    let age_span = || Span::styled(age.clone(), age_style);
+    let author = row.author.trim();
+    // Absent means "not read yet", which is not the same as a commit that
+    // changed nothing — the second read fills the map and the columns are
+    // rebuilt from it.
+    let stat = stats.get(&row.hash).copied();
+
+    narrow.lines.push(Line::from(age_span()));
+
+    let mut mid_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(s) = stat {
+      mid_spans.extend(commit_stat_spans(s, theme));
+      mid_spans.push(sep());
+    }
+    mid_spans.push(age_span());
+    mid.lines.push(Line::from(mid_spans));
+
+    let mut wide_spans: Vec<Span<'static>> = Vec::new();
+    if !author.is_empty() {
+      wide_spans.push(Span::styled(author.to_string(), Style::default().fg(theme.muted)));
+      wide_spans.push(sep());
+    }
+    if let Some(s) = stat {
+      wide_spans.extend(commit_stat_spans(s, theme));
+      wide_spans.push(sep());
+    }
+    wide_spans.push(age_span());
+    wide.lines.push(Line::from(wide_spans));
+  }
+
+  for col in [&mut wide, &mut mid, &mut narrow] {
+    col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
+  }
+  [wide, mid, narrow]
+}
+
+/// One commit's diff counts as coloured spans: `3~ 1+ 1- +120 -34`.
+///
+/// The file counts reuse the working-tree pane's roles (#287) so a created
+/// file reads the same colour here as it does there, and the line counts
+/// reuse the diff pair. A category with nothing in it is omitted rather
+/// than printed as a zero: five zeroes on every quiet commit is noise, and
+/// the row is competing with the subject for width.
+pub fn commit_stat_spans(s: worktree::CommitStat, theme: &Theme) -> Vec<Span<'static>> {
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut push = |text: String, color: Color| {
+    if !spans.is_empty() {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(text, Style::default().fg(color)));
+  };
+  if s.files_modified > 0 {
+    push(format!("{}~", s.files_modified), theme.dirty);
+  }
+  if s.files_added > 0 {
+    push(format!("{}+", s.files_added), theme.clean);
+  }
+  if s.files_deleted > 0 {
+    push(format!("{}-", s.files_deleted), theme.prunable);
+  }
+  if s.insertions > 0 {
+    push(format!("+{}", s.insertions), theme.clean);
+  }
+  if s.deletions > 0 {
+    push(format!("-{}", s.deletions), theme.prunable);
+  }
+  if spans.is_empty() {
+    // An empty commit, or a merge that brought nothing onto its first
+    // parent. Silence would read as "not loaded yet".
+    spans.push(Span::styled("0".to_string(), Style::default().fg(theme.muted)));
+  }
+  spans
+}
+
+/// The full result of one read of the log: the rows, the commit count, and
+/// the two right-hand metadata columns.
+///
+/// The count is not `lines.len()` and the difference is not cosmetic: an
+/// unborn HEAD, an empty history or a failed read all paint exactly ONE
+/// sentinel row, so a caller inferring the count from the rows reads them
+/// as a repository with one commit (Codex review, PR #614). The
+/// commit-listing overlay (issue #593) titles itself with this count and
+/// decides whether a page is full from it.
+///
+/// `now` is passed in rather than read here so the ages are deterministic
+/// under test.
+pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, now: i64, theme: &Theme) -> CommitsSnapshot {
   match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
+      let loaded = rows.len();
+      let tiers = commit_meta_columns(&rows, now, &HashMap::new(), theme);
       let graphs = super::commit_graph::render_commits(&rows, theme);
-      rows
-        .into_iter()
+      let lines = rows
+        .iter()
+        .cloned()
         .zip(graphs)
         .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
-        .collect()
+        .collect();
+      CommitsSnapshot {
+        lines,
+        loaded,
+        rows,
+        tiers,
+      }
     }
-    Ok(_) => vec![Line::from(Span::styled(
-      "(no commits)".to_string(),
-      Style::default().fg(theme.muted),
-    ))],
-    Err(e) => vec![Line::from(Span::styled(
-      format!("! {}", e),
-      Style::default().fg(theme.prunable),
-    ))],
+    Ok(_) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
+        "(no commits)".to_string(),
+        Style::default().fg(theme.muted),
+      ))],
+      ..Default::default()
+    },
+    Err(e) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
+        format!("! {}", e),
+        Style::default().fg(theme.prunable),
+      ))],
+      ..Default::default()
+    },
   }
 }
 
@@ -2902,6 +3066,12 @@ impl HintContext {
         // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        // #593: reading the log and the checks is the same register as
+        // launching lazygit, and both keys mean this in either pane — so
+        // the worktrees footer advertises the pair the status footer does,
+        // ahead of the verbs that are reached less often.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
         // #515: the note is written far more often than a review is
@@ -2924,8 +3094,10 @@ impl HintContext {
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
-        // #436: `c` routes to the CI checks overlay in this context.
-        Hint::Key(EditWorktree, "ci checks"),
+        // #593: `c` / `C` mean the same thing in both panes — this one's
+        // own content at full size, and the linked PR's checks.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -3381,6 +3553,37 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
     if let Some(k) = modal.primary_key(action) {
       hints.push((k, label.to_string()));
     }
+  }
+  hints
+}
+
+/// Commit-listing overlay footer hints (issue #593). `load more` / `close`
+/// resolve from the `Commits*` modal bindings so a rebind of
+/// `[tui.keys.modal.commits]` shows through; the scroll / top-bottom
+/// movement pairs stay literal, as the Command Logs footer does.
+///
+/// `load more` is dropped when `more` is false — there is no deeper page,
+/// either because the revwalk ran out of history or because the paging cap
+/// was reached. Advertising a key that does nothing is how a working
+/// overlay reads as broken. While `loading`, the slot says so instead: the
+/// key is equally inert there, but for a reason that resolves on its own.
+pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  if loading {
+    // `more` is false while a read is out, so without this the hint slot
+    // would simply go blank and a deeper page would look refused rather
+    // than under way.
+    hints.push(("…".to_string(), "loading".to_string()));
+  } else if more {
+    if let Some(k) = modal.primary_key(ModalAction::CommitsLoadMore) {
+      hints.push((k, "load more".to_string()));
+    }
+  }
+  if let Some(k) = modal.primary_key(ModalAction::CommitsClose) {
+    hints.push((k, "close".to_string()));
   }
   hints
 }
@@ -3894,6 +4097,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
+  rows.push(entry(
+    Action::Commits,
+    "show the commit listing full size, with load-more",
+  ));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
@@ -4202,6 +4409,17 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::CommandLogsClose, "close"),
       HelpRow::Blank,
+      HelpRow::Section("Commits".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommitsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommitsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommitsHalfDown, "scroll down half a screen"),
+      modal_entry(ModalAction::CommitsHalfUp, "scroll up half a screen"),
+      modal_entry(ModalAction::CommitsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommitsScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::CommitsLoadMore, "read one page deeper"),
+      modal_entry(ModalAction::CommitsClose, "close"),
+      HelpRow::Blank,
       HelpRow::Section("Settings".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::ConfigNextTab, "next tab"),
@@ -4426,6 +4644,102 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
+/// Render the full-size commit listing (issue #593).
+///
+/// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the
+/// snapshot `App::enter_commits` took — one row per commit, short hash /
+/// author initials / `o`-`@` graph / subject, exactly as the sidebar pane
+/// paints them.
+///
+/// No horizontal pan: `recent_commits_lines` deliberately leaves subjects
+/// untruncated and relies on ratatui's hard clip at the right edge, which is
+/// lazygit's behaviour. The whole point of the overlay is that the canvas is
+/// wide enough for that clip to stop mattering.
+///
+/// The title carries the row count so `load more` has visible feedback; a
+/// trailing `+` means a deeper page exists. It rides the top rule, which is
+/// clipped from the LEFT when centred, so the count sits last on purpose.
+fn draw_commits(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+
+  let more = app.commits_can_load_more();
+  let loading = app.commits.loading;
+  // The `+` tracks "a deeper page exists", which is true while one is being
+  // read too: `can_load_more` is false then only because the read is out.
+  let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
+  let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
+  let block = overlay_block_titled(&title, accent);
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  // A muted loader rather than an empty canvas while the first page is
+  // being walked: blank reads as "no commits", which is the one answer this
+  // overlay must not give by accident. A deeper page keeps the rows it
+  // already has on screen instead, and says `loading` in the footer.
+  let lines: Vec<Line<'static>> = if !app.commits.lines.is_empty() {
+    app.commits.lines.clone()
+  } else if loading {
+    vec![Line::from(Span::styled(
+      " loading…".to_string(),
+      Style::default().fg(muted),
+    ))]
+  } else {
+    vec![Line::from(Span::styled(
+      "No commits.".to_string(),
+      Style::default().fg(muted),
+    ))]
+  };
+
+  // Publish the scroll bound against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.commits.viewport = body_area.height;
+  app.commits.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
+  app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
+  let scroll = app.commits.scroll;
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+
+  // The metadata rides its own rect on the right rather than being appended
+  // to each row: the subject is deliberately hard-clipped without an
+  // ellipsis (lazygit's gocui behaviour, documented on
+  // `recent_commits_lines` and shared with the sidebar pane), so narrowing
+  // the left rect IS that same rule applied at a nearer edge. Both
+  // paragraphs take the same scroll offset, so the columns stay aligned.
+  let widths = [
+    app.commits.tiers[0].width,
+    app.commits.tiers[1].width,
+    app.commits.tiers[2].width,
+  ];
+  let meta = commits_meta_pick(text_area.width as usize, widths);
+
+  match meta {
+    Some(meta_w) => {
+      let column = &app.commits.tiers[widths.iter().position(|&w| w == meta_w).unwrap_or(2)];
+      let meta_w = meta_w as u16;
+      let [left, _gap, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(COMMITS_META_GAP as u16),
+        Constraint::Length(meta_w),
+      ])
+      .areas(text_area);
+      f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), left);
+      f.render_widget(
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        right,
+      );
+    }
+    None => f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area),
+  }
+
+  let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
+}
+
 fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
@@ -7506,22 +7820,14 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
     // #436: advertise the key that opens the CI checks overlay right after
-    // the indicator, resolved live so a rebind shows through. The key is
-    // context-accurate (Codex review #455): the contextual `c`
-    // (EditWorktree's chord) only while the status pane holds the focus —
-    // in the worktrees context that key opens the rename modal, so the
-    // global `ci_checks` binding is advertised instead. An unbound
-    // EditWorktree falls back to the global binding (still live in that
-    // context); only when both are unbound does the suffix disappear. In
-    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
-    // printable keys feed the filter — so no key is advertised at all.
+    // the indicator, resolved live so a rebind shows through. Since #593
+    // that key is `ci_checks` in every context — the pane-dependent form
+    // this used to take existed only because the status pane borrowed
+    // `c`, and `c` now means the commit listing in both panes. In picker
+    // mode (`gwm switch`) run_action drops Action::CiChecks — printable
+    // keys feed the filter — so no key is advertised at all.
     let ci_key = if app.picker_mode {
       None
-    } else if app.sidebar.open && app.sidebar.focused {
-      app
-        .keymap
-        .primary_chord(Action::EditWorktree)
-        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
     } else {
       app.keymap.primary_chord(Action::CiChecks)
     };

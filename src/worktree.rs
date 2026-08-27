@@ -1119,6 +1119,17 @@ pub struct CommitRow {
   pub author: String,
   pub parents: Vec<git2::Oid>,
   pub subject: String,
+  /// Commit time, Unix seconds, as git recorded it.
+  ///
+  /// Kept raw rather than as a `Duration` since now: the rows are memoised
+  /// by `(repo, tip, limit)`, so a pre-computed age would be frozen at the
+  /// first read and every later cache hit would serve it. The age is
+  /// derived at render time from this instead.
+  ///
+  /// It can be AHEAD of the local clock — skew, a rewritten history, a
+  /// rebase preserving author dates — so any subtraction against `now`
+  /// saturates at zero rather than underflowing.
+  pub time: i64,
 }
 
 /// Return recent commits for the sidebar using libgit2. This is the uncached
@@ -1130,6 +1141,145 @@ pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
     reason: "HEAD does not point at a commit".into(),
   })?;
   recent_commits_revwalk(&repo, tip, n)
+}
+
+/// What one commit did, in counts: how many files it added, changed and
+/// removed, and how many lines it inserted and deleted.
+///
+/// The listing overlay (#593) shows this per row. `files_*` come from the
+/// `--raw` status letters, the line counts from `--numstat`; a binary file
+/// contributes to `files_*` with no lines, since git reports `-` for both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommitStat {
+  pub files_added: usize,
+  pub files_modified: usize,
+  pub files_deleted: usize,
+  pub insertions: usize,
+  pub deletions: usize,
+}
+
+impl CommitStat {
+  /// Every file the commit touched, whatever it did to it.
+  pub fn files_touched(self) -> usize {
+    self.files_added + self.files_modified + self.files_deleted
+  }
+}
+
+/// Per-commit diff counts for exactly `oids`, read in one `git log`.
+///
+/// Shells out rather than walking with libgit2: a `diff_tree_to_tree` per
+/// commit costs 33s for 300 commits on this repo (measured, debug build),
+/// where git streams the same answer in about a second. This runs on a
+/// worker, never on the render path.
+///
+/// **`--diff-merges=first-parent` is load-bearing.** `git log` emits no
+/// diff at all for a merge by default, and this project merges rather than
+/// squashes, so a fifth of the rows here are merges: without it they would
+/// silently read as "changed nothing". It gives a merge its diff against
+/// parent 1 WITHOUT touching traversal, unlike `--first-parent`.
+///
+/// **`--no-walk` with an explicit oid list** is what keeps this set equal
+/// to the rows on screen. `-N` would not: the revwalk sorts
+/// `TIME | TOPOLOGICAL` and `git log` does not, so the two disagree on
+/// which commits the first N are. The oids go through argv (about 41 bytes
+/// each, so ~61 KB at the `COMMITS_MAX` page cap, well under `ARG_MAX`).
+///
+/// An oid git has nothing to say about is absent from the map rather than
+/// zero, so a caller can tell "no changes" from "not read".
+pub fn commit_stats(dir: &Path, oids: &[git2::Oid]) -> Result<HashMap<git2::Oid, CommitStat>> {
+  if oids.is_empty() {
+    return Ok(HashMap::new());
+  }
+  let hashes: Vec<String> = oids.iter().map(|o| o.to_string()).collect();
+  let mut args: Vec<&str> = vec![
+    "log",
+    "--no-walk",
+    "--diff-merges=first-parent",
+    "--raw",
+    "--numstat",
+    "-z",
+    "--format=%H",
+  ];
+  args.extend(hashes.iter().map(String::as_str));
+  Ok(parse_commit_stats(&run_git(dir, &args)?))
+}
+
+/// Parse `git log --raw --numstat -z --format=%H` into per-commit counts.
+///
+/// The `-z` stream is one flat run of NUL-terminated tokens, and the tokens
+/// are classified BY SHAPE rather than by counting positions:
+///
+/// - a bare 40-hex token starts a new commit (the `%H`, whose trailing
+///   newline the format leaves in front of the next token),
+/// - a token opening with `:` is a `--raw` entry, whose last field is the
+///   status letter (`R100` and `C50` carry a score, so only the letter is
+///   read),
+/// - `<n>\t<n>\t…` or `-\t-\t…` is a `--numstat` entry.
+///
+/// Anything else is a path, and paths are ignored. Counting positions is
+/// what a rename breaks: `R` and `C` emit TWO paths where every other
+/// status emits one, so a positional walk desynchronises for the rest of
+/// the commit. Shape classification cannot: it never has to know how many
+/// paths came before.
+///
+/// The one thing it cannot survive is a path that is itself shaped like a
+/// numstat entry — POSIX allows tabs in filenames — which would add its
+/// digits to the totals. That miscounts a row; it cannot desynchronise the
+/// commit boundaries, which only a 40-hex token moves.
+pub fn parse_commit_stats(raw: &str) -> HashMap<git2::Oid, CommitStat> {
+  let mut out: HashMap<git2::Oid, CommitStat> = HashMap::new();
+  let mut current: Option<git2::Oid> = None;
+
+  for token in raw.split('\0') {
+    let token = token.trim_start_matches(['\n', '\r']);
+    if token.is_empty() {
+      continue;
+    }
+
+    if token.len() == 40 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+      current = git2::Oid::from_str(token).ok();
+      if let Some(oid) = current {
+        out.entry(oid).or_default();
+      }
+      continue;
+    }
+
+    let Some(oid) = current else { continue };
+
+    if let Some(rest) = token.strip_prefix(':') {
+      // `:<mode> <mode> <sha> <sha> <status>` — the status is the last
+      // whitespace-separated field, and only its first letter matters.
+      let Some(status) = rest.split_whitespace().next_back().and_then(|f| f.chars().next()) else {
+        continue;
+      };
+      let e = out.entry(oid).or_default();
+      match status {
+        'A' | 'C' => e.files_added += 1,
+        'D' => e.files_deleted += 1,
+        // M, R (a rename is the file changed, under a new name), T, U and
+        // anything git grows later.
+        _ => e.files_modified += 1,
+      }
+      continue;
+    }
+
+    let mut fields = token.split('\t');
+    let (Some(ins), Some(del)) = (fields.next(), fields.next()) else {
+      continue;
+    };
+    // `-\t-` is git's way of saying "binary": the file counts, the lines
+    // do not exist.
+    if ins == "-" && del == "-" {
+      continue;
+    }
+    let (Ok(ins), Ok(del)) = (ins.parse::<usize>(), del.parse::<usize>()) else {
+      continue;
+    };
+    let e = out.entry(oid).or_default();
+    e.insertions += ins;
+    e.deletions += del;
+  }
+  out
 }
 
 /// Return recent commits for one worktree, memoised by branch-tip OID and
@@ -1193,6 +1343,7 @@ fn recent_commits_revwalk(repo: &Repository, tip: git2::Oid, limit: usize) -> Re
       author: commit.author().name().unwrap_or("").to_string(),
       parents: commit.parent_ids().collect(),
       subject: commit.summary().ok().flatten().unwrap_or("").to_string(),
+      time: commit.time().seconds(),
     });
   }
   Ok(rows)
@@ -1224,6 +1375,7 @@ fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
       author,
       parents,
       subject,
+      time: 0,
     });
   }
   Ok(rows)
@@ -1642,6 +1794,26 @@ pub fn branch_age(repo: &Repository, branch: &str) -> Option<Duration> {
 /// from lazygit: single-character suffix, no plural, capital `M` to
 /// disambiguate from minutes. Bounded at 4 chars for two-digit values in
 /// each unit, which is enough for any realistic branch age.
+/// Age of a commit timestamp against `now`, both in Unix seconds.
+///
+/// Saturates at zero: a commit can be dated in the future (clock skew, a
+/// rewritten history, a rebase that preserved author dates), and the naive
+/// subtraction would underflow into "55 thousand years ago". Zero renders
+/// as `0s`, which reads as "just now" — the least wrong thing to say about
+/// a timestamp the local clock has not reached.
+pub fn commit_age(commit_time: i64, now: i64) -> Duration {
+  Duration::from_secs(now.saturating_sub(commit_time).max(0) as u64)
+}
+
+/// Unix seconds now, or 0 if the system clock predates the epoch. Never
+/// panics: this feeds a user-facing render path.
+pub fn unix_now() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs() as i64)
+    .unwrap_or(0)
+}
+
 pub fn format_relative_duration(d: Duration) -> String {
   const MINUTE: u64 = 60;
   const HOUR: u64 = 60 * MINUTE;

@@ -3487,31 +3487,32 @@ fn pr_line_ci_hint_follows_the_focus_context() {
       .collect()
   };
 
-  app.focus_worktrees();
-  let unfocused = text_of(&app);
-  assert!(
-    unfocused.contains("10/10 [C]"),
-    "worktrees focus advertises the global ci_checks binding: {unfocused}"
-  );
+  // #593: `C` opens the checks in both panes, so the badge no longer
+  // changes under the focus. The pane-dependent form it used to take
+  // existed only because the status pane borrowed `c` for the checks.
+  for focus_status in [false, true] {
+    if focus_status {
+      app.focus_status();
+    } else {
+      app.focus_worktrees();
+    }
+    let text = text_of(&app);
+    assert!(
+      text.contains("10/10 [C]"),
+      "the ci_checks binding is advertised in both panes (status focus = {focus_status}): {text}"
+    );
+  }
 
-  app.focus_status();
-  let focused = text_of(&app);
-  assert!(
-    focused.contains("10/10 [c]"),
-    "status focus advertises the contextual c: {focused}"
-  );
-
-  // Codex review #455 (P2): with `edit_worktree` explicitly unbound the
-  // contextual key is gone, but the global `ci_checks` binding still opens
-  // the overlay — advertise it instead of dropping the hint entirely.
+  // With `ci_checks` explicitly unbound there is no key to advertise and
+  // the suffix disappears rather than naming a phantom one.
   app
     .keymap
-    .apply_override(gwm::tui::keymap::Action::EditWorktree, vec![])
+    .apply_override(gwm::tui::keymap::Action::CiChecks, vec![])
     .unwrap();
   let unbound = text_of(&app);
   assert!(
-    unbound.contains("10/10 [C]"),
-    "unbound edit_worktree falls back to the global ci_checks key: {unbound}"
+    unbound.contains("10/10") && !unbound.contains("10/10 ["),
+    "an unbound ci_checks drops the key suffix: {unbound}"
   );
 }
 
@@ -3640,7 +3641,7 @@ fn ci_filter_enter_on_a_urlless_check_leaves_the_filter_and_signals_it() {
 }
 
 #[test]
-fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
+fn the_ci_overlay_opens_from_the_status_pane() {
   // Issue #436: `c` is contextual, same dispatch mechanism that turns j/k
   // into sidebar scroll — worktrees context keeps the rename modal, status
   // context opens the CI checks overlay.
@@ -3669,31 +3670,9 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
     detail: Default::default(),
   }));
 
-  // Codex review on PR #455: the contextual routing lives on the KEY path
-  // only — a pure pre-resolution the event loop applies before run_action.
-  // The palette's `edit-worktree` entry must stay a rename everywhere, so
-  // accept_command_palette returns the action unresolved.
-  use gwm::tui::keymap::Action;
-  app.focus_status();
-  assert_eq!(
-    app.resolve_contextual_action(Action::EditWorktree),
-    Action::CiChecks,
-    "status focus routes the edit-worktree KEY to the CI overlay"
-  );
-  assert_eq!(
-    app.resolve_contextual_action(Action::Down),
-    Action::Down,
-    "other actions pass through untouched"
-  );
-
-  app.focus_worktrees();
-  assert_eq!(
-    app.resolve_contextual_action(Action::EditWorktree),
-    Action::EditWorktree,
-    "worktrees context keeps the rename on c"
-  );
-
-  // The resolved CiChecks action opens the overlay as before.
+  // #593 replaced the #436 contextual routing: `c` and `C` mean the same
+  // thing in both panes now, so there is nothing left to re-resolve under
+  // the focus, and `enter_ci_checks` is reached the same way from either.
   app.focus_status();
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
@@ -15136,4 +15115,521 @@ fn emptying_the_buffer_with_dd_removes_the_note_too() {
   app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
   assert!(!path.exists(), "an emptied note is removed, not blanked");
+}
+
+// ---- full-size commit listing (issue #593) ---------------------------------
+
+/// Flatten a rendered modal line into its plain text.
+fn commits_line_text(l: &ratatui::text::Line<'_>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Drain until the commit-listing worker lands, or fail loudly.
+fn settle_commits(app: &mut App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_commits_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_commits_loading(),
+    "the commit-listing worker never landed within 10s"
+  );
+}
+
+#[test]
+fn commits_modal_snapshots_the_log_on_open() {
+  // Issue #593: `6` opens the commit listing full size. The snapshot is
+  // taken AT OPEN, not read from the sidebar cache — the sidebar is a
+  // hidden pane here (`open = false`), the state in which that cache is
+  // never rebuilt, and the overlay must still show the log.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+
+  app.enter_commits();
+  assert_eq!(app.view, View::Commits);
+  assert!(
+    app.is_commits_loading(),
+    "the overlay opens on a loader; the revwalk is on a worker, not the keypress"
+  );
+  settle_commits(&mut app);
+
+  let text: Vec<String> = app.commits.lines.iter().map(commits_line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("init")),
+    "the repo's only commit subject is listed — got {text:?}"
+  );
+  assert_eq!(app.commits.limit, COMMITS_PAGE, "the first page reads one page deep");
+  assert_eq!(app.commits.loaded, 1, "one row per commit — got {text:?}");
+  assert_eq!(app.commits.scroll, 0, "a fresh open starts at the top");
+}
+
+#[test]
+fn load_more_is_refused_once_history_runs_out() {
+  // The revwalk returned fewer rows than the limit asked for, so the whole
+  // history is already on screen: raising the limit would re-walk the same
+  // graph for the same rows. This is the common case — most worktrees have
+  // far fewer than a page of commits.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  assert!(
+    !app.commits.can_load_more(),
+    "1 row against a {COMMITS_PAGE}-row limit is an exhausted history"
+  );
+  app.load_more_commits();
+  assert_eq!(
+    app.commits.limit, COMMITS_PAGE,
+    "a refused page must not raise the limit"
+  );
+}
+
+#[test]
+fn load_more_raises_the_limit_by_one_page() {
+  // A full first page means there is probably more behind it. `loaded` is
+  // forced here rather than committing 300 times: the fixture repo cannot
+  // fill a page, and this pins the App-level wiring (limit -> worker ->
+  // payload), not the revwalk.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  assert!(app.commits.can_load_more(), "a full page can be paged past");
+  app.load_more_commits();
+  assert_eq!(app.commits.limit, COMMITS_PAGE * 2, "load-more reads one page deeper");
+  assert!(app.is_commits_loading(), "the deeper read is on a worker too");
+  assert!(
+    !app.commits.lines.is_empty(),
+    "the rows already read stay on screen while the deeper page loads"
+  );
+
+  settle_commits(&mut app);
+  assert_eq!(
+    app.commits.limit,
+    COMMITS_PAGE * 2,
+    "the payload lands on the deeper page"
+  );
+  assert!(
+    !app.commits.lines.is_empty(),
+    "the deeper page is installed, not left blank"
+  );
+}
+
+#[test]
+fn a_second_load_more_cannot_queue_while_the_first_is_out() {
+  // `loaded` still describes the previous page while the worker runs, so
+  // without the loading gate a held `m` would raise the limit again and
+  // queue a duplicate walk — and the slot would coalesce the second onto
+  // the first, whose payload the drain then drops on the limit check,
+  // leaving the loader up forever.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  app.load_more_commits();
+  app.load_more_commits();
+  assert_eq!(
+    app.commits.limit,
+    COMMITS_PAGE * 2,
+    "the second press while a read is out must not page again"
+  );
+  settle_commits(&mut app);
+}
+
+#[test]
+fn reopening_on_another_worktree_gets_its_own_read() {
+  // Coalescing is only sound for the same worktree at the same limit: the
+  // drain drops a payload whose path does not match, so without freeing the
+  // slot the reopen waits on a worker whose result it will never accept and
+  // the loader never clears.
+  //
+  // The in-flight read is staged by hand rather than raced against a real
+  // worker: on a one-commit fixture the thread finishes before the second
+  // open, so a raced version passes with the invalidate removed. Occupying
+  // the slot is what makes the guard the only thing standing between this
+  // test and a 10s timeout.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (dir, mut app) = make_app();
+  let other = dir.path().join("elsewhere");
+
+  app.commits.begin(Some(&other), COMMITS_PAGE, None);
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert!(!app.is_commits_loading(), "the reopen's own read cleared the loader");
+}
+
+#[test]
+fn reopening_after_a_deeper_page_gets_its_own_read() {
+  // Same hole, reached by the limit rather than the path: close the overlay
+  // while a 600-commit page is out, reopen, and the first page's request
+  // would coalesce onto a read whose payload the drain drops on the limit
+  // check.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (dir, mut app) = make_app();
+
+  app.commits.begin(Some(dir.path()), COMMITS_PAGE * 2, None);
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert_eq!(app.commits.limit, COMMITS_PAGE, "the reopen is back at the first page");
+}
+
+#[test]
+fn load_more_pages_the_worktree_the_overlay_opened_on() {
+  // Codex review, PR #614: the auto-refresh can move the selection while
+  // the overlay is up. Paging from `selected()` would fire a read for the
+  // NEW worktree, which the drain then drops on the path check — after
+  // `complete` freed the slot — so nothing is ever left to clear the
+  // loader. The target captured at open is the only sound one.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  // The selection drifts, the overlay does not.
+  app.worktrees.push(worktree_fixture("feat-0-elsewhere"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+
+  app.load_more_commits();
+  settle_commits(&mut app);
+  assert!(
+    !app.is_commits_loading(),
+    "the deeper page landed on the captured target"
+  );
+}
+
+#[test]
+fn a_vanished_worktree_stops_advertising_load_more() {
+  // Codex review, PR #614: another process removes the worktree while the
+  // overlay is up and the auto-refresh drops it from the list. The modal's
+  // own arithmetic still says "a full page, under the cap", so the footer
+  // kept offering `m` for a read that can no longer resolve a target. The
+  // hint and the handler have to agree, or a live key reads as broken.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  assert!(app.commits_can_load_more(), "a full page on a live worktree pages");
+
+  app.worktrees.clear();
+
+  assert!(
+    app.commits.can_load_more(),
+    "the modal's own arithmetic cannot see the list, and still says yes"
+  );
+  assert!(
+    !app.commits_can_load_more(),
+    "but the App knows the target is gone, so the key is not offered"
+  );
+}
+
+#[test]
+fn a_moved_tip_is_not_coalesced_onto_the_previous_read() {
+  // Codex review, PR #614: close the overlay mid-read, land a commit, and
+  // reopen on the same worktree. Path and limit both match, so the request
+  // coalesced onto the worker already out — which still holds the OLD
+  // `WorktreeInfo.head`, so its payload passes both drain checks and the
+  // reopen silently shows a log missing the new commits. The tip is part
+  // of what identifies a read.
+  //
+  // The in-flight read is staged rather than raced: the fixture's walk
+  // finishes long before a second open could reach the guard.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (_dir, mut app) = make_app();
+  let path = app.selected().expect("the fixture repo is listed").path.clone();
+
+  app.commits.begin(Some(&path), COMMITS_PAGE, Some("0".repeat(40)));
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert!(!app.is_commits_loading(), "the reopen at the new tip got its own read");
+}
+
+#[test]
+fn the_count_is_commits_not_rendered_rows() {
+  // Codex review, PR #614: `recent_commits_lines` paints ONE sentinel row
+  // for an unborn HEAD or a failed read, so counting rows called that
+  // "1 commit" and the title read `Commits (1)` over a repo with none.
+  // The count travels with the rows instead of being inferred from them.
+  use gwm::tui::recent_commits_listing;
+  let dir = tempfile::tempdir().unwrap();
+  git2::Repository::init(dir.path()).unwrap();
+  let w = worktree_pointing_at_dir(dir.path());
+
+  let snap = recent_commits_listing(&w, 10, 0, &Theme::default());
+  assert_eq!(snap.loaded, 0, "an unborn HEAD has no commits");
+  assert_eq!(snap.lines.len(), 1, "but it still paints one sentinel row");
+  assert!(
+    snap.tiers.iter().all(|t| t.lines.is_empty()),
+    "and a sentinel carries no metadata column"
+  );
+}
+
+#[test]
+fn a_sentinel_row_is_not_a_full_page() {
+  // The consequence that matters: a sentinel counted as a row would make
+  // `loaded >= limit` true at limit 1 and offer a page that does not exist.
+  use gwm::tui::{CommitsModal, CommitsSnapshot};
+  let mut m = CommitsModal::new();
+  m.begin(Some(std::path::Path::new("/tmp/x")), 1, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("! unborn HEAD")],
+    loaded: 0,
+    ..Default::default()
+  });
+  assert_eq!(m.loaded, 0, "the sentinel is a row, not a commit");
+  assert!(!m.can_load_more(), "and an empty history has no deeper page");
+}
+
+#[test]
+fn a_commit_dated_in_the_future_reads_as_just_now() {
+  // A commit time can be AHEAD of the local clock: skew, a rewritten
+  // history, a rebase that preserved author dates. The naive subtraction
+  // underflows into "55 thousand years"; saturating at zero renders `0s`,
+  // which is the least wrong thing to say about a timestamp we have not
+  // reached. No panic either, and this is a render path.
+  use gwm::worktree::{commit_age, format_relative_duration};
+  let now = 1_000_000i64;
+  assert_eq!(commit_age(now + 3600, now).as_secs(), 0, "the future saturates");
+  assert_eq!(format_relative_duration(commit_age(now + 3600, now)), "0s");
+  assert_eq!(commit_age(now - 3600, now).as_secs(), 3600, "the past is unaffected");
+}
+
+#[test]
+fn the_metadata_column_only_takes_room_the_subject_can_spare() {
+  // The graph is variable-width, so what the left side needs cannot be a
+  // constant — the policy is a floor on what survives instead. A
+  // merge-heavy history at 80 columns would otherwise buy an author column
+  // with a ten-cell subject, which is a worse listing than no column.
+  use gwm::tui::{commits_meta_pick, COMMITS_META_GAP, COMMITS_SUBJECT_FLOOR};
+  // author · stats · age / stats · age / age
+  let tiers = [30usize, 14, 4];
+  let room_for = |w: usize| w + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
+
+  assert_eq!(commits_meta_pick(room_for(tiers[0]), tiers), Some(tiers[0]));
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[0]) - 1, tiers),
+    Some(tiers[1]),
+    "one cell short of the widest tier drops the author, not the stats"
+  );
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[1]) - 1, tiers),
+    Some(tiers[2]),
+    "one cell short of the middle tier keeps the age alone"
+  );
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[2]) - 1, tiers),
+    None,
+    "below the floor the listing keeps the whole width"
+  );
+
+  assert_eq!(
+    commits_meta_pick(500, [0, 0, 0]),
+    None,
+    "a sentinel row carries no column, however wide the terminal"
+  );
+}
+
+#[test]
+fn the_metadata_columns_carry_the_author_and_the_age() {
+  // `wide` is `author · age`, `narrow` the age alone: the initials are
+  // already on the left, so the full author is the second tier of
+  // information and the age is the first — it is what the listing lacks.
+  use gwm::tui::commit_meta_columns;
+  use gwm::worktree::CommitRow;
+  let now = 1_000_000i64;
+  let row = CommitRow {
+    hash: git2::Oid::ZERO_SHA1,
+    author: "Kylian Bardini".into(),
+    parents: vec![],
+    subject: "whatever".into(),
+    time: now - 3 * 86_400,
+  };
+  let none = std::collections::HashMap::new();
+  let [wide, mid, narrow] = commit_meta_columns(&[row], now, &none, &Theme::default());
+
+  let text = |l: &ratatui::text::Line<'_>| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
+  assert_eq!(text(&wide.lines[0]), "Kylian Bardini · 3d");
+  assert_eq!(
+    text(&mid.lines[0]),
+    "3d",
+    "with no stats reads the middle tier is the age"
+  );
+  assert_eq!(text(&narrow.lines[0]), "3d");
+  assert_eq!(wide.width, "Kylian Bardini · 3d".chars().count());
+  assert_eq!(narrow.width, 2);
+}
+
+#[test]
+fn an_authorless_commit_keeps_the_age_alone() {
+  // The `git log` fallback parser can yield an empty author, and a
+  // dangling ` · ` separator with nothing before it reads as a bug.
+  use gwm::tui::commit_meta_columns;
+  use gwm::worktree::CommitRow;
+  let now = 1_000_000i64;
+  let row = CommitRow {
+    hash: git2::Oid::ZERO_SHA1,
+    author: "   ".into(),
+    parents: vec![],
+    subject: String::new(),
+    time: now - 60,
+  };
+  let none = std::collections::HashMap::new();
+  let [wide, _, _] = commit_meta_columns(&[row], now, &none, &Theme::default());
+  let text: String = wide.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  assert_eq!(text, "1m", "no author, no separator");
+}
+
+#[test]
+fn paging_stops_at_the_cap() {
+  // #593 notes the memo in `recent_commits_cached` is keyed on the limit
+  // and evicts an arbitrary entry when full, so unbounded paging would push
+  // other worktrees' sidebar entries out. The cap is what bounds it.
+  use gwm::tui::{CommitsModal, CommitsSnapshot, COMMITS_MAX, COMMITS_PAGE};
+  let mut m = CommitsModal::new();
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_MAX, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); COMMITS_MAX],
+    loaded: COMMITS_MAX,
+    ..Default::default()
+  });
+
+  assert!(!m.can_load_more(), "the cap is a hard stop even on a full page");
+
+  m.limit = COMMITS_MAX - 1;
+  assert_eq!(m.next_limit(), COMMITS_MAX, "the last page clamps to the cap");
+
+  // And the cap leaves room for more than the first page, or load-more
+  // would be dead on arrival.
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_PAGE, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); COMMITS_PAGE],
+    loaded: COMMITS_PAGE,
+    ..Default::default()
+  });
+  assert!(m.can_load_more(), "a full first page is under the cap");
+}
+
+#[test]
+fn a_deeper_page_keeps_the_scroll_position() {
+  // The user pages from the bottom of the list. Rewinding to the top there
+  // would throw away the position they paged from — unlike a fresh open,
+  // which does rewind.
+  use gwm::tui::{CommitsModal, CommitsSnapshot};
+  let path = std::path::Path::new("/tmp/x");
+  let mut m = CommitsModal::new();
+  m.begin(Some(path), 10, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); 10],
+    loaded: 10,
+    ..Default::default()
+  });
+  m.max_scroll = 8;
+  m.scroll_to_bottom();
+  assert_eq!(m.scroll, 8);
+
+  m.begin_more(20);
+  assert_eq!(m.scroll, 8, "arming a deeper page keeps the cursor and the rows");
+  assert_eq!(m.lines.len(), 10, "the rows already read stay up while it loads");
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); 20],
+    loaded: 20,
+    ..Default::default()
+  });
+  assert_eq!(m.scroll, 8, "and the payload does not rewind either");
+
+  m.begin(Some(path), 20, None);
+  assert_eq!(m.scroll, 0, "a fresh open still rewinds");
+  assert!(m.lines.is_empty(), "and drops the previous listing");
+}
+
+/// Drain until the chained diff-stat read lands, or fail loudly.
+fn settle_commit_stats(app: &mut App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !app.commits.stats_loaded && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(app.commits.stats_loaded, "the chained stats read never landed");
+}
+
+#[test]
+fn the_stats_read_is_chained_after_the_rows_and_grows_the_column() {
+  // Issue #593: the rows come from a ~0.4s revwalk, the diff counts from a
+  // one-to-three second `git log`. Folding them into one read would hold
+  // the listing behind the slower half, so the second is chained from the
+  // drain and the column grows under rows already on screen.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  let before = app.commits.tiers[1].width;
+  assert!(!app.commits.stats_loaded, "the rows land without the stats");
+
+  settle_commit_stats(&mut app);
+  assert!(
+    app.commits.tiers[1].width > before,
+    "the middle tier grew by the diff counts: {} -> {}",
+    before,
+    app.commits.tiers[1].width
+  );
+}
+
+#[test]
+fn a_stats_payload_for_another_listing_is_dropped() {
+  // Same three-part identity the rows are matched on. Unlike the rows,
+  // dropping one strands nothing: the columns already carry author and
+  // age, and the next chained request covers the current listing.
+  use gwm::tui::{MetaColumn, TaskKind, TaskMsg, COMMITS_PAGE};
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  // Let the chained read this open fired land FIRST, then pretend it never
+  // did. Injecting while it is still in flight makes the assertion a race
+  // with a worker the test did not start: green locally, red on CI, which
+  // is exactly what happened.
+  settle_commit_stats(&mut app);
+  app.commits.stats_loaded = false;
+
+  let fat = MetaColumn {
+    lines: vec![ratatui::text::Line::from("XXXXXXXXXXXX")],
+    width: 12,
+  };
+  let tiers = [fat.clone(), fat.clone(), fat];
+  let path = app.commits.path.clone().unwrap();
+  let generation = app
+    .tasks
+    .request(TaskKind::CommitStats)
+    .expect("the chained read has landed, so the slot is free");
+
+  // Right path, wrong limit — injected through the spine, the path a real
+  // worker takes.
+  app
+    .task_result_sender()
+    .send(TaskMsg::CommitStats(
+      generation,
+      path.clone(),
+      COMMITS_PAGE * 2,
+      app.commits.head.clone(),
+      tiers,
+    ))
+    .unwrap();
+  app.drain_task_results();
+  assert!(
+    !app.commits.stats_loaded,
+    "a payload read at another page depth is not this listing's"
+  );
 }

@@ -150,6 +150,9 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  // #593: the sidebar's Commits pane, given the whole terminal, with a
+  // load-more key so history is paged rather than capped.
+  Commits           => "commits",
   // #436: CI checks overlay — also reachable via `c` in the status context.
   CiChecks          => "ci_checks",
   // #420: rich PR / issue view — description, checks, reviews, comments.
@@ -519,6 +522,11 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #593: `c` for commits, `C` for the checks — the same pair in both
+      // panes, so the key does not change meaning under the focus. It cost
+      // `c` its rename, which moved to `E`, and the #436 contextual
+      // routing, which existed to give the status pane its own `c`.
+      def(Action::Commits, &["c"]),
       // #436: `C` opens the CI checks overlay from anywhere in the list
       // view; `c` does the same while the status pane holds the focus
       // (contextual routing, same mechanism as j/k sidebar scroll).
@@ -547,12 +555,16 @@ impl Keymap {
       // #290: `P` is Push.
       def(Action::Push, &["P"]),
       // #290: `c` opens the edit-worktree modal (rename branch).
-      def(Action::EditWorktree, &["c"]),
+      // #593: `e` for edit. `c` went to the commit listing in both panes,
+      // and the rename took the letter that names it, which sent
+      // `exit_to_worktree` to `E`.
+      def(Action::EditWorktree, &["e"]),
       // #515: `N` opens the selected worktree's note in $EDITOR. `i`, which
       // the reference implementation uses, is taken here — it is LinkPrompt.
       def(Action::EditNote, &["N"]),
       // #290: `e` exits the TUI and prints the selected worktree path to stdout.
-      def(Action::ExitToWorktree, &["e"]),
+      // #593: `E`, having lent `e` to the rename it names.
+      def(Action::ExitToWorktree, &["E"]),
       // #35/#290: `l` opens lazygit in an embedded PTY overlay.
       def(Action::LazyGitPty, &["l"]),
       // #290: `L` opens lazygit fullscreen (was unbound before #290).

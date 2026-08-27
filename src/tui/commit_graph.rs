@@ -456,5 +456,6 @@ pub fn test_row(hash: &str, parents: &[&str]) -> CommitRow {
     author: String::new(),
     parents: parents.iter().map(|s| oid(s)).collect(),
     subject: String::new(),
+    time: 0,
   }
 }
