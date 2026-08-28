@@ -389,6 +389,35 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # mux_open_in        = "workspace"
 # mux_pane_direction = "down"
 
+# --- Terminal browser (issue #590) -------------------------------------------
+# `terminal_browser` is a command that renders a URL INSIDE the terminal, so a
+# link opens next to gwm instead of pulling you out of the workspace gwm is
+# sitting in. It covers every link the TUI opens: the browse-links menu (`B`),
+# the open-menu Issue and PR picks, a row in the rich PR/issue view, a CI
+# check's details URL, and `.` for the docs.
+#
+# The `{url}` placeholder is optional: a bare "w3m" gets the URL appended as
+# its last argument, which w3m / lynx / carbonyl / browsh all take anyway.
+#
+# ONLY consulted when a multiplexer is detected ($TMUX / $ZELLIJ / $HERDR_ENV).
+# A terminal browser with nowhere to put it is worse than the system browser,
+# so unset (the DEFAULT) is gwm's behaviour up to 1.9 on every platform: every
+# link goes to `open` / `xdg-open` / `explorer`. The level a pane opens at is
+# `mux_open_in` / `mux_pane_direction` above, the pair `t` and `o` read.
+#
+# Where the container takes no command (herdr, a zellij tab, any "workspace")
+# the browser runs in the PTY overlay instead, and the status bar names the
+# backend that refused. A browser missing from $PATH falls back to the system
+# browser, with the binary named.
+#
+# The URL is always ONE argument: the template is tokenised BEFORE the
+# placeholder is substituted, so `w3m {url}` and `w3m "{url}"` are the same
+# command and a URL's `?`, `&` and `#` cannot become shell syntax. Only
+# absolute http/https URLs are passed on. An empty string reads as unset.
+#
+# [tui]
+# terminal_browser = "w3m {url}"
+
 # --- TUI clipboard (issue #367) ----------------------------------------------
 # How yanked text (path / branch / worktree name / command logs) reaches the
 # clipboard:
