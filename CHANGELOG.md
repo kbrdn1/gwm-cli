@@ -242,6 +242,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Modals follow `[tui] layout` instead of always being bordered**
+  ([#594](https://github.com/kbrdn1/gwm-cli/issues/594)). `compact` has been
+  the default layout since
+  [#545](https://github.com/kbrdn1/gwm-cli/issues/545), and every surface
+  honoured it but the overlays, which kept their rounded box whatever the
+  config said. They now spend the same chrome the panes do:
+
+  - the title rides a **filled band on the frame's first row**, the same
+    band a compact pane's header wears, mixed from the modal's own role so
+    a delete or a merge confirmation keeps its danger colour and the two
+    worktree forms keep their green;
+  - **no rules on any side**, top or bottom included;
+  - the row every modal already spends on its key hints is painted as a
+    quiet `section_bg` **footer band**. It is a ground under a row that was
+    already there, not an extra one, so nothing moved to make room for it.
+    A bordered modal's bottom-rule counter (the Working Tree's per-category
+    counts) rides the right of that band.
+
+  That is **three rows and four columns back per overlay**, which is what
+  the layout was asked for in the first place: modals are the surfaces most
+  likely to overflow a short terminal.
+
+  A rule around a panel floating over content is worth something, and what
+  replaces it is the ground: while a compact modal is up, everything behind
+  it is **darkened**. The colours are mixed toward black rather than only
+  dimmed, because `DIM` reaches the foreground alone and a pane's header
+  band sits directly above a full-size overlay's own band. A palette with no
+  components to mix, an ANSI colour name or a 256-palette index, keeps `DIM`
+  by itself.
+
+  `layout = "bordered"` is the opt-out and is untouched, rules, padding,
+  sizes and undimmed background alike.
+
 - **`c` and `C` now mean the same thing in both panes, which moved three
   bindings** ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)).
   `c` opens the commit listing and `C` the CI checks, in the worktrees pane
