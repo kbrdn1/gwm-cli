@@ -93,6 +93,7 @@ impl SettingsTab {
         SettingField::AutoRefreshSecs,
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
+        SettingField::TerminalBrowser,
       ],
       // The Keys tab edits dynamic [`KeyRow`]s, not static fields, and `All`
       // is read-only.
@@ -348,6 +349,8 @@ pub enum SettingField {
   OpenShellCmd,
   /// `tui.open.editor_cmd` — `$EDITOR` override (text).
   OpenEditorCmd,
+  /// `tui.terminal_browser`: the in-terminal browser command (issue #590).
+  TerminalBrowser,
 }
 
 impl SettingField {
@@ -372,6 +375,7 @@ impl SettingField {
       SettingField::AutoRefreshSecs => "auto refresh (s)",
       SettingField::OpenShellCmd => "open shell cmd",
       SettingField::OpenEditorCmd => "open editor cmd",
+      SettingField::TerminalBrowser => "terminal browser",
     }
   }
 
@@ -396,6 +400,7 @@ impl SettingField {
       SettingField::AutoRefreshSecs => "tui.auto_refresh_secs",
       SettingField::OpenShellCmd => "tui.open.shell_cmd",
       SettingField::OpenEditorCmd => "tui.open.editor_cmd",
+      SettingField::TerminalBrowser => "tui.terminal_browser",
     }
   }
 
@@ -416,7 +421,8 @@ impl SettingField {
       | SettingField::WorktreePathPattern
       | SettingField::WorktreeBranchPattern
       | SettingField::OpenShellCmd
-      | SettingField::OpenEditorCmd => FieldKind::Text,
+      | SettingField::OpenEditorCmd
+      | SettingField::TerminalBrowser => FieldKind::Text,
     }
   }
 
@@ -470,6 +476,7 @@ impl SettingField {
       SettingField::AutoRefreshSecs => cfg.tui.auto_refresh_secs.to_string(),
       SettingField::OpenShellCmd => cfg.tui.open.shell_cmd.clone().unwrap_or_default(),
       SettingField::OpenEditorCmd => cfg.tui.open.editor_cmd.clone().unwrap_or_default(),
+      SettingField::TerminalBrowser => cfg.tui.terminal_browser.clone().unwrap_or_default(),
     }
   }
 
