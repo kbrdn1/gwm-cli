@@ -8540,6 +8540,12 @@ pub enum BrowserPlan {
 /// The level comes from `[tui] mux_open_in` / `mux_pane_direction`, the pair
 /// `t` and `o` already read (#589 / #608), so a user does not configure where
 /// panes open twice.
+// Eight parameters, one more than `plan_agent_pane`, and every one of them is
+// a test seam rather than a convenience: the three env values because `$TMUX`
+// is read by the clipboard path too (rewriting it in a test would pull every
+// yank test in the same binary under the env lock), and `on_path` because "the
+// browser is not installed" is a branch no runner's `$PATH` can be made to
+// produce. Bundling them into a struct would hide that and buy nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_terminal_browser(
   url: &str,

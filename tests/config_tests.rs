@@ -3275,6 +3275,24 @@ fn terminal_browser_parses_and_an_empty_string_reads_as_unset() {
   );
   assert_eq!(write("[tui]\nterminal_browser = \"\"\n").tui.terminal_browser, None);
   assert_eq!(write("[tui]\nlayout = \"compact\"\n").tui.terminal_browser, None);
+
+  // And the key reaches the Settings panel's read-only `All` tab, which is
+  // what attributes a value to the layer that set it. `resolved_rows` derives
+  // its rows from the serialised `Config` rather than from a hand-written key
+  // list, so this is a check that the round trip survives the `Option`, not
+  // that someone remembered to add a line.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui]\nterminal_browser = \"w3m {url}\"\n",
+  )
+  .unwrap();
+  let rows = gwm::config::resolved_rows(dir.path(), None).unwrap();
+  let row = rows
+    .iter()
+    .find(|r| r.key == "tui.terminal_browser")
+    .expect("tui.terminal_browser must be listed in the All tab");
+  assert_eq!(row.value, "\"w3m {url}\"");
+  assert_eq!(row.source, gwm::config::ConfigSource::Repo);
 }
 
 #[test]
