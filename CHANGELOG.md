@@ -12,14 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`5` opens the Working Tree listing at full size**
+- **`W` opens the Working Tree listing at full size**
   ([#592](https://github.com/kbrdn1/gwm-cli/issues/592)). The sidebar's
   Working Tree pane is one block among five in a column that is a fraction of
   the screen, so a worktree with more than a handful of changed files could
-  only be read two rows at a time through `J` / `K`. `5` now opens the same
+  only be read two rows at a time through `J` / `K`. `W` now opens the same
   file-explorer tree as a full-size overlay: same icons, same per-category
   colours, the same change counts on the bottom rule, scrolled with
-  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `5` again, whatever `5`
+  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `W` again, whatever `W`
   gets rebound to, see #613 below), and rebindable under
   `[tui.keys.modal.working_tree]`.
 
@@ -310,7 +310,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **An overlay's toggle key closes it whatever it is bound to**
-  ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `5`
+  ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `W`
   each close the overlay they open, but the guard doing it asked
   `key_matches_action`, which reads a single stroke and only ran after the
   modal verbs had their turn. Two silent holes: a multi-stroke binding

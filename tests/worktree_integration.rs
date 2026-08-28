@@ -2643,6 +2643,9 @@ fn working_tree_stats_counts_staged_and_unstaged_together() {
     idx.write().unwrap();
   }
   std::fs::write(dir.path().join("dirty.rs"), "a\n").unwrap();
+  // libgit2 mmaps the index, so the handle goes before git is asked to read
+  // the same file (this repo has taken that red on windows-latest before).
+  drop(repo);
 
   let stats = worktree::working_tree_stats(dir.path()).unwrap();
   assert_eq!(stats["staged.rs"].insertions, 2, "the staged half counts — {stats:?}");

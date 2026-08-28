@@ -15325,7 +15325,7 @@ fn the_working_tree_column_is_dropped_before_the_file_name_is() {
 
 #[test]
 fn the_working_tree_open_key_is_also_what_closes_it() {
-  // `5` toggles. The dispatch resolves the toggle before the modal verbs
+  // `W` toggles. The dispatch resolves the toggle before the modal verbs
   // and against the action alone, so this is the pin for the default: one
   // stroke, `Fired`.
   let (_dir, mut app) = make_app();
@@ -15333,7 +15333,7 @@ fn the_working_tree_open_key_is_also_what_closes_it() {
 
   assert_eq!(
     app.modal_toggle_stroke(
-      KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+      KeyEvent::new(KeyCode::Char('W'), KeyModifiers::NONE),
       gwm::tui::keymap::Action::WorkingTree
     ),
     ToggleStroke::Fired
@@ -15583,7 +15583,7 @@ fn every_overlay_that_advertises_a_toggle_resolves_one() {
   for (action, chord, ch) in [
     (Action::CommandLogs, "3", '3'),
     (Action::ConfigPanel, "4", '4'),
-    (Action::WorkingTree, "5", '5'),
+    (Action::WorkingTree, "W", 'W'),
   ] {
     assert_eq!(
       app.keymap.primary_chord(action).as_deref(),
@@ -15735,7 +15735,7 @@ fn the_overlay_never_waits_on_a_worker_that_is_not_there() {
 
 #[test]
 fn reopening_on_another_worktree_does_not_wait_on_the_previous_read() {
-  // Copilot review, PR #612: the coalescing that makes a held `5` cheap is
+  // Copilot review, PR #612: the coalescing that makes a held `W` cheap is
   // only sound while the in-flight read is for the SAME worktree. Close a
   // slow snapshot for A, select B, reopen: `request` would hand back `None`
   // (slot busy with A), no worker would exist for B, and A's payload gets
@@ -15764,7 +15764,7 @@ fn reopening_on_another_worktree_does_not_wait_on_the_previous_read() {
 
 #[test]
 fn reopening_on_the_same_worktree_still_coalesces() {
-  // The other half: same path must NOT invalidate, or a held `5` spawns a
+  // The other half: same path must NOT invalidate, or a held `W` spawns a
   // `git status` per repeat.
   use gwm::tui::state::async_task::TaskKind;
 

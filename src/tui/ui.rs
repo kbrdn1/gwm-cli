@@ -3214,6 +3214,9 @@ impl HintContext {
         // ahead of the verbs that are reached less often.
         Hint::Key(Commits, "commits"),
         Hint::Key(CiChecks, "ci checks"),
+        // #592: the change set at full size belongs to the same register,
+        // and `W` means it in either pane.
+        Hint::Key(WorkingTree, "tree"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
         // #515: the note is written far more often than a review is
@@ -3235,6 +3238,9 @@ impl HintContext {
         // Read the status pane.
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
+        // #592: this pane holds the Working Tree block, so the key that opens
+        // it full size sits with the pair that scrolls it in place.
+        Hint::Key(WorkingTree, "tree"),
         Hint::Key(FetchGithub, "fetch"),
         // #593: `c` / `C` mean the same thing in both panes — this one's
         // own content at full size, and the linked PR's checks.

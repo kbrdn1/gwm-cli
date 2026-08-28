@@ -150,7 +150,7 @@ pub enum View {
   /// Full-size Working Tree listing (issue #592). A ~90% fullscreen modal
   /// showing the same file-explorer tree the sidebar pane paints, given the
   /// whole screen so a large change set reads in one go instead of two rows
-  /// at a time through `J` / `K`. Opened on `5`, scrolled like the help
+  /// at a time through `J` / `K`. Opened on `W`, scrolled like the help
   /// overlay; state lives on [`App::working_tree`].
   WorkingTree,
   /// Full-size commit listing (issue #593). A ~90% fullscreen modal
@@ -3048,7 +3048,7 @@ impl App {
     };
     let Some(generation) = self.tasks.request(TaskKind::WorkingTree) else {
       // A read for this same worktree is already out; ride on it, which is
-      // what keeps a held `5` from spawning a `git status` per repeat.
+      // what keeps a held `W` from spawning a `git status` per repeat.
       return;
     };
     let theme = self.theme;

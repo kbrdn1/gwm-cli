@@ -524,9 +524,12 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
-      // #592: `5` keeps the "numbers open panels" family going — the
-      // Working Tree listing at full size.
-      def(Action::WorkingTree, &["5"]),
+      // #592: `W` for the Working Tree listing at full size. A letter and
+      // not the next number in the `3` / `4` family: those two open gwm's
+      // own panels (the command transcript, the settings), while this one
+      // and `c` / `C` open a pane's content, which is the register the
+      // letters name.
+      def(Action::WorkingTree, &["W"]),
       // #593: `c` for commits, `C` for the checks — the same pair in both
       // panes, so the key does not change meaning under the focus. It cost
       // `c` its rename, which moved to `E`, and the #436 contextual

@@ -524,7 +524,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       },
       // Full-size Working Tree listing (issue #592). A read-only overlay
       // over an already-taken snapshot: it scrolls like the command logs,
-      // and the bound global `working_tree` key (default `5`) toggles it
+      // and the bound global `working_tree` key (default `W`) toggles it
       // shut even when rebound.
       // Routing lives in a testable `App` method (the #217 shape), because
       // the precedence it encodes is the whole point of #613.

@@ -2712,9 +2712,13 @@ fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
     "and they are pinned right: only padding and the border follow, got {row:?}"
   );
 
-  // Narrow: the name survives whole, the column is what goes. `WT_NAME_FLOOR`
-  // plus the gap plus the column is more than this body has.
-  let narrow = render_at(&mut app, 40, 40);
+  // Narrow: the name survives whole, the column is what goes. The modal takes
+  // 90% of the terminal and spends two more cells on its border, so 30
+  // columns leave a 25-cell body — less than the 34 the column needs beside
+  // `WT_NAME_FLOOR`. 40 would NOT do: it leaves exactly 34, which fits, and
+  // the assertion would fail on the boundary rather than past it. The exact
+  // boundary is pinned on `meta_pick` itself, in `tui_app_tests`.
+  let narrow = render_at(&mut app, 30, 40);
   let rows = modal_rows(&narrow);
   let row = rows
     .iter()

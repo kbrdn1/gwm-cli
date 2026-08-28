@@ -134,7 +134,7 @@ pub enum TaskKind {
   /// cannot run inline: `STATUS_SCAN_CAP` bounds how many records are read,
   /// not how long git takes to produce the first one, so an untracked tree
   /// on a cold or network filesystem would freeze the event loop for as
-  /// long as the walk takes. A single global slot; a second `5` while one
+  /// long as the walk takes. A single global slot; a second `W` while one
   /// is in flight coalesces onto it.
   WorkingTree,
   /// Off-thread snapshot for the full-size commit listing (issue #593).
