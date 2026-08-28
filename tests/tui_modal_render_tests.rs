@@ -2824,6 +2824,11 @@ struct CompactCase {
   /// Matches the name the boxed `sizing_matrix` uses where the surface is
   /// in both, so a failure names the same modal in either half.
   name: &'static str,
+  /// The `View` this case must actually leave the app in. Checked at
+  /// render time: without it the coverage guard below matches a case by
+  /// its *name*, and a setup that opened the wrong overlay (or none) would
+  /// satisfy it.
+  view: View,
   setup: ModalSetup,
   /// The role its band is mixed from.
   band: Band,
@@ -2872,21 +2877,23 @@ fn compact_modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
   rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
 }
 
-/// A PR carrying one CI check, so `enter_ci_checks` has something to open.
-fn app_with_ci_checks() -> (tempfile::TempDir, App) {
+/// A PR carrying `n` CI checks, so `enter_ci_checks` has something to open.
+fn app_with_ci_checks(n: usize) -> (tempfile::TempDir, App) {
   let (dir, mut app) = app_with_the_rich_view_open("body");
   let mut pr = match app.pr_fetch_state() {
     gwm::tui::GitHubFetchState::Loaded(pr) => pr.clone(),
     _ => panic!("the fixture fetched a PR"),
   };
-  pr.checks = vec![gwm::forge::PrCheck {
-    name: "build".into(),
-    outcome: gwm::forge::CheckOutcome::Passing,
-    url: Some("https://example.test/checks/1".into()),
-    workflow_name: Some("ci".into()),
-    started_at: None,
-    completed_at: None,
-  }];
+  pr.checks = (0..n)
+    .map(|i| gwm::forge::PrCheck {
+      name: format!("build-{i}"),
+      outcome: gwm::forge::CheckOutcome::Passing,
+      url: Some(format!("https://example.test/checks/{i}")),
+      workflow_name: Some("ci".into()),
+      started_at: None,
+      completed_at: None,
+    })
+    .collect();
   app.apply_pr_fetch_result(Ok(pr));
   app.enter_ci_checks();
   (dir, app)
@@ -2903,6 +2910,24 @@ fn compact_cases() -> Vec<CompactCase> {
         "create" | "edit/rename" => Band::Clean,
         _ => Band::Accent,
       },
+      view: match name {
+        "help" => View::Help,
+        "config-panel" => View::Config,
+        "command-palette" => View::CommandPalette,
+        "create" => View::Create,
+        "edit/rename" => View::Edit,
+        "confirm" => View::Confirm,
+        "open-menu" => View::OpenMenu,
+        "link-prompt" => View::LinkPrompt,
+        "exec-picker" => View::ExecPicker,
+        "detail/agents" => View::DetailOverlay,
+        "report" => View::Report,
+        "command-logs" => View::CommandLogs,
+        "working-tree" => View::WorkingTree,
+        "commits" => View::Commits,
+        "note-editor" => View::Note,
+        other => panic!("the boxed matrix grew {other:?}; name the View it renders"),
+      },
       name,
       setup,
       footer: true,
@@ -2910,6 +2935,7 @@ fn compact_cases() -> Vec<CompactCase> {
     .collect();
   cases.push(CompactCase {
     name: "confirm/merge",
+    view: View::Confirm,
     setup: Box::new(|| {
       let (dir, mut app) = app_with_the_rich_view_open("body");
       app.enter_confirm_merge();
@@ -2921,6 +2947,7 @@ fn compact_cases() -> Vec<CompactCase> {
   });
   cases.push(CompactCase {
     name: "clean",
+    view: View::CleanReport,
     setup: Box::new(|| {
       let (dir, _) = init_repo();
       std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
@@ -2937,6 +2964,7 @@ fn compact_cases() -> Vec<CompactCase> {
   });
   cases.push(CompactCase {
     name: "detail/attach",
+    view: View::DetailOverlay,
     setup: Box::new(|| {
       let (dir, mut app) = make_app();
       app.open_agent_overlay();
@@ -2948,8 +2976,15 @@ fn compact_cases() -> Vec<CompactCase> {
   });
   cases.push(CompactCase {
     name: "detail/ci-filter",
+    view: View::DetailOverlay,
     setup: Box::new(|| {
-      let (dir, mut app) = app_with_ci_checks();
+      // Enough checks to FILL the fixed listing window at the size these
+      // tests render (`(term.height - 12).clamp(3, 10)`, so 10 rows at
+      // 120x40). A shorter list blank-pads its tail, which would leave the
+      // last row empty and exercise the `without_footer` path without ever
+      // reaching the condition that motivates it: a data row on the frame's
+      // bottom line.
+      let (dir, mut app) = app_with_ci_checks(16);
       app.ci_input_open();
       (dir, app)
     }),
@@ -2960,6 +2995,7 @@ fn compact_cases() -> Vec<CompactCase> {
   });
   cases.push(CompactCase {
     name: "link-prompt/number",
+    view: View::LinkPrompt,
     setup: Box::new(|| {
       let (dir, mut app) = make_app();
       app.enter_link_prompt();
@@ -3037,11 +3073,22 @@ fn every_overlay_view_has_a_compact_case() {
     let Some(name) = compact_case_for(view) else {
       continue;
     };
-    assert!(
-      cases.iter().any(|c| c.name == name),
-      "{view:?} names the case {name:?}, which the compact matrix does not carry"
+    let case = cases
+      .iter()
+      .find(|c| c.name == name)
+      .unwrap_or_else(|| panic!("{view:?} names the case {name:?}, which the compact matrix does not carry"));
+    assert_eq!(
+      case.view, view,
+      "the case {name:?} is registered against {:?}, not the {view:?} it is supposed to cover",
+      case.view
     );
   }
+  // A duplicated name would let one case answer for two views.
+  let mut names: Vec<&str> = cases.iter().map(|c| c.name).collect();
+  names.sort_unstable();
+  let before = names.len();
+  names.dedup();
+  assert_eq!(before, names.len(), "two compact cases share a name");
 }
 
 #[test]
@@ -3050,6 +3097,13 @@ fn every_compact_modal_is_painted_and_locatable() {
   // make each assertion pass over an empty buffer instead of failing.
   for case in compact_cases() {
     let (_dir, mut app) = compact_app(&case.setup);
+    // The setup opened what the case says it opens. Without this the
+    // coverage guard above matches a case by its name alone.
+    assert_eq!(
+      app.view, case.view,
+      "{}: the setup left the app on {:?}",
+      case.name, app.view
+    );
     let buf = render_at(&mut app, 120, 40);
     let rect = compact_modal_rect(&buf);
     assert!(
@@ -3149,6 +3203,26 @@ fn a_compact_modal_closes_on_a_muted_footer_band() {
         row_strings(&buf).join("\n")
       );
     }
+  }
+}
+
+#[test]
+fn a_modal_that_opts_out_paints_no_footer_band() {
+  // `without_footer` is a claim about the last row, so it is worth an
+  // assertion rather than an exemption from one: skipping these cases in
+  // the test above would leave the opt-out unpinned in both directions.
+  for case in compact_cases().into_iter().filter(|c| !c.footer) {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let ground = app.theme.section_bg;
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    let footer = y + h - 1;
+    assert!(
+      (x..x + w).any(|col| buf[(col, footer)].bg != ground),
+      "{}: the last row is content, so it must not come back painted edge to edge in the footer ground. rows:\n{}",
+      case.name,
+      row_strings(&buf).join("\n")
+    );
   }
 }
 
