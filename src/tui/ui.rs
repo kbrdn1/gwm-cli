@@ -6786,6 +6786,7 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
     Some((PtyKind::LazyGit, _)) => "LazyGit",
     Some((PtyKind::Terminal, _)) => "Terminal",
     Some((PtyKind::Review, _)) => "Review",
+    Some((PtyKind::Browser, _)) => "Browser",
     Some((PtyKind::Exec, false)) => "Exec",
     // #325: once the one-shot command exits, the title invites dismissal.
     Some((PtyKind::Exec, true)) => "Exec · done · press any key",

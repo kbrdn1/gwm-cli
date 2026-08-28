@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, AgentPanePlan, App, CommandLogsKey,
-  ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget,
-  PendingMerge, RepoMeta, ToggleStroke, View, WorkspaceState,
+  agent_pane_status, mux_pane_status, plan_agent_pane, plan_terminal_browser, read_pins_from_sources, AgentPanePlan,
+  App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey,
+  LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, ToggleStroke, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -639,17 +639,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::OpenMenuToggle) => app.open_menu_toggle_selection(),
         Some(ModalAction::OpenMenuAccept) => {
           if let Some(url) = app.open_menu_pick(app.open_menu_selected) {
-            open_url(&url, &mut app);
+            open_url(terminal, &url, &mut app);
           }
         }
         Some(ModalAction::OpenMenuIssue) => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
-            open_url(&url, &mut app);
+            open_url(terminal, &url, &mut app);
           }
         }
         Some(ModalAction::OpenMenuPr) => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Pr) {
-            open_url(&url, &mut app);
+            open_url(terminal, &url, &mut app);
           }
         }
         _ if app.key_matches_action(key, Action::FetchGithub) => app.refresh_github_status(),
@@ -758,7 +758,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           KeyCode::Esc if ci => app.ci_input_cancel(),
           KeyCode::Esc => app.agent_input_cancel(),
           KeyCode::Enter if ci => match app.ci_input_selected_url() {
-            Some(url) => open_url(&url, &mut app),
+            Some(url) => open_url(terminal, &url, &mut app),
             // The method flips back to List only when a row WAS picked —
             // report the missing URL like the List-mode Enter does (Codex
             // review #455). A query with no match keeps the filter open.
@@ -790,7 +790,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           Some(ModalAction::CiChecksNext) => app.detail_overlay.select_next(),
           Some(ModalAction::CiChecksPrev) => app.detail_overlay.select_prev(),
           Some(ModalAction::CiChecksOpen) => match app.ci_selected_url() {
-            Some(url) => open_url(&url, &mut app),
+            Some(url) => open_url(terminal, &url, &mut app),
             None => app.status = "this check exposes no details URL".into(),
           },
           Some(ModalAction::CiChecksFilter) => app.ci_input_open(),
@@ -814,7 +814,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           Some(ModalAction::RichViewNext) => app.detail_overlay.select_next(),
           Some(ModalAction::RichViewPrev) => app.detail_overlay.select_prev(),
           Some(ModalAction::RichViewOpen) => match app.rich_selected_url() {
-            Some(url) => open_url(&url, &mut app),
+            Some(url) => open_url(terminal, &url, &mut app),
             None => app.status = "this row has nothing to open".into(),
           },
           Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
@@ -1132,7 +1132,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // #290: BrowseLinks replaces OpenMenu.
     Action::BrowseLinks if !app.picker_mode => app.enter_open_menu(),
     // Not picker-gated — `gwm switch` can open docs too.
-    Action::OpenDocs => open_url(DOCS_URL, app),
+    Action::OpenDocs => open_url(terminal, DOCS_URL, app),
     Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
     Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
     // #290: ReviewFullscreen replaces Review.
@@ -1630,10 +1630,79 @@ fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
 /// branch. A `[docs]` config override is a possible follow-up.
 pub const DOCS_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/tree/main/docs");
 
-/// Spawn the OS opener for `url` (used by the OpenMenu key handler and the
-/// `.` open-docs key, issue #233).
-/// Failures land in the status bar — we never propagate up.
-fn open_url(url: &str, app: &mut App) {
+/// Open `url`, the single funnel every link in the TUI goes through (issue
+/// #233): the browse-links menu, the open-menu Issue / PR picks, a row in the
+/// rich PR/issue view, a CI check's details URL, and `.` for the docs.
+///
+/// Since #590 the destination is a decision rather than a constant:
+/// [`plan_terminal_browser`] answers it, and the OS opener is the last rung
+/// as well as the default. Failures land in the status bar; we never
+/// propagate up.
+fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, app: &mut App) {
+  // A browser does not care where it is started from, so nothing here refuses
+  // on a missing selection the way `t` does: the selected worktree is a
+  // preference, the current directory a fine answer without one.
+  let cwd = app
+    .selected()
+    .map(|w| w.path.clone())
+    .or_else(|| std::env::current_dir().ok())
+    .unwrap_or_else(|| PathBuf::from("."));
+  let plan = plan_terminal_browser(
+    url,
+    &cwd,
+    &app.config.tui,
+    std::env::var("TMUX").ok(),
+    std::env::var("ZELLIJ").ok(),
+    std::env::var("HERDR_ENV").ok(),
+    std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
+    &|bin| which::which(bin).is_ok(),
+  );
+  match plan {
+    BrowserPlan::MuxPane { argv, noun } => {
+      // `output()` rather than `spawn()`, for the reason spelled out in
+      // [`App::open_in_mux_pane_from`]: this runs while ratatui owns the
+      // screen, so a child that inherits the pipes draws over the frame.
+      match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+        Ok(out) => {
+          app.status = mux_pane_status(
+            url,
+            noun,
+            out.status.success(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+          )
+        }
+        Err(e) => app.status = format!("mux-pane failed: {}", e),
+      }
+    }
+    BrowserPlan::Overlay { line, why } => {
+      let (shell, shell_flag) = platform_shell();
+      let sz = terminal.size().unwrap_or_default();
+      let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+      let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+      let argv = [shell.as_str(), shell_flag, line.as_str()];
+      match PtyOverlay::spawn(PtyKind::Browser, &argv, &cwd, inner_cols, inner_rows) {
+        Ok(pty) => {
+          app.open_pty_overlay(pty);
+          app.status = format!("{}: opened {} in the overlay", why, url);
+        }
+        // The overlay is itself a fallback, so its failure falls through to
+        // the opener rather than leaving the key with nothing to show for it.
+        Err(e) => open_system_browser(url, app, Some(format!("overlay failed: {}", e))),
+      }
+    }
+    BrowserPlan::System { why } => open_system_browser(url, app, why),
+  }
+}
+
+/// Hand `url` to the OS opener: gwm's behaviour up to 1.9, and still the
+/// default and the last rung of [`plan_terminal_browser`].
+///
+/// `why` is `Some` only when a terminal browser was configured and could not
+/// be honoured, and it goes in the status line for that case alone: an opt-in
+/// that quietly does nothing reads as a broken feature, while a note on every
+/// link for users who set nothing would be noise.
+fn open_system_browser(url: &str, app: &mut App, why: Option<String>) {
   let opener = if cfg!(target_os = "macos") {
     "open"
   } else if cfg!(target_os = "windows") {
@@ -1642,7 +1711,12 @@ fn open_url(url: &str, app: &mut App) {
     "xdg-open"
   };
   match std::process::Command::new(opener).arg(url).spawn() {
-    Ok(_) => app.status = format!("opened {}", url),
+    Ok(_) => {
+      app.status = match why {
+        Some(why) => format!("{}: opened {} in the system browser", why, url),
+        None => format!("opened {}", url),
+      }
+    }
     Err(e) => app.status = format!("failed to open {}: {}", url, e),
   }
 }

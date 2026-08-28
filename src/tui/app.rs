@@ -8489,6 +8489,124 @@ pub fn agent_pane_status(kind: &str, noun: &str, active: bool, ok: bool, stdout:
   }
 }
 
+/// Where a URL the TUI opens actually goes (issue #590).
+///
+/// Three rungs, in the order of how much of gwm stays on screen:
+///
+/// * [`MuxPane`]: the browser runs *beside* gwm. What the issue asks for,
+///   and the only rung that needs a multiplexer able to carry a command.
+/// * [`Overlay`]: a multiplexer is there but its container takes no command
+///   (herdr in every mode, a zellij tab), so the browser runs *over* gwm in
+///   the PTY overlay that already hosts lazygit and `[tui.macro*]`. Still a
+///   terminal browser, which is the point; the cost is the frame it covers,
+///   and `why` is what the status bar says instead of leaving that unexplained.
+/// * [`System`]: the OS opener, gwm's behaviour up to 1.9 and the default
+///   forever: `why` is `None` when nothing was configured, `Some` when the
+///   feature was asked for and could not be honoured. An opt-in that quietly
+///   does nothing reads as a broken feature.
+///
+/// [`MuxPane`]: BrowserPlan::MuxPane
+/// [`Overlay`]: BrowserPlan::Overlay
+/// [`System`]: BrowserPlan::System
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserPlan {
+  /// One control command that opens the pane/tab and runs the browser in it.
+  MuxPane {
+    argv: Vec<String>,
+    /// What was opened, for the status line: pane / window / tab.
+    noun: &'static str,
+  },
+  /// Run `line` in the PTY overlay. `why` names the backend that refused a
+  /// pane, so the overlay does not look like a bug.
+  Overlay { line: String, why: &'static str },
+  /// Hand the URL to the OS opener. `None` when `terminal_browser` is unset.
+  System { why: Option<String> },
+}
+
+/// Decide where `url` opens (issue #590).
+///
+/// The gate is the issue's own: **a terminal browser with nowhere to put it
+/// is worse than the system browser**, so an unset `terminal_browser` or an
+/// absent multiplexer is today's behaviour, unchanged, on every platform.
+///
+/// The env values are parameters rather than reads, the shape
+/// [`plan_agent_pane`] and [`crate::multiplexer::detect_multiplexer`] already
+/// use: `$TMUX` is also read by the clipboard path, so a test that unset it
+/// would pull every yank test in the same binary under the env lock.
+/// `on_path` is a parameter for the same reason. "The browser is not
+/// installed" is the branch the issue asks for ("detect if install"), and it
+/// cannot be driven on a runner whose `$PATH` nobody controls.
+///
+/// The level comes from `[tui] mux_open_in` / `mux_pane_direction`, the pair
+/// `t` and `o` already read (#589 / #608), so a user does not configure where
+/// panes open twice.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_terminal_browser(
+  url: &str,
+  cwd: &Path,
+  tui: &crate::config::TuiConfig,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+  on_path: &dyn Fn(&str) -> bool,
+) -> BrowserPlan {
+  use crate::multiplexer as mux_mod;
+  // Not configured: silent. This is the default, and a note on every `B`
+  // would be noise about a feature the user never asked for.
+  let Some(template) = tui.terminal_browser.as_deref() else {
+    return BrowserPlan::System { why: None };
+  };
+  // The gate. Nothing below runs without somewhere to put the browser.
+  let Some(mux) = mux_mod::detect_multiplexer(tmux, zellij, herdr) else {
+    return BrowserPlan::System {
+      why: Some("no multiplexer ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into()),
+    };
+  };
+  let Some(argv) = crate::config::expand_terminal_browser(template, url) else {
+    return BrowserPlan::System {
+      why: Some(format!("terminal_browser cannot render {url:?}")),
+    };
+  };
+  // "detect if install" from the issue: probing beats spawning a missing
+  // file, because a failed spawn inside a mux pane closes the pane before
+  // anyone reads the error.
+  if !on_path(&argv[0]) {
+    return BrowserPlan::System {
+      why: Some(format!("{} not on PATH", argv[0])),
+    };
+  }
+  // One argv element per word from here on, so the line handed to a shell is
+  // quoted by gwm rather than by whatever the template happened to write.
+  let line = shell_words::join(&argv);
+  let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
+  let noun = mux_mod::spawn_noun(mux, mode);
+  // "Can this backend run a command here" first, then "can it open this
+  // target at all", the order `macro_mux_command` asks in, so a zellij user
+  // hears about the tab rather than about a workspace flag they never set.
+  // Either refusal lands in the overlay: the browser still renders in the
+  // terminal, which is what was asked for.
+  if let Some(why) = mux_mod::macro_refusal(mux, mode) {
+    return BrowserPlan::Overlay { line, why };
+  }
+  let open = match mux_mod::build_command(mux, &argv[0], cwd, mode, workspace) {
+    Ok(open) => open,
+    Err(why) => return BrowserPlan::Overlay { line, why },
+  };
+  let (shell, shell_flag) = crate::tui::platform_shell();
+  match mux_mod::attach_pane_command(mux, &open, &line, &shell, shell_flag) {
+    Some(argv) => BrowserPlan::MuxPane { argv, noun },
+    // Unreachable behind `macro_refusal`, which already answered for every
+    // backend without a trailing-command form. Spelled out rather than
+    // unwrapped: the failure it guards is an empty pane and a dropped
+    // command, and that is worth being unrepresentable.
+    None => BrowserPlan::Overlay {
+      line,
+      why: "this backend's panes take no command",
+    },
+  }
+}
+
 /// How long the herdr resume waits for the freshly-opened shell to reach its
 /// prompt before giving up (#591).
 ///

@@ -16392,3 +16392,247 @@ fn a_stats_payload_for_another_listing_is_dropped() {
     "a payload read at another page depth is not this listing's"
   );
 }
+
+// ---------------------------------------------------------------------------
+// #590: where a URL opens. Terminal browser in a mux pane, else the OS opener
+// ---------------------------------------------------------------------------
+
+/// `[tui] terminal_browser` set to `w3m {url}`, everything else default.
+fn tui_with_browser(template: &str) -> gwm::config::TuiConfig {
+  gwm::config::TuiConfig {
+    terminal_browser: Some(template.into()),
+    ..Default::default()
+  }
+}
+
+const URL: &str = "https://github.com/kbrdn1/gwm-cli/issues/590";
+
+#[test]
+fn terminal_browser_unset_opens_the_system_browser_without_a_word() {
+  // The default, on every platform, and the compatibility promise of #590:
+  // unset is gwm's behaviour up to 1.9, unchanged. Silent too, because a note on
+  // every link about a feature nobody asked for is noise.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &gwm::config::TuiConfig::default(),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert_eq!(plan, gwm::tui::BrowserPlan::System { why: None });
+}
+
+#[test]
+fn terminal_browser_without_a_multiplexer_falls_back_and_names_the_probes() {
+  // The gate the issue asks for: "a terminal browser with nowhere to put it
+  // is worse than the system browser". The fallback is not silent here,
+  // because the user DID configure one, and an opt-in that quietly does nothing
+  // reads as a broken feature.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("no multiplexer must reach the system browser, with a reason");
+  };
+  assert!(
+    why.contains("$TMUX") && why.contains("$ZELLIJ") && why.contains("$HERDR_ENV"),
+    "the reason must name what gwm probed, got: {why}"
+  );
+}
+
+#[test]
+fn terminal_browser_inside_tmux_opens_a_pane_running_it() {
+  // The point of #590: the page renders beside gwm instead of pulling the
+  // user out of the workspace gwm is sitting in.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, noun } = plan else {
+    panic!("tmux carries its command in the argv that opens the pane");
+  };
+  assert_eq!(argv[0], "tmux");
+  assert!(
+    argv.iter().any(|a| a == "split-window") && argv.iter().any(|a| a == "-h"),
+    "the level and side come from [tui] mux_open_in / mux_pane_direction, got: {argv:?}"
+  );
+  // The browser line is the LAST operand, and the URL is one word in it.
+  assert_eq!(
+    argv.last().map(String::as_str),
+    Some("w3m {url}".replace("{url}", URL).as_str())
+  );
+  assert_eq!(noun, "pane");
+}
+
+#[test]
+fn terminal_browser_inside_herdr_runs_in_the_overlay_and_says_why() {
+  // herdr panes take no command in the argv that opens them, and the resume
+  // path's answer to that (#591 / #599) is a round trip that waited ~60s for
+  // the new shell in the worst measured case. For a browser that is the wrong
+  // trade: the key was pressed, something must appear. The PTY overlay still
+  // renders the page in the terminal; it just covers gwm, which is what the
+  // status line has to say out loud.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Overlay { line, why } = plan else {
+    panic!("herdr must reach the overlay, not the system browser");
+  };
+  assert_eq!(line, format!("w3m {URL}"));
+  assert!(why.contains("herdr"), "the reason must name the backend, got: {why}");
+}
+
+#[test]
+fn terminal_browser_under_a_level_that_takes_no_command_still_renders_in_the_terminal() {
+  // Two refusals that are not herdr's: a zellij TAB takes no trailing
+  // command, and no backend but herdr has a workspace level at all. Both are
+  // reachable from `[tui] mux_open_in`, which the user sets for `t`, so
+  // neither may silently downgrade to the external browser.
+  for (mux_open_in, zellij, tmux, expect) in [
+    (gwm::config::MuxTarget::Tab, Some("0".to_string()), None, "zellij"),
+    (
+      gwm::config::MuxTarget::Workspace,
+      None,
+      Some("/tmp/sock,1,0".to_string()),
+      "workspace",
+    ),
+  ] {
+    let tui = gwm::config::TuiConfig {
+      mux_open_in,
+      ..tui_with_browser("w3m {url}")
+    };
+    let plan = gwm::tui::plan_terminal_browser(
+      URL,
+      std::path::Path::new("/tmp/gwm-test/wt"),
+      &tui,
+      tmux,
+      zellij,
+      None,
+      None,
+      &|_| true,
+    );
+    let gwm::tui::BrowserPlan::Overlay { why, .. } = plan else {
+      panic!("{mux_open_in:?} must still render in the terminal, via the overlay");
+    };
+    assert!(why.contains(expect), "expected a {expect} refusal, got: {why}");
+  }
+}
+
+#[test]
+fn terminal_browser_that_is_not_installed_is_caught_before_the_spawn() {
+  // "detect if install" from the issue. Probing beats spawning: a failed
+  // spawn inside a fresh mux pane closes the pane before anyone can read the
+  // error, so the user would see a pane flash and no page.
+  //
+  // The REASON is pinned, not just the variant: `System` is also what an
+  // absent multiplexer and a refused URL produce, and a test that only
+  // asserted the variant would stay green if this branch disappeared.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("carbonyl {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin != "carbonyl",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser must fall back rather than open an empty pane");
+  };
+  assert!(
+    why.contains("carbonyl") && why.contains("PATH"),
+    "the reason must name the binary gwm looked for, got: {why}"
+  );
+}
+
+#[test]
+fn terminal_browser_refuses_a_url_it_will_not_hand_to_a_shell() {
+  // The expander's refusal has to survive as a fallback rather than as a
+  // dead key: whatever `is_browsable_url` turns down still opens somewhere.
+  let plan = gwm::tui::plan_terminal_browser(
+    "file:///etc/passwd",
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a refused URL must still reach the OS opener");
+  };
+  assert!(why.contains("terminal_browser"), "got: {why}");
+}
+
+#[test]
+#[cfg(unix)]
+fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
+  // Every other test here stops at the argv. This one runs the line the plan
+  // produces through the shell that actually receives it (tmux hands its
+  // operand to one, and the overlay wraps it in `sh -c`), because the whole
+  // security claim of #590 is about what a shell does with that string, not
+  // about what the Vec looks like.
+  //
+  // The fake browser is `printf %s\n`, so its arguments come back one per
+  // line: a URL that stayed one word prints one line, and a URL that was
+  // re-split or substituted prints something else.
+  let url = "https://example.com/a;id&whoami?q=$(id)`id`&x=1";
+  let plan = gwm::tui::plan_terminal_browser(
+    url,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &gwm::config::TuiConfig {
+      // The quoted form, which is where `expand_agent_resume`'s
+      // substitute-into-the-line order would have leaked.
+      terminal_browser: Some("printf '%s\\n' \"{url}\"".into()),
+      ..Default::default()
+    },
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Overlay { line, .. } = plan else {
+    panic!("herdr plans the overlay, whose line is the one a shell runs");
+  };
+  let out = std::process::Command::new("/bin/sh")
+    .arg("-c")
+    .arg(&line)
+    .output()
+    .expect("/bin/sh runs on every unix runner");
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert_eq!(
+    stdout.lines().collect::<Vec<_>>(),
+    vec![url],
+    "the URL must reach the browser as exactly one argument, verbatim; line was {line:?}"
+  );
+  assert!(
+    !stdout.contains("uid=") && !String::from_utf8_lossy(&out.stderr).contains("uid="),
+    "nothing in the URL may be executed by the shell, got {stdout:?}"
+  );
+}
