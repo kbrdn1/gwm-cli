@@ -72,10 +72,10 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, bootstrap_report_lines,
-  branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, cells, centered_abs,
-  chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, commit_meta_columns, commits_meta_pick,
-  compact_header_fill, compact_header_line, compact_header_style, config_capture_footer_hints,
+  agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, band_fill,
+  bootstrap_report_lines, branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, cells,
+  centered_abs, chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, commit_meta_columns,
+  commits_meta_pick, compact_header_fill, compact_header_line, compact_header_style, config_capture_footer_hints,
   config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
   confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, detail_overlay_width,
   detail_visible_rows, display_path_with_home, ellipsize_middle, field_input_line, filled_cells_for_progress,
