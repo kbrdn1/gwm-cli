@@ -267,6 +267,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$PATH`, the system browser answers as it always has, with the reason on
   the status bar rather than silently.
 
+  **A browser that places itself is launched rather than hosted**, via the
+  companion `[tui] terminal_browser_open_in`:
+
+  ```toml
+  [tui]
+  terminal_browser = "terminal-browser open {url} --split right"
+  terminal_browser_open_in = "detached"   # default "overlay"
+  ```
+
+  Both shapes above host the browser, which assumes it draws inside the TTY
+  it is handed. That holds for `w3m` and `lynx` and fails for one that
+  renders through the terminal's image protocol: it positions against the
+  real window, so in the PTY overlay it paints over the top-left corner of
+  the screen whatever rect gwm passes, and in a gwm pane it splits twice
+  because it splits on its own. `"detached"` launches the command and stops
+  there. The two gates stay in front of it: no multiplexer still means the
+  system browser, since placing itself means asking a multiplexer for a pane,
+  and a missing binary still falls back. An unknown value errors at load.
+
   **Unset is the default and is exactly the behaviour up to 1.9**, on every
   platform. The key is also editable in the Settings panel under the **TUI**
   tab (`4`), where blanking it turns the feature back off.
