@@ -240,6 +240,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merge_method = "merge"   # or "squash", "rebase"
   ```
 
+- **A link can open in a terminal browser instead of leaving the terminal**
+  ([#590](https://github.com/kbrdn1/gwm-cli/issues/590)). Every URL the TUI
+  opens went to the system browser: the browse-links menu (`B`), the
+  open-menu Issue and PR picks, a row in the rich PR/issue view, a CI check's
+  details URL, `.` for the docs. On a tiling setup that means losing the
+  workspace gwm is sitting in. The new `[tui] terminal_browser` names a
+  command that renders the page in the terminal instead:
+
+  ```toml
+  [tui]
+  terminal_browser = "w3m {url}"   # or lynx / carbonyl / browsh
+  ```
+
+  The `{url}` placeholder is optional: a bare `"w3m"` gets the URL appended
+  as its last argument, which all four of those tools take anyway.
+
+  **It is only consulted when a multiplexer is detected.** A terminal browser
+  with nowhere to put it is worse than the system browser, so `$TMUX` /
+  `$ZELLIJ` / `$HERDR_ENV` gate it, and the page opens in a new pane or tab
+  beside gwm, at the level `[tui] mux_open_in` and `mux_pane_direction`
+  already set for `t` and `o`. Where the container takes no command (herdr,
+  a zellij tab, any `workspace`) it runs in the PTY overlay instead, so the
+  browser still renders in the terminal, and the status bar names the backend
+  that refused a pane. Anywhere else, including a browser that is not on
+  `$PATH`, the system browser answers as it always has, with the reason on
+  the status bar rather than silently.
+
+  **Unset is the default and is exactly the behaviour up to 1.9**, on every
+  platform. The key is also editable in the Settings panel under the **TUI**
+  tab (`4`), where blanking it turns the feature back off.
+
+  The URL is always one argument: the template is tokenised *before* the
+  placeholder is substituted, so `w3m {url}` and `w3m "{url}"` are the same
+  command and a URL's `?`, `&` and `#` cannot become shell syntax. Only
+  absolute `http`/`https` URLs are passed on.
+
 ### Changed
 
 - **`c` and `C` now mean the same thing in both panes, which moved three
