@@ -7181,22 +7181,31 @@ impl App {
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
 
-  /// Re-read the link for the currently selected worktree's branch. Also
-  /// re-resolves the repo slug from the origin remote, and resets any
-  /// previously cached GitHub fetch state since it would refer to a
-  /// different (issue, pr) tuple now. Delegates to
-  /// [`GitHubFetch::refresh_link`] for the pure state mutation; the
-  /// branch resolution still lives here because it depends on
-  /// `App`'s `selected()` + `repo.head()` fallback.
+  /// Re-read the link for the currently selected worktree's branch, and
+  /// re-resolve the repo slug from the origin remote. Delegates to
+  /// [`GitHubFetch::reread_link`] for the pure state mutation; the branch
+  /// resolution still lives here because it depends on `App`'s
+  /// `selected()` + `repo.head()` fallback.
+  ///
+  /// **The fetched statuses survive this** (issue #597). The result cache
+  /// has been keyed by `(side, number)` since #138, so it cannot serve one
+  /// row's status for another: a row reads its own number, and a number it
+  /// never fetched reads `Idle`. Flushing it on every link re-read was a
+  /// leftover of the pre-#138 single slot (PR #68), and since this runs on
+  /// every navigation it threw away the prefetch `App::new` and every
+  /// relist start — which is why standing on any row but the one the TUI
+  /// opened on left `C` / `I` with nothing to show.
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
-    self.github.refresh_link(&self.repo, branch.as_deref(), &self.config);
-    // Navigation invariant (issue #255): the cache clear above must be paired
-    // with a spine generation-bump so any in-flight `gh` worker for the
-    // previous worktree's link is dropped instead of stamping the now-active
-    // worktree's cache. `refresh_link` no longer holds the old issue/PR
-    // numbers, so invalidate by predicate.
-    self.tasks.invalidate_matching(TaskKind::is_github);
+    // Only a change of forge *instance* makes a cached number mean
+    // something else, and `reread_link` reports exactly that by dropping
+    // the caches and returning `true`. Navigation invariant (issue #255):
+    // that flush must be paired with a spine generation-bump, so any
+    // in-flight `gh` worker started against the previous instance is
+    // dropped instead of stamping the new one's cache.
+    if self.github.reread_link(&self.repo, branch.as_deref(), &self.config) {
+      self.tasks.invalidate_matching(TaskKind::is_github);
+    }
     // Every link mutation funnels through here or through the
     // `refresh_github_status` re-probe — both revalidate the CI overlay's
     // pinned identity (Codex review #455): an auto-refresh relist can move
