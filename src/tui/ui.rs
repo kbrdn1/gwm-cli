@@ -165,6 +165,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   draw_body(f, chunks[1], app);
   draw_footer(f, chunks[2], app);
 
+  // #594: a compact modal has no rules, so the ground does the separating.
+  // Everything painted so far is darkened; the overlay's own `Clear` resets
+  // the cells under it, so the modal comes back at full strength against a
+  // shaded list. Bordered is left alone: the box is already the boundary.
+  if app.view != View::List && app.config.tui.layout.is_compact() {
+    shade_background(f.buffer_mut());
+  }
+
   match app.view {
     View::Help => draw_help(f, app),
     View::Create => draw_create(f, app),
@@ -480,12 +488,22 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
 /// and 3.1:1 at 70%, so darkening much further would need the text to
 /// switch to a light role instead.
 pub fn compact_header_fill(theme: &super::theme::Theme) -> Color {
-  match (theme.accent, theme.section_bg) {
+  band_fill(theme.accent, theme.section_bg)
+}
+
+/// [`compact_header_fill`]'s mix, over an arbitrary foreground role.
+///
+/// Split out for the modal frame (issue #594), which paints the same band
+/// but not always from `accent`: a destructive modal's frame is
+/// `prunable`, and a band mixed from `accent` there would drop the one
+/// signal the confirm surface exists to carry.
+pub fn band_fill(color: Color, ground: Color) -> Color {
+  match (color, ground) {
     (Color::Rgb(ar, ag, ab), Color::Rgb(gr, gg, gb)) => {
       let mix = |a: u8, g: u8| ((a as u16 * ACCENT_MIX + g as u16 * (100 - ACCENT_MIX)) / 100) as u8;
       Color::Rgb(mix(ar, gr), mix(ag, gg), mix(ab, gb))
     }
-    (accent, _) => accent,
+    (color, _) => color,
   }
 }
 
@@ -570,20 +588,6 @@ impl Chrome {
   /// layout can budget for it without building a `Chrome` just to read
   /// a constant off it.
   pub const COMPACT_ROWS: u16 = 1;
-
-  /// Chrome for a surface that stays boxed whatever `[tui] compact`
-  /// says — the modals, where a rule separates the panel from the
-  /// content it floats over.
-  pub fn boxed(accent: Color) -> Self {
-    Self {
-      compact: false,
-      accent,
-      fill: Color::Reset,
-      header: Style::default(),
-      focused: true,
-      dim_unfocused: false,
-    }
-  }
 
   pub fn resolve(compact: bool, focused: bool, dim_unfocused: bool, theme: &super::theme::Theme) -> Self {
     Self {
@@ -4777,17 +4781,20 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     }
   }
 
-  let block = overlay_block_titled(&modal_title, accent);
-  let inner_area = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner_area = frame.render(f, area, &modal_title, None);
 
   // header (fixed) | body (scrollable) | footer hint (fixed). The header is
   // exactly as tall as its line count; the footer is one row; the body
   // takes the rest.
   let header_h = header_lines.len() as u16;
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner_area);
+  let [header_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(header_h),
+    Constraint::Min(1),
+    Constraint::Length(1), // the gap above the hints
+    Constraint::Length(1),
+  ])
+  .areas(inner_area);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -4827,15 +4834,18 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 fn draw_working_tree(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let theme = app.theme;
-  let block = match working_tree_counts_footer(&app.working_tree.counts, &theme) {
-    Some(counts) => overlay_block_titled("Working Tree", theme.accent).title_bottom(counts.right_aligned()),
-    None => overlay_block_titled("Working Tree", theme.accent),
-  };
-  let inner = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), theme.accent, &theme);
+  let inner = frame.render(
+    f,
+    area,
+    "Working Tree",
+    working_tree_counts_footer(&app.working_tree.counts, &theme),
+  );
 
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // While the worker is out, a muted loader rather than an empty canvas:
   // blank reads as "nothing changed", which is the one answer this overlay
@@ -4941,12 +4951,13 @@ fn draw_commits(f: &mut Frame, app: &mut App) {
   // read too: `can_load_more` is false then only because the read is out.
   let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
   let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
-  let block = overlay_block_titled(&title, accent);
-  let inner = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = frame.render(f, area, &title, None);
 
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // A muted loader rather than an empty canvas while the first page is
   // being walked: blank reads as "no commits", which is the one answer this
@@ -5022,14 +5033,15 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
 
   // Scrollable body / fixed footer hint (issue #279) —
   // the title and the close hint stay pinned while the transcript scrolls.
-  let block = overlay_block_titled("Command Logs", accent);
-  let inner = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = frame.render(f, area, "Command Logs", None);
 
   // The title rides the top rule since #549, so the fixed header row it
   // used to occupy is gone and the transcript starts one row higher.
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // A full-width `-` rule, padded by a blank line above and below, separates
   // adjacent log entries (issue #279 follow-up).
@@ -5400,8 +5412,8 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // deliberate trade: the tabs are genuinely different lengths (3 rows for
   // Worktree, 173 for Keys), and with the floor and ceiling in place it
   // settles into two sizes rather than a continuum.
-  let content_rows =
-    header_h + body_lines.len() as u16 + 1 /* footer */ + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let content_rows = header_h + body_lines.len() as u16 + 2 /* gap + footer */ + frame.rows();
   let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
   let area = centered_content(
     60,
@@ -5411,13 +5423,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     f.area(),
   );
 
-  let block = overlay_block_titled("Settings", accent);
-  let inner = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let inner = frame.render(f, area, "Settings", None);
 
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  let [header_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(header_h),
+    Constraint::Min(1),
+    Constraint::Length(1), // the gap above the hints
+    Constraint::Length(1),
+  ])
+  .areas(inner);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -5644,17 +5658,15 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let block = overlay_block_titled(
-    if app.create_form.mode == Mode::Freeform {
-      "New Worktree (free-form)"
-    } else {
-      "New Worktree"
-    },
-    clean,
-  );
+  let title = if app.create_form.mode == Mode::Freeform {
+    "New Worktree (free-form)"
+  } else {
+    "New Worktree"
+  };
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
-  let inner_w = block.inner(outer).width as usize;
+  let inner_w = frame.inner(outer).width as usize;
 
   // Width of the background-filled value field: the inner width minus the
   // `  label  ` gutter (2 indent + label column + 2 gap).
@@ -5709,8 +5721,9 @@ fn draw_create(f: &mut Frame, app: &App) {
     lines.extend(fields);
   }
 
-  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let height = lines.len() as u16 + 4 + frame.rows();
   let area = centered_content(70, 56, 72, height, term);
+  let content = frame.render(f, area, title, None);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -5720,10 +5733,8 @@ fn draw_create(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
+    .split(content);
 
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
   render_form_body(f, inner[0], lines, focused_row, &app.theme);
 
   if app.is_create_worktree_loading() {
@@ -6215,9 +6226,9 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
     Style::default().fg(muted),
   )));
 
-  let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
+  let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + frame.rows();
   let area = centered_content(62, 56, 80, height, f.area());
-  let block = overlay_block_titled("Merge", danger);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -6227,10 +6238,8 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
+    .split(frame.render(f, area, "Merge", None));
 
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
   // --- loader / failure / countdown, exactly the delete modal's ladder ---
@@ -6311,20 +6320,20 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // #484: the overlay is about the batch snapshotted when it opened, not
   // about wherever the cursor sits now.
   let targets = app.pending_delete();
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
   if targets.is_empty() {
-    let block = overlay_block_titled(delete_worktree_title(), danger);
     let lines: Vec<Line<'static>> = vec![Line::from("nothing selected").centered()];
-    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let height = lines.len() as u16 + frame.rows();
     let area = centered_content(40, 40, 64, height, f.area());
-    f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    let content = frame.render(f, area, delete_worktree_title(), None);
+    f.render_widget(Paragraph::new(lines), content);
     return;
   }
 
   // Title stays centred; details use an aligned label/value grid so the
   // destructive target is easier to scan (#220 visual follow-up).
   let term = f.area();
-  let block = overlay_block_titled(&delete_batch_title(targets.len()), danger);
+  let title = delete_batch_title(targets.len());
 
   // Width first so a long path / name can be middle-ellipsized to one line
   // instead of wrapping mid-path (#187 review). Measured on a throwaway
@@ -6338,7 +6347,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // disagreed — at 200 columns the text was sized for 124 columns inside an
   // 88-column frame, so nothing was ellipsized and the path wrapped across
   // three rows, breaking the very alignment #187 built this grid for.
-  let text_w = block.inner(centered_content(62, 64, 88, 1, term)).width as usize;
+  let text_w = frame.inner(centered_content(62, 64, 88, 1, term)).width as usize;
   let label_w = "Delete Branch".chars().count();
   let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
@@ -6411,9 +6420,8 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // fixed rows (loader / buttons / hint gap / hint), the rounded border and the
   // shared interior padding — no more fixed 44%-tall box that dwarfed its
   // few lines (#187 review).
-  let height = content.len() as u16 + 4 + 2 /* border */ + 2 /* padding */;
+  let height = content.len() as u16 + 4 + frame.rows();
   let area = centered_content(62, 64, 88, height, term);
-  f.render_widget(Clear, area);
 
   // Five stacked regions inside the padded frame: the title + description,
   // a loader/countdown row, the button row, a gap, and a statusbar-style hint. The
@@ -6429,8 +6437,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
-  f.render_widget(block, area);
+    .split(frame.render(f, area, &title, None));
 
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
@@ -6606,11 +6613,14 @@ fn draw_report(f: &mut Frame, app: &App) {
   // screen so a long report stays on-screen rather than a fixed 80%-tall
   // box (#187).
   let term = f.area();
-  let logs_height = (logs.len() as u16 + 2/* nested border */).max(3);
+  // The nested ` Logs ` pane follows `[tui] layout` like every other
+  // section (issue #594): boxed it costs two rows, compact one.
+  let logs_chrome = Chrome::resolve(app.config.tui.layout.is_compact(), true, false, &app.theme);
+  let logs_height = (logs.len() as u16 + logs_chrome.rows()).max(3);
   // Two rows shorter than pre-#549: the title and its spacer row moved
   // into the top rule.
-  let height =
-    (logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let height = (logs_height + 2 /* gap + hint */ + frame.rows()).min(term.height.saturating_mul(80) / 100);
   // A text canvas, so a bare percentage rather than the bounded
   // [`modal_width`] policy (issue #550) — the same call the PTY overlay, the
   // command-log transcript and the note editor make, and for the same
@@ -6624,8 +6634,7 @@ fn draw_report(f: &mut Frame, app: &App) {
   // matters: the worst case is a compiler error, and the cap cut 64 cells
   // off it at 200 columns. No defect ever motivated the cap.
   let area = centered_abs(term.width.saturating_mul(80) / 100, height, term);
-  let block = overlay_block_titled("Bootstrap Report", accent);
-  let inner = block.inner(area);
+  let inner = frame.render(f, area, "Bootstrap Report", None);
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -6634,19 +6643,11 @@ fn draw_report(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint
     ])
     .split(inner);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
-  // A modal keeps its rules whatever `[tui] layout` says: a panel
-  // floating over content is exactly where a border earns its keep.
-  render_section(
-    f,
-    layout[0],
-    " Logs ",
-    SectionBody::new(&logs),
-    Chrome::boxed(accent),
-    0,
-    None,
-  );
+  // The nested ` Logs ` pane keeps its own rules whatever the modal frame
+  // spends: it is a section *inside* a surface, the way the sidebar's are,
+  // and the modal has already spent the layout's chrome budget for the
+  // frame around it.
+  render_section(f, layout[0], " Logs ", SectionBody::new(&logs), logs_chrome, 0, None);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::Report,
@@ -6670,7 +6671,6 @@ fn draw_report(f: &mut Frame, app: &App) {
 /// editor what a page key should move by.
 fn draw_note_editor(f: &mut Frame, app: &mut App) {
   let area = centered(80, 80, f.area());
-  f.render_widget(Clear, area);
 
   let title = match app.note_editor.as_ref() {
     Some(editor) => {
@@ -6698,9 +6698,8 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   };
   // Already rode the top rule before #549; routed through the shared
   // helper so it picks up the same bold accent as every other modal.
-  let block = overlay_block_titled(&title, app.theme.accent);
-  let inner = block.inner(area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme);
+  let inner = frame.render(f, area, &title, None);
 
   // #557: the modal carries its own mode line on its last row. The
   // statusbar already says the same thing through the same
@@ -6736,9 +6735,9 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
     // at the two-row inner height where they compete the buffer wins the
     // row. The mode line then renders into a zero-height rect, which
     // ratatui draws as nothing rather than as a panic.
-    .constraints([Constraint::Min(1), Constraint::Length(1)])
+    .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
     .split(inner);
-  let (inner, hint_row) = (rows[0], rows[1]);
+  let (inner, hint_row) = (rows[0], rows[2]);
   f.render_widget(Paragraph::new(hint), hint_row);
 
   let Some(editor) = app.note_editor.as_mut() else {
@@ -6780,8 +6779,6 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   let term = f.area();
   let area = centered(90, 90, term);
 
-  f.render_widget(Clear, area);
-
   let title = match app.pty_overlay.as_ref().map(|p| (p.kind, p.finished)) {
     Some((PtyKind::LazyGit, _)) => "LazyGit",
     Some((PtyKind::Terminal, _)) => "Terminal",
@@ -6794,9 +6791,12 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   };
   // Already rode the top rule before #549; routed through the shared
   // helper so it picks up the same bold accent as every other modal.
-  let block = overlay_block_titled(title, app.theme.accent);
-  let inner = block.inner(area);
-  f.render_widget(block, area);
+  // No footer band: every row inside is the child process's own screen,
+  // and a ground painted under its last line would read as a footer that
+  // is not one.
+  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme)
+    .without_footer()
+    .render(f, area, title, None);
 
   if let Some(pty) = app.pty_overlay.as_ref() {
     let pseudo_terminal = tui_term::widget::PseudoTerminal::new(pty.parser.screen());
@@ -6886,12 +6886,15 @@ fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect)
   centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 
-/// A modal overlay frame: a rounded border in `color` with interior
-/// padding on every side. Shared by every overlay (#187) so the confirm /
-/// help / create / report / open / link / palette modals read consistently.
-/// The padding (2 cols horizontal, 1 row vertical) is the breathing room
-/// callers must account for when sizing — inner height shrinks by 2 rows,
-/// inner width by 4 cols, on top of the 2-cell border.
+/// The **boxed** modal frame: a rounded border in `color` with interior
+/// padding on every side (#187), what every overlay wore before #594 and
+/// what `[tui] layout = "bordered"` still gives them. The padding (2 cols
+/// horizontal, 1 row vertical) shrinks the inner height by 2 rows and the
+/// inner width by 4 cols on top of the 2-cell border.
+///
+/// Not called directly by a modal any more: [`ModalFrame`] owns the choice
+/// between this and the compact bands, and [`ModalFrame::rows`] /
+/// [`ModalFrame::cols`] are what a caller sizes against.
 ///
 /// Untitled frame. Modals that carry a title use [`overlay_block_titled`].
 fn overlay_block(color: Color) -> Block<'static> {
@@ -6912,8 +6915,9 @@ fn overlay_block(color: Color) -> Block<'static> {
 /// density; modals are the surfaces most likely to overflow a short
 /// terminal, so they get the same treatment.
 ///
-/// Callers size to `lines.len() + 2 /* border */ + 2 /* padding */` and
-/// keep that formula: the two title rows simply leave `lines`.
+/// The two title rows simply left `lines`, and since #594 what a caller
+/// sizes against is [`ModalFrame::rows`] rather than a literal, so the same
+/// arithmetic holds under either layout.
 fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
   overlay_block(color).title(
     Line::from(Span::styled(
@@ -6922,6 +6926,220 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
     ))
     .centered(),
   )
+}
+
+/// Darken everything already painted, so a modal with no rules still reads
+/// as a panel over content (issue #594).
+///
+/// Two mechanisms, because one of them is not enough on its own.
+///
+/// `DIM` is what a terminal offers, and it touches the **foreground** only.
+/// A compact pane's header is a filled band, and the full-size overlays open
+/// on the row directly under one: left at full saturation, the pane's band
+/// and the modal's own title band are the same colour on adjacent rows and
+/// read as a single strip (the #605 lesson: two grounds that are adjacent
+/// by design do not separate).
+///
+/// So the colours are mixed toward black as well, which is what "darken the
+/// background" means to the eye. Same mechanism as [`band_fill`], other
+/// direction. A colour with no components to mix (an ANSI name, whose
+/// value belongs to the terminal, or a 256-palette index) comes back
+/// unchanged and keeps `DIM` alone, which is exactly the pre-#594 look.
+fn shade_background(buf: &mut Buffer) {
+  for cell in buf.content.iter_mut() {
+    cell.fg = shade(cell.fg);
+    cell.bg = shade(cell.bg);
+    cell.modifier.insert(Modifier::DIM);
+  }
+}
+
+/// Weight kept on a colour when [`shade_background`] pushes it toward
+/// black. Settled on a capture, not by arithmetic, because the pair this
+/// has to separate is a background against a background and that is not
+/// something a test can judge. The one knob to turn if the shading reads
+/// wrong.
+const SHADE_MIX: u16 = 45;
+
+fn shade(color: Color) -> Color {
+  match color {
+    Color::Rgb(r, g, b) => {
+      let mix = |c: u8| ((c as u16 * SHADE_MIX) / 100) as u8;
+      Color::Rgb(mix(r), mix(g), mix(b))
+    }
+    other => other,
+  }
+}
+
+/// A modal's frame, resolved from `[tui] layout` (issue #594).
+///
+/// Two shapes, the same pair the panes have carried since #545, and for
+/// the same reason: a knob that says "no rules" and then draws a box
+/// around every overlay means "no rules on the surfaces I picked".
+///
+/// - **Bordered**: [`overlay_block_titled`] verbatim, a rounded rule on
+///   four sides, the title centred in the top one, two rows and four
+///   columns of interior padding.
+/// - **Compact**: no rules at all. The title rides a filled band on the
+///   frame's first row, exactly the pane treatment
+///   ([`compact_header_line`] over [`compact_header_fill`]'s mix), and the
+///   frame's LAST row is painted as the quiet `section_bg` band that
+///   carries the footer. One column of padding each side, none vertically.
+///
+/// The footer band is a **ground**, not a row of its own. Every modal
+/// already spends its last inner row on a hint line ([`push_modal_hint`]
+/// for the ones that build a `Vec<Line>`, the `footer_area` split the four
+/// full-size overlays make, `inner[4]` in the confirm / create family), so
+/// the band paints *under* what is already there and no content moves.
+/// The two surfaces whose last row carries data instead (the PTY overlay,
+/// the CI-checks filter) opt out through [`Self::without_footer`].
+///
+/// [`Self::rows`] and [`Self::cols`] are the sizing contract, and they are
+/// methods rather than a doc comment on purpose: #550 is the story of a
+/// modal width rule that lived in prose while its consumers recomputed it
+/// by hand. A caller sizes to `content.len() + frame.rows()`, never to a
+/// literal.
+#[derive(Debug, Clone, Copy)]
+pub struct ModalFrame {
+  /// `true` when the frame spends bands instead of rules.
+  compact: bool,
+  /// Bordered: the rule colour. Compact: the role the header band is mixed
+  /// from, so a destructive modal keeps its danger.
+  accent: Color,
+  /// Header band ground, compact only.
+  fill: Color,
+  /// Header band text style, compact only.
+  header: Style,
+  /// Footer band ground, compact only.
+  footer_fill: Color,
+  /// `false` on the surfaces whose last row is content, not a footer.
+  footer: bool,
+}
+
+impl ModalFrame {
+  /// Resolve the frame for `[tui] layout`. `accent` is the modal's own
+  /// colour (`theme.accent` for most, `theme.prunable` for the destructive
+  /// ones), and it drives the rules in one layout and the header band in
+  /// the other.
+  pub fn resolve(compact: bool, accent: Color, theme: &Theme) -> Self {
+    Self {
+      compact,
+      accent,
+      fill: band_fill(accent, theme.section_bg),
+      // A modal always holds focus, so the header takes the focused
+      // treatment unconditionally: dark bold text on the coloured ground.
+      header: compact_header_style(true, theme),
+      footer_fill: theme.section_bg,
+      footer: true,
+    }
+  }
+
+  /// Drop the footer band: this modal's last row carries content, and a
+  /// ground painted under it would read as a footer that is not one.
+  pub fn without_footer(self) -> Self {
+    Self { footer: false, ..self }
+  }
+
+  /// Rows the frame costs. Bordered: two rules plus two padding rows.
+  /// Compact: the header band plus the blank row under it. The footer band
+  /// is a ground under the modal's own last row, not an extra one, and the
+  /// blank row above that row belongs to the modal (every one of them
+  /// leaves a gap between its content and its hints).
+  pub const fn rows(&self) -> u16 {
+    if self.compact {
+      2
+    } else {
+      4
+    }
+  }
+
+  /// Columns the frame costs: two rules plus four padding columns, or one
+  /// padding column each side.
+  pub const fn cols(&self) -> u16 {
+    if self.compact {
+      2
+    } else {
+      6
+    }
+  }
+
+  /// The content rect inside the frame. Bordered delegates to the block
+  /// itself rather than reproducing its arithmetic: the two must agree,
+  /// and one of them owns padding.
+  pub fn inner(&self, area: Rect) -> Rect {
+    if self.compact {
+      Rect {
+        x: area.x.saturating_add(1),
+        // Past the band AND the blank row under it: a modal's first line of
+        // content never sits flush against its title, in either layout. The
+        // last row stays inside, because that is the one the footer band is
+        // painted under.
+        y: area.y.saturating_add(2),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+      }
+    } else {
+      overlay_block(self.accent).inner(area)
+    }
+  }
+
+  /// Paint the frame over `area` (clearing what is under it) and hand back
+  /// the content rect.
+  ///
+  /// `footer_right` is what the bordered layout puts in the bottom rule,
+  /// the Working Tree's per-category counts today. Compact has no rule to
+  /// put it in, so it rides the right of the footer band, which is where
+  /// the compact panes put their counter too.
+  pub fn render(&self, f: &mut Frame, area: Rect, title: &str, footer_right: Option<Line<'static>>) -> Rect {
+    f.render_widget(Clear, area);
+    if !self.compact {
+      let mut block = overlay_block_titled(title, self.accent);
+      if let Some(right) = footer_right {
+        block = block.title_bottom(right.right_aligned());
+      }
+      let inner = block.inner(area);
+      f.render_widget(block, area);
+      return inner;
+    }
+
+    // Header band. The title is NOT upper-cased the way a pane's is: a
+    // pane label is a fixed noun, while a modal title carries live text (a
+    // branch, a typed number prompt), and shouting a branch name reads as a
+    // different string.
+    let header_area = Rect { height: 1, ..area };
+    f.render_widget(
+      Paragraph::new(compact_header_line(
+        Line::from(format!(" {} ", title)),
+        None,
+        header_area.width,
+        self.header,
+      ))
+      .style(Style::default().bg(self.fill)),
+      header_area,
+    );
+
+    // Footer band, painted before the caller's content so the hint line it
+    // renders into that same row lands on top of the ground rather than
+    // under it.
+    if self.footer && area.height > 1 {
+      let footer_area = Rect {
+        y: area.y.saturating_add(area.height).saturating_sub(1),
+        height: 1,
+        ..area
+      };
+      f.render_widget(
+        Paragraph::new(compact_header_line(
+          Line::default(),
+          footer_right,
+          footer_area.width,
+          Style::default(),
+        ))
+        .style(Style::default().bg(self.footer_fill)),
+        footer_area,
+      );
+    }
+
+    self.inner(area)
+  }
 }
 
 /// Width of `s` in the cells ratatui will actually paint.
@@ -7109,12 +7327,13 @@ fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let title = "Open in Browser";
   let lines = link_open_modal_lines(app, title, Some(app.open_menu_selected));
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block_titled(title, accent)), area);
+  let content = frame.render(f, area, title, None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
@@ -7150,12 +7369,13 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       lines
     }
   };
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block_titled(&title, accent)), area);
+  let content = frame.render(f, area, &title, None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
@@ -7266,7 +7486,8 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = width.saturating_sub(frame.cols()) as usize;
   let mut lines: Vec<Line<'static>> = Vec::new();
   // Leave room for the title + hint + borders; the picker scrolls past that.
   let max_visible = (term.height as usize).saturating_sub(8).max(3);
@@ -7285,13 +7506,10 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
     &app.modal_keymap,
     &app.theme,
   );
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let height = lines.len() as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(
-    Paragraph::new(lines).block(overlay_block_titled("Run an exec profile", accent)),
-    area,
-  );
+  let content = frame.render(f, area, "Run an exec profile", None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Render the generic detail overlay (issue #408). A centred modal listing
@@ -7310,7 +7528,8 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // width and painting at another either ellipsises the tail of every line
   // or leaves a column of dead space down the right edge.
   let width = detail_overlay_width(app.detail_overlay.kind, term.width);
-  let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = width.saturating_sub(frame.cols()) as usize;
   let ov = &app.detail_overlay;
 
   // CI checks filter (issue #436): palette-style query over the overlay's
@@ -7361,19 +7580,19 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // this count in #549 — the title rides the top rule now (Codex review,
     // PR #546: keeping them here left the frame two rows too tall and the
     // scrollbar two rows too low).
-    let height = (2 + list_h) as u16 + 2 /* border */ + 2 /* padding */;
+    // No footer band (#594): the last row here is a listing row when the
+    // window is full, and a ground under it would read as a footer.
+    let filter_frame = frame.without_footer();
+    let height = (2 + list_h) as u16 + filter_frame.rows();
     let area = centered_abs(width, height, term);
-    f.render_widget(Clear, area);
-    f.render_widget(
-      Paragraph::new(lines).block(overlay_block_titled("Filter CI checks", accent)),
-      area,
-    );
+    let content = filter_frame.render(f, area, "Filter CI checks", None);
+    f.render_widget(Paragraph::new(lines), content);
     // Scrollbar over the LISTING sub-area (Codex review #455): the rows
-    // start after border (1) + padding (1) + the query line + its blank
-    // spacer = y + 4.
+    // start after the frame's own chrome plus the query line and its blank
+    // spacer.
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 4,
+      y: content.y + 2,
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -7449,13 +7668,10 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       ],
       &app.theme,
     ));
-    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let height = lines.len() as u16 + frame.rows();
     let area = centered_abs(width, height, term);
-    f.render_widget(Clear, area);
-    f.render_widget(
-      Paragraph::new(lines).block(overlay_block_titled("Attach a session", accent)),
-      area,
-    );
+    let content = frame.render(f, area, "Attach a session", None);
+    f.render_widget(Paragraph::new(lines), content);
     // Scrollbar over the listing sub-area when the candidates overflow the
     // fixed window — same affordance as the detail mode below (issue #445).
     // Intersected with the modal's real area: on a tiny terminal
@@ -7463,7 +7679,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // past the ratatui buffer and panic (Codex review #445).
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 2 /* border + padding */ + 2, /* id line + blank */
+      y: content.y + 2, /* id line + blank */
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -7673,20 +7889,17 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // counted here leaves the frame short and the last row clipped; one
   // counted but not added leaves dead space under the hint (#549 / PR #546).
   let chrome = if tabs.is_empty() { 2 } else { 4 };
-  let height = (visible + chrome) as u16 + 2 /* border */ + 2 /* padding */;
+  let height = (visible + chrome) as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(
-    Paragraph::new(lines).block(overlay_block_titled(&ov.title, accent)),
-    area,
-  );
+  let content = frame.render(f, area, &ov.title, None);
+  f.render_widget(Paragraph::new(lines), content);
   // Scrollbar over the rows sub-area (right padding column) when the list
   // overflows — the missing affordance from the feedback.
   // Intersected with the modal's real area for the same tiny-terminal
   // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
-    y: area.y + 2 /* border + padding */ + if tabs.is_empty() { 0 } else { 2 },
+    y: content.y + if tabs.is_empty() { 0 } else { 2 },
     width: area.width.saturating_sub(2),
     height: visible as u16,
   }
@@ -7710,7 +7923,8 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let border = if armed { danger } else { accent };
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), border, &app.theme);
+  let inner = width.saturating_sub(frame.cols()) as usize;
 
   let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -7813,13 +8027,10 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
     &app.modal_keymap,
     &app.theme,
   );
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let height = lines.len() as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(
-    Paragraph::new(lines).block(overlay_block_titled("Reclaim build artifacts", border)),
-    area,
-  );
+  let content = frame.render(f, area, "Reclaim build artifacts", None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Render the command palette overlay (issue #32).
@@ -7847,10 +8058,11 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let block = overlay_block_titled("Rename Worktree", clean);
+  let title = "Rename Worktree";
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
-  let inner_w = block.inner(outer).width as usize;
+  let inner_w = frame.inner(outer).width as usize;
   let label_w = 5usize;
   let gutter = 2 + label_w + 2;
   let value_w = inner_w.saturating_sub(gutter);
@@ -7914,8 +8126,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     lines.extend(fields);
   }
 
-  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let height = lines.len() as u16 + 4 + frame.rows();
   let area = centered_content(70, 56, 72, height, term);
+  let content = frame.render(f, area, title, None);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -7925,10 +8138,8 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
+    .split(content);
 
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
   render_form_body(f, inner[0], lines, focused_row, &app.theme);
 
   if app.is_edit_worktree_loading() {
@@ -7971,12 +8182,13 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 
 fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered_viewport(60, 64, 96, 50, f.area());
-  f.render_widget(Clear, area);
-
   let accent = app.theme.accent;
-  let outer = overlay_block_titled("Command Palette", accent);
-  let inner = outer.inner(area);
-  f.render_widget(outer, area);
+  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme).render(
+    f,
+    area,
+    "Command Palette",
+    None,
+  );
 
   // Input-first layout (issue #262): the `:` input field
   // (background-filled, mirroring the New Worktree modal's
