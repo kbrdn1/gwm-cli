@@ -932,6 +932,25 @@ pub struct TuiConfig {
   /// printable is text, no modes, and one `Esc` writes and closes.
   #[serde(default = "default_note_vim")]
   pub note_vim: bool,
+
+  /// Command that renders a URL *inside the terminal* (issue #590).
+  ///
+  /// A shell line taking the `{url}` placeholder: `w3m {url}`, `lynx
+  /// {url}`, `carbonyl {url}`, `browsh {url}`. The placeholder is optional:
+  /// a bare `w3m` gets the URL appended as its last argument, which is what
+  /// every one of those tools takes anyway.
+  ///
+  /// **Only consulted when a multiplexer is detected.** A terminal browser
+  /// with nowhere to put it is worse than the system browser, so `$TMUX` /
+  /// `$ZELLIJ` / `$HERDR_ENV` gate it and the OS opener stays the fallback.
+  /// Unset (the default) is today's behaviour on every platform: every URL
+  /// the TUI opens goes to the external browser.
+  ///
+  /// Same `"" == omitted` convention as `[tui.open]`'s `shell_cmd`, so
+  /// blanking the key in the Settings panel turns the feature back off
+  /// rather than leaving an empty command nobody can spawn.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub terminal_browser: Option<String>,
 }
 
 /// What a mux spawn opens (issue #608): the level of the multiplexer's own
@@ -1044,6 +1063,7 @@ impl Default for TuiConfig {
       mux_open_in: MuxTarget::default(),
       mux_pane_direction: SplitDirection::default(),
       note_vim: default_note_vim(),
+      terminal_browser: None,
     }
   }
 }
@@ -1500,6 +1520,81 @@ pub fn expand_agent_resume(template: &str, session_id: &str) -> Option<String> {
   }
   out.push_str(rest);
   Some(out)
+}
+
+/// `true` when `url` is a thing gwm will hand to a terminal browser.
+///
+/// Deliberately **not** the shape [`is_shell_safe_session_id`] takes. A
+/// session id is a slug, so an allowlist costs nothing there; a URL carries
+/// `: / ? # % = & +` by construction. `#` shows up in gwm's own branch
+/// names, and `?a=1&b=2` in the `details_url` GitHub hands back for a check
+/// run. An allowlist wide enough for a real URL would admit `&`, so the
+/// quoting is what holds here instead, and this stays the narrow check that
+/// nothing *else* gets through: an absolute `http`/`https` URL, with no
+/// whitespace and no control characters.
+///
+/// [`expand_terminal_browser`] is what makes the quoting sound: it splits
+/// the template **before** substituting, so the URL lands as one argv
+/// element whose quoting gwm owns, rather than as text spliced into a line
+/// the user wrote.
+pub fn is_browsable_url(url: &str) -> bool {
+  (url.starts_with("http://") || url.starts_with("https://"))
+    && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Expand `[tui] terminal_browser` into the argv that renders `url`, or
+/// `None` when the URL is refused or the template does not parse.
+///
+/// **Split first, substitute second.** This is the whole security argument,
+/// and it is the opposite order from [`expand_agent_resume`]. That one
+/// substitutes into the line and cannot control where the user's template
+/// put the placeholder, so it constrains the *value* instead: put
+/// `{session}` inside double quotes and `shell_words::quote` emits single
+/// quotes the shell reads as literal characters, leaving `$(…)` live. Here
+/// the template is tokenised first, so `w3m {url}` and `w3m "{url}"` both
+/// yield the token `{url}` and the URL becomes exactly one argv element.
+/// The template's own quoting is consumed by the split and can no longer
+/// reach the value, which is why a URL's `&` and `?` need no allowlist.
+///
+/// Substitution inside a token is **single pass**, the rule
+/// [`crate::lifecycle`] learned in GHSA-fffq-vg6f-gxqm: an expansion is a
+/// value, not more template, so a URL that itself spelled `{url}` is not
+/// rewritten from the inside.
+///
+/// **A template with no `{url}` gets it appended.** `terminal_browser =
+/// "w3m"` is what people write first, and every one of w3m / lynx /
+/// carbonyl / browsh takes the URL as its last argument. Refusing it would
+/// document a loss for nothing.
+pub fn expand_terminal_browser(template: &str, url: &str) -> Option<Vec<String>> {
+  if !is_browsable_url(url) {
+    return None;
+  }
+  let tokens = shell_words::split(template).ok()?;
+  if tokens.is_empty() {
+    return None;
+  }
+  let mut used = false;
+  let mut argv: Vec<String> = Vec::with_capacity(tokens.len() + 1);
+  for token in tokens {
+    if !token.contains("{url}") {
+      argv.push(token);
+      continue;
+    }
+    used = true;
+    let mut out = String::with_capacity(token.len() + url.len());
+    let mut rest = token.as_str();
+    while let Some(at) = rest.find("{url}") {
+      out.push_str(&rest[..at]);
+      out.push_str(url);
+      rest = &rest[at + "{url}".len()..];
+    }
+    out.push_str(rest);
+    argv.push(out);
+  }
+  if !used {
+    argv.push(url.to_string());
+  }
+  Some(argv)
 }
 
 impl TuiConfig {

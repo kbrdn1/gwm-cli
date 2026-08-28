@@ -3252,3 +3252,111 @@ fn agent_resume_expansion_quotes_the_session_and_runs_one_pass() {
     Some("claude -r {nope}".into())
   );
 }
+
+#[test]
+fn terminal_browser_parses_and_an_empty_string_reads_as_unset() {
+  // #590. Same `"" == omitted` convention as `[tui.open] shell_cmd`, so
+  // blanking the key in the Settings panel turns the feature off rather than
+  // leaving an empty command nobody can spawn.
+  //
+  // `load_for_repo` resolves the global config path from `$HOME`, so this
+  // holds the binary's env lock across the read like every other loading
+  // test here (`env_guard_invariant_tests` enforces it).
+  let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+  let dir = tempfile::tempdir().unwrap();
+  let write = |body: &str| {
+    std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+    Config::load_for_repo(dir.path()).unwrap()
+  };
+
+  assert_eq!(
+    write("[tui]\nterminal_browser = \"w3m {url}\"\n").tui.terminal_browser,
+    Some("w3m {url}".into())
+  );
+  assert_eq!(write("[tui]\nterminal_browser = \"\"\n").tui.terminal_browser, None);
+  assert_eq!(write("[tui]\nlayout = \"compact\"\n").tui.terminal_browser, None);
+}
+
+#[test]
+fn terminal_browser_expansion_keeps_the_url_as_one_argument() {
+  use gwm::config::expand_terminal_browser;
+  // The whole security argument of #590, and the opposite order from
+  // `expand_agent_resume`: the template is SPLIT first, so its own quoting is
+  // consumed by the tokeniser and the URL lands as exactly one argv element
+  // whose quoting gwm owns. `w3m {url}` and `w3m "{url}"` must therefore be
+  // indistinguishable, and a URL carrying shell metacharacters must never be
+  // able to become a second word.
+  let hostile = "https://example.com/a;id&whoami?q=$(id)`id`";
+  let bare = expand_terminal_browser("w3m {url}", hostile).unwrap();
+  let quoted = expand_terminal_browser("w3m \"{url}\"", hostile).unwrap();
+  assert_eq!(bare, quoted, "the template's quoting cannot change the value");
+  assert_eq!(bare, vec!["w3m".to_string(), hostile.to_string()]);
+
+  // Real URLs the TUI actually opens are not refused. `#` is in gwm's own
+  // branch names and a check run's `details_url` carries a query string.
+  for real in [
+    "https://github.com/kbrdn1/gwm-cli/issues/590",
+    "https://github.com/kbrdn1/gwm-cli/actions/runs/33156327787/job/98800986980",
+    "https://github.com/kbrdn1/gwm-cli/tree/feat/%23590-terminal-browser",
+    "https://gitlab.com/g/p/-/merge_requests/7?tab=diffs&view=inline",
+  ] {
+    let argv = expand_terminal_browser("w3m {url}", real).unwrap_or_else(|| panic!("{real} is a URL gwm builds"));
+    assert_eq!(argv.last().map(String::as_str), Some(real));
+  }
+
+  // Substitution inside a token is single pass: an expansion is a value, not
+  // more template (GHSA-fffq-vg6f-gxqm).
+  assert_eq!(
+    expand_terminal_browser("b --u={url} --alt={url}", "https://e.co/x"),
+    Some(vec![
+      "b".into(),
+      "--u=https://e.co/x".into(),
+      "--alt=https://e.co/x".into()
+    ])
+  );
+}
+
+#[test]
+fn terminal_browser_expansion_appends_the_url_when_the_template_omits_it() {
+  use gwm::config::expand_terminal_browser;
+  // `terminal_browser = "w3m"` is what people write first, and w3m / lynx /
+  // carbonyl / browsh all take the URL as their last argument. Refusing it
+  // would document a loss for nothing.
+  assert_eq!(
+    expand_terminal_browser("w3m", "https://e.co/x"),
+    Some(vec!["w3m".into(), "https://e.co/x".into()])
+  );
+  assert_eq!(
+    expand_terminal_browser("lynx -accept_all_cookies", "https://e.co/x"),
+    Some(vec![
+      "lynx".into(),
+      "-accept_all_cookies".into(),
+      "https://e.co/x".into()
+    ])
+  );
+}
+
+#[test]
+fn terminal_browser_expansion_refuses_what_is_not_an_absolute_web_url() {
+  use gwm::config::{expand_terminal_browser, is_browsable_url};
+  // Narrow on purpose: the quoting handles the metacharacters, this handles
+  // everything that is not a URL at all. A `file://` or a bare path would be
+  // gwm handing a local read to a browser it never built the link for, and a
+  // newline is the one character that could survive into a second command
+  // line whatever the quoting does.
+  for bad in [
+    "",
+    "example.com/x",
+    "file:///etc/passwd",
+    "javascript:alert(1)",
+    "https://e.co/a b",
+    "https://e.co/a\nid",
+  ] {
+    assert!(!is_browsable_url(bad), "{bad:?} must not reach a terminal browser");
+    assert_eq!(expand_terminal_browser("w3m {url}", bad), None, "{bad:?}");
+  }
+  // An unparseable or empty template is refused too, rather than spawning a
+  // browser-less argv.
+  assert_eq!(expand_terminal_browser("w3m \"unbalanced", "https://e.co/x"), None);
+  assert_eq!(expand_terminal_browser("   ", "https://e.co/x"), None);
+}
