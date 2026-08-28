@@ -479,8 +479,9 @@ fn extract_launcher_binary(command: &str) -> Option<String> {
 /// `$PATH`. `lazygit` (the TUI's `l` keybinding's default) and `direnv`
 /// (only if the repo has an `.envrc`) are also checked because they're
 /// the two "ambient" dependencies whose absence routinely confuses new
-/// users. Configured launchers ([git_tui], [review] — issue #75) are
-/// added to the same set so the user gets one consolidated warning.
+/// users. Configured launchers ([git_tui] and [review] from issue #75, plus
+/// [tui] terminal_browser from #590) are added to the same set so the user
+/// gets one consolidated warning.
 ///
 /// Issue #415: `worktree.branch_pattern` is honoured when a branch name is
 /// *written* and ignored when one is *read back*, so a pattern the parser
@@ -642,6 +643,20 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     if let Some(bin) = extract_launcher_binary(&review.command) {
       needed.insert(bin);
     }
+  }
+  // `[tui] terminal_browser` is a third configurable binary (issue #590),
+  // opt-in like the review launcher. The TUI probes it too and falls back to
+  // the system browser, so a missing one is never fatal; surfacing it here is
+  // what stops a user from setting the key, seeing links keep opening
+  // externally, and having nothing tell them why.
+  if let Some(bin) = ctx
+    .config
+    .tui
+    .terminal_browser
+    .as_deref()
+    .and_then(extract_launcher_binary)
+  {
+    needed.insert(bin);
   }
 
   // Whatever the user's own bootstrap commands and lifecycle hooks invoke.
