@@ -1675,12 +1675,13 @@ fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, ap
         Err(e) => app.status = format!("mux-pane failed: {}", e),
       }
     }
-    BrowserPlan::Overlay { line, why } => {
-      let (shell, shell_flag) = platform_shell();
+    BrowserPlan::Overlay { argv, why } => {
       let sz = terminal.size().unwrap_or_default();
       let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
       let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
-      let argv = [shell.as_str(), shell_flag, line.as_str()];
+      // Exec'd directly, with no shell in between: `spawn` runs `argv[0]
+      // argv[1..]` itself, and the browser is already an argv.
+      let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
       match PtyOverlay::spawn(PtyKind::Browser, &argv, &cwd, inner_cols, inner_rows) {
         Ok(pty) => {
           app.open_pty_overlay(pty);

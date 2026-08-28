@@ -659,6 +659,11 @@ pub struct App {
   /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
   pub pty_overlay: Option<PtyOverlay>,
 
+  /// The view the open PTY overlay covers, restored when it closes (#590).
+  /// `None` when no overlay is open, or when it was opened from the table,
+  /// which is where every caller before `terminal_browser` came from.
+  pty_return: Option<View>,
+
   /// Exec profile picker overlay state (issue #325). Populated by
   /// [`Self::enter_exec_picker`] from `[exec.profiles.*]`; on `Enter` the
   /// run loop resolves the highlight to an argv and spawns a PTY overlay
@@ -876,6 +881,7 @@ impl App {
     }
     let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
+      pty_return: None,
       repo,
       display_repo_name: repo_name.clone(),
       repo_name,
@@ -3602,18 +3608,28 @@ impl App {
   /// Open the PTY overlay: store `pty` and switch to [`View::Pty`].
   pub fn open_pty_overlay(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
     self.pty_overlay = Some(pty);
+    // Remember what the overlay covers so closing it lands back there rather
+    // than on the table (Codex review on PR #615). Every pre-#590 caller
+    // opens from `View::List`, so this is a no-op for them; a `terminal_browser`
+    // link opened from the rich PR/issue view or the CI checks overlay is the
+    // first caller that covers a modal, and dropping the reader on the list
+    // loses both the modal and the row they were on. Only the view is stashed:
+    // opening a PTY touches no other overlay state, so restoring it is enough.
+    self.pty_return = (self.view != View::Pty).then_some(self.view);
     self.view = View::Pty;
   }
 
   /// Close the PTY overlay: kill the child process, drop the state, and
-  /// return to [`View::List`]. Safe to call when no overlay is open.
+  /// return to whatever the overlay covered ([`View::List`] for every caller
+  /// that opened from the table). Safe to call when no overlay is open.
   pub fn close_pty_overlay(&mut self) {
     if let Some(ref mut pty) = self.pty_overlay {
       pty.kill();
     }
     self.pty_overlay = None;
+    let back = self.pty_return.take();
     if self.view == View::Pty {
-      self.view = View::List;
+      self.view = back.unwrap_or(View::List);
     }
   }
 
@@ -8516,9 +8532,18 @@ pub enum BrowserPlan {
     /// What was opened, for the status line: pane / window / tab.
     noun: &'static str,
   },
-  /// Run `line` in the PTY overlay. `why` names the backend that refused a
+  /// Run `argv` in the PTY overlay. `why` names the backend that refused a
   /// pane, so the overlay does not look like a bug.
-  Overlay { line: String, why: &'static str },
+  ///
+  /// An argv rather than a shell line: [`PtyOverlay::spawn`] execs
+  /// `argv[0] argv[1..]` directly, so wrapping it in `platform_shell()`
+  /// would add a re-parse for nothing, and on Windows that shell is
+  /// `cmd.exe`, which reads neither the POSIX quoting `shell_words::join`
+  /// writes nor `&` as anything but a command separator (Codex review on
+  /// PR #615).
+  ///
+  /// [`PtyOverlay::spawn`]: crate::tui::state::pty_overlay::PtyOverlay::spawn
+  Overlay { argv: Vec<String>, why: &'static str },
   /// Hand the URL to the OS opener. `None` when `terminal_browser` is unset.
   System { why: Option<String> },
 }
@@ -8582,9 +8607,6 @@ pub fn plan_terminal_browser(
       why: Some(format!("{} not on PATH", argv[0])),
     };
   }
-  // One argv element per word from here on, so the line handed to a shell is
-  // quoted by gwm rather than by whatever the template happened to write.
-  let line = shell_words::join(&argv);
   let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
   let noun = mux_mod::spawn_noun(mux, mode);
   // "Can this backend run a command here" first, then "can it open this
@@ -8593,21 +8615,24 @@ pub fn plan_terminal_browser(
   // Either refusal lands in the overlay: the browser still renders in the
   // terminal, which is what was asked for.
   if let Some(why) = mux_mod::macro_refusal(mux, mode) {
-    return BrowserPlan::Overlay { line, why };
+    return BrowserPlan::Overlay { argv, why };
   }
   let open = match mux_mod::build_command(mux, &argv[0], cwd, mode, workspace) {
     Ok(open) => open,
-    Err(why) => return BrowserPlan::Overlay { line, why },
+    Err(why) => return BrowserPlan::Overlay { argv, why },
   };
-  let (shell, shell_flag) = crate::tui::platform_shell();
-  match mux_mod::attach_pane_command(mux, &open, &line, &shell, shell_flag) {
-    Some(argv) => BrowserPlan::MuxPane { argv, noun },
+  // `attach_pane_argv`, not `attach_pane_command`: the browser is already an
+  // argv, so no `platform_shell()` re-parse is needed and none happens. tmux
+  // still gets one joined operand because it has no argv form, and the shell
+  // that reads it is tmux's own, which is POSIX wherever tmux runs.
+  match mux_mod::attach_pane_argv(mux, &open, &argv) {
+    Some(spawn) => BrowserPlan::MuxPane { argv: spawn, noun },
     // Unreachable behind `macro_refusal`, which already answered for every
     // backend without a trailing-command form. Spelled out rather than
     // unwrapped: the failure it guards is an empty pane and a dropped
     // command, and that is worth being unrepresentable.
     None => BrowserPlan::Overlay {
-      line,
+      argv,
       why: "this backend's panes take no command",
     },
   }

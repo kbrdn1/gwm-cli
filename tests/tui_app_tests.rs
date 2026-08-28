@@ -16498,10 +16498,15 @@ fn terminal_browser_inside_herdr_runs_in_the_overlay_and_says_why() {
     None,
     &|_| true,
   );
-  let gwm::tui::BrowserPlan::Overlay { line, why } = plan else {
+  let gwm::tui::BrowserPlan::Overlay { argv, why } = plan else {
     panic!("herdr must reach the overlay, not the system browser");
   };
-  assert_eq!(line, format!("w3m {URL}"));
+  // An argv, not a shell line: `PtyOverlay::spawn` execs it directly, so
+  // joining it and handing the result to `platform_shell()` would add a
+  // re-parse for nothing, and on Windows that shell is `cmd.exe`, which reads
+  // neither POSIX quoting nor `&` as anything but a command separator (Codex
+  // review on PR #615).
+  assert_eq!(argv, vec!["w3m".to_string(), URL.to_string()]);
   assert!(why.contains("herdr"), "the reason must name the backend, got: {why}");
 }
 
@@ -16592,11 +16597,10 @@ fn terminal_browser_refuses_a_url_it_will_not_hand_to_a_shell() {
 #[test]
 #[cfg(unix)]
 fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
-  // Every other test here stops at the argv. This one runs the line the plan
-  // produces through the shell that actually receives it (tmux hands its
-  // operand to one, and the overlay wraps it in `sh -c`), because the whole
-  // security claim of #590 is about what a shell does with that string, not
-  // about what the Vec looks like.
+  // tmux is the one backend with no argv form: it takes a single
+  // shell-command operand and hands it to its own `default-shell`. So that
+  // operand is a real shell line, and the whole security claim of #590 is
+  // about what a shell does with it, not about what the Vec looks like.
   //
   // The fake browser is `printf %s\n`, so its arguments come back one per
   // line: a URL that stayed one word prints one line, and a URL that was
@@ -16611,15 +16615,16 @@ fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
       terminal_browser: Some("printf '%s\\n' \"{url}\"".into()),
       ..Default::default()
     },
+    Some("/tmp/sock,1,0".into()),
     None,
     None,
-    Some("1".into()),
     None,
     &|_| true,
   );
-  let gwm::tui::BrowserPlan::Overlay { line, .. } = plan else {
-    panic!("herdr plans the overlay, whose line is the one a shell runs");
+  let gwm::tui::BrowserPlan::MuxPane { argv, .. } = plan else {
+    panic!("tmux carries the browser as a shell-command operand");
   };
+  let line = argv.last().expect("the operand is the last word").clone();
   let out = std::process::Command::new("/bin/sh")
     .arg("-c")
     .arg(&line)
@@ -16635,4 +16640,51 @@ fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
     !stdout.contains("uid=") && !String::from_utf8_lossy(&out.stderr).contains("uid="),
     "nothing in the URL may be executed by the shell, got {stdout:?}"
   );
+}
+
+#[test]
+fn the_pty_overlay_returns_to_the_view_it_covered() {
+  // Codex review on PR #615. Before #590 every PTY overlay opened from the
+  // worktree table, so closing it back to `View::List` was always right. A
+  // `terminal_browser` link is the first caller that can open from ON TOP of
+  // a modal: the rich PR/issue view and the CI checks overlay both open URLs.
+  // Landing the reader on the table there loses the modal AND the row they
+  // were on, which the system-browser and mux-pane paths never do.
+  //
+  // Driven through the two state methods rather than through `open_url`,
+  // which needs a live `Terminal` and would spawn a real browser.
+  let (_d, mut app) = make_app();
+  app.view = gwm::tui::View::DetailOverlay;
+  // A PTY the test can own without spawning a browser: `spawn` execs argv[0]
+  // directly, so a shell that reads nothing is the cheapest live child.
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .expect("/bin/sh spawns on every runner this test runs on");
+  app.open_pty_overlay(pty);
+  assert_eq!(app.view, gwm::tui::View::Pty);
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    gwm::tui::View::DetailOverlay,
+    "closing the browser must land back on the modal it covered, not the table"
+  );
+
+  // And the pre-#590 callers are unchanged: opened from the table, back to it.
+  app.view = gwm::tui::View::List;
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Terminal,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay(pty);
+  app.close_pty_overlay();
+  assert_eq!(app.view, gwm::tui::View::List);
 }
