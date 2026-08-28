@@ -8378,11 +8378,31 @@ pub fn mux_pane_status(name: &str, noun: &str, ok: bool, stdout: &str, stderr: &
   if ok {
     return format!("opened {} in new {}", name, noun);
   }
-  let detail = [stderr, stdout]
+  format!("mux-pane refused: {}", first_detail_line(stdout, stderr))
+}
+
+/// The first non-empty line a failed child said, stderr before stdout, for a
+/// status bar that has one line to explain itself.
+fn first_detail_line<'a>(stdout: &'a str, stderr: &'a str) -> &'a str {
+  [stderr, stdout]
     .iter()
     .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
-    .unwrap_or("no output");
-  format!("mux-pane refused: {}", detail)
+    .unwrap_or("no output")
+}
+
+/// The status line for a browser that places itself (#590), the job
+/// [`mux_pane_status`] does for a pane gwm opened.
+///
+/// Not that function with `noun = "pane"`, which is the shortcut this exists
+/// to refuse: gwm asked for **no** pane here, so "mux-pane refused" would name
+/// a step that never ran and send the user reading their multiplexer config
+/// for a browser that simply exited non-zero. What failed is the browser, and
+/// that is what the one line has to say.
+pub fn detached_browser_status(url: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in its own pane", url);
+  }
+  format!("browser refused: {}", first_detail_line(stdout, stderr))
 }
 
 /// Everything `o` on the agents overlay (#591) decides before a process is

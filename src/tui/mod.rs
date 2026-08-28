@@ -28,9 +28,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  agent_pane_status, mux_pane_status, plan_agent_pane, plan_terminal_browser, read_pins_from_sources, AgentPanePlan,
-  App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey,
-  LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, ToggleStroke, View, WorkspaceState,
+  agent_pane_status, detached_browser_status, mux_pane_status, plan_agent_pane, plan_terminal_browser,
+  read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey,
+  LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, ToggleStroke,
+  View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -1706,16 +1707,23 @@ fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, ap
     BrowserPlan::Detached { argv } => {
       // `output()` like the mux path, and for the same reason: this runs while
       // ratatui owns the screen, so a child inheriting the pipes draws over
-      // the frame. `terminal-browser open --split` measured ~4s to create its
-      // pane and exit, which is a wait the mux verbs also take.
+      // the frame.
+      //
+      // Unlike the mux path, the wait is real: `tmux split-window` returns in
+      // milliseconds, `terminal-browser open --split` measured ~4s to create
+      // its pane and exit, and the loop is blocked for all of it. Accepted
+      // here rather than threaded through `TaskRunner`, because the browser is
+      // opening in front of the user for those seconds and the frame behind it
+      // is not what they are looking at. If it grows a second failure mode
+      // (a browser that hangs rather than exits) it belongs on the task spine
+      // like every other slow child; see the follow-up filed on #590.
       match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
-        Ok(out) if out.status.success() => app.status = format!("opened {} in its own pane", url),
+        Ok(out) if out.status.success() => app.status = detached_browser_status(url, true, "", ""),
         Ok(out) => open_system_browser(
           url,
           app,
-          Some(mux_pane_status(
+          Some(detached_browser_status(
             url,
-            "pane",
             false,
             &String::from_utf8_lossy(&out.stdout),
             &String::from_utf8_lossy(&out.stderr),

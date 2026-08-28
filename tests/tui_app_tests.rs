@@ -16956,3 +16956,33 @@ fn the_default_host_is_the_one_that_hosts() {
     "an unset host key keeps the hosting behaviour w3m needs"
   );
 }
+
+#[test]
+fn a_detached_browser_reports_itself_and_never_blames_the_multiplexer() {
+  // #590. The shortcut this pins down is `mux_pane_status(url, "pane", …)`,
+  // which reads naturally at the call site and lies: `detached` asks the
+  // multiplexer for nothing, so "mux-pane refused" names a step that never
+  // ran and sends the user reading their tmux config because a browser
+  // exited non-zero.
+  let ok = gwm::tui::detached_browser_status(URL, true, "", "");
+  assert_eq!(ok, format!("opened {URL} in its own pane"));
+
+  let err = gwm::tui::detached_browser_status(URL, false, "", "terminal-browser: no such split\n");
+  assert!(
+    err.contains("browser refused") && err.contains("no such split"),
+    "the browser is what failed, and the line has to say so: {err}"
+  );
+  assert!(
+    !err.contains("mux-pane"),
+    "gwm asked for no pane here, so nothing may blame one: {err}"
+  );
+
+  // stderr wins over stdout, and a child that said nothing at all still
+  // produces a line rather than a bare "browser refused:".
+  let both = gwm::tui::detached_browser_status(URL, false, "opening...", "cannot reach display");
+  assert!(both.contains("cannot reach display"), "stderr comes first: {both}");
+  assert!(
+    gwm::tui::detached_browser_status(URL, false, "", "").contains("no output"),
+    "a silent failure still explains itself"
+  );
+}
