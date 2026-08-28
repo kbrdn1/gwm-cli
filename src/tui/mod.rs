@@ -1662,17 +1662,26 @@ fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, ap
       // `output()` rather than `spawn()`, for the reason spelled out in
       // [`App::open_in_mux_pane_from`]: this runs while ratatui owns the
       // screen, so a child that inherits the pipes draws over the frame.
+      // Both failure shapes fall through to the opener rather than leaving the
+      // key with nothing to show for it (Codex review on PR #615): a stale
+      // `$TMUX` from a dead session, a multiplexer binary gone from `$PATH`, a
+      // zellij too old for the flag, a split the layout refuses. The plan
+      // cannot see any of those, they only surface on the spawn, and the
+      // system browser is the documented last rung for exactly this.
       match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
-        Ok(out) => {
-          app.status = mux_pane_status(
+        Ok(out) if out.status.success() => app.status = mux_pane_status(url, noun, true, "", ""),
+        Ok(out) => open_system_browser(
+          url,
+          app,
+          Some(mux_pane_status(
             url,
             noun,
-            out.status.success(),
+            false,
             &String::from_utf8_lossy(&out.stdout),
             &String::from_utf8_lossy(&out.stderr),
-          )
-        }
-        Err(e) => app.status = format!("mux-pane failed: {}", e),
+          )),
+        ),
+        Err(e) => open_system_browser(url, app, Some(format!("mux-pane failed: {}", e))),
       }
     }
     BrowserPlan::Overlay { argv, why } => {
@@ -1684,7 +1693,9 @@ fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, ap
       let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
       match PtyOverlay::spawn(PtyKind::Browser, &argv, &cwd, inner_cols, inner_rows) {
         Ok(pty) => {
-          app.open_pty_overlay(pty);
+          // `_over_current`: a link opened from the rich PR/issue view or the
+          // CI checks overlay must land back there when the browser closes.
+          app.open_pty_overlay_over_current(pty);
           app.status = format!("{}: opened {} in the overlay", why, url);
         }
         // The overlay is itself a fallback, so its failure falls through to

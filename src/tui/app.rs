@@ -3608,15 +3608,32 @@ impl App {
   /// Open the PTY overlay: store `pty` and switch to [`View::Pty`].
   pub fn open_pty_overlay(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
     self.pty_overlay = Some(pty);
-    // Remember what the overlay covers so closing it lands back there rather
-    // than on the table (Codex review on PR #615). Every pre-#590 caller
-    // opens from `View::List`, so this is a no-op for them; a `terminal_browser`
-    // link opened from the rich PR/issue view or the CI checks overlay is the
-    // first caller that covers a modal, and dropping the reader on the list
-    // loses both the modal and the row they were on. Only the view is stashed:
-    // opening a PTY touches no other overlay state, so restoring it is enough.
-    self.pty_return = (self.view != View::Pty).then_some(self.view);
+    self.pty_return = None;
     self.view = View::Pty;
+  }
+
+  /// [`Self::open_pty_overlay`], but closing it lands back on the view it
+  /// covered instead of on the worktree table (issue #590).
+  ///
+  /// A separate entry point rather than a rule inside `open_pty_overlay`,
+  /// because "where does closing this land" is the caller's decision and the
+  /// callers genuinely disagree. Stashing the current view unconditionally
+  /// looked harmless and was not: the exec picker spawns its PTY from
+  /// `View::ExecPicker`, so every finished run would have dropped the user
+  /// back on the picker instead of the list, contradicting
+  /// `close_exec_picker`'s contract (Codex review on PR #615).
+  ///
+  /// A `terminal_browser` link is the one caller that opens from on top of a
+  /// modal: the rich PR/issue view and the CI checks overlay both open URLs,
+  /// and landing the reader on the table there loses the modal AND the row
+  /// they were on. Only the view is stashed, because opening a PTY touches no
+  /// other overlay state.
+  pub fn open_pty_overlay_over_current(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
+    let back = self.view;
+    self.open_pty_overlay(pty);
+    if back != View::Pty {
+      self.pty_return = Some(back);
+    }
   }
 
   /// Close the PTY overlay: kill the child process, drop the state, and

@@ -16643,6 +16643,12 @@ fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
 }
 
 #[test]
+// `/bin/sh` is the child, so this is a unix test, like every other PTY
+// lifecycle test in the suite. Pushed without the gate it took
+// `test (windows-latest)` red: `spawn` cannot find the binary there, and the
+// `expect` fails the whole suite before the assertion runs. Exactly the trap
+// CLAUDE.md names under "pre-validate environment-dependent tests".
+#[cfg(unix)]
 fn the_pty_overlay_returns_to_the_view_it_covered() {
   // Codex review on PR #615. Before #590 every PTY overlay opened from the
   // worktree table, so closing it back to `View::List` was always right. A
@@ -16665,7 +16671,7 @@ fn the_pty_overlay_returns_to_the_view_it_covered() {
     24,
   )
   .expect("/bin/sh spawns on every runner this test runs on");
-  app.open_pty_overlay(pty);
+  app.open_pty_overlay_over_current(pty);
   assert_eq!(app.view, gwm::tui::View::Pty);
   app.close_pty_overlay();
   assert_eq!(
@@ -16674,17 +16680,23 @@ fn the_pty_overlay_returns_to_the_view_it_covered() {
     "closing the browser must land back on the modal it covered, not the table"
   );
 
-  // And the pre-#590 callers are unchanged: opened from the table, back to it.
-  app.view = gwm::tui::View::List;
-  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
-    gwm::tui::state::pty_overlay::PtyKind::Terminal,
-    &["/bin/sh", "-c", "sleep 30"],
-    std::path::Path::new("."),
-    80,
-    24,
-  )
-  .unwrap();
-  app.open_pty_overlay(pty);
-  app.close_pty_overlay();
-  assert_eq!(app.view, gwm::tui::View::List);
+  // And every pre-#590 caller is untouched, which is why this is a separate
+  // entry point. The exec picker spawns its PTY from `View::ExecPicker`, so a
+  // rule that stashed the current view unconditionally would drop the user
+  // back on the picker after every run instead of on the list, contradicting
+  // `close_exec_picker` (Codex review on PR #615).
+  for from in [gwm::tui::View::List, gwm::tui::View::ExecPicker] {
+    app.view = from;
+    let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+      gwm::tui::state::pty_overlay::PtyKind::Exec,
+      &["/bin/sh", "-c", "sleep 30"],
+      std::path::Path::new("."),
+      80,
+      24,
+    )
+    .unwrap();
+    app.open_pty_overlay(pty);
+    app.close_pty_overlay();
+    assert_eq!(app.view, gwm::tui::View::List, "opened from {from:?}");
+  }
 }
