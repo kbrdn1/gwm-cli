@@ -374,6 +374,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already done. Only a row with nothing linked still gets the link hint.
   Workspace mode gains the most: it skips the bulk prefetch by design, so
   before this the verbs there were fed by nothing at all.
+
+  Freshness is unchanged: a relist still expires every fetched status, so
+  `tui.auto_refresh_secs` (60 by default) still bounds how stale one can be.
+  That expiry moved ahead of the bulk prefetch's early returns, which is what
+  gives workspace mode the same bound rather than none.
 - **An overlay's toggle key closes it whatever it is bound to**
   ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `W`
   each close the overlay they open, but the guard doing it asked
