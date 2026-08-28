@@ -20,7 +20,8 @@
 //! the renderer each frame against the live viewport.
 
 use crate::config::{
-  ClipboardMode, Config, ConfigRow, ConfigSource, MuxTarget, SidebarOrientation, SidebarPosition, TuiLayout,
+  ClipboardMode, Config, ConfigRow, ConfigSource, MuxTarget, SidebarOrientation, SidebarPosition, TerminalBrowserHost,
+  TuiLayout,
 };
 use crate::multiplexer::SplitDirection;
 use crate::tui::keymap::{Action, KeyStroke, Keymap};
@@ -94,6 +95,7 @@ impl SettingsTab {
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
         SettingField::TerminalBrowser,
+        SettingField::TerminalBrowserOpenIn,
       ],
       // The Keys tab edits dynamic [`KeyRow`]s, not static fields, and `All`
       // is read-only.
@@ -304,6 +306,10 @@ const MUX_PANE_DIRECTION_CHOICES: &[&str] = &[
   SplitDirection::Left.label(),
   SplitDirection::Up.label(),
 ];
+const TERMINAL_BROWSER_HOST_CHOICES: &[&str] = &[
+  TerminalBrowserHost::Overlay.label(),
+  TerminalBrowserHost::Detached.label(),
+];
 const CLIPBOARD_CHOICES: &[&str] = &[
   ClipboardMode::Auto.label(),
   ClipboardMode::Osc52.label(),
@@ -351,6 +357,8 @@ pub enum SettingField {
   OpenEditorCmd,
   /// `tui.terminal_browser`: the in-terminal browser command (issue #590).
   TerminalBrowser,
+  /// `tui.terminal_browser_open_in`: who places it, gwm or the browser (#590).
+  TerminalBrowserOpenIn,
 }
 
 impl SettingField {
@@ -376,6 +384,7 @@ impl SettingField {
       SettingField::OpenShellCmd => "open shell cmd",
       SettingField::OpenEditorCmd => "open editor cmd",
       SettingField::TerminalBrowser => "terminal browser",
+      SettingField::TerminalBrowserOpenIn => "terminal browser placed by",
     }
   }
 
@@ -401,6 +410,7 @@ impl SettingField {
       SettingField::OpenShellCmd => "tui.open.shell_cmd",
       SettingField::OpenEditorCmd => "tui.open.editor_cmd",
       SettingField::TerminalBrowser => "tui.terminal_browser",
+      SettingField::TerminalBrowserOpenIn => "tui.terminal_browser_open_in",
     }
   }
 
@@ -414,6 +424,7 @@ impl SettingField {
       | SettingField::Clipboard
       | SettingField::MuxOpenIn
       | SettingField::MuxPaneDirection
+      | SettingField::TerminalBrowserOpenIn
       | SettingField::OpenMode => FieldKind::Choice,
       SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
@@ -445,6 +456,7 @@ impl SettingField {
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::MuxOpenIn => MUX_OPEN_IN_CHOICES,
       SettingField::MuxPaneDirection => MUX_PANE_DIRECTION_CHOICES,
+      SettingField::TerminalBrowserOpenIn => TERMINAL_BROWSER_HOST_CHOICES,
       SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
       _ => &[],
@@ -477,6 +489,7 @@ impl SettingField {
       SettingField::OpenShellCmd => cfg.tui.open.shell_cmd.clone().unwrap_or_default(),
       SettingField::OpenEditorCmd => cfg.tui.open.editor_cmd.clone().unwrap_or_default(),
       SettingField::TerminalBrowser => cfg.tui.terminal_browser.clone().unwrap_or_default(),
+      SettingField::TerminalBrowserOpenIn => cfg.tui.terminal_browser_open_in.label().into(),
     }
   }
 

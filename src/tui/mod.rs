@@ -1703,6 +1703,27 @@ fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, ap
         Err(e) => open_system_browser(url, app, Some(format!("overlay failed: {}", e))),
       }
     }
+    BrowserPlan::Detached { argv } => {
+      // `output()` like the mux path, and for the same reason: this runs while
+      // ratatui owns the screen, so a child inheriting the pipes draws over
+      // the frame. `terminal-browser open --split` measured ~4s to create its
+      // pane and exit, which is a wait the mux verbs also take.
+      match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+        Ok(out) if out.status.success() => app.status = format!("opened {} in its own pane", url),
+        Ok(out) => open_system_browser(
+          url,
+          app,
+          Some(mux_pane_status(
+            url,
+            "pane",
+            false,
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+          )),
+        ),
+        Err(e) => open_system_browser(url, app, Some(format!("browser failed: {}", e))),
+      }
+    }
     BrowserPlan::System { why } => open_system_browser(url, app, why),
   }
 }

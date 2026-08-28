@@ -8570,6 +8570,17 @@ pub enum BrowserPlan {
   ///
   /// [`PtyOverlay::spawn`]: crate::tui::state::pty_overlay::PtyOverlay::spawn
   Overlay { argv: Vec<String>, why: &'static str },
+  /// Launch `argv` and stop there: the browser places itself (issue #590,
+  /// `terminal_browser_open_in = "detached"`).
+  ///
+  /// Not a pane and not the overlay, and that is the whole point.
+  /// `terminal-browser open {url} --split right` asks the multiplexer for its
+  /// own pane and exits ~4s later, so hosting it in one of gwm's would split
+  /// twice. Hosting it in the PTY overlay is worse than wrong, it is
+  /// impossible: it draws through the terminal's image protocol, which
+  /// positions against the real window and lands in the screen's top-left
+  /// corner whatever the overlay's rect says.
+  Detached { argv: Vec<String> },
   /// Hand the URL to the OS opener. `None` when `terminal_browser` is unset.
   System { why: Option<String> },
 }
@@ -8641,6 +8652,13 @@ pub fn plan_terminal_browser(
     return BrowserPlan::System {
       why: Some(format!("{} not on PATH", probe)),
     };
+  }
+  // A browser that places itself is launched and nothing else. Checked after
+  // the multiplexer gate rather than before it, because placing itself still
+  // means asking a multiplexer for a pane: with none running,
+  // `terminal-browser open` would take over the pane gwm is drawing in.
+  if tui.terminal_browser_open_in == crate::config::TerminalBrowserHost::Detached {
+    return BrowserPlan::Detached { argv };
   }
   let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
   let noun = mux_mod::spawn_noun(mux, mode);

@@ -1,7 +1,7 @@
 use gwm::config::{
   expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, ClipboardMode, Config, ConfigRow,
-  ConfigSource, MacroOpenMode, MuxTarget, SidebarOrientation, SidebarPosition, TuiLayout, TuiOpenMode, WorktreeConfig,
-  CONFIG_FILE,
+  ConfigSource, MacroOpenMode, MuxTarget, SidebarOrientation, SidebarPosition, TerminalBrowserHost, TuiLayout,
+  TuiOpenMode, WorktreeConfig, CONFIG_FILE,
 };
 use gwm::multiplexer::SplitDirection;
 use tempfile::TempDir;
@@ -3377,4 +3377,42 @@ fn terminal_browser_expansion_refuses_what_is_not_an_absolute_web_url() {
   // browser-less argv.
   assert_eq!(expand_terminal_browser("w3m \"unbalanced", "https://e.co/x"), None);
   assert_eq!(expand_terminal_browser("   ", "https://e.co/x"), None);
+}
+
+#[test]
+fn tui_terminal_browser_open_in_round_trips_every_variant_and_rejects_the_rest() {
+  // #590. The Settings panel writes this key back by its label, so every
+  // variant has to load from the file the panel produces. Enumerated from
+  // `ALL` rather than a hand-written list: a third host added later is
+  // covered here by construction instead of being remembered.
+  for host in TerminalBrowserHost::ALL {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+      dir.path().join(CONFIG_FILE),
+      format!("[tui]\nterminal_browser_open_in = \"{}\"\n", host.label()),
+    )
+    .unwrap();
+    let cfg = Config::load_layered(dir.path(), None).unwrap();
+    assert_eq!(
+      cfg.tui.terminal_browser_open_in,
+      host,
+      "`{}` must load back as itself",
+      host.label()
+    );
+  }
+
+  // A typo fails at load rather than falling back to `overlay`, which is the
+  // failure that matters: it would host a browser that cannot be hosted, and
+  // the user would see the corner of the screen painted over with no error.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    "[tui]\nterminal_browser_open_in = \"detatched\"\n",
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("a typo is not a host");
+  assert!(
+    format!("{err}").contains("terminal_browser_open_in"),
+    "the error must name the key, got: {err}"
+  );
 }

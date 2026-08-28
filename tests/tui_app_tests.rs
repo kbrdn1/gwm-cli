@@ -16825,3 +16825,134 @@ fn a_modal_whose_link_held_still_is_restored_after_the_browser() {
     "an unchanged link must come back to the modal the reader left"
   );
 }
+
+#[test]
+fn a_browser_that_places_itself_is_launched_and_not_hosted() {
+  // #590, after trying `terminal-browser` in a real herdr session. gwm's two
+  // hosting shapes both assume the browser draws inside the TTY it is handed,
+  // which is true of w3m and lynx and false of a graphical one:
+  // `terminal-browser` renders through the terminal's image protocol, which
+  // positions against the real window, so it landed in the screen's top-left
+  // corner and ignored the overlay's rect entirely. No rect gwm passes can fix
+  // that, and the mouse has the same wall.
+  //
+  // `detached` is the answer: `terminal-browser open {url} --split right`
+  // asks the multiplexer for its own pane and exits (~4s, measured), so the
+  // rendering and the clicks are the terminal's business and gwm hosts
+  // nothing.
+  let tui = gwm::config::TuiConfig {
+    terminal_browser: Some("terminal-browser open {url} --split right".into()),
+    terminal_browser_open_in: gwm::config::TerminalBrowserHost::Detached,
+    ..Default::default()
+  };
+  // herdr, where the overlay was the only option before this.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Detached { argv } = plan else {
+    panic!("a self-placing browser must not be hosted in the overlay");
+  };
+  assert_eq!(
+    argv,
+    vec![
+      "terminal-browser".to_string(),
+      "open".into(),
+      URL.into(),
+      "--split".into(),
+      "right".into()
+    ]
+  );
+
+  // Same under tmux, which CAN host a pane: hosting one here would split
+  // twice, since the browser splits on its own.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::Detached { .. }),
+    "detached must win over the pane path, or the browser is split twice"
+  );
+}
+
+#[test]
+fn a_self_placing_browser_still_needs_a_multiplexer_and_a_binary() {
+  // The two gates stay in front of `detached`, and the order is the reason
+  // this test exists. Placing itself still means asking a multiplexer for a
+  // pane: with none running, `terminal-browser open` takes over the pane gwm
+  // is drawing in, which is worse than the system browser it would have used.
+  let tui = gwm::config::TuiConfig {
+    terminal_browser: Some("terminal-browser open {url} --split right".into()),
+    terminal_browser_open_in: gwm::config::TerminalBrowserHost::Detached,
+    ..Default::default()
+  };
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::System { why: Some(_) }),
+    "no multiplexer means the system browser, detached or not"
+  );
+
+  // And a browser that is not installed falls back rather than being launched
+  // into nothing.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|bin| bin != "terminal-browser",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing self-placing browser must fall back too");
+  };
+  assert!(why.contains("terminal-browser") && why.contains("PATH"), "got: {why}");
+}
+
+#[test]
+fn the_default_host_is_the_one_that_hosts() {
+  // `overlay` is the default because a text browser is the common case and
+  // gwm placing it beside the worktree list is the point of #590. `detached`
+  // is the opt-in for the browsers that cannot be hosted.
+  assert_eq!(
+    gwm::config::TerminalBrowserHost::default(),
+    gwm::config::TerminalBrowserHost::Overlay
+  );
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::Overlay { .. }),
+    "an unset host key keeps the hosting behaviour w3m needs"
+  );
+}

@@ -951,6 +951,54 @@ pub struct TuiConfig {
   /// rather than leaving an empty command nobody can spawn.
   #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
   pub terminal_browser: Option<String>,
+
+  /// Who gives the terminal browser its place on screen (issue #590).
+  ///
+  /// Default `overlay`: gwm hosts the command in a pane it opens, or in the
+  /// PTY overlay where the multiplexer cannot carry a command. That assumes
+  /// the browser draws inside whatever TTY it is handed, which is true of
+  /// w3m, lynx and every other text browser.
+  ///
+  /// `detached` is for a browser that places *itself*, which gwm must then
+  /// not host: `terminal-browser open {url} --split right` asks the
+  /// multiplexer for its own pane and exits. Hosting one of those in the PTY
+  /// overlay does not work and cannot be made to: it renders through the
+  /// terminal's image protocol, which positions against the real window and
+  /// so ignores the overlay entirely, drawing over the top-left corner of the
+  /// screen instead.
+  #[serde(default)]
+  pub terminal_browser_open_in: TerminalBrowserHost,
+}
+
+/// Who places the terminal browser (issue #590).
+///
+/// `kebab-case` for the same reason as [`TuiLayout`]: it keeps the serialised
+/// form equal to [`Self::label`], so a Settings-panel write-back produces a
+/// file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalBrowserHost {
+  /// gwm hosts it: a mux pane, or the PTY overlay. The default, and right for
+  /// any browser that draws in the TTY it is given.
+  #[default]
+  Overlay,
+  /// The browser places itself and gwm only launches it. No pane, no overlay,
+  /// which is the point: a browser that splits on its own would otherwise be
+  /// split twice, or hosted somewhere it cannot draw.
+  Detached,
+}
+
+impl TerminalBrowserHost {
+  /// Every variant, default first.
+  pub const ALL: [TerminalBrowserHost; 2] = [TerminalBrowserHost::Overlay, TerminalBrowserHost::Detached];
+
+  /// Settings-panel label, equal to the serialised TOML spelling.
+  pub const fn label(self) -> &'static str {
+    match self {
+      TerminalBrowserHost::Overlay => "overlay",
+      TerminalBrowserHost::Detached => "detached",
+    }
+  }
 }
 
 /// What a mux spawn opens (issue #608): the level of the multiplexer's own
@@ -1064,6 +1112,7 @@ impl Default for TuiConfig {
       mux_pane_direction: SplitDirection::default(),
       note_vim: default_note_vim(),
       terminal_browser: None,
+      terminal_browser_open_in: TerminalBrowserHost::default(),
     }
   }
 }
