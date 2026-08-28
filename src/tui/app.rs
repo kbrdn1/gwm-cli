@@ -7572,13 +7572,21 @@ impl App {
   }
 
   fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    // A relist is the moment the fetched statuses stop being authoritative,
+    // and since #597 nothing else expires them: the link re-read on every
+    // navigation keeps them now. So the expiry runs FIRST, ahead of every
+    // early return below, and it is what bounds staleness to
+    // `tui.auto_refresh_secs`. Workspace mode needs it most, since it takes
+    // the early return and refills per-selection instead.
+    self.invalidate_github();
+
     // Workspace mode (#36): this bulk prefetch resolves every merged row's
     // issue/PR against a single repo's slug (`self.github.link_slug`), which
     // mis-attributes numbers across child repos with different remotes (Codex
     // review #303 P2). In workspace mode GitHub state is fetched per-selection
-    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, which
-    // re-resolves the slug from the selected row's own repo. So skip the bulk
-    // cross-repo prefetch here.
+    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, and
+    // the context verbs ask for what they need through `forge_fetch_gap`
+    // (#597). So skip the bulk cross-repo prefetch here.
     if self.is_workspace() {
       return 0;
     }
@@ -7603,7 +7611,6 @@ impl App {
       return 0;
     }
 
-    self.invalidate_github();
     let mut spawned = 0u32;
     for n in issues {
       if self.spawn_github_issue(n, &slug) {

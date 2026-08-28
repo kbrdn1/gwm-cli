@@ -602,3 +602,44 @@ fn overlay_pin_markers_survive_an_active_repo_swap() {
       .collect::<Vec<_>>()
   );
 }
+
+// -- GitHub statuses stay bounded in workspace mode (issue #597) -----------
+
+fn sample_issue(n: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number: n,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+    detail: Default::default(),
+  }
+}
+
+#[test]
+fn a_workspace_relist_expires_the_fetched_github_statuses() {
+  // Issue #597 made the fetch cache survive a selection change, which leaves
+  // the relist as the only thing bounding how stale it can get (60 s by
+  // default, `tui.auto_refresh_secs`). Single-repo mode gets that from the
+  // bulk prefetch, which invalidates before re-spawning; workspace mode
+  // skips that prefetch by design (one slug cannot resolve every child
+  // repo's numbers, Codex review #303), so the expiry has to run before that
+  // early return. Without it a workspace row would keep showing a CI state
+  // that went red hours ago, and only `F` would ever correct it.
+  use gwm::tui::GitHubFetchState;
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  app.github.complete_issue(42, Ok(sample_issue(42)));
+  assert!(
+    matches!(app.github.issue_fetch_state(42), GitHubFetchState::Loaded(_)),
+    "precondition: the status must be cached, or the assertion below is vacuous"
+  );
+
+  app.refresh().unwrap();
+
+  assert!(
+    matches!(app.github.issue_fetch_state(42), GitHubFetchState::Idle),
+    "a relist must expire the statuses it can no longer vouch for"
+  );
+}
