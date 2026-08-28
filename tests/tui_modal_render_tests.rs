@@ -3207,6 +3207,36 @@ fn a_compact_modal_closes_on_a_muted_footer_band() {
 }
 
 #[test]
+fn a_compact_modal_keeps_a_blank_row_at_each_end_of_its_content() {
+  // User feedback on PR #616: content must never sit flush against a band,
+  // at either end, the way the boxed layout's interior padding already
+  // guarantees. The top row is the frame's (its `inner` starts past it);
+  // the bottom one belongs to the modal, which is why it is asserted here
+  // rather than assumed: the four full-size overlays and the note editor
+  // had no gap above their hints before this.
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    let row = |r: u16| -> String { (x..x + w).map(|col| buf[(col, r)].symbol()).collect() };
+    assert!(
+      row(y + 1).trim().is_empty(),
+      "{}: the row under the title band must be blank, got {:?}",
+      case.name,
+      row(y + 1)
+    );
+    if case.footer {
+      assert!(
+        row(y + h - 2).trim().is_empty(),
+        "{}: the row above the footer band must be blank, got {:?}",
+        case.name,
+        row(y + h - 2)
+      );
+    }
+  }
+}
+
+#[test]
 fn a_modal_that_opts_out_paints_no_footer_band() {
   // `without_footer` is a claim about the last row, so it is worth an
   // assertion rather than an exemption from one: skipping these cases in
@@ -3330,12 +3360,12 @@ fn a_bordered_modal_leaves_the_background_alone() {
 }
 
 #[test]
-fn a_content_sized_modal_spends_three_rows_less_in_compact() {
+fn a_content_sized_modal_spends_two_rows_less_in_compact() {
   // The sizing contract, measured rather than restated: boxed costs two
-  // rules and two padding rows, compact costs the title band alone (the
-  // footer band is a ground under a row the modal already had). A call
-  // site that kept its own `+ 4` would show up here as a modal two rows
-  // too tall with dead space above the band.
+  // rules and two padding rows, compact costs the title band and the blank
+  // row under it (the footer band is a ground under a row the modal
+  // already had). A call site that kept its own `+ 4` would show up here
+  // as a modal two rows too tall with dead space above the band.
   for name in ["open-menu", "link-prompt", "create", "exec-picker"] {
     let (_name, setup, _, _) = sizing_matrix()
       .into_iter()
@@ -3348,7 +3378,7 @@ fn a_content_sized_modal_spends_three_rows_less_in_compact() {
       .expect("a compact modal")
       .3;
     assert_eq!(
-      compact_h + 3,
+      compact_h + 2,
       boxed_h,
       "{name}: compact is {compact_h} rows against the boxed {boxed_h}"
     );

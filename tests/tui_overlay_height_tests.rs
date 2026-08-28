@@ -110,12 +110,13 @@ fn the_settings_panel_is_shorter_on_a_short_tab_than_on_a_long_one() {
 fn the_settings_panel_spends_its_rows_on_content_not_on_blanks() {
   // The chrome arithmetic, pinned exactly on the tab whose content is known
   // and small: 3 field rows, plus the header (layer subtitle, spacer, tab
-  // strip), the footer hint row, the rounded border and the shared interior
-  // padding. Before #569 this box was 24 rows on a 40-row terminal, roughly
-  // six of them blank.
+  // strip), the blank row above the hints and the hints themselves, the
+  // rounded border and the shared interior padding. Before #569 this box was
+  // 24 rows on a 40-row terminal, roughly six of them blank. The gap row is
+  // #594: content never sits flush against the footer, in either layout.
   let dir = repo();
   let h = height(&settings(&dir, SettingsTab::Worktree, 40));
-  let expected = 3 /* fields */ + 3 /* header */ + 1 /* footer */ + 2 /* border */ + 2 /* padding */;
+  let expected = 3 /* fields */ + 3 /* header */ + 2 /* gap + footer */ + 2 /* border */ + 2 /* padding */;
   assert_eq!(h, expected, "the Worktree tab's box must fit its three rows");
 }
 

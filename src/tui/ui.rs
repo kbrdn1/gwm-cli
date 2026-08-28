@@ -4788,8 +4788,13 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // exactly as tall as its line count; the footer is one row; the body
   // takes the rest.
   let header_h = header_lines.len() as u16;
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner_area);
+  let [header_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(header_h),
+    Constraint::Min(1),
+    Constraint::Length(1), // the gap above the hints
+    Constraint::Length(1),
+  ])
+  .areas(inner_area);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -4837,7 +4842,10 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
     working_tree_counts_footer(&app.working_tree.counts, &theme),
   );
 
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // While the worker is out, a muted loader rather than an empty canvas:
   // blank reads as "nothing changed", which is the one answer this overlay
@@ -4946,7 +4954,10 @@ fn draw_commits(f: &mut Frame, app: &mut App) {
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
   let inner = frame.render(f, area, &title, None);
 
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // A muted loader rather than an empty canvas while the first page is
   // being walked: blank reads as "no commits", which is the one answer this
@@ -5027,7 +5038,10 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
 
   // The title rides the top rule since #549, so the fixed header row it
   // used to occupy is gone and the transcript starts one row higher.
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // A full-width `-` rule, padded by a blank line above and below, separates
   // adjacent log entries (issue #279 follow-up).
@@ -5399,7 +5413,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // Worktree, 173 for Keys), and with the floor and ceiling in place it
   // settles into two sizes rather than a continuum.
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let content_rows = header_h + body_lines.len() as u16 + 1 /* footer */ + frame.rows();
+  let content_rows = header_h + body_lines.len() as u16 + 2 /* gap + footer */ + frame.rows();
   let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
   let area = centered_content(
     60,
@@ -5411,8 +5425,13 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
 
   let inner = frame.render(f, area, "Settings", None);
 
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  let [header_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(header_h),
+    Constraint::Min(1),
+    Constraint::Length(1), // the gap above the hints
+    Constraint::Length(1),
+  ])
+  .areas(inner);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -6716,9 +6735,9 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
     // at the two-row inner height where they compete the buffer wins the
     // row. The mode line then renders into a zero-height rect, which
     // ratatui draws as nothing rather than as a panic.
-    .constraints([Constraint::Min(1), Constraint::Length(1)])
+    .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
     .split(inner);
-  let (inner, hint_row) = (rows[0], rows[1]);
+  let (inner, hint_row) = (rows[0], rows[2]);
   f.render_widget(Paragraph::new(hint), hint_row);
 
   let Some(editor) = app.note_editor.as_mut() else {
@@ -7020,11 +7039,13 @@ impl ModalFrame {
   }
 
   /// Rows the frame costs. Bordered: two rules plus two padding rows.
-  /// Compact: the header band, and nothing else. The footer band is a
-  /// ground under the modal's own last row, not an extra one.
+  /// Compact: the header band plus the blank row under it. The footer band
+  /// is a ground under the modal's own last row, not an extra one, and the
+  /// blank row above that row belongs to the modal (every one of them
+  /// leaves a gap between its content and its hints).
   pub const fn rows(&self) -> u16 {
     if self.compact {
-      1
+      2
     } else {
       4
     }
@@ -7047,9 +7068,13 @@ impl ModalFrame {
     if self.compact {
       Rect {
         x: area.x.saturating_add(1),
-        y: area.y.saturating_add(1),
+        // Past the band AND the blank row under it: a modal's first line of
+        // content never sits flush against its title, in either layout. The
+        // last row stays inside, because that is the one the footer band is
+        // painted under.
+        y: area.y.saturating_add(2),
         width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(1),
+        height: area.height.saturating_sub(2),
       }
     } else {
       overlay_block(self.accent).inner(area)

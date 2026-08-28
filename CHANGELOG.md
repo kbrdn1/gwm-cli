@@ -258,10 +258,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     quiet `section_bg` **footer band**. It is a ground under a row that was
     already there, not an extra one, so nothing moved to make room for it.
     A bordered modal's bottom-rule counter (the Working Tree's per-category
-    counts) rides the right of that band.
+    counts) rides the right of that band;
+  - **a blank row at each end of the content**, so nothing sits flush
+    against a band. The boxed layout's interior padding already gave that,
+    and the four full-size overlays plus the note editor gained the one
+    above their hints under both layouts.
 
-  That is **three rows and four columns back per overlay**, which is what
-  the layout was asked for in the first place: modals are the surfaces most
+  That is **two rows and four columns back per overlay**, which is what the
+  layout was asked for in the first place: modals are the surfaces most
   likely to overflow a short terminal.
 
   A rule around a panel floating over content is worth something, and what
