@@ -4297,6 +4297,145 @@ fn enter_ci_checks_error_resolves_the_fetch_key() {
   );
 }
 
+/// An App on `feat/#42-tui-search` with a GitHub origin and PR 61 linked,
+/// its fetch never started — the cold shape the #597 tests below act on.
+fn app_with_a_linked_unfetched_pr() -> (tempfile::TempDir, git2::Repository, App) {
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // The origin is what resolves the forge, and with it `link_slug` — the
+  // fetch refuses to start without one, exactly as the bulk prefetch does.
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  (dir, repo, app)
+}
+
+#[test]
+fn enter_ci_checks_starts_the_fetch_nobody_asked_for() {
+  // Issue #597: `Idle` on a LINKED PR is "nobody asked yet", not "nothing
+  // to show". Workspace mode skips the bulk prefetch entirely, so before
+  // this the only filler was an explicit `F` on the right row — and the
+  // message sent the user to link a PR that was already linked.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Idle),
+    "the fixture must start unfetched, or the assertions below pass vacuously"
+  );
+
+  app.enter_ci_checks();
+
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "the verb must ask for what it needs instead of refusing"
+  );
+  assert!(
+    app.status.contains("fetching") && app.status.contains("61"),
+    "and say which fetch it started: {}",
+    app.status
+  );
+  assert_ne!(app.view, View::DetailOverlay, "still nothing to render yet");
+}
+
+#[test]
+fn enter_ci_checks_while_the_pr_fetch_is_in_flight_says_so() {
+  // Issue #597: `Loading` is not a missing link either — a second spawn
+  // would be wrong and the link hint would be a lie.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  let _generation = request_github_pr(&mut app, 61);
+
+  app.enter_ci_checks();
+
+  assert!(
+    app.status.contains("fetching") && app.status.contains("61"),
+    "an in-flight fetch is reported as one: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_ci_checks_after_a_failed_fetch_reports_the_failure() {
+  // Issue #597: `Error` is terminal in the cache, so the "fetch (F) first"
+  // hint pointed at a fetch that had already run and failed. The reason
+  // the user needs is the one `gh` gave.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  app.enter_ci_checks();
+
+  assert!(
+    app.status.contains("HTTP 502"),
+    "the probe failure is what the user has to act on: {}",
+    app.status
+  );
+  assert!(
+    !app.status.contains("link a PR"),
+    "a PR that is linked must not be reported as unlinked: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_ci_checks_on_a_fetched_pr_with_an_empty_rollup_says_that() {
+  // Issue #597: the fetched-but-empty case shared the unlinked message,
+  // which named the two things that were already done. The rollup is
+  // empty because the workflows have not started, and that is what to say.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "no checks yet".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+    checks: vec![],
+    detail: Default::default(),
+  }));
+
+  app.enter_ci_checks();
+
+  assert_ne!(app.view, View::DetailOverlay, "an empty rollup opens nothing");
+  assert!(
+    app.status.contains("no CI checks") && !app.status.contains("link a PR"),
+    "a linked, fetched PR must not be reported as unlinked: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_rich_view_starts_the_fetch_nobody_asked_for() {
+  // Issue #597: the rich view reads the same cache and refused for the
+  // same reason. Same contract, same verb-level fix.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+
+  app.enter_rich_view();
+
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "the view must ask for the PR it wants to show"
+  );
+  assert!(
+    app.status.contains("fetching") && app.status.contains("61"),
+    "and say so: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_rich_view_after_a_failed_fetch_reports_the_failure() {
+  // Issue #597, PR side, same reasoning as the CI checks counterpart.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  app.enter_rich_view();
+
+  assert!(
+    app.status.contains("HTTP 502"),
+    "the probe failure is what the user has to act on: {}",
+    app.status
+  );
+}
+
 #[test]
 fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
@@ -4714,14 +4853,83 @@ fn apply_fetch_error_stores_error_state() {
 }
 
 #[test]
-fn refresh_link_invalidates_fetch_state() {
-  // After the user changes selection or the branch link changes, any
-  // previously fetched status no longer applies. The state must reset.
+fn refresh_link_keeps_the_status_it_re_reads_the_link_for() {
+  // Issue #597. The result cache has been keyed by (side, number) since
+  // #138, so a link re-read cannot serve one row's status for another: a
+  // row reads its OWN number, and a number it never fetched reads `Idle`.
+  // Flushing the whole cache here was a leftover of the pre-#138 single
+  // slot (PR #68), and it threw away the prefetch that `App::new` and
+  // every relist run — the reason `C` / `I` had nothing to show.
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  app.apply_issue_fetch_result(Err("e".into()));
+  app.apply_issue_fetch_result(Ok(sample_issue(42)));
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)),
+    "the fixture must start Loaded, or the assertion below passes vacuously"
+  );
+
   app.refresh_link();
-  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
-  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.number, 42),
+    other => panic!("re-reading the link must keep the fetched status: {other:?}"),
+  }
+}
+
+#[test]
+fn walking_the_list_and_back_finds_the_status_still_there() {
+  // Issue #597, the behaviour the acceptance test in the issue describes:
+  // open on a worktree with a fetched PR, move away, move back, and the
+  // context is still loaded. Pre-#597 `on_navigation` -> `refresh_link`
+  // flushed the cache and bumped the spine generation, so the prefetch
+  // died on the first `j` and every context-dependent verb reported
+  // "nothing to show" from then until an explicit `F`.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  app.apply_issue_fetch_result(Ok(sample_issue(42)));
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)),
+    "the fixture must start Loaded, or the assertions below pass vacuously"
+  );
+
+  app.next();
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Idle),
+    "the other row reads its own number: #42's status must not leak onto it"
+  );
+
+  app.prev();
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.number, 42),
+    other => panic!("coming back must find #42's status still cached: {other:?}"),
+  }
+}
+
+#[test]
+fn navigation_keeps_an_in_flight_fetch_alive() {
+  // Issue #597, the half the cache alone does not cover: `refresh_link`
+  // also bumped the spine generation on every navigation, so a worker
+  // started by the prefetch had its result dropped by `drain` if the user
+  // pressed a key while it was in flight. Nothing then refilled the slot,
+  // which is how a row could sit on `Loading` forever.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  let generation = request_github_issue(&mut app, 42);
+
+  app.next();
+  app.prev();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
+    .unwrap();
+  app.drain_task_results();
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.number, 42),
+    other => panic!("the in-flight worker must survive the navigation: {other:?}"),
+  }
 }
 
 #[test]
@@ -4750,10 +4958,15 @@ fn prev_resets_fetch_state_on_selection_change() {
 
 #[test]
 fn first_resets_fetch_state_on_selection_change() {
+  // The row `first()` lands on links #42, and it must not be handed the
+  // status of a number it does not link to. Seeded under the fixture row's
+  // own number rather than through `apply_issue_fetch_result` (which keys
+  // on the CURRENT link, so it would have stored #42's status and, since
+  // #597, that one legitimately survives).
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.worktrees.push(worktree_fixture("alt"));
   app.list_state.select(Some(1));
-  app.apply_issue_fetch_result(Err("stale".into()));
+  app.github.complete_issue(0, Ok(sample_issue(0)));
   app.first();
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
 }
@@ -4769,20 +4982,43 @@ fn last_resets_fetch_state_on_selection_change() {
 }
 
 #[test]
-fn filter_clamping_resets_fetch_state_when_selection_moves() {
+fn filter_clamping_re_resolves_the_status_when_selection_moves() {
   // When typing into the filter narrows the visible set so much that the
-  // current selection no longer points at the same worktree, the link
-  // cache must invalidate too. Otherwise the right-panel block lies.
+  // current selection no longer points at the same worktree, the panel
+  // must follow — otherwise the right-panel block describes a row that is
+  // no longer selected. Since #597 that is a re-resolution, not a flush:
+  // both numbers stay cached and the selection decides which one is read.
+  //
+  // The full fixture name is typed rather than a single `z`: the repo row
+  // is a `tempfile` directory whose random name can contain one, which
+  // left two rows matching and the assertion at the mercy of the draw.
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.worktrees.push(worktree_fixture("zzz-unique"));
-  app.list_state.select(Some(1));
-  app.apply_issue_fetch_result(Err("stale".into()));
+  app.list_state.select(Some(0));
+  app
+    .github
+    .complete_issue(42, Ok(sample_issue_titled(42, "the branch row")));
+  app
+    .github
+    .complete_issue(0, Ok(sample_issue_titled(0, "the fixture row")));
+  app.refresh_link();
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.title, "the branch row", "precondition"),
+    other => panic!("precondition: the branch row must read #42: {other:?}"),
+  }
+
   app.enter_filter();
-  app.filter_push_char('z'); // only the second fixture matches
-                             // The selection survives but the link cache should still reset because
-                             // the filter operation can drop selection back to index 0 on the
-                             // filtered subset. The contract: any selection-state mutation refreshes.
-  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+  for c in "zzz-unique".chars() {
+    app.filter_push_char(c);
+  }
+
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(
+      i.title, "the fixture row",
+      "the narrowed selection must read its own number"
+    ),
+    other => panic!("expected the fixture row's own status: {other:?}"),
+  }
 }
 
 #[test]
@@ -13727,11 +13963,15 @@ fn a_failed_thread_fetch_is_shown_not_swallowed() {
 }
 
 #[test]
-fn a_link_refresh_drops_cached_threads_with_everything_else() {
-  // Threads live in their own cache, so the invalidation that clears the
-  // PR must clear them too — otherwise a refreshed PR renders next to the
-  // previous run's inline comments.
+fn cached_threads_move_with_the_pr_they_hang_from() {
+  // Threads live in their own cache, so whatever happens to the PR cache
+  // must happen to them — otherwise a refreshed PR renders next to the
+  // previous run's inline comments. Both halves of that, in order: a plain
+  // link re-read keeps them (they are keyed by PR number, so they are as
+  // authoritative as the PR itself — issue #597), and an origin moving
+  // between two instances that share a slug drops them (Codex review #458).
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
   app.refresh_link();
   app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
@@ -13741,10 +13981,18 @@ fn a_link_refresh_drops_cached_threads_with_everything_else() {
   );
 
   app.refresh_link();
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "a link re-read on the same instance must keep #61's threads"
+  );
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.refresh_link();
 
   assert!(
     matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Idle),
-    "stale threads survived the invalidation"
+    "threads from the previous instance survived the identity change"
   );
 }
 
