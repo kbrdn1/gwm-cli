@@ -1448,6 +1448,12 @@ fn modal_rows(buf: &Buffer) -> Vec<String> {
     .collect()
 }
 
+/// Byte offset of `needle` in `row`, for slicing what precedes it. Panics
+/// when absent, which the caller has already asserted against.
+fn tail_of(row: &str, needle: &str) -> usize {
+  row.find(needle).expect("needle present in row")
+}
+
 fn modal_width_at(setup: &dyn Fn() -> (tempfile::TempDir, App), w: u16, h: u16) -> u16 {
   let (_dir, mut app) = setup();
   let buf = render_at(&mut app, w, h);
@@ -1601,6 +1607,16 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
       Box::new(|| {
         let (d, mut a) = make_app();
         a.view = View::CommandLogs;
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
+      "working-tree",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.view = View::WorkingTree;
         (d, a)
       }),
       72,
@@ -2604,4 +2620,145 @@ fn the_mode_badge_is_absent_with_the_mode_off() {
     "no badge without the mode, row:\n{}",
     (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
   );
+}
+
+#[test]
+fn working_tree_modal_renders_its_title_body_and_footer() {
+  use gwm::tui::{WorkingTreeCounts, WT_CREATED_ICON, WT_MODIFIED_ICON};
+  use ratatui::text::Line;
+
+  // Issue #592: the sidebar pane's tree, given the whole screen. The rows
+  // are injected as owned state (the same boundary the command-logs render
+  // test pins) so this stays offline and deterministic — `enter_working_tree`
+  // is what shells out, and `tui_app_tests` covers that half.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("src/tui/"), Line::from("└─ ui.rs"), Line::from("README.md")];
+  app.working_tree.counts = WorkingTreeCounts {
+    created: 1,
+    modified: 2,
+    deleted: 0,
+  };
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+  assert_present(&buf, "ui.rs", "a tree row from the injected listing");
+  assert_present(&buf, "README.md", "a second tree row");
+  // The pane's change-count footer travels with the listing (issue #287):
+  // the same `<glyph> <n>` segments the bordered sidebar pane puts on its
+  // bottom rule, asserted through the constants so a glyph change here is a
+  // deliberate edit rather than a silently-passing literal.
+  //
+  // Scanned on the modal's LAST row and pinned to the right (Copilot review,
+  // PR #612): a whole-buffer `assert_present` catches the counts vanishing,
+  // but not `title_bottom(...)` losing its `.right_aligned()` or the segments
+  // migrating into the body. Placement is the observable part here. The
+  // per-category COLOURS are not re-pinned: `working_tree_counts_footer` owns
+  // them and `tui_ui_helpers_tests::working_tree_counts_footer_shows_only_nonzero_colored_segments`
+  // is where they are asserted, at the shared source both surfaces call.
+  let rows = modal_rows(&buf);
+  let bottom = rows.last().expect("the modal renders at least one row").clone();
+  let created = format!("{WT_CREATED_ICON} 1");
+  let modified = format!("{WT_MODIFIED_ICON} 2");
+  assert!(
+    bottom.contains(&created) && bottom.contains(&modified),
+    "the change counts ride the modal's bottom rule — bottom row was {bottom:?}, modal rows:\n{}",
+    rows.join("\n")
+  );
+  // Right-aligned means nothing but padding and the corner follows the last
+  // segment. Left or centred would leave `─` rule on its right.
+  let last = bottom.find(&modified).expect("modified segment on the bottom rule") + modified.len();
+  assert!(
+    bottom[last..].chars().all(|c| c == ' ' || c == '╯'),
+    "the counts ride the RIGHT of the bottom rule; found rule after them in {bottom:?}"
+  );
+  assert!(
+    bottom[..tail_of(&bottom, &created)].contains('─'),
+    "and the rule runs up to them from the left in {bottom:?}"
+  );
+  assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
+fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
+  use gwm::tui::MetaColumn;
+  use ratatui::text::Line;
+
+  // Issue #592, the responsive half of the commit listing's treatment
+  // (#593). The counts sit in their own rect on the right, so what a narrow
+  // terminal loses is the column, never the file name.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("├─ src/tui/"), Line::from("└─ ui.rs")];
+  app.working_tree.meta = MetaColumn {
+    lines: vec![Line::from(""), Line::from("+120 -34")],
+    width: 8,
+  };
+  app.view = View::WorkingTree;
+
+  // Wide: the counts are drawn, and nothing but the border follows them.
+  let wide = render_at(&mut app, 180, 40);
+  let rows = modal_rows(&wide);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("no row for the file — modal was:\n{}", rows.join("\n")));
+  assert!(
+    row.contains("+120 -34"),
+    "the counts ride the row they describe — got {row:?}"
+  );
+  let after = row.find("+120 -34").unwrap() + "+120 -34".len();
+  assert!(
+    row[after..].chars().all(|c| c == ' ' || c == '│' || c == '║'),
+    "and they are pinned right: only padding and the border follow, got {row:?}"
+  );
+
+  // Narrow: the name survives whole, the column is what goes. The modal takes
+  // 90% of the terminal and spends two more cells on its border, so 30
+  // columns leave a 25-cell body — less than the 34 the column needs beside
+  // `WT_NAME_FLOOR`. 40 would NOT do: it leaves exactly 34, which fits, and
+  // the assertion would fail on the boundary rather than past it. The exact
+  // boundary is pinned on `meta_pick` itself, in `tui_app_tests`.
+  let narrow = render_at(&mut app, 30, 40);
+  let rows = modal_rows(&narrow);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("the name is never what is dropped — modal was:\n{}", rows.join("\n")));
+  assert!(
+    !row.contains("+120"),
+    "the column yields before the name does — got {row:?}"
+  );
+}
+
+#[test]
+fn working_tree_modal_renders_a_loader_while_the_worker_is_out() {
+  // The read moved to a worker (Copilot review, PR #612), so there is a
+  // frame with no rows yet. It must say so: an empty canvas reads as "no
+  // changes", which is the one answer this overlay must not give by
+  // accident.
+  let (_dir, mut app) = make_app();
+  app
+    .working_tree
+    .begin(Some(std::path::Path::new("/tmp/gwm-test/pending")));
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+  assert_present(&buf, "loading", "the loader, not a blank canvas");
+  // The exit is still advertised while it waits.
+  assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
+fn working_tree_modal_renders_an_empty_listing_without_panicking() {
+  // The empty snapshot is what `enter_working_tree` loads when nothing is
+  // selected. It is NOT the errored-`git status` case: that one still
+  // produces a row (`! <error>`, `working_tree_lines`), which is the point
+  // of rendering it. The overlay still opens on its frame either way.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines.clear();
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
 }

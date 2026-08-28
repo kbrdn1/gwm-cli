@@ -150,6 +150,8 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  // #592: the sidebar's Working Tree pane, given the whole terminal.
+  WorkingTree       => "working_tree",
   // #593: the sidebar's Commits pane, given the whole terminal, with a
   // load-more key so history is paged rather than capped.
   Commits           => "commits",
@@ -522,6 +524,12 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #592: `W` for the Working Tree listing at full size. A letter and
+      // not the next number in the `3` / `4` family: those two open gwm's
+      // own panels (the command transcript, the settings), while this one
+      // and `c` / `C` open a pane's content, which is the register the
+      // letters name.
+      def(Action::WorkingTree, &["W"]),
       // #593: `c` for commits, `C` for the checks — the same pair in both
       // panes, so the key does not change meaning under the focus. It cost
       // `c` its rename, which moved to `E`, and the #436 contextual
@@ -757,6 +765,24 @@ impl Keymap {
       .find(|b| b.action == action)
       .and_then(|b| b.chords.first())
       .map(|chord| format_chord(chord))
+  }
+
+  /// Every chord bound to `action`, as the parsed stroke sequences, or an
+  /// empty slice when the action is unbound.
+  ///
+  /// [`Self::lookup`] answers "what does this buffer resolve to", which is
+  /// the wrong question inside a modal: there, the only binding that may
+  /// fire is the overlay's own toggle, and every other global action has to
+  /// stay unreachable. Issue #613 needs the inverse lookup, so a caller can
+  /// ask whether a buffer matches (or is a prefix of) one specific action
+  /// without letting the rest of the keymap through.
+  pub fn chords_for(&self, action: Action) -> &[Vec<KeyStroke>] {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.chords.as_slice())
+      .unwrap_or(&[])
   }
 
   /// Every chord bound to `action`, comma-joined (`"j, Down"`) or empty when

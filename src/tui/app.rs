@@ -8,6 +8,7 @@ use super::state::async_task::{
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::commits::{CommitsModal, COMMITS_PAGE};
+use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field, Mode};
@@ -18,6 +19,7 @@ use super::state::link_prompt::LinkPrompt;
 use super::state::pty_overlay::PtyOverlay;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
+use super::state::working_tree::WorkingTreeModal;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
@@ -96,6 +98,32 @@ pub struct PendingMerge {
   pub noun: String,
 }
 
+/// Outcome of [`App::handle_command_logs_key`] (issue #613): the two side
+/// effects the run loop owns, since neither belongs in a state transition.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CommandLogsKey {
+  /// Close the overlay.
+  Close,
+  /// Write the transcript to the clipboard (the run loop owns the I/O).
+  Copy,
+  /// Consumed; nothing for the caller to do.
+  Handled,
+}
+
+/// Outcome of [`App::modal_toggle_stroke`] (issue #613): what a modal
+/// should do with a keystroke offered to its toggle key before the modal
+/// verbs get a look at it.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ToggleStroke {
+  /// The buffer completed the toggle chord. Close the overlay.
+  Fired,
+  /// The buffer is a strict prefix of the toggle chord. The stroke is
+  /// consumed; wait for the next one and do not run the modal verbs.
+  Pending,
+  /// Nothing to do with the toggle. Fall through to the modal verbs.
+  Unclaimed,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
   List,
@@ -119,6 +147,12 @@ pub enum View {
   /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
   /// state lives on [`App::command_logs`].
   CommandLogs,
+  /// Full-size Working Tree listing (issue #592). A ~90% fullscreen modal
+  /// showing the same file-explorer tree the sidebar pane paints, given the
+  /// whole screen so a large change set reads in one go instead of two rows
+  /// at a time through `J` / `K`. Opened on `W`, scrolled like the help
+  /// overlay; state lives on [`App::working_tree`].
+  WorkingTree,
   /// Full-size commit listing (issue #593). A ~90% fullscreen modal
   /// showing the same graph the sidebar's Commits pane paints, given the
   /// whole screen, plus a load-more key that re-reads at a deeper limit so
@@ -609,6 +643,10 @@ pub struct App {
   /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
   pub config_panel: ConfigPanel,
 
+  /// Full-size Working Tree overlay state (issue #592): the scroll cursor
+  /// plus the snapshotted tree rows, filled by [`Self::enter_working_tree`].
+  pub working_tree: WorkingTreeModal,
+
   /// The user-level global config path this `App` was constructed with
   /// (issue #232). Stored so [`Self::enter_config_panel`] resolves the
   /// panel's source attribution against the *same* layers the running
@@ -891,6 +929,7 @@ impl App {
       task_rx,
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
+      working_tree: WorkingTreeModal::new(),
       commits: CommitsModal::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
@@ -2201,6 +2240,19 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
+        TaskMsg::WorkingTree(generation, path, snap) => {
+          if !self.tasks.complete(TaskKind::WorkingTree, generation) {
+            continue;
+          }
+          // The selection moved while the read ran (or the overlay was
+          // closed and reopened elsewhere): this payload describes a
+          // worktree the overlay is no longer showing.
+          if self.working_tree.path.as_deref() != Some(path.as_path()) {
+            continue;
+          }
+          self.working_tree.load(snap);
+          applied = true;
+        }
         TaskMsg::Commits(generation, path, limit, snap) => {
           if !self.tasks.complete(TaskKind::Commits, generation) {
             continue;
@@ -2498,6 +2550,68 @@ impl App {
     outcome
   }
 
+  /// What one keystroke means for a modal's own toggle key (issue #613).
+  ///
+  /// [`Self::key_matches_action`] answers the same question for a single
+  /// stroke, which left two silent holes in every overlay that closes on
+  /// its opener:
+  ///
+  /// - a **multi-stroke** binding (`working_tree = ["g w"]`) could open the
+  ///   overlay through the chord-aware list dispatch but never match here,
+  ///   because the lookup only ever saw the last stroke;
+  /// - a binding the overlay's own context already claims (`= ["j"]`) was
+  ///   resolved as a modal verb first, so the key opened the overlay and
+  ///   then scrolled it instead of closing.
+  ///
+  /// This resolves against `action` **alone** rather than the whole keymap:
+  /// inside a modal the toggle is the one global binding allowed to fire,
+  /// and letting [`Self::dispatch_key`] run there would make `d` open the
+  /// delete confirm from behind an overlay.
+  ///
+  /// [`ToggleStroke::Pending`] means the stroke was consumed as the prefix
+  /// of the toggle chord: the caller must NOT hand it to the modal verbs,
+  /// or `g` would scroll to the top on its way to `g w`.
+  pub fn modal_toggle_stroke(&mut self, key: KeyEvent, action: Action) -> ToggleStroke {
+    let stroke = KeyStroke::from_event(&key);
+    let mut tentative = self.pending_chord.clone();
+    tentative.push(stroke.clone());
+
+    let outcome = match self.resolve_toggle_buffer(action, &tentative) {
+      ToggleStroke::Unclaimed if !self.pending_chord.is_empty() => {
+        // Mismatched continuation. Drop the in-flight prefix and retry the
+        // stroke on its own, the vim-style fallback `dispatch_key` does:
+        // one action can hold several chords, so with
+        // `working_tree = ["g w", "j k"]` a `g` followed by `j` has to start
+        // the second chord rather than fall through to a scroll verb.
+        self.pending_chord.clear();
+        self.resolve_toggle_buffer(action, &[stroke])
+      }
+      other => other,
+    };
+    match &outcome {
+      ToggleStroke::Pending => {}
+      // Fired or Unclaimed: nothing is in flight either way.
+      _ => self.pending_chord.clear(),
+    }
+    self.sync_legacy_pending_flag();
+    outcome
+  }
+
+  /// Resolve one buffer against the chords bound to `action` alone, arming
+  /// [`Self::pending_chord`] on a strict prefix. The inner step of
+  /// [`Self::modal_toggle_stroke`], which owns the retry and the clears.
+  fn resolve_toggle_buffer(&mut self, action: Action, buffer: &[KeyStroke]) -> ToggleStroke {
+    let chords = self.keymap.chords_for(action);
+    if chords.iter().any(|c| c.as_slice() == buffer) {
+      return ToggleStroke::Fired;
+    }
+    if chords.iter().any(|c| c.len() > buffer.len() && c.starts_with(buffer)) {
+      self.pending_chord = buffer.to_vec();
+      return ToggleStroke::Pending;
+    }
+    ToggleStroke::Unclaimed
+  }
+
   pub fn key_matches_action(&self, key: KeyEvent, action: Action) -> bool {
     matches!(
       self.keymap.lookup(&[KeyStroke::from_event(&key)]),
@@ -2771,6 +2885,8 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
+      // Same for the full-size Working Tree listing (issue #592).
+      View::WorkingTree => self.pane_hint_context(),
       // Same for the full-size commit listing (issue #593).
       View::Commits => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
@@ -2892,6 +3008,168 @@ impl App {
     self.command_logs.sync();
     self.command_logs.reset();
     self.view = View::CommandLogs;
+  }
+
+  /// Open the full-size Working Tree listing (issues #592, #613).
+  ///
+  /// The overlay opens immediately on a loader and the `git status` read
+  /// runs on a [`TaskKind::WorkingTree`] worker. It is deliberately NOT
+  /// inline: `STATUS_SCAN_CAP` bounds how many records git yields, not how
+  /// long it takes to produce the first one, so an untracked tree on a cold
+  /// or network filesystem would freeze the event loop for the length of the
+  /// walk (Copilot review, PR #612). Same boundary as the sidebar's own
+  /// preview (#343), reached from a keypress rather than from navigation.
+  ///
+  /// The rows are read fresh rather than taken from `SidebarState::cache`:
+  /// that cache is keyed by `(path, mode)` and only rebuilt while the
+  /// sidebar is open and in commits mode, so it is empty in the two states
+  /// where the overlay is most useful.
+  ///
+  /// With nothing selected the overlay still opens, empty — the
+  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
+  /// reads as a dead key.
+  pub fn enter_working_tree(&mut self) {
+    let selected = self.selected().cloned();
+    let target = selected.as_ref().map(|w| w.path.as_path());
+    // Coalescing is only sound while the in-flight read is for the SAME
+    // worktree (Copilot review, PR #612). Close a slow snapshot for A,
+    // select B, reopen: the request would come back `None` because the slot
+    // is still A's, no worker would exist for B, and A's payload is dropped
+    // on the path check below — leaving the loader up with nothing left to
+    // clear it. `invalidate` bumps the generation and frees the slot, so A's
+    // late result is discarded and B gets its own read.
+    if self.working_tree.loading && self.working_tree.path.as_deref() != target {
+      self.tasks.invalidate(TaskKind::WorkingTree);
+    }
+    self.working_tree.begin(target);
+    self.view = View::WorkingTree;
+    let Some(w) = selected else {
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::WorkingTree) else {
+      // A read for this same worktree is already out; ride on it, which is
+      // what keeps a held `W` from spawning a `git status` per repeat.
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let snap = crate::tui::ui::working_tree_listing(&w, &theme);
+      let _ = tx.send(TaskMsg::WorkingTree(generation, w.path, snap));
+    });
+  }
+
+  /// `true` while the Working Tree overlay is waiting on its worker.
+  pub fn is_working_tree_loading(&self) -> bool {
+    self.working_tree.loading
+  }
+
+  /// Route one keystroke through the Command Logs overlay (issues #226,
+  /// #613). The two side effects the run loop owns (close, clipboard write)
+  /// come back as [`CommandLogsKey`] rather than firing here, so the routing
+  /// stays a pure state transition, the way [`Self::handle_create_key`] does
+  /// (issue #217).
+  ///
+  /// Same precedence as [`Self::handle_working_tree_key`]: the toggle first,
+  /// then the modal verbs.
+  pub fn handle_command_logs_key(&mut self, key: KeyEvent) -> CommandLogsKey {
+    match self.modal_toggle_stroke(key, Action::CommandLogs) {
+      ToggleStroke::Fired => return CommandLogsKey::Close,
+      ToggleStroke::Pending => return CommandLogsKey::Handled,
+      ToggleStroke::Unclaimed => {}
+    }
+    match self.resolve_modal(KeyContext::CommandLogs, key) {
+      Some(ModalAction::CommandLogsClose) => return CommandLogsKey::Close,
+      Some(ModalAction::CommandLogsCopy) => return CommandLogsKey::Copy,
+      Some(ModalAction::CommandLogsScrollDown) => self.command_logs.scroll_down(),
+      Some(ModalAction::CommandLogsScrollUp) => self.command_logs.scroll_up(),
+      Some(ModalAction::CommandLogsScrollRight) => self.command_logs.scroll_right(),
+      Some(ModalAction::CommandLogsScrollLeft) => self.command_logs.scroll_left(),
+      Some(ModalAction::CommandLogsScrollTop) => self.command_logs.scroll_to_top(),
+      Some(ModalAction::CommandLogsScrollBottom) => self.command_logs.scroll_to_bottom(),
+      _ => {}
+    }
+    CommandLogsKey::Handled
+  }
+
+  /// Route one keystroke through the Settings panel's navigation mode
+  /// (issues #232, #613). Returns `true` when the panel should close.
+  ///
+  /// Navigation ONLY: the capture and edit sub-modes own every stroke while
+  /// they are live and stay routed ahead of this in the run loop, so a
+  /// `config_panel` key rebound to a digit still types into a numeric field
+  /// instead of closing the panel out from under the edit.
+  pub fn handle_config_nav_key(&mut self, key: KeyEvent) -> bool {
+    match self.modal_toggle_stroke(key, Action::ConfigPanel) {
+      ToggleStroke::Fired => return true,
+      ToggleStroke::Pending => return false,
+      ToggleStroke::Unclaimed => {}
+    }
+    let on_all = self.config_panel.tab == SettingsTab::All;
+    match self.resolve_modal(KeyContext::Config, key) {
+      Some(ModalAction::ConfigClose) => return true,
+      Some(ModalAction::ConfigNextTab) => self.config_panel.next_tab(),
+      Some(ModalAction::ConfigPrevTab) => self.config_panel.prev_tab(),
+      Some(ModalAction::ConfigToggleLayer) => self.config_panel.toggle_layer(),
+      // On the Keys tab `activate` arms a live keystroke capture for the
+      // selected binding (issue #294); elsewhere it cycles a choice or
+      // opens the numeric/text edit buffer.
+      Some(ModalAction::ConfigActivate) => {
+        if self.config_panel.tab == SettingsTab::Keys {
+          self.config_panel.begin_capture();
+        } else {
+          self.activate_selected_setting();
+        }
+      }
+      Some(ModalAction::ConfigSelectNext) => {
+        if on_all {
+          self.config_panel.scroll_down();
+        } else {
+          self.config_panel.select_next();
+        }
+      }
+      Some(ModalAction::ConfigSelectPrev) => {
+        if on_all {
+          self.config_panel.scroll_up();
+        } else {
+          self.config_panel.select_prev();
+        }
+      }
+      Some(ModalAction::ConfigScrollRight) if on_all => self.config_panel.scroll_right(),
+      Some(ModalAction::ConfigScrollLeft) if on_all => self.config_panel.scroll_left(),
+      Some(ModalAction::ConfigScrollTop) if on_all => self.config_panel.scroll_to_top(),
+      Some(ModalAction::ConfigScrollBottom) if on_all => self.config_panel.scroll_to_bottom(),
+      _ => {}
+    }
+    false
+  }
+
+  /// Route one keystroke through the full-size Working Tree overlay
+  /// (issues #592, #613). Returns `true` when the overlay should close.
+  ///
+  /// The routing lives here rather than in the event loop, the way
+  /// [`Self::handle_create_key`] does (issue #217), so the ONE thing a
+  /// `match` in the run loop cannot express in a test is pinned: the
+  /// toggle resolves **before** the modal verbs. Move the two blocks and
+  /// `a_rebound_toggle_beats_the_scroll_verb_it_shadows` goes red.
+  pub fn handle_working_tree_key(&mut self, key: KeyEvent) -> bool {
+    match self.modal_toggle_stroke(key, Action::WorkingTree) {
+      ToggleStroke::Fired => return true,
+      // Consumed as a chord prefix: the modal verbs must not see it.
+      ToggleStroke::Pending => return false,
+      ToggleStroke::Unclaimed => {}
+    }
+    match self.resolve_modal(KeyContext::WorkingTree, key) {
+      Some(ModalAction::WorkingTreeClose) => return true,
+      Some(ModalAction::WorkingTreeScrollDown) => self.working_tree.scroll_down(),
+      Some(ModalAction::WorkingTreeScrollUp) => self.working_tree.scroll_up(),
+      Some(ModalAction::WorkingTreeHalfDown) => self.working_tree.scroll_half_down(),
+      Some(ModalAction::WorkingTreeHalfUp) => self.working_tree.scroll_half_up(),
+      Some(ModalAction::WorkingTreeScrollTop) => self.working_tree.scroll_to_top(),
+      Some(ModalAction::WorkingTreeScrollBottom) => self.working_tree.scroll_to_bottom(),
+      _ => {}
+    }
+    false
   }
 
   /// Open the full-size commit listing (issue #593).

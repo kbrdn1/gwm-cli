@@ -12,6 +12,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`W` opens the Working Tree listing at full size**
+  ([#592](https://github.com/kbrdn1/gwm-cli/issues/592)). The sidebar's
+  Working Tree pane is one block among five in a column that is a fraction of
+  the screen, so a worktree with more than a handful of changed files could
+  only be read two rows at a time through `J` / `K`. `W` now opens the same
+  file-explorer tree as a full-size overlay: same icons, same per-category
+  colours, the same change counts on the bottom rule, scrolled with
+  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `W` again, whatever `W`
+  gets rebound to, see #613 below), and rebindable under
+  `[tui.keys.modal.working_tree]`.
+
+  The listing is read when the overlay opens rather than taken from the
+  sidebar's cache, so it does not go blank in the two states where that cache
+  is never built: sidebar hidden, or the Details panel showing stashes. The
+  read runs on a worker and the overlay opens on a loader, so a repository
+  whose untracked walk is slow does not freeze the event loop on the
+  keypress.
+
+  The right of each row says how many lines the file gained and lost
+  (`+120 -34`), from one `git diff` against `HEAD` in the same read, so
+  staged and unstaged changes are counted together. A directory, an untracked
+  file and a binary file carry no counts: the first has no diff of its own,
+  and for the other two git counts no lines. The column rides its own rect on
+  the right and is dropped whole on a terminal too narrow to keep it and a
+  readable file name, so the name is never what goes. `D` / `U` page the
+  listing by half a screen, and the key is advertised in both pane footers,
+  matching the commit listing (#593).
 - **`o` on the agents overlay resumes the session in the multiplexer**
   ([#591](https://github.com/kbrdn1/gwm-cli/issues/591)). The overlay told you
   which agent was working where and then left you to get there by hand. `a`
@@ -282,6 +309,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An overlay's toggle key closes it whatever it is bound to**
+  ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `W`
+  each close the overlay they open, but the guard doing it asked
+  `key_matches_action`, which reads a single stroke and only ran after the
+  modal verbs had their turn. Two silent holes: a multi-stroke binding
+  (`working_tree = ["g w"]`) could open the overlay and never shut it, and a
+  binding the overlay's own context already claimed (`= ["j"]`) opened it and
+  then scrolled it. The toggle now resolves first, against that one action
+  rather than the whole keymap, and it accumulates its chord, so a prefix
+  stroke is consumed instead of firing a scroll verb on the way through.
+
+  Each of the three overlays routes its keys through an `App` method now
+  (the shape the create overlay has had since #217), because the ordering
+  is the fix and a `match` in the run loop cannot be tested. `d` still
+  cannot reach the delete confirm from behind an overlay: the toggle
+  resolves against its one action, not the whole keymap.
 - **A compact pane's header says where you are, and its name no longer
   dims when it is not**
   ([#605](https://github.com/kbrdn1/gwm-cli/issues/605)). In the default

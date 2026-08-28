@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, AgentPanePlan, App, ConfirmKind,
-  CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget,
-  PendingMerge, RepoMeta, View, WorkspaceState,
+  agent_pane_status, mux_pane_status, plan_agent_pane, read_pins_from_sources, AgentPanePlan, App, CommandLogsKey,
+  ConfirmKind, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget,
+  PendingMerge, RepoMeta, ToggleStroke, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -50,6 +50,7 @@ pub use state::link_prompt::LinkPrompt;
 pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
+pub use state::working_tree::{WorkingTreeModal, WorkingTreeSnapshot};
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -81,16 +82,17 @@ pub use ui::{
   folded_status_line, footer_line, form_field_scroll, format_status, freshness_color, github_status_lines, header_line,
   help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
   hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
-  link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter, markdown_style, modal_height,
-  modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width, overlay_modal_width,
-  pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line,
-  recent_commits_lines, recent_commits_listing, recent_items_pane_title, reclaim_size_color, rename_buttons_line,
-  rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker, tilde_compress_with_home,
-  type_selector_line, working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts,
+  link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter, markdown_style, meta_pick,
+  modal_height, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
+  overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
+  pr_summary_line, recent_commits_lines, recent_commits_listing, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_listing,
+  working_tree_meta_column, working_tree_pane_title, working_tree_stat_spans, working_tree_status_counts,
   working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext,
-  SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMITS_META_GAP,
-  COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
-  WT_DELETED_ICON, WT_MODIFIED_ICON,
+  SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMITS_SUBJECT_FLOOR,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -514,19 +516,23 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // so the open key toggles it shut even when rebound.
       // #219: keys resolved through the `command_logs` modal context. The
       // bound global `command_logs` key still toggles the overlay shut.
-      View::CommandLogs => match app.resolve_modal(KeyContext::CommandLogs, key) {
-        Some(ModalAction::CommandLogsClose) => app.view = View::List,
+      View::CommandLogs => match app.handle_command_logs_key(key) {
+        CommandLogsKey::Close => app.view = View::List,
         // `y` copies the whole transcript to the clipboard (issue #279).
-        Some(ModalAction::CommandLogsCopy) => copy_command_logs_to_clipboard(&mut app),
-        Some(ModalAction::CommandLogsScrollDown) => app.command_logs.scroll_down(),
-        Some(ModalAction::CommandLogsScrollUp) => app.command_logs.scroll_up(),
-        Some(ModalAction::CommandLogsScrollRight) => app.command_logs.scroll_right(),
-        Some(ModalAction::CommandLogsScrollLeft) => app.command_logs.scroll_left(),
-        Some(ModalAction::CommandLogsScrollTop) => app.command_logs.scroll_to_top(),
-        Some(ModalAction::CommandLogsScrollBottom) => app.command_logs.scroll_to_bottom(),
-        _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
-        _ => {}
+        CommandLogsKey::Copy => copy_command_logs_to_clipboard(&mut app),
+        CommandLogsKey::Handled => {}
       },
+      // Full-size Working Tree listing (issue #592). A read-only overlay
+      // over an already-taken snapshot: it scrolls like the command logs,
+      // and the bound global `working_tree` key (default `W`) toggles it
+      // shut even when rebound.
+      // Routing lives in a testable `App` method (the #217 shape), because
+      // the precedence it encodes is the whole point of #613.
+      View::WorkingTree => {
+        if app.handle_working_tree_key(key) {
+          app.view = View::List;
+        }
+      }
       // Full-size commit listing (issue #593). Scrolls like the Command
       // Logs overlay; `m` re-reads one page deeper. Closes on Esc, `q` or
       // `c` — the key that opened it.
@@ -572,42 +578,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // tab exactly as before; the bound global `config_panel` key still
       // toggles the overlay shut.
       View::Config => {
-        let on_all = app.config_panel.tab == SettingsTab::All;
-        match app.resolve_modal(KeyContext::Config, key) {
-          Some(ModalAction::ConfigClose) => app.view = View::List,
-          Some(ModalAction::ConfigNextTab) => app.config_panel.next_tab(),
-          Some(ModalAction::ConfigPrevTab) => app.config_panel.prev_tab(),
-          Some(ModalAction::ConfigToggleLayer) => app.config_panel.toggle_layer(),
-          // On the Keys tab `activate` arms a live keystroke capture for the
-          // selected binding (issue #294); elsewhere it cycles a choice or
-          // opens the numeric/text edit buffer.
-          Some(ModalAction::ConfigActivate) => {
-            if app.config_panel.tab == SettingsTab::Keys {
-              app.config_panel.begin_capture();
-            } else {
-              app.activate_selected_setting();
-            }
-          }
-          Some(ModalAction::ConfigSelectNext) => {
-            if on_all {
-              app.config_panel.scroll_down();
-            } else {
-              app.config_panel.select_next();
-            }
-          }
-          Some(ModalAction::ConfigSelectPrev) => {
-            if on_all {
-              app.config_panel.scroll_up();
-            } else {
-              app.config_panel.select_prev();
-            }
-          }
-          Some(ModalAction::ConfigScrollRight) if on_all => app.config_panel.scroll_right(),
-          Some(ModalAction::ConfigScrollLeft) if on_all => app.config_panel.scroll_left(),
-          Some(ModalAction::ConfigScrollTop) if on_all => app.config_panel.scroll_to_top(),
-          Some(ModalAction::ConfigScrollBottom) if on_all => app.config_panel.scroll_to_bottom(),
-          _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
-          _ => {}
+        // The toggle resolves BEFORE the nav verbs (issue #613), and only on
+        // this arm: the capture and edit sub-modes above own every stroke
+        // while they are live, so a `config_panel` key rebound to a digit
+        // must still type into a numeric field.
+        if app.handle_config_nav_key(key) {
+          app.view = View::List;
         }
       }
       // Create-overlay keys live in a testable `App` method (issue #217);
@@ -1180,6 +1156,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // overlay it is read-only and not picker-gated — harmless inside
     // `gwm switch`, opening from any List state.
     Action::ConfigPanel => app.enter_config_panel(),
+    // Issue #592: `5` opens the Working Tree listing at full size. Read-only
+    // like the two overlays above, so it is not picker-gated either.
+    Action::WorkingTree => app.enter_working_tree(),
     // Issue #593: `c` opens the commit listing full size, in both panes.
     // Read-only like the two overlays above, so it is not picker-gated
     // either.

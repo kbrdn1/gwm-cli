@@ -368,6 +368,8 @@ fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
       "git",
       "commits",
       "ci checks",
+      // #592: the same pane content at full size, in the same register.
+      "tree",
       "exec",
       "agents",
       "note",
@@ -399,7 +401,10 @@ fn status_hints_are_grouped_read_then_sidebar_then_navigate_then_global() {
     vec![
       "scroll",
       "wt scroll", // #437: Working Tree pane scroll
-      "fetch",     // read the status pane
+      // #592: this pane's own block at full size, next to the pair that
+      // scrolls it in place.
+      "tree",
+      "fetch", // read the status pane
       // #593: this pane's own content at full size, then the linked PR's
       // checks. The pair reads the same in the worktrees footer.
       "commits",

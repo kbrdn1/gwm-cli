@@ -1607,6 +1607,82 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
+/// One changed file's line counts, from `git diff --numstat` (issue #592).
+///
+/// The working-tree listing already says *what kind* of change a file
+/// carries (the badge and the colour); this says *how much*.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileStat {
+  pub insertions: usize,
+  pub deletions: usize,
+}
+
+/// Parse `git diff --numstat -z` into per-path line counts.
+///
+/// The `-z` stream is `<ins>\t<del>\t<path>\0` for an ordinary entry. A
+/// rename or a copy is the one exception: it leaves the path field empty
+/// and follows with the source and the destination as two further tokens,
+/// so those are consumed here rather than mistaken for two more entries.
+/// The destination is the path the status listing shows, so it is the one
+/// keyed.
+///
+/// A binary file reports `-\t-\t<path>`: git counts no lines for it, and
+/// neither does this. It lands as a zero pair, which
+/// [`crate::tui::ui::working_tree_stat_spans`] renders as nothing rather
+/// than as `+0 -0`.
+pub fn parse_numstat(raw: &str) -> HashMap<String, FileStat> {
+  let mut out: HashMap<String, FileStat> = HashMap::new();
+  let mut tokens = raw.split('\0');
+  while let Some(token) = tokens.next() {
+    if token.is_empty() {
+      continue;
+    }
+    // `splitn(3)` and not `split`: a path may itself contain a tab, and
+    // everything past the second one belongs to it.
+    let mut fields = token.splitn(3, '\t');
+    let (Some(ins), Some(del), Some(rest)) = (fields.next(), fields.next(), fields.next()) else {
+      continue;
+    };
+    let stat = FileStat {
+      insertions: ins.parse().unwrap_or(0),
+      deletions: del.parse().unwrap_or(0),
+    };
+    let path = if rest.is_empty() {
+      // Rename / copy: `<from>\0<to>\0` follows.
+      tokens.next();
+      match tokens.next() {
+        Some(to) if !to.is_empty() => to.to_string(),
+        _ => continue,
+      }
+    } else {
+      rest.to_string()
+    };
+    out.insert(path, stat);
+  }
+  out
+}
+
+/// Line counts for every tracked file in `dir` that differs from `HEAD`.
+///
+/// One read against `HEAD` rather than two against the index: the overlay
+/// lists staged and unstaged changes together, so a split would only have
+/// to be summed back into one number per file.
+///
+/// Untracked files are absent by construction — git has nothing to diff
+/// them against, and `--no-index` would mean one child process per file.
+/// The listing already marks them created, which is the information a
+/// count would be repeating.
+///
+/// An unborn HEAD (a repository with no commit) makes `git diff HEAD` fail;
+/// that is an empty map, not an error, because every file there is
+/// untracked or newly staged and carries no count either way.
+pub fn working_tree_stats(dir: &Path) -> Result<HashMap<String, FileStat>> {
+  match run_git(dir, &["--no-optional-locks", "diff", "--numstat", "-z", "HEAD"]) {
+    Ok(raw) => Ok(parse_numstat(&raw)),
+    Err(_) => Ok(HashMap::new()),
+  }
+}
+
 /// Hard cap on the number of NUL-terminated `git status -z` records read
 /// before the scan is abandoned (issue #300). `--untracked-files=all` makes
 /// git recurse into unignored generated/vendor directories; streaming the

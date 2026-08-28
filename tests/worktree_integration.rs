@@ -2568,3 +2568,98 @@ fn commit_stats_reads_the_oids_it_is_given() {
     "no oids means no git call and no entries"
   );
 }
+
+// ---- working-tree diff counts (issue #592) --------------------------------
+
+#[test]
+fn parse_numstat_keys_a_rename_by_its_destination() {
+  // `git diff --numstat -z` writes an ordinary entry as
+  // `<ins>\t<del>\t<path>\0`, but a rename or a copy leaves the path field
+  // EMPTY and follows with `<from>\0<to>\0`. A parser that reads one token
+  // per entry would take those two paths as two more entries and lose the
+  // rest of the stream; the destination is the path the status listing
+  // shows, so it is the one keyed.
+  let raw = "3\t1\tkept.rs\x005\t2\t\x00old/name.rs\x00new/name.rs\x004\t0\tafter.rs\x00";
+  let stats = worktree::parse_numstat(raw);
+
+  assert_eq!(stats.len(), 3, "three entries, not five — got {stats:?}");
+  assert_eq!(stats["kept.rs"].insertions, 3);
+  assert_eq!(stats["new/name.rs"].insertions, 5, "keyed by the destination");
+  assert_eq!(stats["new/name.rs"].deletions, 2);
+  assert!(!stats.contains_key("old/name.rs"), "the source is consumed, not keyed");
+  assert_eq!(
+    stats["after.rs"].insertions, 4,
+    "the entry after a rename is still read — the stream did not desynchronise"
+  );
+}
+
+#[test]
+fn parse_numstat_reads_a_binary_file_as_no_lines() {
+  // Git reports `-\t-\t<path>` for a binary blob: it counts no lines, and
+  // neither does this. Zero on both sides renders as nothing rather than as
+  // `+0 -0`.
+  let stats = worktree::parse_numstat("-\t-\tlogo.png\x0012\t0\tsrc/main.rs\x00");
+
+  assert_eq!(stats["logo.png"], worktree::FileStat::default());
+  assert_eq!(stats["src/main.rs"].insertions, 12);
+}
+
+#[test]
+fn parse_numstat_keeps_a_tab_inside_a_path() {
+  // POSIX allows a tab in a filename, and `-z` writes paths verbatim. Only
+  // the first two tabs delimit the counts; everything past them is the
+  // path.
+  let stats = worktree::parse_numstat("1\t2\tweird\tname.rs\x00");
+
+  assert_eq!(stats.len(), 1, "one entry — got {stats:?}");
+  assert_eq!(stats["weird\tname.rs"].deletions, 2);
+}
+
+#[test]
+fn working_tree_stats_counts_staged_and_unstaged_together() {
+  // One read against HEAD rather than two against the index: the overlay
+  // lists both kinds of change in one tree, so a split would only have to
+  // be summed back per file.
+  let (dir, repo) = init_repo();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  std::fs::write(dir.path().join("staged.rs"), "a\nb\n").unwrap();
+  std::fs::write(dir.path().join("dirty.rs"), "a\nb\nc\n").unwrap();
+  {
+    let mut idx = repo.index().unwrap();
+    idx.add_path(std::path::Path::new("staged.rs")).unwrap();
+    idx.add_path(std::path::Path::new("dirty.rs")).unwrap();
+    idx.write().unwrap();
+    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo
+      .commit(Some("HEAD"), &sig, &sig, "base", &tree, &[&parent])
+      .unwrap();
+  }
+  // One file changed in the index only, the other in the worktree only.
+  std::fs::write(dir.path().join("staged.rs"), "a\nb\nc\nd\n").unwrap();
+  {
+    let mut idx = repo.index().unwrap();
+    idx.add_path(std::path::Path::new("staged.rs")).unwrap();
+    idx.write().unwrap();
+  }
+  std::fs::write(dir.path().join("dirty.rs"), "a\n").unwrap();
+  // libgit2 mmaps the index, so the handle goes before git is asked to read
+  // the same file (this repo has taken that red on windows-latest before).
+  drop(repo);
+
+  let stats = worktree::working_tree_stats(dir.path()).unwrap();
+  assert_eq!(stats["staged.rs"].insertions, 2, "the staged half counts — {stats:?}");
+  assert_eq!(stats["dirty.rs"].deletions, 2, "so does the unstaged half — {stats:?}");
+}
+
+#[test]
+fn working_tree_stats_on_an_unborn_head_is_empty_not_an_error() {
+  // `git diff HEAD` fails in a repository with no commit. Every file there
+  // is untracked or newly staged and carries no count either way, so this
+  // is an empty map rather than a failure that would strand the overlay.
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init(dir.path()).unwrap();
+  std::fs::write(dir.path().join("first.rs"), "fn main() {}\n").unwrap();
+
+  assert!(worktree::working_tree_stats(dir.path()).unwrap().is_empty());
+}

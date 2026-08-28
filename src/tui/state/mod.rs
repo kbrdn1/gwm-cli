@@ -34,3 +34,4 @@ pub mod pty_overlay;
 pub mod rich_view;
 pub mod sidebar;
 pub mod spinner;
+pub mod working_tree;

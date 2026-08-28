@@ -39,6 +39,7 @@ use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
 use crate::tui::state::commits::{CommitsSnapshot, MetaColumn};
 use crate::tui::state::sidebar::SidebarMode;
+use crate::tui::state::working_tree::WorkingTreeSnapshot;
 use crate::tui::ui::SidebarSections;
 use crate::worktree::WorktreeInfo;
 use std::collections::{HashMap, HashSet};
@@ -127,6 +128,15 @@ pub enum TaskKind {
   /// per row; the render key-check discards a result for a since-moved
   /// selection and the next tick requests the settled one.
   Sidebar,
+  /// Off-thread snapshot for the full-size Working Tree overlay (issues
+  /// #592, #613). The same `git status --porcelain -z` the sidebar pane
+  /// runs, but requested by a keypress rather than by navigation, and it
+  /// cannot run inline: `STATUS_SCAN_CAP` bounds how many records are read,
+  /// not how long git takes to produce the first one, so an untracked tree
+  /// on a cold or network filesystem would freeze the event loop for as
+  /// long as the walk takes. A single global slot; a second `W` while one
+  /// is in flight coalesces onto it.
+  WorkingTree,
   /// Off-thread snapshot for the full-size commit listing (issue #593).
   /// The same revwalk the sidebar's Commits pane runs, but requested by a
   /// keypress rather than by navigation, and it cannot run inline: the walk
@@ -178,6 +188,7 @@ impl TaskKind {
       TaskKind::EditWorktree => "renaming worktree…",
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
+      TaskKind::WorkingTree => "reading the working tree…",
       TaskKind::Commits => "reading the log…",
       TaskKind::CommitStats => "reading the diffs…",
       TaskKind::AgentSessions => "detecting agent sessions…",
@@ -410,6 +421,12 @@ pub enum TaskMsg {
   /// `SidebarState::cache`; a result whose selection has since moved is dropped
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
+  /// Working Tree overlay snapshot (issues #592, #613): the generation, the
+  /// worktree `path` it was read for, and everything that read produced —
+  /// the file-explorer rows, their per-category counts and the right-hand
+  /// `+N -M` column. The drain hands it to `WorkingTreeModal::load`; a
+  /// result for a path the user has since navigated away from is dropped.
+  WorkingTree(u64, PathBuf, WorkingTreeSnapshot),
   /// Commit-listing snapshot (issue #593): the generation, the worktree
   /// `path` and the `limit` it was read at, and everything that read
   /// produced: the rendered graph rows, the commit count they describe

@@ -2,10 +2,11 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
+use gwm::tui::keymap::Action;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
-  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, View,
+  CommandLogsKey, ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, SettingsTab, ToggleStroke, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -15117,6 +15118,764 @@ fn emptying_the_buffer_with_dd_removes_the_note_too() {
   assert!(!path.exists(), "an emptied note is removed, not blanked");
 }
 
+/// Drain until the Working Tree overlay's worker lands (issues #592, #613).
+/// The snapshot runs off-thread, so a test that reads the rows has to wait
+/// for the payload the same way the event loop does.
+fn settle_working_tree(app: &mut App) {
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_working_tree_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_working_tree_loading(),
+    "the working-tree worker never landed within 10s"
+  );
+}
+
+/// Rebind `action` to `chords` on a live `App`, the way a `[tui.keys]`
+/// override would. Used by the #613 toggle tests, which are exactly about
+/// what a rebind does to the dispatch.
+fn rebind(app: &mut App, action: Action, chords: &[&str]) {
+  use gwm::tui::keymap::KeyStroke;
+  let parsed: Vec<Vec<KeyStroke>> = chords.iter().map(|c| KeyStroke::parse_chord(c).unwrap()).collect();
+  app.keymap.apply_override(action, parsed).unwrap();
+}
+
+/// Flatten a rendered sidebar/modal line into its plain text.
+fn line_text(l: &ratatui::text::Line<'_>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn working_tree_modal_snapshots_the_dirty_tree_on_open() {
+  // Issue #592: `5` opens the Working Tree listing full size. The snapshot
+  // is taken AT OPEN, not read from the sidebar cache — the sidebar is a
+  // hidden pane here (`open = false`), the state in which that cache is
+  // never rebuilt, and the overlay must still show the change set.
+  let (dir, mut app) = make_app();
+  std::fs::write(dir.path().join("scratch.rs"), "fn main() {}\n").unwrap();
+  app.sidebar.open = false;
+
+  app.enter_working_tree();
+  assert!(
+    app.is_working_tree_loading(),
+    "the overlay opens on a loader; the git read is on a worker, not the keypress"
+  );
+  settle_working_tree(&mut app);
+
+  assert_eq!(app.view, View::WorkingTree);
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("scratch.rs")),
+    "the untracked file is listed — got {text:?}"
+  );
+  assert_eq!(app.working_tree.scroll, 0, "a fresh open starts at the top");
+  assert_eq!(
+    app.working_tree.counts.created, 1,
+    "the footer counts come with the snapshot — got {:?}",
+    app.working_tree.counts
+  );
+}
+
+/// Commit `name` with `body` on top of HEAD, so a later rewrite of it is a
+/// real diff against a tracked file rather than an untracked add.
+///
+/// The repo handle is scoped: libgit2 mmaps the index, and a live handle
+/// keeps the file mapped on Windows.
+fn commit_file(dir: &std::path::Path, name: &str, body: &str) {
+  std::fs::write(dir.join(name), body).unwrap();
+  let repo = git2::Repository::open(dir).unwrap();
+  let mut idx = repo.index().unwrap();
+  idx.add_path(std::path::Path::new(name)).unwrap();
+  idx.write().unwrap();
+  let tree_id = idx.write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let parent = repo.head().unwrap().peel_to_commit().unwrap();
+  repo
+    .commit(
+      Some("HEAD"),
+      &sig,
+      &sig,
+      format!("add {name}").as_str(),
+      &tree,
+      &[&parent],
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_working_tree_listing_says_how_many_lines_each_file_changed() {
+  // Issue #592, the treatment #593 gave the commit listing: the row says
+  // WHAT changed (badge, colour), the right-hand column says HOW MUCH.
+  let (dir, mut app) = make_app();
+  commit_file(dir.path(), "notes.md", "one\ntwo\nthree\n");
+  // Two lines gone, one arrived: `+1 -2`.
+  std::fs::write(dir.path().join("notes.md"), "one\nfour\n").unwrap();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let rows: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  let at = rows
+    .iter()
+    .position(|l| l.contains("notes.md"))
+    .unwrap_or_else(|| panic!("no row for the changed file — got {rows:?}"));
+  let meta: Vec<String> = app.working_tree.meta.lines.iter().map(line_text).collect();
+  assert_eq!(
+    meta.len(),
+    rows.len(),
+    "the column carries one entry per row or it scrolls out of step — {meta:?} vs {rows:?}"
+  );
+  assert_eq!(
+    meta[at].trim(),
+    "+1 -2",
+    "the counts sit on the row they describe — got {meta:?}"
+  );
+  assert!(
+    app.working_tree.meta.width >= "+1 -2".len(),
+    "the width is measured once so the column cannot jump while scrolling"
+  );
+}
+
+#[test]
+fn a_row_with_nothing_to_count_still_takes_a_slot_in_the_column() {
+  // The invariant the test above can only half-see: a directory row and an
+  // untracked file have no counts, and git has nothing to diff an untracked
+  // file against. Skipping them would slide every count below onto the
+  // wrong row, which is the failure the reader cannot spot.
+  let (dir, mut app) = make_app();
+  commit_file(dir.path(), "tracked.md", "one\ntwo\n");
+  std::fs::write(dir.path().join("tracked.md"), "one\ntwo\nthree\n").unwrap();
+  std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+  std::fs::write(dir.path().join("nested/fresh.md"), "brand new\n").unwrap();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let rows: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  let meta: Vec<String> = app.working_tree.meta.lines.iter().map(line_text).collect();
+  assert_eq!(meta.len(), rows.len(), "one entry per row — {meta:?} vs {rows:?}");
+
+  let tracked = rows.iter().position(|l| l.contains("tracked.md")).unwrap();
+  assert_eq!(meta[tracked].trim(), "+1", "the tracked rewrite is counted");
+
+  let untracked = rows.iter().position(|l| l.contains("fresh.md")).unwrap();
+  assert_eq!(
+    meta[untracked].trim(),
+    "",
+    "git cannot diff an untracked file, and the badge already says it is new"
+  );
+  let dir_row = rows.iter().position(|l| l.contains("nested")).unwrap();
+  assert_eq!(meta[dir_row].trim(), "", "a directory has no diff of its own");
+}
+
+#[test]
+fn the_working_tree_half_page_moves_by_the_viewport_the_reader_sees() {
+  // `D` / `U`, the pair the commit listing carries. Half of what the BODY
+  // last showed, not half the content: the renderer publishes the viewport
+  // alongside the bound, and only it knows both.
+  let (_dir, mut app) = make_app();
+  app.working_tree.max_scroll = 100;
+  app.working_tree.viewport = 20;
+
+  app.working_tree.scroll_half_down();
+  assert_eq!(app.working_tree.scroll, 10, "half of 20 rows");
+  app.working_tree.scroll_half_up();
+  assert_eq!(app.working_tree.scroll, 0);
+
+  // Never past the ends, whatever the viewport.
+  app.working_tree.scroll_half_up();
+  assert_eq!(app.working_tree.scroll, 0, "never above the top");
+  app.working_tree.scroll = 95;
+  app.working_tree.scroll_half_down();
+  assert_eq!(app.working_tree.scroll, 100, "never past the last row");
+
+  // Nothing drawn yet: a zero viewport would make the key inert rather than
+  // slow, which reads as a dead key.
+  app.working_tree.viewport = 0;
+  app.working_tree.scroll = 0;
+  app.working_tree.scroll_half_down();
+  assert_eq!(app.working_tree.scroll, 1, "a half page is never zero");
+}
+
+#[test]
+fn the_working_tree_column_is_dropped_before_the_file_name_is() {
+  // The width policy both listings share (`meta_pick`): the column is worth
+  // showing only while the left side keeps its floor. `WT_NAME_FLOOR` is
+  // lower than the commit listing's, because a row here is a leaf name
+  // under a connector, not a sentence.
+  use gwm::tui::{meta_pick, META_GAP, WT_NAME_FLOOR};
+  let col = 7usize;
+  let room = col + META_GAP + WT_NAME_FLOOR;
+
+  assert_eq!(meta_pick(room, &[col], WT_NAME_FLOOR), Some(col), "exactly enough fits");
+  assert_eq!(
+    meta_pick(room - 1, &[col], WT_NAME_FLOOR),
+    None,
+    "one cell short and the name wins"
+  );
+  assert_eq!(
+    meta_pick(room, &[0], WT_NAME_FLOOR),
+    None,
+    "an empty column is never picked, however much room there is"
+  );
+}
+
+#[test]
+fn the_working_tree_open_key_is_also_what_closes_it() {
+  // `W` toggles. The dispatch resolves the toggle before the modal verbs
+  // and against the action alone, so this is the pin for the default: one
+  // stroke, `Fired`.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('W'), KeyModifiers::NONE),
+      gwm::tui::keymap::Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+}
+
+#[test]
+fn a_multi_stroke_toggle_closes_the_overlay_it_opened() {
+  // Issue #613, first hole: the old guard asked `key_matches_action`, which
+  // looks up ONE stroke, so `working_tree = ["g w"]` opened the overlay
+  // through the chord-aware list dispatch and then had no way to shut it.
+  // The prefix must be consumed (`Pending`), not handed to the modal verbs,
+  // or `g` jumps the listing to the top on its way through.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Pending
+  );
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+}
+
+#[test]
+fn a_stray_prefix_stroke_does_not_arm_a_phantom_toggle() {
+  // The other half of the chord contract: a `g` that is not followed by the
+  // toggle's own continuation must drop the buffer, or the next unrelated
+  // stroke would complete a chord the user never typed.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Pending
+  );
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed,
+    "`j` is not the continuation, so it falls through to the modal verbs"
+  );
+  assert!(app.pending_chord_is_empty(), "the half-typed prefix is dropped");
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed,
+    "a bare `w` must not complete the chord the dropped `g` started"
+  );
+}
+
+#[test]
+fn a_toggle_rebound_onto_a_modal_verbs_key_still_closes() {
+  // Issue #613, second hole: the guard used to run AFTER the modal
+  // resolution, so `working_tree = ["j"]` opened the overlay and then
+  // scrolled it. The toggle wins now, which is what the user asked for by
+  // binding it there.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["j"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+  // `k` is untouched: only the rebound key is taken from the context.
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed
+  );
+}
+
+#[test]
+fn a_rebound_toggle_beats_the_scroll_verb_it_shadows() {
+  // The precedence itself, not just the resolver: `handle_working_tree_key`
+  // asks the toggle first. With `working_tree = ["j"]`, `j` closes and the
+  // listing does NOT scroll. Put the modal resolution back in front and the
+  // scroll assertion below goes red.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["j"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+
+  let close = app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+  assert!(close, "the rebound toggle closes the overlay");
+  assert_eq!(app.working_tree.scroll, 0, "and the shadowed scroll verb never ran");
+}
+
+#[test]
+fn an_unclaimed_key_still_reaches_the_modal_verbs() {
+  // The other side of that precedence: taking the toggle first must not
+  // swallow the rest of the context.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.working_tree.scroll, 1);
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+}
+
+#[test]
+fn a_chord_prefix_does_not_reach_the_scroll_verbs() {
+  // `working_tree = ["g w"]`: the `g` is consumed as a prefix. Were it
+  // handed to the modal verbs it would fire `scroll_top`, so the listing
+  // would jump to the top on the way to closing.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+  app.working_tree.scroll = 7;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert_eq!(app.working_tree.scroll, 7, "the prefix did not fire `scroll_top`");
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+}
+
+#[test]
+fn the_modal_toggle_never_fires_another_global_action() {
+  // The reason this is not `dispatch_key`: inside an overlay the toggle is
+  // the ONE global binding allowed through. `d` would otherwise open the
+  // delete confirm from behind the modal.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+
+  for c in ['d', 'n', 'q', 'x', '3', '4'] {
+    assert_eq!(
+      app.modal_toggle_stroke(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), Action::WorkingTree),
+      ToggleStroke::Unclaimed,
+      "`{c}` is not the working_tree toggle and must not resolve here"
+    );
+  }
+}
+
+#[test]
+fn the_command_logs_toggle_beats_the_verb_it_shadows() {
+  // #613's precedence, pinned on the second of the three overlays rather
+  // than assumed from the first. `command_logs = ["j"]`: `j` closes, and
+  // the transcript does not scroll on the way out.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::CommandLogs, &["j"]);
+  app.enter_command_logs();
+  app.command_logs.max_scroll = 10;
+
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CommandLogsKey::Close
+  );
+  assert_eq!(app.command_logs.scroll, 0, "the shadowed scroll verb never ran");
+
+  // And the rest of the context is untouched.
+  rebind(&mut app, Action::CommandLogs, &["3"]);
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CommandLogsKey::Handled
+  );
+  assert_eq!(app.command_logs.scroll, 1);
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+    CommandLogsKey::Copy,
+    "the clipboard side effect still comes back for the run loop to perform"
+  );
+}
+
+#[test]
+fn the_settings_toggle_beats_the_verb_it_shadows() {
+  // Third of the three. `config_panel = ["j"]`: `j` closes instead of
+  // moving the selection.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::ConfigPanel, &["j"]);
+  app.enter_config_panel();
+  // The read-only `All` tab routes select onto scroll, so pick an editable
+  // tab and watch the field cursor, which is what `j` moves there.
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+
+  assert!(app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.selected, 0, "the shadowed select verb never ran");
+
+  rebind(&mut app, Action::ConfigPanel, &["4"]);
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.selected, 1, "and `j` navigates again once unbound");
+}
+
+#[test]
+fn a_multi_stroke_toggle_closes_every_overlay_that_has_one() {
+  // The chord half, across all three. Each takes the prefix without firing
+  // a verb, then closes on the continuation.
+  // Distinct chords per action: the keymap refuses one chord bound twice,
+  // which is itself the guarantee that makes a per-action lookup sound.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::CommandLogs, &["g l"]);
+  rebind(&mut app, Action::ConfigPanel, &["g c"]);
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_command_logs();
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+    CommandLogsKey::Handled
+  );
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+    CommandLogsKey::Close
+  );
+
+  app.enter_config_panel();
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert!(app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+
+  app.enter_working_tree();
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+}
+
+#[test]
+fn every_overlay_that_advertises_a_toggle_resolves_one() {
+  // The three overlays whose docs promise "the open key closes it too"
+  // (issue #613 fixed all of them at once, not just #592's). Enumerated so
+  // a fourth overlay copying the shape has a place to declare itself.
+  let (_dir, mut app) = make_app();
+  for (action, chord, ch) in [
+    (Action::CommandLogs, "3", '3'),
+    (Action::ConfigPanel, "4", '4'),
+    (Action::WorkingTree, "W", 'W'),
+  ] {
+    assert_eq!(
+      app.keymap.primary_chord(action).as_deref(),
+      Some(chord),
+      "{action:?} default chord moved; update this table"
+    );
+    assert_eq!(
+      app.modal_toggle_stroke(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), action),
+      ToggleStroke::Fired
+    );
+  }
+}
+
+#[test]
+fn a_second_chord_bound_to_the_same_action_can_start_after_a_failed_one() {
+  // Copilot review, PR #612: one action may hold several chords. With two of
+  // them, a first stroke that is not followed by its own continuation must
+  // not just drop the buffer, it has to retry that stroke as the start of
+  // the other chord. `dispatch_key` does this for the list view; the toggle
+  // now does too.
+  //
+  // `6` / `7` because the keymap refuses a chord whose prefix is another
+  // action's key, so `j k` cannot be used here: `j` is `down`.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["6 w", "7 k"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+  app.working_tree.scroll = 5;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)));
+  // `7` is not `6`'s continuation, but it IS the start of the second chord,
+  // so it must arm rather than fall through to the modal verbs.
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)));
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)));
+  assert_eq!(
+    app.working_tree.scroll, 5,
+    "neither the retried stroke nor the continuation reached `scroll_up`"
+  );
+}
+
+#[test]
+fn a_working_tree_payload_for_a_worktree_left_behind_is_dropped() {
+  // The read is off-thread, so the user can navigate (or reopen elsewhere)
+  // while it runs. A payload that describes a worktree the overlay is no
+  // longer showing must not be painted as if it were the current one.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  let real = app.working_tree.lines.clone();
+
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let generation = app.tasks.request(TaskKind::WorkingTree).expect("a free slot");
+  app
+    .task_result_sender()
+    .send(TaskMsg::WorkingTree(
+      generation,
+      PathBuf::from("/tmp/gwm-test/some-other-worktree"),
+      gwm::tui::WorkingTreeSnapshot {
+        lines: vec![ratatui::text::Line::from("rows from the wrong worktree")],
+        ..Default::default()
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    !text.iter().any(|l| l.contains("wrong worktree")),
+    "a payload for another path is dropped, not shown — got {text:?}"
+  );
+  assert_eq!(
+    app.working_tree.lines.len(),
+    real.len(),
+    "and the listing that was already there survives"
+  );
+}
+
+#[test]
+fn the_overlay_never_waits_on_a_worker_that_is_not_there() {
+  // The invariant behind three rounds of review on PR #612, each of which
+  // found a different unenumerated state of this slot: the loader is up if
+  // and only if a read is actually in flight. Every way in is walked here,
+  // rather than waiting for a fourth state to be reported.
+  //
+  // | selection | slot            | what must happen                     |
+  // |-----------|-----------------|--------------------------------------|
+  // | none      | free            | no worker, no loader                 |
+  // | some      | free            | worker spawned, loader up            |
+  // | some      | busy same path  | coalesce onto it, loader stays up    |
+  // | some      | busy other path | invalidate, own worker, loader up    |
+  //
+  // The two drop paths (stale generation, path mismatch) are covered by
+  // `a_working_tree_payload_for_a_worktree_left_behind_is_dropped` and by
+  // `TaskRunner::complete`'s own tests; neither can leave the loader up,
+  // because both only run once the slot has already been settled.
+  //
+  // A worker that dies without sending would break this after the fact
+  // (`let _ = tx.send(..)` swallows the failure and the slot stays claimed),
+  // but `working_tree_lines` is total: every arm of its `git_status_short`
+  // match returns rows, an `Err` included. No defensive machinery for a
+  // state that cannot be reached.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  let inflight = |app: &App| app.tasks.is_loading(TaskKind::WorkingTree);
+
+  // none / free
+  app.worktrees.clear();
+  app.list_state.select(None);
+  app.enter_working_tree();
+  assert!(!app.is_working_tree_loading(), "nothing selected, nothing to wait on");
+  assert_eq!(app.is_working_tree_loading(), inflight(&app));
+
+  // some / free
+  let (_dir2, mut app) = make_app();
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "the loader tracks the worker, both up"
+  );
+  settle_working_tree(&mut app);
+  assert_eq!(app.is_working_tree_loading(), inflight(&app), "and both down");
+
+  // some / busy, same path
+  app.working_tree.begin(Some(&a));
+  let _held = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "coalesced onto the read already out"
+  );
+
+  // some / busy, other path
+  app.worktrees.push(worktree_fixture("elsewhere"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "the stale slot was invalidated and a fresh worker claimed it"
+  );
+  settle_working_tree(&mut app);
+  assert_eq!(app.is_working_tree_loading(), inflight(&app));
+}
+
+#[test]
+fn reopening_on_another_worktree_does_not_wait_on_the_previous_read() {
+  // Copilot review, PR #612: the coalescing that makes a held `W` cheap is
+  // only sound while the in-flight read is for the SAME worktree. Close a
+  // slow snapshot for A, select B, reopen: `request` would hand back `None`
+  // (slot busy with A), no worker would exist for B, and A's payload gets
+  // dropped by the path check, so the loader stays up forever.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  // A read for A is out: the slot is claimed and the overlay is waiting.
+  app.working_tree.begin(Some(&a));
+  let _inflight = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+  assert!(app.is_working_tree_loading());
+
+  // The user moves to another worktree and reopens before A lands.
+  app.worktrees.push(worktree_fixture("some-other-worktree"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_working_tree();
+
+  settle_working_tree(&mut app);
+  assert_eq!(
+    app.working_tree.path.as_deref(),
+    Some(app.selected().unwrap().path.as_path()),
+    "the listing that landed is the one the overlay is showing"
+  );
+}
+
+#[test]
+fn reopening_on_the_same_worktree_still_coalesces() {
+  // The other half: same path must NOT invalidate, or a held `W` spawns a
+  // `git status` per repeat.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  app.working_tree.begin(Some(&a));
+  let inflight = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+
+  app.enter_working_tree();
+
+  assert!(
+    app.tasks.request(TaskKind::WorkingTree).is_none(),
+    "the slot is still held by the first read, so the reopen coalesced"
+  );
+  // And the generation was not bumped, which is what `invalidate` would do.
+  app
+    .task_result_sender()
+    .send(gwm::tui::state::async_task::TaskMsg::WorkingTree(
+      inflight,
+      a.clone(),
+      gwm::tui::WorkingTreeSnapshot {
+        lines: vec![ratatui::text::Line::from("from the coalesced read")],
+        ..Default::default()
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("coalesced")),
+    "the original worker's payload is still the authoritative one — got {text:?}"
+  );
+}
+
+#[test]
+fn opening_the_overlay_with_nothing_selected_does_not_wait_on_a_worker() {
+  // The empty-selection path spawns nothing, so the loader would never
+  // clear: `begin` must leave `loading` false when there is no worktree.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.enter_working_tree();
+
+  assert_eq!(app.view, View::WorkingTree);
+  assert!(!app.is_working_tree_loading(), "nothing to wait for, so no loader");
+  assert!(app.working_tree.lines.is_empty());
+}
+
+#[test]
+fn working_tree_modal_reports_a_clean_tree() {
+  // The empty-state: `init_repo` leaves no dirty file, so the overlay says
+  // so rather than rendering a blank canvas.
+  let (_dir, mut app) = make_app();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("clean")),
+    "a clean worktree gets the clean row — got {text:?}"
+  );
+}
+
+#[test]
+fn reopening_the_working_tree_modal_rewinds_the_scroll_and_resnapshots() {
+  // Two invariants in one gesture: a stale scroll offset from the previous
+  // visit does not survive the re-open (the `enter_help` / `enter_command_logs`
+  // contract), and the listing is re-read, so a file created while the
+  // overlay was closed shows up on the next open.
+  let (dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 40;
+  app.working_tree.scroll = 12;
+
+  std::fs::write(dir.path().join("late.rs"), "// added after the first open\n").unwrap();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  assert_eq!(app.working_tree.scroll, 0);
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("late.rs")),
+    "the re-open re-reads the tree — got {text:?}"
+  );
+}
+
+#[test]
+fn the_working_tree_modal_scroll_clamps_to_the_published_bound() {
+  // Same scroll contract as the help overlay: the renderer publishes
+  // `max_scroll` against the live viewport and the cursor never passes it.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 2;
+
+  for _ in 0..5 {
+    app.working_tree.scroll_down();
+  }
+  assert_eq!(app.working_tree.scroll, 2);
+
+  app.working_tree.scroll_to_top();
+  assert_eq!(app.working_tree.scroll, 0);
+  app.working_tree.scroll_up();
+  assert_eq!(app.working_tree.scroll, 0, "the top is a floor, not a wrap");
+  app.working_tree.scroll_to_bottom();
+  assert_eq!(app.working_tree.scroll, 2);
+}
+
 // ---- full-size commit listing (issue #593) ---------------------------------
 
 /// Flatten a rendered modal line into its plain text.
@@ -15413,10 +16172,10 @@ fn the_metadata_column_only_takes_room_the_subject_can_spare() {
   // constant — the policy is a floor on what survives instead. A
   // merge-heavy history at 80 columns would otherwise buy an author column
   // with a ten-cell subject, which is a worse listing than no column.
-  use gwm::tui::{commits_meta_pick, COMMITS_META_GAP, COMMITS_SUBJECT_FLOOR};
+  use gwm::tui::{commits_meta_pick, COMMITS_SUBJECT_FLOOR, META_GAP};
   // author · stats · age / stats · age / age
   let tiers = [30usize, 14, 4];
-  let room_for = |w: usize| w + COMMITS_META_GAP + COMMITS_SUBJECT_FLOOR;
+  let room_for = |w: usize| w + META_GAP + COMMITS_SUBJECT_FLOOR;
 
   assert_eq!(commits_meta_pick(room_for(tiers[0]), tiers), Some(tiers[0]));
   assert_eq!(
