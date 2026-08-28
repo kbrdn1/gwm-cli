@@ -422,8 +422,22 @@ const SHELL_KEYWORDS: &[&str] = &[
 /// — better to surface nothing than a garbage binary name that would
 /// produce a confusing PATH warning).
 fn extract_binary(run: &str) -> Option<String> {
-  let tokens = shell_words::split(run).ok()?;
-  let mut iter = tokens.into_iter().peekable();
+  executable_in(&shell_words::split(run).ok()?)
+}
+
+/// [`extract_binary`] for a caller that already holds an argv, which is the
+/// half `[tui] terminal_browser` needs (issue #590): it expands to an argv
+/// before anything probes it, and re-joining it only to re-split here would
+/// be a round trip through a quoting layer for nothing.
+///
+/// Same skipping rules, which is the point of sharing it: a `terminal_browser
+/// = "env -u NO_COLOR w3m {url}"` must probe `w3m`, not `env`, or the check
+/// passes on a browser that is not installed and the pane the plan opens dies
+/// on the spot (Codex review on PR #615). The `env -u NAME` operand rule this
+/// walks was itself a fix (`env -u NODE_OPTIONS npm ci` resolved to
+/// `NODE_OPTIONS`), which is exactly why there should be one copy of it.
+pub(crate) fn executable_in(tokens: &[String]) -> Option<String> {
+  let mut iter = tokens.iter().cloned().peekable();
 
   // Skip leading `KEY=VAL` env assignments (POSIX `FOO=bar tool` form).
   while iter.peek().is_some_and(|t| !t.starts_with('=') && t.contains('=')) {

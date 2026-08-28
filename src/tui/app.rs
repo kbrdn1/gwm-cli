@@ -3647,6 +3647,15 @@ impl App {
     let back = self.pty_return.take();
     if self.view == View::Pty {
       self.view = back.unwrap_or(View::List);
+      // A restored forge modal is revalidated before the reader can act on it
+      // (Codex review on PR #615). `View::Pty` does not suspend the auto
+      // refresh, and `close_forge_overlay_if_link_disagrees` returns early on
+      // any view but `DetailOverlay`, so a link that moved while the browser
+      // was up would come back to rows nobody re-checked, with `Enter`
+      // opening the old PR's URL. That is the exact bug class the guard was
+      // written for; it only needed to be asked again on the way back. Self
+      // gated, so it is a no-op for every other restored view.
+      self.close_forge_overlay_if_link_disagrees();
     }
   }
 
@@ -8619,9 +8628,18 @@ pub fn plan_terminal_browser(
   // "detect if install" from the issue: probing beats spawning a missing
   // file, because a failed spawn inside a mux pane closes the pane before
   // anyone reads the error.
-  if !on_path(&argv[0]) {
+  //
+  // The binary behind any wrapper, not `argv[0]`: `terminal_browser = "env -u
+  // NO_COLOR w3m {url}"` is a valid setting, and probing `env` there would
+  // pass on a machine with no `w3m` and open a pane that dies on the spot
+  // (Codex review on PR #615). `doctor` already walks this, `env -u NAME`'s
+  // detached operand included, so the walk is shared rather than re-written.
+  // A command that resolves to nothing keeps `argv[0]`, so the message still
+  // names something the user actually wrote.
+  let probe = crate::doctor::executable_in(&argv).unwrap_or_else(|| argv[0].clone());
+  if !on_path(&probe) {
     return BrowserPlan::System {
-      why: Some(format!("{} not on PATH", argv[0])),
+      why: Some(format!("{} not on PATH", probe)),
     };
   }
   let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);

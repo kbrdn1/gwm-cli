@@ -16700,3 +16700,128 @@ fn the_pty_overlay_returns_to_the_view_it_covered() {
     assert_eq!(app.view, gwm::tui::View::List, "opened from {from:?}");
   }
 }
+
+#[test]
+fn terminal_browser_probes_the_binary_behind_a_wrapper() {
+  // Codex review on PR #615. `terminal_browser = "env -u NO_COLOR w3m {url}"`
+  // is a valid setting, and probing `argv[0]` there checks that `env` exists,
+  // which it always does. The promise the probe makes is "detect if install",
+  // so on a machine with no `w3m` it has to fall back, not open a pane whose
+  // process dies on the spot.
+  //
+  // `doctor` already walks past `env` and its detached `-u NAME` operand, a
+  // walk that was itself a fix (`env -u NODE_OPTIONS npm ci` resolved to
+  // `NODE_OPTIONS`), so this shares it rather than growing a second copy.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The shape of a real machine with `env` but no browser.
+    &|bin| bin == "env",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser behind a wrapper must still fall back");
+  };
+  assert!(
+    why.contains("w3m") && !why.contains("env"),
+    "the reason must name the browser, not the wrapper, got: {why}"
+  );
+
+  // And the wrapper form still opens a pane when the browser IS there, so the
+  // probe did not become a refusal of wrappers.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, .. } = plan else {
+    panic!("with the browser installed the wrapper form opens a pane");
+  };
+  assert_eq!(
+    argv.last().map(String::as_str),
+    Some(format!("env -u NO_COLOR w3m {URL}").as_str()),
+    "the wrapper stays in the command that runs, got: {argv:?}"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_link_that_moved_under_the_browser_does_not_come_back_as_stale_rows() {
+  // Codex review on PR #615. `a_link_change_closes_the_rich_view` covers the
+  // link moving while the modal is on screen. A `terminal_browser` link opens
+  // the PTY overlay ON TOP of that modal, and two things then hold at once:
+  // `View::Pty` does not suspend the auto refresh, and
+  // `close_forge_overlay_if_link_disagrees` returns early on any view but
+  // `DetailOverlay`. So the move lands with nothing to catch it, and without
+  // re-asking the guard on the way back the reader gets rows nobody
+  // re-checked, with `Enter` opening the old PR's URL.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  // `B` on a row: the browser covers the modal.
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .expect("/bin/sh spawns on every unix runner");
+  app.open_pty_overlay_over_current(pty);
+  assert_eq!(app.view, View::Pty);
+
+  // The refresh lands while the page is up, and the guard cannot see it.
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+  assert_eq!(app.view, View::Pty, "the refresh must not disturb the open browser");
+
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a modal whose link moved must not be restored: it would hand `Enter` the old PR's URL"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_modal_whose_link_held_still_is_restored_after_the_browser() {
+  // The other half, and the one that makes the guard above a guard rather
+  // than a blanket close: nothing moved, so the reader comes back to the row
+  // they were on. Without this a "fix" that always closed the modal would
+  // pass the test above and silently undo the restore #590 added.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay_over_current(pty);
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "an unchanged link must come back to the modal the reader left"
+  );
+}
