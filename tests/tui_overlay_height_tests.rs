@@ -7,7 +7,7 @@
 //! actually lives (border, padding, header, footer), nor whether the call site
 //! is wired up at all.
 
-use gwm::config::{ConfigRow, ConfigSource};
+use gwm::config::{ConfigRow, ConfigSource, TuiLayout};
 use gwm::tui::keymap::Keymap;
 use gwm::tui::modal_keymap::ModalKeymap;
 use gwm::tui::{build_key_rows, draw, App, SettingsTab, View};
@@ -29,15 +29,29 @@ fn repo() -> TempDir {
   dir
 }
 
+/// Pin the boxed layout: since #594 the modal frame follows `[tui] layout`
+/// and the shipped default is `compact`, which paints no corners at all.
+/// Every measure below is border-row to border-row, so it is the boxed
+/// contract they describe. The compact frame's own row cost is pinned in
+/// `tests/tui_modal_render_tests.rs`.
+fn pin_bordered(app: &mut App) {
+  app.config.tui.layout = TuiLayout::Bordered;
+}
+
 /// The painted height of the topmost overlay box, in rows.
 ///
 /// Located by its rounded corners rather than by a row count, so the measure
 /// does not assume where the box sits. Returns `(top, bottom)` row indices.
+///
+/// Column 0 is skipped: in the boxed layout the sidebar's own sections are
+/// rounded too, and they sit flush with the left edge where a centred modal
+/// never does. Scanning it would stretch the measure from the sidebar's
+/// first section to the modal's bottom rule (issue #594).
 fn box_rows(terminal: &Terminal<TestBackend>) -> (usize, usize) {
   let buf = terminal.backend().buffer();
   let area = *buf.area();
   let rows: Vec<String> = (0..area.height)
-    .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+    .map(|y| (1..area.width).map(|x| buf[(x, y)].symbol()).collect())
     .collect();
   let top = rows
     .iter()
@@ -61,6 +75,7 @@ fn height(terminal: &Terminal<TestBackend>) -> usize {
 /// are injected so the *render* is deterministic.
 fn settings(dir: &TempDir, tab: SettingsTab, frame_h: u16) -> Terminal<TestBackend> {
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.config_panel.rows = (0..12)
     .map(|i| ConfigRow {
       key: format!("key.number.{i}"),
@@ -171,6 +186,7 @@ fn a_modal_that_cannot_scroll_keeps_its_rows_rather_than_its_margin() {
   let dir = repo();
   for frame_h in [14u16, 16] {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    pin_bordered(&mut app);
     app.view = View::Create;
     let mut terminal = Terminal::new(TestBackend::new(120, frame_h)).unwrap();
     terminal.draw(|f| draw(f, &mut app)).unwrap();

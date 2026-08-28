@@ -35,6 +35,7 @@ mod common;
 
 use common::init_repo;
 use gwm::bootstrap::{BootstrapReport, StepResult};
+use gwm::config::TuiLayout;
 use gwm::tui::{draw, App, Field, LinkTarget, TaskKind, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
@@ -56,7 +57,23 @@ fn make_app() -> (tempfile::TempDir, App) {
   // `Stacked` orientation, which renders even at < 120 cols — terminal
   // width alone does NOT hide the sidebar; only `open = false` does.
   app.sidebar.open = false;
+  // Modals follow `[tui] layout` since #594, and the shipped default is
+  // `Compact`. Every case built on this helper pins the BORDERED contract:
+  // the `sizing_matrix` numbers, and a `modal_rect` that locates the frame by
+  // its `╭`. The layout is pinned here rather than inherited, because without it
+  // the whole file would silently re-measure the compact frame under names
+  // that promise the boxed one, and `modal_rect` would find no corner at all.
+  // Compact coverage flips it back through [`compact_app`], so both halves
+  // of the layout are exercised by the same setups.
+  pin_bordered(&mut app);
   (dir, app)
+}
+
+/// Pin the boxed layout on an app this file builds outside [`make_app`].
+/// Same reason, and the same contract: the assertions below describe the
+/// bordered frame.
+fn pin_bordered(app: &mut App) {
+  app.config.tui.layout = TuiLayout::Bordered;
 }
 
 /// A synthetic, deletable (non-main) worktree row so the Confirm modal
@@ -718,6 +735,7 @@ fn exec_picker_modal_renders_title_profiles_and_hints() {
   )
   .unwrap();
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.sidebar.open = false;
   app.enter_exec_picker();
   assert_eq!(app.view, View::ExecPicker);
@@ -737,6 +755,7 @@ fn clean_modal_renders_title_report_and_hints() {
   std::fs::create_dir(dir.path().join("target")).unwrap();
   std::fs::write(dir.path().join("target").join("blob"), vec![0u8; 4096]).unwrap();
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.sidebar.open = false;
   app.enter_clean_overlay();
   assert_eq!(app.view, View::CleanReport);
@@ -1414,8 +1433,13 @@ fn modal_frames_are_not_taller_than_their_content() {
 fn modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
   let area = *buf.area();
   let mut top_left = None;
+  // From column 1: a modal is centred, so its left rule never sits flush
+  // with the terminal edge, while a background pane's always does. Under
+  // `[tui] layout = "bordered"` the sidebar's sections are rounded too
+  // (#594), and scanning from column 0 would return one of those instead:
+  // the whole matrix would then measure the pane behind the modal.
   'outer: for y in 0..area.height {
-    for x in 0..area.width {
+    for x in 1..area.width {
       if buf[(x, y)].symbol() == "╭" {
         top_left = Some((x, y));
         break 'outer;
@@ -1563,6 +1587,7 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
         )
         .unwrap();
         let mut a = App::new_at_layered(Some(d.path()), None).unwrap();
+        pin_bordered(&mut a);
         a.sidebar.open = false;
         a.enter_exec_picker();
         (d, a)
@@ -1649,23 +1674,27 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
 }
 
 #[test]
-fn the_background_paints_no_rounded_corner() {
-  // The matrix below finds each modal by its rounded top-left corner. That
-  // only works while nothing behind the modal draws one — if the worktree
-  // table or the sidebar ever grows a rounded frame, every measurement below
-  // silently starts describing the wrong rect. Prove the oracle, then use it.
+fn the_background_paints_no_rounded_corner_a_modal_could_be_mistaken_for() {
+  // The matrix below finds each modal by its rounded top-left corner, from
+  // column 1 (see `modal_rect`). That only works while nothing behind the
+  // modal draws one there. If the worktree table or the sidebar ever grows
+  // a rounded frame off the left edge, every measurement below silently
+  // starts describing the wrong rect. Prove the oracle, then use it.
+  //
+  // The sidebar's own sections ARE rounded in the boxed layout, which is
+  // exactly why the claim is about column 1 onwards and not about the
+  // buffer: they sit flush at column 0, and a centred modal never can.
   for sidebar_open in [false, true] {
     let (_dir, mut app) = make_app();
     app.sidebar.open = sidebar_open;
     let buf = render_at(&mut app, 120, 40);
-    let corners = (0..buf.area().height)
-      .flat_map(|y| (0..buf.area().width).map(move |x| (x, y)))
+    let corners: Vec<(u16, u16)> = (0..buf.area().height)
+      .flat_map(|y| (1..buf.area().width).map(move |x| (x, y)))
       .filter(|&(x, y)| buf[(x, y)].symbol() == "╭")
-      .count();
-    assert_eq!(
-      corners,
-      0,
-      "View::List (sidebar open = {sidebar_open}) must paint no rounded corner, found {corners} — rows:\n{}",
+      .collect();
+    assert!(
+      corners.is_empty(),
+      "View::List (sidebar open = {sidebar_open}) must paint no rounded corner past column 0, found {corners:?}. rows:\n{}",
       row_strings(&buf).join("\n")
     );
   }
@@ -2010,6 +2039,7 @@ fn app_with_the_rich_view_open(body: &str) -> (tempfile::TempDir, App) {
   let (dir, repo) = init_repo();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.sidebar.open = false;
   gwm::github::link_pr(&repo, &branch, 551).unwrap();
   app.refresh_link();
@@ -2112,7 +2142,10 @@ fn a_body_row_starts_at_the_frame_edge_not_behind_an_empty_label_column() {
   let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
   app.set_term_width(200);
   let buf = render_at(&mut app, 200, 50);
-  let rows = row_strings(&buf);
+  // The modal's rows, not the terminal's: in the boxed layout the worktree
+  // pane behind it owns column 0's `│`, and `left_rule` below would find
+  // that one rather than the modal's own (issue #594).
+  let rows = modal_rows(&buf);
 
   let body = rows
     .iter()
@@ -2225,6 +2258,7 @@ fn app_with_both_tabs() -> (tempfile::TempDir, App) {
   let (dir, repo) = init_repo();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.sidebar.open = false;
   gwm::github::link_pr(&repo, &branch, 551).unwrap();
   gwm::github::link_issue(&repo, &branch, 420).unwrap();
@@ -2761,4 +2795,488 @@ fn working_tree_modal_renders_an_empty_listing_without_panicking() {
 
   let buf = render(&mut app);
   assert_present(&buf, "Working Tree", "working tree overlay title");
+}
+
+// ── The compact frame (issue #594) ─────────────────────────────────────────
+//
+// Everything above pins the boxed frame. Below is the other half of
+// `[tui] layout`: no rules at all, a filled title band on the frame's first
+// row, and the quiet `section_bg` band under its last one. The cases are
+// enumerated rather than sampled: `compact_case_for` carries no wildcard,
+// so a new overlay stops this file compiling until it is accounted for.
+
+/// The theme role a modal's frame is built from: the rules in the boxed
+/// layout, the title band's ground in the compact one. Three of them, and
+/// the band is mixed from whichever the modal passes: a destructive
+/// confirmation mixed from `accent` would drop the one signal it exists
+/// to carry.
+#[derive(Debug, Clone, Copy)]
+enum Band {
+  Accent,
+  /// The two forms: creating and renaming a worktree.
+  Clean,
+  /// The two irreversible confirmations: delete and merge.
+  Danger,
+}
+
+/// One overlay, under `[tui] layout = "compact"`.
+struct CompactCase {
+  /// Matches the name the boxed `sizing_matrix` uses where the surface is
+  /// in both, so a failure names the same modal in either half.
+  name: &'static str,
+  setup: ModalSetup,
+  /// The role its band is mixed from.
+  band: Band,
+  /// `false` on the surfaces whose last row is content rather than a
+  /// footer, and which therefore paint no band under it.
+  footer: bool,
+}
+
+/// The app `setup` builds, flipped back to the layout gwm actually ships.
+/// Every setup in this file pins `Bordered` (see `make_app`), which is what
+/// the assertions above want and the opposite of what these want.
+fn compact_app(setup: &ModalSetup) -> (tempfile::TempDir, App) {
+  let (dir, mut app) = setup();
+  app.config.tui.layout = TuiLayout::Compact;
+  (dir, app)
+}
+
+/// The modal's rect in the compact layout.
+///
+/// There is no glyph to hunt: the frame paints no rules, which is the whole
+/// point of the layout, so `modal_rect`'s `╭` is gone and a locator built on
+/// it would return `None` and make every assertion below pass vacuously.
+///
+/// What marks the modal out instead is the one thing `draw` does to the
+/// buffer before an overlay paints: everything already on screen is set
+/// `DIM` (#594), and the overlay's own `Clear` resets the cells under it.
+/// So the modal is exactly the bounding box of the cells carrying no `DIM`,
+/// and "no overlay was painted" comes back as `None` rather than as a rect
+/// describing something else.
+fn compact_modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
+  use ratatui::style::Modifier;
+  let area = *buf.area();
+  let lit = |x: u16, y: u16| !buf[(x, y)].modifier.contains(Modifier::DIM);
+  let mut rect: Option<(u16, u16, u16, u16)> = None;
+  for y in 0..area.height {
+    for x in 0..area.width {
+      if !lit(x, y) {
+        continue;
+      }
+      rect = Some(match rect {
+        None => (x, y, x, y),
+        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+      });
+    }
+  }
+  rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// A PR carrying one CI check, so `enter_ci_checks` has something to open.
+fn app_with_ci_checks() -> (tempfile::TempDir, App) {
+  let (dir, mut app) = app_with_the_rich_view_open("body");
+  let mut pr = match app.pr_fetch_state() {
+    gwm::tui::GitHubFetchState::Loaded(pr) => pr.clone(),
+    _ => panic!("the fixture fetched a PR"),
+  };
+  pr.checks = vec![gwm::forge::PrCheck {
+    name: "build".into(),
+    outcome: gwm::forge::CheckOutcome::Passing,
+    url: Some("https://example.test/checks/1".into()),
+    workflow_name: Some("ci".into()),
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_ci_checks();
+  (dir, app)
+}
+
+/// Every overlay, in the compact layout: the boxed matrix, plus the four
+/// surfaces it does not carry.
+fn compact_cases() -> Vec<CompactCase> {
+  let mut cases: Vec<CompactCase> = sizing_matrix()
+    .into_iter()
+    .map(|(name, setup, _, _)| CompactCase {
+      band: match name {
+        "confirm" => Band::Danger,
+        "create" | "edit/rename" => Band::Clean,
+        _ => Band::Accent,
+      },
+      name,
+      setup,
+      footer: true,
+    })
+    .collect();
+  cases.push(CompactCase {
+    name: "confirm/merge",
+    setup: Box::new(|| {
+      let (dir, mut app) = app_with_the_rich_view_open("body");
+      app.enter_confirm_merge();
+      assert_eq!(app.view, View::Confirm, "the merge confirmation must be up");
+      (dir, app)
+    }),
+    band: Band::Danger,
+    footer: true,
+  });
+  cases.push(CompactCase {
+    name: "clean",
+    setup: Box::new(|| {
+      let (dir, _) = init_repo();
+      std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+      std::fs::create_dir(dir.path().join("target")).unwrap();
+      std::fs::write(dir.path().join("target").join("blob"), vec![0u8; 4096]).unwrap();
+      let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+      pin_bordered(&mut app);
+      app.sidebar.open = false;
+      app.enter_clean_overlay();
+      (dir, app)
+    }),
+    band: Band::Accent,
+    footer: true,
+  });
+  cases.push(CompactCase {
+    name: "detail/attach",
+    setup: Box::new(|| {
+      let (dir, mut app) = make_app();
+      app.open_agent_overlay();
+      app.open_agent_input();
+      (dir, app)
+    }),
+    band: Band::Accent,
+    footer: true,
+  });
+  cases.push(CompactCase {
+    name: "detail/ci-filter",
+    setup: Box::new(|| {
+      let (dir, mut app) = app_with_ci_checks();
+      app.ci_input_open();
+      (dir, app)
+    }),
+    band: Band::Accent,
+    // The last row here is a listing row whenever the fixed window is
+    // full, so the frame paints no ground under it.
+    footer: false,
+  });
+  cases.push(CompactCase {
+    name: "link-prompt/number",
+    setup: Box::new(|| {
+      let (dir, mut app) = make_app();
+      app.enter_link_prompt();
+      app.handle_link_prompt_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('i'),
+      ));
+      (dir, app)
+    }),
+    band: Band::Accent,
+    footer: true,
+  });
+  cases
+}
+
+/// Every `View`, so the guard below can walk them.
+const ALL_VIEWS: [View; 18] = [
+  View::List,
+  View::Create,
+  View::Confirm,
+  View::Report,
+  View::Help,
+  View::OpenMenu,
+  View::LinkPrompt,
+  View::CommandPalette,
+  View::CommandLogs,
+  View::WorkingTree,
+  View::Commits,
+  View::Config,
+  View::Pty,
+  View::ExecPicker,
+  View::CleanReport,
+  View::Edit,
+  View::DetailOverlay,
+  View::Note,
+];
+
+/// The compact case that covers `view`, or why there is none.
+///
+/// No wildcard arm, deliberately: a new overlay variant stops this file
+/// compiling until someone says which case renders it. That is the guard:
+/// "no modal missed" enumerated by construction rather than by eyeball.
+fn compact_case_for(view: View) -> Option<&'static str> {
+  match view {
+    // Not an overlay.
+    View::List => None,
+    // The PTY overlay renders a live child process. There is no fixture
+    // for one that does not spawn a shell, and its frame is the one that
+    // opts out of the footer band anyway (`without_footer`), which the CI
+    // filter case below covers. Its title band goes through the same
+    // `ModalFrame::render` as every other.
+    View::Pty => None,
+    View::Help => Some("help"),
+    View::Create => Some("create"),
+    View::Confirm => Some("confirm"),
+    View::Report => Some("report"),
+    View::OpenMenu => Some("open-menu"),
+    View::LinkPrompt => Some("link-prompt"),
+    View::CommandPalette => Some("command-palette"),
+    View::CommandLogs => Some("command-logs"),
+    View::WorkingTree => Some("working-tree"),
+    View::Commits => Some("commits"),
+    View::Config => Some("config-panel"),
+    View::ExecPicker => Some("exec-picker"),
+    View::CleanReport => Some("clean"),
+    View::Edit => Some("edit/rename"),
+    View::DetailOverlay => Some("detail/agents"),
+    View::Note => Some("note-editor"),
+  }
+}
+
+#[test]
+fn every_overlay_view_has_a_compact_case() {
+  let cases = compact_cases();
+  for view in ALL_VIEWS {
+    let Some(name) = compact_case_for(view) else {
+      continue;
+    };
+    assert!(
+      cases.iter().any(|c| c.name == name),
+      "{view:?} names the case {name:?}, which the compact matrix does not carry"
+    );
+  }
+}
+
+#[test]
+fn every_compact_modal_is_painted_and_locatable() {
+  // The oracle for everything below: a rect that came back `None` would
+  // make each assertion pass over an empty buffer instead of failing.
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let buf = render_at(&mut app, 120, 40);
+    let rect = compact_modal_rect(&buf);
+    assert!(
+      rect.is_some(),
+      "{}: no compact modal on screen. rows:\n{}",
+      case.name,
+      row_strings(&buf).join("\n")
+    );
+    let (_, _, w, h) = rect.unwrap();
+    assert!(
+      w > 2 && h > 1,
+      "{}: the frame collapsed to {w}x{h}. rows:\n{}",
+      case.name,
+      row_strings(&buf).join("\n")
+    );
+  }
+}
+
+#[test]
+fn a_compact_modal_paints_no_rule_on_any_side() {
+  // The ask of #594: no border on the horizontal sides, and none top or
+  // bottom either: the bands replace them. Only the frame's own edges are
+  // examined: a modal's *content* may legitimately hold box-drawing glyphs
+  // (the commit graph does), and it never reaches the edge columns.
+  const RULES: [&str; 10] = ["│", "─", "╭", "╮", "╰", "╯", "┌", "┐", "└", "┘"];
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    for row in y..y + h {
+      for col in [x, x + w - 1] {
+        let symbol = buf[(col, row)].symbol().to_string();
+        assert!(
+          !RULES.contains(&symbol.as_str()),
+          "{}: a rule {symbol:?} at ({col},{row}), and the compact frame has no sides. rows:\n{}",
+          case.name,
+          row_strings(&buf).join("\n")
+        );
+      }
+    }
+    for col in x..x + w {
+      for row in [y, y + h - 1] {
+        let symbol = buf[(col, row)].symbol().to_string();
+        assert!(
+          !RULES.contains(&symbol.as_str()),
+          "{}: a rule {symbol:?} at ({col},{row}), and the compact frame has no top or bottom. rows:\n{}",
+          case.name,
+          row_strings(&buf).join("\n")
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn a_compact_modal_opens_on_a_filled_title_band() {
+  // A *background* role, so the assertion is on the cells' `bg` and not on
+  // anything the flattened rows could show. The band spans the frame edge
+  // to edge: a ground that stopped at its text would read as a highlighted
+  // word rather than as the top of a panel.
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let role = match case.band {
+      Band::Accent => app.theme.accent,
+      Band::Clean => app.theme.clean,
+      Band::Danger => app.theme.prunable,
+    };
+    let expected = gwm::tui::band_fill(role, app.theme.section_bg);
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, _) = compact_modal_rect(&buf).expect("a compact modal");
+    for col in x..x + w {
+      assert_eq!(
+        buf[(col, y)].bg,
+        expected,
+        "{}: the title band must be filled edge to edge, cell ({col},{y}) is not. rows:\n{}",
+        case.name,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+#[test]
+fn a_compact_modal_closes_on_a_muted_footer_band() {
+  for case in compact_cases().into_iter().filter(|c| c.footer) {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let expected = app.theme.section_bg;
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    let footer = y + h - 1;
+    for col in x..x + w {
+      assert_eq!(
+        buf[(col, footer)].bg,
+        expected,
+        "{}: the footer band must be filled edge to edge, cell ({col},{footer}) is not. rows:\n{}",
+        case.name,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+#[test]
+fn the_hints_ride_the_footer_band_rather_than_a_row_of_their_own() {
+  // The band is a ground under the row the modal already spends on its
+  // hint line, not an extra row: if the frame reserved one, the hint would
+  // sit above it and the band would come back blank.
+  let (_dir, mut app) = compact_app(
+    &(Box::new(|| {
+      let (d, mut a) = make_app();
+      a.enter_help();
+      (d, a)
+    }) as ModalSetup),
+  );
+  let buf = render_at(&mut app, 120, 40);
+  let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+  let footer: String = (x..x + w).map(|col| buf[(col, y + h - 1)].symbol()).collect();
+  assert!(
+    footer.contains("close"),
+    "the help overlay's close hint must be on the band itself. footer: {footer:?}"
+  );
+}
+
+#[test]
+fn the_working_tree_counts_ride_the_footer_band_in_compact() {
+  // The boxed frame puts them in the bottom rule (`title_bottom`). Compact
+  // has no rule to put them in, so they take the right of the band, the
+  // same place a compact pane puts its counter.
+  let (_dir, mut app) = make_app();
+  app.config.tui.layout = TuiLayout::Compact;
+  app.enter_working_tree();
+  let counts = gwm::tui::working_tree_counts_footer(&app.working_tree.counts, &app.theme);
+  let buf = render_at(&mut app, 120, 40);
+  let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+  let footer: String = (x..x + w).map(|col| buf[(col, y + h - 1)].symbol()).collect();
+  match counts {
+    // The fixture's working tree is what it is; assert against whatever the
+    // pane itself would show rather than against a count pinned by hand.
+    Some(line) => {
+      let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+      let text = text.trim();
+      assert!(
+        footer.contains(text),
+        "the counts {text:?} must ride the footer band. footer: {footer:?}"
+      );
+    }
+    None => assert!(
+      footer.contains("close"),
+      "with no counts the band still carries the hints. footer: {footer:?}"
+    ),
+  }
+}
+
+#[test]
+fn the_background_is_shaded_behind_a_compact_modal_and_the_modal_is_not() {
+  // A compact modal has no rule, so the ground does the separating.
+  use ratatui::style::Modifier;
+  let (_dir, mut app) = make_app();
+  app.config.tui.layout = TuiLayout::Compact;
+  // An RGB preset: the shading mixes toward black, and a palette built from
+  // ANSI names has no components to mix, so that theme keeps `DIM` alone,
+  // which is the documented fallback and not what this test is about. The
+  // default theme is exactly such a palette.
+  app.theme = gwm::tui::theme::Theme::preset("claude-dark").expect("a built-in RGB preset");
+  let band = gwm::tui::compact_header_fill(&app.theme);
+  // The worktrees pane's own header band, on the row under the app header.
+  let lit = render_at(&mut app, 120, 40)[(0, 1)].bg;
+  assert_eq!(lit, band, "the fixture must put the pane's band where this reads it");
+
+  app.enter_help();
+  let buf = render_at(&mut app, 120, 40);
+  let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+  assert!(
+    buf[(0, 0)].modifier.contains(Modifier::DIM),
+    "the header behind the modal must be dimmed"
+  );
+  // DIM alone would not do it: it touches the foreground only, and the
+  // pane's band sits directly above a full-size overlay's own band. The
+  // grounds have to move apart, not just the text on them.
+  assert_ne!(
+    buf[(0, 1)].bg,
+    band,
+    "the pane's band behind the modal must be darkened, not merely dimmed"
+  );
+  assert!(
+    !buf[(x + w / 2, y + h / 2)].modifier.contains(Modifier::DIM),
+    "the modal itself must come back at full strength"
+  );
+}
+
+#[test]
+fn a_bordered_modal_leaves_the_background_alone() {
+  // The shading is the compact frame's compensation for its missing rule.
+  // The boxed layout already has the boundary, and #594 changes nothing
+  // there.
+  use ratatui::style::Modifier;
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  let buf = render_at(&mut app, 120, 40);
+  assert!(
+    !buf[(0, 0)].modifier.contains(Modifier::DIM),
+    "the boxed layout must not dim what it floats over"
+  );
+}
+
+#[test]
+fn a_content_sized_modal_spends_three_rows_less_in_compact() {
+  // The sizing contract, measured rather than restated: boxed costs two
+  // rules and two padding rows, compact costs the title band alone (the
+  // footer band is a ground under a row the modal already had). A call
+  // site that kept its own `+ 4` would show up here as a modal two rows
+  // too tall with dead space above the band.
+  for name in ["open-menu", "link-prompt", "create", "exec-picker"] {
+    let (_name, setup, _, _) = sizing_matrix()
+      .into_iter()
+      .find(|(n, _, _, _)| *n == name)
+      .expect("the matrix carries this modal");
+    let (_dir, mut boxed) = setup();
+    let boxed_h = modal_rect(&render_at(&mut boxed, 120, 40)).expect("a boxed modal").3;
+    let (_dir, mut compact) = compact_app(&setup);
+    let compact_h = compact_modal_rect(&render_at(&mut compact, 120, 40))
+      .expect("a compact modal")
+      .3;
+    assert_eq!(
+      compact_h + 3,
+      boxed_h,
+      "{name}: compact is {compact_h} rows against the boxed {boxed_h}"
+    );
+  }
 }
