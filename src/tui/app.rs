@@ -1381,6 +1381,15 @@ impl App {
     // (the bulk prefetch is a no-op in workspace mode).
     self.sync_active_repo();
     self.refresh_link();
+    // The shared tail above expired every fetched status, and workspace mode
+    // has no bulk refill behind it: a fetch in flight when the auto-refresh
+    // timer fires would lose its generation and have its result dropped, with
+    // nothing to replace it — and with an `auto_refresh_secs` shorter than the
+    // forge's latency, every fetch a context verb starts could be cancelled
+    // that way (Codex review on #618). Refilled here rather than in that tail
+    // because only now has the repo swap resolved the link and the slug
+    // against the row actually selected.
+    self.spawn_selected_github();
   }
 
   /// Builder-style setter for `trust_mode`. The TUI entrypoint
@@ -7571,6 +7580,36 @@ impl App {
     }
   }
 
+  /// Request the SELECTED row's linked issue / PR, returning how many
+  /// workers actually started (issue #597, Codex review on #618).
+  ///
+  /// The narrow counterpart to
+  /// [`Self::refresh_linked_github_statuses_for_worktrees`]: the link and the
+  /// slug both belong to the active repo, so this is sound in workspace mode
+  /// where resolving *every* merged row against one slug is not (#303). Both
+  /// guards the bulk path uses still apply — no slug, no request; a terminal
+  /// cache hit or a coalesced spine slot does not spawn a second subprocess.
+  fn spawn_selected_github(&mut self) -> u32 {
+    let Some(slug) = self.github.link_slug.clone() else {
+      return 0;
+    };
+    let mut spawned = 0u32;
+    if let Some(n) = self.github.link.issue {
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if let Some(n) = self.github.link.pr {
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if spawned > 0 {
+      self.spinner.reset();
+    }
+    spawned
+  }
+
   fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
     // A relist is the moment the fetched statuses stop being authoritative,
     // and since #597 nothing else expires them: the link re-read on every
@@ -7584,9 +7623,10 @@ impl App {
     // issue/PR against a single repo's slug (`self.github.link_slug`), which
     // mis-attributes numbers across child repos with different remotes (Codex
     // review #303 P2). In workspace mode GitHub state is fetched per-selection
-    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, and
-    // the context verbs ask for what they need through `forge_fetch_gap`
-    // (#597). So skip the bulk cross-repo prefetch here.
+    // instead — the relist refills the selected row through
+    // `spawn_selected_github`, and the context verbs ask for what they need
+    // through `forge_fetch_gap` (#597). So skip the bulk cross-repo prefetch
+    // here, having already expired what it would have replaced.
     if self.is_workspace() {
       return 0;
     }

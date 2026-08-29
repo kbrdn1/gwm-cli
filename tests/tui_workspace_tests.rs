@@ -643,3 +643,35 @@ fn a_workspace_relist_expires_the_fetched_github_statuses() {
     "a relist must expire the statuses it can no longer vouch for"
   );
 }
+
+#[test]
+fn a_workspace_relist_re_requests_the_selection_it_just_expired() {
+  // Codex review on PR #618. The relist expires every fetched status, and
+  // workspace mode has no bulk refill behind it: a fetch in flight when the
+  // auto-refresh timer fires had its generation bumped and its result dropped
+  // by `TaskRunner::complete`, with nothing to replace it. With an
+  // `auto_refresh_secs` shorter than the forge's latency, every fetch the
+  // context verbs start could be cancelled that way and the row would never
+  // fill in. The selected row's link resolves against the ACTIVE repo, so
+  // re-requesting it is the one refill that is sound across repos (#303).
+  use gwm::tui::GitHubFetchState;
+  let root = workspace_root();
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  alpha.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&alpha, "main", 61).unwrap();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  // A fetch in flight. The workspace constructor anchors on alpha through the
+  // single-repo one, whose prefetch starts one for the linked PR — the same
+  // state a context verb leaves behind through `forge_fetch_gap`.
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "precondition: the fetch must be in flight, or the assertion below is vacuous"
+  );
+
+  app.refresh().unwrap();
+
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "the relist dropped the in-flight fetch and put nothing behind it"
+  );
+}
