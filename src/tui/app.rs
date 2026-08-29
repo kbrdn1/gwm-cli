@@ -3656,6 +3656,10 @@ impl App {
       // written for; it only needed to be asked again on the way back. Self
       // gated, so it is a no-op for every other restored view.
       self.close_forge_overlay_if_link_disagrees();
+      // Identity held, so the modal is still up: give it what landed while it
+      // was covered, or the reader comes back to rows the cache has already
+      // replaced (Codex review on PR #615).
+      self.resync_forge_overlay_from_cache();
     }
   }
 
@@ -7277,6 +7281,57 @@ impl App {
     }
   }
 
+  /// Re-run the open forge modal's sync against the fetch cache (Codex
+  /// review on PR #615).
+  ///
+  /// The companion of [`Self::close_forge_overlay_if_link_disagrees`], and
+  /// needed because that guard only answers "is this still the same PR".
+  /// `View::Pty` does not suspend the auto refresh, so a result can land
+  /// while the browser covers the modal; every sync that would absorb it
+  /// returns early on `view != DetailOverlay`, and the modal holds its own
+  /// rows rather than reading the cache at render time. An unchanged number
+  /// therefore restored the pre-browser rows over a cache that had moved,
+  /// and the reader had no way to tell.
+  ///
+  /// Routed through the same two syncs the landing paths use rather than
+  /// touching rows here, for the reason [`Self::land_pr_threads`] gives: the
+  /// view renders the side the link prefers, and that invariant lives in one
+  /// place.
+  ///
+  /// Exhaustive match with no `_` arm, the rule
+  /// [`crate::tui::state::detail_overlay::DetailKind::is_forge_linked`]
+  /// documents: a fourth consumer must not silently inherit "nothing to
+  /// resync".
+  fn resync_forge_overlay_from_cache(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay {
+      return;
+    }
+    match self.detail_overlay.kind {
+      DetailKind::CiChecks => {
+        if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+          let pr = pr.clone();
+          self.refresh_ci_overlay_on_pr_landing(&pr);
+        }
+      }
+      DetailKind::RichIssue => {
+        if let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() {
+          let issue = issue.clone();
+          self.sync_rich_overlay(RichSource::Issue(issue));
+        }
+      }
+      DetailKind::RichPr => {
+        if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+          let pr = pr.clone();
+          self.sync_rich_overlay(RichSource::Pr(pr));
+        }
+      }
+      // Agent rows come from the local session store, which the browser
+      // cannot have changed, and there is no fetch cache to re-read.
+      DetailKind::Agents => {}
+    }
+  }
+
   fn selected_branch_name(&self) -> Option<String> {
     self.selected().and_then(|w| w.branch.clone()).or_else(|| {
       self
@@ -8688,11 +8743,23 @@ pub fn plan_terminal_browser(
   // detached operand included, so the walk is shared rather than re-written.
   // A command that resolves to nothing keeps `argv[0]`, so the message still
   // names something the user actually wrote.
+  // Both the wrapper and the binary behind it, because running the browser
+  // needs both (Codex review on PR #615). Probing only the one behind is the
+  // mirror of the bug that walk was written for: `env NO_COLOR=1 w3m {url}`
+  // on Windows finds `w3m.exe` while `env.exe` is absent, `env` being a
+  // coreutil Windows does not ship. The consumers exec `argv[0]`, so a
+  // missing wrapper dies exactly like a missing browser, and under zellij it
+  // dies inside a pane that reported success.
+  //
+  // `argv[0]` first: it is what the spawn reaches for, so when both are
+  // missing the message names the one that fails first.
   let probe = crate::doctor::executable_in(&argv).unwrap_or_else(|| argv[0].clone());
-  if !on_path(&probe) {
-    return BrowserPlan::System {
-      why: Some(format!("{} not on PATH", probe)),
-    };
+  for bin in [argv[0].as_str(), probe.as_str()] {
+    if !on_path(bin) {
+      return BrowserPlan::System {
+        why: Some(format!("{} not on PATH", bin)),
+      };
+    }
   }
   // A browser that places itself is launched and nothing else. Checked after
   // the multiplexer gate rather than before it, because placing itself still

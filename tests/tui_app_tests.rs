@@ -17059,3 +17059,107 @@ fn a_leading_shell_assignment_is_refused_rather_than_half_honoured() {
     "only a leading assignment is refused, not any token carrying `=`"
   );
 }
+
+#[test]
+fn a_modal_covered_by_the_browser_comes_back_holding_what_landed_meanwhile() {
+  // Codex review on PR #615, and the other half of the restore #590 added.
+  //
+  // `View::Pty` does not suspend the auto refresh, so a PR, CI or threads
+  // result can land while the browser covers the modal. Every sync that would
+  // absorb it returns early on `view != DetailOverlay`, and the modal keeps
+  // its OWN rows rather than reading the cache at render time. The guard on
+  // the way back only compares the link's *identity*, so an unchanged number
+  // restores the pre-browser rows over a cache that has since moved: the
+  // reader is looking at stale content with nothing saying so, until the next
+  // manual refresh.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(
+    app.detail_overlay.title.contains("rich fixture"),
+    "precondition: the modal opened on the fixture title, got {:?}",
+    app.detail_overlay.title
+  );
+
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay_over_current(pty);
+
+  // The refresh lands while the browser is up. Same PR number, so the
+  // identity guard will be satisfied and the modal restored.
+  let mut moved = rich_pr_fixture(61);
+  moved.title = "retitled while the browser was up".into();
+  app.apply_pr_fetch_result(Ok(moved));
+
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "an unchanged link still comes back to the modal"
+  );
+  assert!(
+    app.detail_overlay.title.contains("retitled while the browser was up"),
+    "the restored modal must hold what landed while it was covered, got {:?}",
+    app.detail_overlay.title
+  );
+}
+
+#[test]
+fn a_wrapper_that_is_itself_missing_is_caught_like_the_browser_behind_it() {
+  // Codex review on PR #615, the mirror image of
+  // `terminal_browser_probes_the_binary_behind_a_wrapper`. That one fixed
+  // probing `argv[0]` and never the real browser; this is the half it left:
+  // probing the real browser and never `argv[0]`.
+  //
+  // `env NO_COLOR=1 w3m {url}` on Windows is the case that bites. `w3m.exe`
+  // can be installed while `env.exe` is not, since `env` is a coreutil rather
+  // than something Windows ships. The probe walks past the wrapper, finds
+  // `w3m`, and accepts; the consumers then exec `argv[0]`, which is `env`, and
+  // it is not there. The overlay and the detached path fail, and zellij opens
+  // a pane reporting success around a process that never started.
+  //
+  // Both have to be on PATH, because both are needed to run the thing.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The Windows shape: the browser is installed, the wrapper is not.
+    &|bin| bin == "w3m",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing wrapper must fall back, not open a pane that cannot run");
+  };
+  assert!(
+    why.contains("env") && why.contains("PATH"),
+    "the refusal must name the wrapper that is missing: {why}"
+  );
+
+  // And the pane still opens when both are there, so this is a second probe
+  // rather than a ban on wrappers.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "a wrapper and a browser both on PATH must still open a pane"
+  );
+}
