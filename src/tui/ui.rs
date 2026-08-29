@@ -2,9 +2,12 @@ use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
+use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
+use super::state::working_tree::WorkingTreeSnapshot;
+use std::collections::HashMap;
 
 /// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
 /// default by the hint helpers that have no form in reach (issue #418). Every
@@ -162,6 +165,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   draw_body(f, chunks[1], app);
   draw_footer(f, chunks[2], app);
 
+  // #594: a compact modal has no rules, so the ground does the separating.
+  // Everything painted so far is darkened; the overlay's own `Clear` resets
+  // the cells under it, so the modal comes back at full strength against a
+  // shaded list. Bordered is left alone: the box is already the boundary.
+  if app.view != View::List && app.config.tui.layout.is_compact() {
+    shade_background(f.buffer_mut());
+  }
+
   match app.view {
     View::Help => draw_help(f, app),
     View::Create => draw_create(f, app),
@@ -171,7 +182,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::LinkPrompt => draw_link_prompt(f, app),
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
+    View::WorkingTree => draw_working_tree(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Commits => draw_commits(f, app),
     View::Pty => draw_pty_overlay(f, app),
     View::Note => draw_note_editor(f, app),
     // #325: exec profile picker renders as a small centred modal.
@@ -453,6 +466,81 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
+/// The focused compact header's fill (issue #605): the `accent` role
+/// darkened toward the `section_bg` band it replaces.
+///
+/// `accent` rather than `focus`, the other orange each preset carries:
+/// `focus` is the *border* tone, and it is more saturated, which is the
+/// half of "too strong" that darkening alone does not fix. `accent` is the
+/// colour the header title already wore, so the band is the same colour
+/// the header always was, moved from the text to the ground under it —
+/// pulled down so it sits under the pane rather than on top of it.
+///
+/// Mixed rather than added as a sixth background role: it is not a
+/// decision a preset should have to make separately, and derived from the
+/// two roles it sits between it stays in tune with a `[theme]` override of
+/// either. A colour with no components to mix — an ANSI name, whose value
+/// belongs to the terminal, or a 256-palette index — comes back unchanged,
+/// so the default theme keeps a coloured band rather than a grey one.
+///
+/// The floor on [`ACCENT_MIX`] is the dark text written on it: on
+/// `claude-dark` the band/`section_bg` contrast is 4.9:1 at full strength
+/// and 3.1:1 at 70%, so darkening much further would need the text to
+/// switch to a light role instead.
+pub fn compact_header_fill(theme: &super::theme::Theme) -> Color {
+  band_fill(theme.accent, theme.section_bg)
+}
+
+/// [`compact_header_fill`]'s mix, over an arbitrary foreground role.
+///
+/// Split out for the modal frame (issue #594), which paints the same band
+/// but not always from `accent`: a destructive modal's frame is
+/// `prunable`, and a band mixed from `accent` there would drop the one
+/// signal the confirm surface exists to carry.
+pub fn band_fill(color: Color, ground: Color) -> Color {
+  match (color, ground) {
+    (Color::Rgb(ar, ag, ab), Color::Rgb(gr, gg, gb)) => {
+      let mix = |a: u8, g: u8| ((a as u16 * ACCENT_MIX + g as u16 * (100 - ACCENT_MIX)) / 100) as u8;
+      Color::Rgb(mix(ar, gr), mix(ag, gg), mix(ab, gb))
+    }
+    (color, _) => color,
+  }
+}
+
+/// Weight on `accent` in [`compact_header_fill`]. Settled on a capture, not
+/// by arithmetic — a foreground/background pair is not something a test can
+/// judge — and the one knob to turn if the band reads wrong on a palette.
+const ACCENT_MIX: u16 = 70;
+
+/// Header text style for a compact pane (issue #605).
+///
+/// Focused: `section_bg` on the [`compact_header_fill`] band, bold — dark
+/// text on the coloured ground, the treatment the version chip and the
+/// footer's context anchor already use. Inactive: `accent` on the quiet
+/// `section_bg` band. The two states trade the same pair of roles rather
+/// than dimming one of them, so `muted` appears in neither: a pane's name
+/// is how you find the pane to `Tab` into and it cannot go secondary the
+/// moment the pane does.
+///
+/// `section_bg` as the focused foreground because the theme owns no
+/// background role beyond it — it is the darkest tone each preset reserves
+/// for chrome, so it is the one colour guaranteed to read on the band
+/// without naming a hex the palette does not have.
+///
+/// It is applied by *patching*, so a span that carries a colour of its own
+/// keeps it on either band (the filter `/` prompt, the Working Tree
+/// per-category counts): those encode a category, not focus.
+///
+/// Pure like [`panel_border_color`] so the focus→theme wiring is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn compact_header_style(focused: bool, theme: &super::theme::Theme) -> Style {
+  if focused {
+    Style::default().fg(theme.section_bg).add_modifier(Modifier::BOLD)
+  } else {
+    Style::default().fg(theme.accent)
+  }
+}
+
 /// What a pane's frame costs and how it is painted (issue #545).
 ///
 /// Two shapes, resolved once per pane and threaded down rather than
@@ -470,17 +558,25 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
 pub struct Chrome {
   /// `true` when the pane draws a filled header instead of box rules.
   pub compact: bool,
-  /// Focus signal: `theme.focus` when the pane holds focus, `theme.muted`
-  /// otherwise. Paints the border when boxed and the header text when
-  /// compact — with no rules left, the header *is* where focus reads.
+  /// Focus signal for the *boxed* layout: `theme.focus` when the pane holds
+  /// focus, `theme.muted` otherwise. Paints the four rules, and the title
+  /// sitting inside the top one. Compact has no rules and does not read it
+  /// — its header text is focus-independent (issue #605).
   pub accent: Color,
-  /// Header background, compact only. Carries the focus signal too
-  /// (validation feedback on PR #546: the text colour alone did not read
-  /// at a glance): `selection_bg` on the focused pane, `section_bg`
-  /// elsewhere. Both roles already exist and the theme guarantees they
-  /// differ, so the two header states are distinct by construction on
-  /// every preset — no third background role to keep in tune.
+  /// Header background, compact only: the [`compact_header_fill`] band on
+  /// the focused pane, `section_bg` elsewhere. With the rules gone
+  /// this is *the* focus signal (PR #546 added it because the text colour
+  /// alone did not read at a glance; #605 removed the text half and made
+  /// the band carry it alone), so it is a coloured role and not the
+  /// `selection_bg` it used to be — that pair sat 14 grey levels apart on
+  /// `claude-dark` and read as a permutation of grey rather than as a
+  /// place. It also stops the focused header from painting exactly like
+  /// the cursor row, which is `selection_bg` too.
   pub fill: Color,
+  /// Header text style, compact only — see [`compact_header_style`].
+  /// Resolved here rather than at the call sites because `render_section`
+  /// threads a `Chrome` and has no theme of its own.
+  pub header: Style,
   /// `true` when this pane holds focus. Drives [`Self::body_style`].
   pub focused: bool,
   /// `[tui] dim_unfocused` — whether the inactive pane's body is dimmed.
@@ -493,24 +589,16 @@ impl Chrome {
   /// a constant off it.
   pub const COMPACT_ROWS: u16 = 1;
 
-  /// Chrome for a surface that stays boxed whatever `[tui] compact`
-  /// says — the modals, where a rule separates the panel from the
-  /// content it floats over.
-  pub fn boxed(accent: Color) -> Self {
-    Self {
-      compact: false,
-      accent,
-      fill: Color::Reset,
-      focused: true,
-      dim_unfocused: false,
-    }
-  }
-
   pub fn resolve(compact: bool, focused: bool, dim_unfocused: bool, theme: &super::theme::Theme) -> Self {
     Self {
       compact,
       accent: panel_border_color(focused, theme),
-      fill: if focused { theme.selection_bg } else { theme.section_bg },
+      fill: if focused {
+        compact_header_fill(theme)
+      } else {
+        theme.section_bg
+      },
+      header: compact_header_style(focused, theme),
       focused,
       dim_unfocused,
     }
@@ -670,11 +758,12 @@ fn pane_title(compact: bool, label: &str, chord: &str) -> String {
 /// would leave the boundary reading as a stray highlighted word rather
 /// than as the edge of a section.
 ///
-/// `accent` carries the focus signal — with the rules gone, the header
-/// text is where "which pane am I in" now lives. It is applied only to
-/// spans that have no colour of their own; a span that already carries
-/// one (the filter `/` prompt) encodes something other than focus and is
-/// left alone.
+/// `header` is the base style every span is patched onto: the fixed
+/// header colour plus, on the focused pane, `BOLD` (issue #605). A span
+/// that already carries a colour (the filter `/` prompt, the Working Tree
+/// per-category counts) keeps it — `patch` lets the span's own `fg` win —
+/// but it still takes the weight, so the whole line runs one rule rather
+/// than a focus-tracking half beside a fixed one.
 ///
 /// On a pane too narrow for both, the counter is dropped whole rather
 /// than overlapped — the title names the section and carries its focus
@@ -687,21 +776,16 @@ pub fn compact_header_line(
   title: Line<'static>,
   counter: Option<Line<'static>>,
   width: u16,
-  accent: Color,
+  header: Style,
 ) -> Line<'static> {
   let width = width as usize;
-  let accent_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  // Only spans with no colour of their own take the accent; the filter `/`
-  // prompt and the Working Tree's per-category counts already encode
-  // something that is not focus.
-  let accentuate = |s: Span<'static>| {
-    if s.style.fg.is_none() {
-      Span::styled(s.content, accent_style.patch(s.style))
-    } else {
-      s
-    }
-  };
-  let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(accentuate).collect();
+  // `patch`, not an overwrite: a span that already carries a colour keeps
+  // it on either band. The filter `/` prompt, the Working Tree
+  // per-category counts and anything else that encodes a category rather
+  // than focus stays readable — which is why the focus fill is tinted
+  // ([`compact_header_fill`]) and not saturated.
+  let restyle = |s: Span<'static>| Span::styled(s.content, header.patch(s.style));
+  let mut spans: Vec<Span<'static>> = title.spans.into_iter().map(restyle).collect();
 
   // Measured in terminal CELLS, not chars: a CJK glyph or an emoji in a
   // filter query counts one char and draws two columns, and padding
@@ -745,10 +829,10 @@ pub fn compact_header_line(
   let counter = counter.filter(|c| title_w + counter_w(c) <= width);
   let pad = width - title_w - counter.as_ref().map(counter_w).unwrap_or(0);
   if pad > 0 {
-    spans.push(Span::styled(" ".repeat(pad), accent_style));
+    spans.push(Span::styled(" ".repeat(pad), header));
   }
   if let Some(counter) = counter {
-    spans.extend(counter.spans.into_iter().map(accentuate));
+    spans.extend(counter.spans.into_iter().map(restyle));
   }
   Line::from(spans)
 }
@@ -845,11 +929,17 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // #515: the note column follows the same rule as AGENT and the mark
   // column — it only exists once something is in it, so a user with no
   // notes keeps the exact pre-#515 table instead of an empty column eating
-  // two cells on a narrow terminal. Caption-less: the marker is binary.
+  // two cells on a narrow terminal.
+  //
+  // #595: it captions itself with [`NOTE_ICON`], the glyph it marks rows
+  // with. It shipped caption-less on the grounds that the marker is binary,
+  // but an empty header immediately right of the two-slot `I/P` group made
+  // the marker read as a third slot of that group rather than as its own
+  // column. A binary column's caption is the thing it marks.
   let show_note = visible.iter().any(|w| w.has_note);
   header_cells.push(Cell::from("I/P"));
   if show_note {
-    header_cells.push(Cell::from(""));
+    header_cells.push(Cell::from(NOTE_ICON));
   }
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
@@ -917,8 +1007,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   }
   widths.push(Constraint::Length(3));
   if show_note {
-    // #515: one cell for the note marker, hard-fixed like the I/P column.
-    widths.push(Constraint::Length(1));
+    // #515: hard-fixed like the I/P column. Two cells since #595, the width
+    // [`NOTE_ICON`] takes: the glyph plus the trailing space a nerd-font
+    // glyph needs because most of them render two cells wide.
+    widths.push(Constraint::Length(2));
   }
   widths.extend([
     Constraint::Min(name_w),
@@ -968,7 +1060,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // block at all — one row of chrome instead of two, two columns back.
   let table_area = if chrome.compact {
     let header_area = Rect { height: 1, ..area };
-    let line = compact_header_line(title, counter.map(Line::from), header_area.width, chrome.accent);
+    let line = compact_header_line(title, counter.map(Line::from), header_area.width, chrome.header);
     f.render_widget(
       Paragraph::new(line).style(Style::default().bg(chrome.fill)),
       header_area,
@@ -1395,7 +1487,7 @@ fn render_section(
     // left, the footer (counter / hint) flushed right on that same row
     // rather than in a bottom rule that no longer exists.
     let header_area = Rect { height: 1, ..area };
-    let header = compact_header_line(title.into(), footer, header_area.width, chrome.accent);
+    let header = compact_header_line(title.into(), footer, header_area.width, chrome.header);
     f.render_widget(
       Paragraph::new(header).style(Style::default().bg(chrome.fill)),
       header_area,
@@ -1838,13 +1930,52 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
+/// Build the Working Tree file-explorer rows for one worktree plus their
+/// per-category counts, from one `git status --porcelain -z` read.
+///
+/// `pub(super)` since #592: the full-size overlay snapshots the same rows
+/// the sidebar pane paints, and it is deliberately NOT routed through
+/// [`build_sidebar_sections`], which would also run `git log` / `git stash
+/// list` / the diff-vs-base stat for panes the overlay does not show.
+pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
+  // The sidebar pane paints rows only. It stops here rather than calling
+  // [`working_tree_listing`] on purpose: the column that read adds costs a
+  // second git process, and this one runs on every selection change.
+  let (lines, _, counts) = working_tree_rows(w, theme);
+  (lines, counts)
+}
+
+/// The full result of one read of the working tree: the rows, the
+/// per-category counts, and the right-hand `+N -M` column (issue #592).
+///
+/// The counts come from `git status`, the column from a `git diff
+/// --numstat` in the same worker. Folded into one read rather than chained
+/// the way the commit listing's stats are (#593): there, the second read is
+/// a `git log --raw --numstat` over 300 commits and takes seconds, so the
+/// rows have to appear without it. Here it is a single diff against `HEAD`,
+/// far quicker than the `git status` that precedes it, so splitting would
+/// buy a flicker and cost a whole second identity to match payloads on.
+pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnapshot {
+  let (lines, paths, counts) = working_tree_rows(w, theme);
+  let stats = worktree::working_tree_stats(&w.path).unwrap_or_default();
+  let meta = working_tree_meta_column(&paths, &stats, theme);
+  WorkingTreeSnapshot { lines, counts, meta }
+}
+
+/// Render the working tree of `w` into rows, the repo-relative path each
+/// row describes, and the per-category counts.
+///
+/// `paths` is `None` on a directory row and on each of the three sentinels
+/// (`✓ clean`, `… N more`, a load error), so it always has exactly as many
+/// entries as there are rows.
+fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
     Ok((s, _)) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
       ))],
+      vec![None],
       WorkingTreeCounts::default(),
     ),
     Ok((s, scan_truncated)) => {
@@ -1855,7 +1986,7 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
       // remainder as a single muted `… N more` row, so the non-scrollable
       // section can't be sized from tens of thousands of files.
       let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
-      let mut lines = working_tree_tree_lines(&tree, theme);
+      let (mut lines, mut paths) = working_tree_tree_lines(&tree, theme);
       if overflow > 0 {
         // After a scan truncation the real remainder is unknown (git was
         // killed at the cap), so `overflow` is only a lower bound — render
@@ -1866,17 +1997,70 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
           format!("… {} more", overflow)
         };
         lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
+        paths.push(None);
       }
-      (lines, counts)
+      (lines, paths, counts)
     }
     Err(e) => (
       vec![Line::from(Span::styled(
         format!("! {}", e),
         Style::default().fg(theme.prunable),
       ))],
+      vec![None],
       WorkingTreeCounts::default(),
     ),
   }
+}
+
+/// Build the right-hand `+N -M` column for a working-tree listing.
+///
+/// One entry per row, in row order, so the column and the rows scroll
+/// together at a single offset. A row with no counts (a directory, a
+/// sentinel, an untracked or binary file) contributes an empty line rather
+/// than being skipped, which is what keeps the two in step.
+pub fn working_tree_meta_column(
+  paths: &[Option<String>],
+  stats: &HashMap<String, worktree::FileStat>,
+  theme: &Theme,
+) -> MetaColumn {
+  let mut col = MetaColumn::default();
+  for key in paths {
+    let spans = key
+      .as_deref()
+      .and_then(|p| stats.get(p))
+      .map(|s| working_tree_stat_spans(*s, theme))
+      .unwrap_or_default();
+    col.lines.push(Line::from(spans));
+  }
+  col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
+  col
+}
+
+/// One file's line counts as coloured spans: `+120 -34`.
+///
+/// The same two roles the commit listing's counts use (#593), so a line
+/// added reads the same colour in both listings. A zero side is left out
+/// rather than printed, and a file with neither renders nothing at all:
+/// unlike a commit, whose silence would read as "not loaded yet", a row
+/// here already carries a badge saying what happened to it.
+pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span<'static>> {
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  if s.insertions > 0 {
+    spans.push(Span::styled(
+      format!("+{}", s.insertions),
+      Style::default().fg(theme.clean),
+    ));
+  }
+  if s.deletions > 0 {
+    if !spans.is_empty() {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(
+      format!("-{}", s.deletions),
+      Style::default().fg(theme.prunable),
+    ));
+  }
+  spans
 }
 
 /// Render the Working Tree file-explorer model (issue #300) into styled
@@ -1896,16 +2080,44 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
 /// - An **extra space** follows each nerd-font glyph: most glyphs render
 ///   double-width but occupy a single terminal cell, so the pad keeps the
 ///   following text from being clipped.
-fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> Vec<Line<'static>> {
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>) {
   let mut out = Vec::new();
-  push_wt_nodes(&mut out, nodes, String::new(), theme);
-  out
+  let mut paths = Vec::new();
+  push_wt_nodes(&mut out, &mut paths, nodes, String::new(), String::new(), theme);
+  (out, paths)
+}
+
+/// Join a path prefix and a node name the way git spells a path.
+///
+/// The RAW name, never [`wt_tree::sanitize_name`]'s: this is a lookup key
+/// into `git diff --numstat` output, not something painted on a terminal.
+fn wt_join(prefix: &str, name: &str) -> String {
+  if prefix.is_empty() {
+    name.to_string()
+  } else {
+    format!("{}/{}", prefix, name)
+  }
 }
 
 /// Depth-first walk used by [`working_tree_tree_lines`]. `prefix` is the
 /// accumulated ancestor connector string; each child appends `├─ `/`└─ `
 /// for its own row and `│  `/`   ` for its descendants.
-fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String, theme: &Theme) {
+///
+/// `paths` grows in lockstep with `out`, one entry per rendered row, so the
+/// right-hand column can be keyed by row without a second walk that could
+/// drift out of step with this one. A directory contributes `None`: it has
+/// no diff of its own, and the aggregate its colour already carries is a
+/// category rather than a count. A collapsed chain (`src/tui`) is one node
+/// whose name already holds the separator, so `path_prefix` reconstructs
+/// git's own spelling either way.
+fn push_wt_nodes(
+  out: &mut Vec<Line<'static>>,
+  paths: &mut Vec<Option<String>>,
+  nodes: &[WtNode],
+  prefix: String,
+  path_prefix: String,
+  theme: &Theme,
+) {
   let last = nodes.len().saturating_sub(1);
   for (i, node) in nodes.iter().enumerate() {
     let is_last = i == last;
@@ -1927,8 +2139,9 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String,
             Style::default().fg(color),
           ),
         ]));
+        paths.push(None);
         let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        push_wt_nodes(out, children, child_prefix, theme);
+        push_wt_nodes(out, paths, children, child_prefix, wt_join(&path_prefix, name), theme);
       }
       WtNode::File {
         name,
@@ -1945,6 +2158,7 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String,
             Style::default().fg(color),
           ),
         ]));
+        paths.push(Some(wt_join(&path_prefix, name)));
       }
     }
   }
@@ -2117,23 +2331,202 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+  // The sidebar pane paints rows only, so the metadata columns it never
+  // shows are built and dropped. Cheap next to the revwalk that precedes
+  // them, and one listing routine is one place for the row format to live.
+  recent_commits_listing(w, limit, worktree::unix_now(), theme).lines
+}
+
+/// Gap, in cells, between the commit subject and the metadata column.
+pub const META_GAP: usize = 2;
+
+/// Cells the subject must keep for the metadata column to be worth showing.
+///
+/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
+/// topology), so what the left side needs cannot be derived from a
+/// constant: the policy is stated as a floor on what survives instead. A
+/// merge-heavy history at 80 columns would otherwise leave a subject of ten
+/// cells to buy an author column, which is a worse listing than no column.
+pub const COMMITS_SUBJECT_FLOOR: usize = 30;
+
+/// Pick the widest metadata column that leaves the subject its floor.
+///
+/// `body_w` is the text area AFTER the scrollbar column is reserved. The
+/// tiers are tried widest first; `None` means even the narrowest does not
+/// fit and the listing renders full-width as it did before.
+///
+/// A pure function on widths so the policy is testable without a terminal:
+/// the render path only decides which `MetaColumn` this names.
+pub fn commits_meta_pick(body_w: usize, tiers: [usize; 3]) -> Option<usize> {
+  meta_pick(body_w, &tiers, COMMITS_SUBJECT_FLOOR)
+}
+
+/// Pick the widest metadata column that leaves the left side `floor` cells.
+///
+/// The policy both full-size listings share: the commit listing (#593)
+/// offers three tiers and protects a subject, the Working Tree overlay
+/// (#592) offers one and protects a file name. Only the tier list and the
+/// floor differ, so only those are parameters.
+pub fn meta_pick(body_w: usize, tiers: &[usize], floor: usize) -> Option<usize> {
+  tiers.iter().copied().find(|&w| w > 0 && body_w >= w + META_GAP + floor)
+}
+
+/// Cells a Working Tree row must keep for its `+N -M` column to be worth
+/// showing.
+///
+/// Lower than [`COMMITS_SUBJECT_FLOOR`] because the row is a leaf name
+/// under a connector prefix, not a sentence: `ui.rs` stays readable at a
+/// width where a commit subject would be a fragment. The connectors grow
+/// with the nesting depth, so what a row needs cannot be derived from a
+/// constant here either — the floor states the policy instead.
+pub const WT_NAME_FLOOR: usize = 24;
+
+/// Build the two right-hand metadata columns for a commit listing.
+///
+/// `wide` carries `author · age`, `narrow` the age alone — the initials are
+/// already on the left, so the full author is the second tier of
+/// information, not the first. The age is what the listing genuinely lacks
+/// today.
+///
+/// Ages are computed against `now` HERE, not stored on the row: the rows
+/// are memoised by `(repo, tip, limit)`, so an age baked into them would be
+/// frozen at the first read. They are still a snapshot in the sense that
+/// the overlay does not re-read itself while open, so a listing left up for
+/// an hour keeps saying `2m`.
+pub fn commit_meta_columns(
+  rows: &[worktree::CommitRow],
+  now: i64,
+  stats: &HashMap<git2::Oid, worktree::CommitStat>,
+  theme: &Theme,
+) -> [MetaColumn; 3] {
+  let mut wide = MetaColumn::default();
+  let mut mid = MetaColumn::default();
+  let mut narrow = MetaColumn::default();
+  let sep = || Span::styled(" · ".to_string(), Style::default().fg(theme.muted));
+
+  for row in rows {
+    let age_d = worktree::commit_age(row.time, now);
+    let age = worktree::format_relative_duration(age_d);
+    let age_style = Style::default().fg(freshness_color(age_d, theme));
+    let age_span = || Span::styled(age.clone(), age_style);
+    let author = row.author.trim();
+    // Absent means "not read yet", which is not the same as a commit that
+    // changed nothing — the second read fills the map and the columns are
+    // rebuilt from it.
+    let stat = stats.get(&row.hash).copied();
+
+    narrow.lines.push(Line::from(age_span()));
+
+    let mut mid_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(s) = stat {
+      mid_spans.extend(commit_stat_spans(s, theme));
+      mid_spans.push(sep());
+    }
+    mid_spans.push(age_span());
+    mid.lines.push(Line::from(mid_spans));
+
+    let mut wide_spans: Vec<Span<'static>> = Vec::new();
+    if !author.is_empty() {
+      wide_spans.push(Span::styled(author.to_string(), Style::default().fg(theme.muted)));
+      wide_spans.push(sep());
+    }
+    if let Some(s) = stat {
+      wide_spans.extend(commit_stat_spans(s, theme));
+      wide_spans.push(sep());
+    }
+    wide_spans.push(age_span());
+    wide.lines.push(Line::from(wide_spans));
+  }
+
+  for col in [&mut wide, &mut mid, &mut narrow] {
+    col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
+  }
+  [wide, mid, narrow]
+}
+
+/// One commit's diff counts as coloured spans: `3~ 1+ 1- +120 -34`.
+///
+/// The file counts reuse the working-tree pane's roles (#287) so a created
+/// file reads the same colour here as it does there, and the line counts
+/// reuse the diff pair. A category with nothing in it is omitted rather
+/// than printed as a zero: five zeroes on every quiet commit is noise, and
+/// the row is competing with the subject for width.
+pub fn commit_stat_spans(s: worktree::CommitStat, theme: &Theme) -> Vec<Span<'static>> {
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut push = |text: String, color: Color| {
+    if !spans.is_empty() {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(text, Style::default().fg(color)));
+  };
+  if s.files_modified > 0 {
+    push(format!("{}~", s.files_modified), theme.dirty);
+  }
+  if s.files_added > 0 {
+    push(format!("{}+", s.files_added), theme.clean);
+  }
+  if s.files_deleted > 0 {
+    push(format!("{}-", s.files_deleted), theme.prunable);
+  }
+  if s.insertions > 0 {
+    push(format!("+{}", s.insertions), theme.clean);
+  }
+  if s.deletions > 0 {
+    push(format!("-{}", s.deletions), theme.prunable);
+  }
+  if spans.is_empty() {
+    // An empty commit, or a merge that brought nothing onto its first
+    // parent. Silence would read as "not loaded yet".
+    spans.push(Span::styled("0".to_string(), Style::default().fg(theme.muted)));
+  }
+  spans
+}
+
+/// The full result of one read of the log: the rows, the commit count, and
+/// the two right-hand metadata columns.
+///
+/// The count is not `lines.len()` and the difference is not cosmetic: an
+/// unborn HEAD, an empty history or a failed read all paint exactly ONE
+/// sentinel row, so a caller inferring the count from the rows reads them
+/// as a repository with one commit (Codex review, PR #614). The
+/// commit-listing overlay (issue #593) titles itself with this count and
+/// decides whether a page is full from it.
+///
+/// `now` is passed in rather than read here so the ages are deterministic
+/// under test.
+pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, now: i64, theme: &Theme) -> CommitsSnapshot {
   match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
+      let loaded = rows.len();
+      let tiers = commit_meta_columns(&rows, now, &HashMap::new(), theme);
       let graphs = super::commit_graph::render_commits(&rows, theme);
-      rows
-        .into_iter()
+      let lines = rows
+        .iter()
+        .cloned()
         .zip(graphs)
         .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
-        .collect()
+        .collect();
+      CommitsSnapshot {
+        lines,
+        loaded,
+        rows,
+        tiers,
+      }
     }
-    Ok(_) => vec![Line::from(Span::styled(
-      "(no commits)".to_string(),
-      Style::default().fg(theme.muted),
-    ))],
-    Err(e) => vec![Line::from(Span::styled(
-      format!("! {}", e),
-      Style::default().fg(theme.prunable),
-    ))],
+    Ok(_) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
+        "(no commits)".to_string(),
+        Style::default().fg(theme.muted),
+      ))],
+      ..Default::default()
+    },
+    Err(e) => CommitsSnapshot {
+      lines: vec![Line::from(Span::styled(
+        format!("! {}", e),
+        Style::default().fg(theme.prunable),
+      ))],
+      ..Default::default()
+    },
   }
 }
 
@@ -2471,6 +2864,17 @@ fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
   }
 }
 
+/// The note column's glyph (issues #515, #595): `nf-oct-markdown`, the same
+/// one [`wt_tree::WT_MARKDOWN_ICON`] paints on a `.md` file in the Working
+/// Tree pane, because a gwm note *is* a markdown file. Carries its trailing
+/// space, the repo-wide convention for a nerd-font glyph (most render two
+/// cells wide, so the space is what the second cell eats instead of the
+/// neighbouring column).
+///
+/// Header and marker share it: the column is binary, so its caption is the
+/// thing it marks.
+const NOTE_ICON: &str = "\u{f48a} ";
+
 /// The note marker (issue #515). Binary by design: this row carries a note
 /// or it does not — no preview, no length, no freshness colour, and no
 /// second meaning layered onto a glyph that already has one (`★`, `●` and
@@ -2481,7 +2885,7 @@ fn mark_cell(marked: bool, theme: &Theme) -> Cell<'static> {
 /// columns stay aligned — the rule [`mark_cell`] follows.
 fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
   if has_note {
-    Cell::from("≡").style(Style::default().fg(theme.name))
+    Cell::from(NOTE_ICON).style(Style::default().fg(theme.name))
   } else {
     Cell::from("")
   }
@@ -2693,6 +3097,8 @@ pub enum HintContext {
   CreateFreeform,
   /// Confirm-delete modal.
   Confirm,
+  /// The confirmation modal when it is holding a merge (issue #551).
+  ConfirmMerge,
   /// Open issue/PR URL menu.
   OpenMenu,
   /// Issue/PR link prompt, stage 1 — choose issue vs PR.
@@ -2734,9 +3140,19 @@ pub enum HintContext {
   /// PR's or issue's description, reviews and conversation — j/k select,
   /// Enter opens the row's URL, f re-fetches, Esc closes.
   RichView,
-  /// The in-TUI note editor (issue #515): every printable is text, so the
-  /// only verbs advertised are the two ways out.
+  /// The in-TUI note editor with `[tui] note_vim = false` (issue #515):
+  /// every printable is text, so the only verbs advertised are the two
+  /// ways out and the two list chords.
   Note,
+  /// The note editor in normal mode (issue #557). A separate context
+  /// because the two modes take different keys entirely: the letters are
+  /// verbs here and text next door, so one static hint list would lie in
+  /// whichever mode it was not written for.
+  NoteNormal,
+  /// The note editor in insert mode, with the mode enabled (issue #557).
+  /// Same keys as [`HintContext::Note`] except the one that matters:
+  /// `Esc` leaves the mode rather than writing and closing.
+  NoteInsert,
 }
 
 impl HintContext {
@@ -2749,6 +3165,7 @@ impl HintContext {
       HintContext::Picker => "switch",
       HintContext::Create | HintContext::CreateFreeform => "create",
       HintContext::Confirm => "confirm",
+      HintContext::ConfirmMerge => "merge",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
       HintContext::LinkInputNumber => "link",
@@ -2763,6 +3180,11 @@ impl HintContext {
       HintContext::CiChecks => "checks",
       HintContext::RichView => "pr/issue",
       HintContext::Note => "note",
+      // #557: the mode belongs in the context slot, not in a hint — it is
+      // state, not a key. The title carries the same chip; this is the
+      // half the eye is already on when it reads the verbs.
+      HintContext::NoteNormal => "note · NORMAL",
+      HintContext::NoteInsert => "note · INSERT",
     }
   }
 
@@ -2790,6 +3212,15 @@ impl HintContext {
         // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        // #593: reading the log and the checks is the same register as
+        // launching lazygit, and both keys mean this in either pane — so
+        // the worktrees footer advertises the pair the status footer does,
+        // ahead of the verbs that are reached less often.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
+        // #592: the change set at full size belongs to the same register,
+        // and `W` means it in either pane.
+        Hint::Key(WorkingTree, "tree"),
         Hint::Key(ExecOverlay, "exec"),
         Hint::Key(AgentSessions, "agents"),
         // #515: the note is written far more often than a review is
@@ -2811,9 +3242,14 @@ impl HintContext {
         // Read the status pane.
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
+        // #592: this pane holds the Working Tree block, so the key that opens
+        // it full size sits with the pair that scrolls it in place.
+        Hint::Key(WorkingTree, "tree"),
         Hint::Key(FetchGithub, "fetch"),
-        // #436: `c` routes to the CI checks overlay in this context.
-        Hint::Key(EditWorktree, "ci checks"),
+        // #593: `c` / `C` mean the same thing in both panes — this one's
+        // own content at full size, and the linked PR's checks.
+        Hint::Key(Commits, "commits"),
+        Hint::Key(CiChecks, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -2866,6 +3302,17 @@ impl HintContext {
         Hint::Modal(ModalAction::ConfirmActivate, "activate"),
         Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
       ],
+      // The same modal, a different verb set (validation feedback on
+      // #551). `delete branch` belongs to the delete flow and was being
+      // advertised over a merge, where it means nothing and where the key
+      // does nothing; the merge has its own thing to offer instead.
+      HintContext::ConfirmMerge => &[
+        Hint::Modal(ModalAction::ConfirmConfirm, "merge"),
+        Hint::Modal(ModalAction::ConfirmCycleMethod, "method"),
+        Hint::Lit("←/→", "move"),
+        Hint::Modal(ModalAction::ConfirmActivate, "activate"),
+        Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
+      ],
       HintContext::OpenMenu => &[
         Hint::Modal(ModalAction::OpenMenuIssue, "issue"),
         Hint::Modal(ModalAction::OpenMenuPr, "pr"),
@@ -2906,6 +3353,7 @@ impl HintContext {
         Hint::Modal(ModalAction::DetailAttach, "attach"),
         Hint::Modal(ModalAction::DetailDetach, "detach"),
         Hint::Modal(ModalAction::DetailInput, "by id"),
+        Hint::Modal(ModalAction::DetailOpenPane, "resume"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
       HintContext::CiChecks => &[
@@ -2918,16 +3366,52 @@ impl HintContext {
       // #420: no filter verb — a rich view is prose, not a row set.
       HintContext::RichView => &[
         Hint::Lit("j/k", "select"),
+        Hint::Lit("h/l", "scroll"),
+        Hint::Lit("D/U", "half page"),
+        Hint::Lit("y/Y", "copy url/body"),
+        Hint::Modal(ModalAction::RichViewMerge, "merge"),
+        Hint::Modal(ModalAction::RichViewTab, "issue/pr"),
         Hint::Modal(ModalAction::RichViewOpen, "open"),
         Hint::Modal(ModalAction::RichViewRefresh, "refresh"),
         Hint::Modal(ModalAction::RichViewClose, "close"),
       ],
-      // #515: no verbs beyond the exits — j/k are letters here, and the
-      // arrows are hard-coded for the same reason `Esc` is elsewhere.
+      // #515: no verbs beyond the exits and the #557 list chords — j/k are
+      // letters here, and the arrows are hard-coded for the same reason
+      // `Esc` is elsewhere. This bar is the only discovery surface the
+      // editor has: `?` is a printable, so the help overlay cannot be
+      // opened from inside it.
       HintContext::Note => &[
         Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "save & close"),
+      ],
+      // #557: the motions are literals because they are hard-coded verbs,
+      // not modal bindings — the same reason the arrows are literals above.
+      // They lead: in normal mode the letters are the surface, and the bar
+      // is the only place the editor can say so (`?` is a printable here,
+      // so the help overlay cannot be opened from inside the modal).
+      HintContext::NoteNormal => &[
+        Hint::Lit("hjkl", "move"),
+        Hint::Lit("w/b/e", "word"),
+        Hint::Lit("gg/G", "doc"),
+        Hint::Lit("i/a/o", "insert"),
+        Hint::Lit("x/dd", "delete"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "save & close"),
+      ],
+      // The one verb whose meaning the mode changes: `Esc` leaves insert
+      // instead of writing and closing, so the bar must not promise the
+      // gesture it promises everywhere else.
+      HintContext::NoteInsert => &[
+        Hint::Lit("↑/↓/←/→", "move"),
+        Hint::Modal(ModalAction::NoteToggleBullet, "bullet"),
+        Hint::Modal(ModalAction::NoteToggleCheckbox, "tick"),
+        Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
+        Hint::Modal(ModalAction::NoteClose, "normal mode"),
       ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
@@ -3041,7 +3525,9 @@ impl HintContext {
       HintContext::Create | HintContext::CreateFreeform | HintContext::Rename | HintContext::RenameFreeform => {
         KeyContext::Create
       }
-      HintContext::Confirm => KeyContext::Confirm,
+      // Both render the confirmation modal, so both resolve through its
+      // key context; only the verbs they advertise differ (#551).
+      HintContext::Confirm | HintContext::ConfirmMerge => KeyContext::Confirm,
       HintContext::OpenMenu => KeyContext::OpenMenu,
       HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
       HintContext::LinkInputNumber => KeyContext::LinkInputNumber,
@@ -3051,7 +3537,7 @@ impl HintContext {
       HintContext::Detail => KeyContext::Detail,
       HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::RichView => KeyContext::RichView,
-      HintContext::Note => KeyContext::Note,
+      HintContext::Note | HintContext::NoteNormal | HintContext::NoteInsert => KeyContext::Note,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -3223,8 +3709,125 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   hints
 }
 
+/// Full-size Working Tree overlay footer hints (issue #592). Same shape as
+/// [`command_logs_footer_hints`] minus the copy verb: `close` resolves from
+/// `[tui.keys.modal.working_tree]` so a rebind shows through, the movement
+/// pairs stay literal.
+pub fn working_tree_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("D/U".to_string(), "half page".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  if let Some(k) = modal.primary_key(ModalAction::WorkingTreeClose) {
+    hints.push((k, "close".to_string()));
+  }
+  hints
+}
+
+/// Commit-listing overlay footer hints (issue #593). `load more` / `close`
+/// resolve from the `Commits*` modal bindings so a rebind of
+/// `[tui.keys.modal.commits]` shows through; the scroll / top-bottom
+/// movement pairs stay literal, as the Command Logs footer does.
+///
+/// `load more` is dropped when `more` is false — there is no deeper page,
+/// either because the revwalk ran out of history or because the paging cap
+/// was reached. Advertising a key that does nothing is how a working
+/// overlay reads as broken. While `loading`, the slot says so instead: the
+/// key is equally inert there, but for a reason that resolves on its own.
+pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("D/U".to_string(), "half page".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  if loading {
+    // `more` is false while a read is out, so without this the hint slot
+    // would simply go blank and a deeper page would look refused rather
+    // than under way.
+    hints.push(("…".to_string(), "loading".to_string()));
+  } else if more {
+    if let Some(k) = modal.primary_key(ModalAction::CommitsLoadMore) {
+      hints.push((k, "load more".to_string()));
+    }
+  }
+  if let Some(k) = modal.primary_key(ModalAction::CommitsClose) {
+    hints.push((k, "close".to_string()));
+  }
+  hints
+}
+
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
+}
+
+/// As [`modal_hint_for_context`], bounded to `width` cells: whole hint
+/// groups are dropped from the end and a `…` marks that they were (issue
+/// #557).
+///
+/// `modal_hint_line` renders the list whatever it measures, and a
+/// `Paragraph` clips the overflow at the rect edge — which reads as a
+/// complete list that happens to end at `Ctrl+u bullet`. The statusbar has
+/// always truncated visibly; the note editor's mode line is the first modal
+/// footer long enough to need the same, because it spells out a whole
+/// keymap rather than two or three verbs.
+pub fn modal_hint_for_context_within(
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+  width: usize,
+  lead: Option<(&str, Color)>,
+) -> Line<'static> {
+  let resolved = ctx.resolve(keymap, modal);
+  let group_w = |key: &str, label: &str| cells(key) + 1 + cells(label);
+  // The leading badge is state, not a verb: it takes the reverse-video
+  // treatment the statusbar's context anchor has always had, so the mode
+  // reads as a block of colour from across the screen rather than as one
+  // more word in a list of keys.
+  let lead_w = lead.map_or(0, |(text, _)| cells(text) + 2);
+  let full: usize = resolved
+    .iter()
+    .enumerate()
+    .map(|(i, (k, l))| if i > 0 { 2 } else { 0 } + group_w(k, l))
+    .sum();
+  // Measured whole first: a list that fits must not lose its last group to
+  // the space held for a marker nothing needs. `Esc normal mode` is exactly
+  // that group at 100 columns, and it is the one telling the user how to
+  // leave the mode.
+  if full + lead_w <= width {
+    let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+    return with_lead(modal_hint_line(&hints, theme), lead);
+  }
+  let budget = width.saturating_sub(lead_w);
+  let mut kept: Vec<(&str, &str)> = Vec::new();
+  let mut used = 0usize;
+  for (key, label) in &resolved {
+    let sep = if kept.is_empty() { 0 } else { 2 };
+    // The ` …` costs two cells, and past this branch it is certain.
+    if used + sep + group_w(key, label) > budget.saturating_sub(2) {
+      break;
+    }
+    used += sep + group_w(key, label);
+    kept.push((key.as_str(), label.as_str()));
+  }
+  let mut line = modal_hint_line(&kept, theme);
+  line.spans.push(Span::styled(" …", hint_label_style(theme)));
+  with_lead(line, lead)
+}
+
+/// Put `lead` at the head of a hint line as a reverse-video chip. The line
+/// stays centred as a whole, badge included: splitting the row into a
+/// left-pinned badge and centred hints would need two rects, and a modal
+/// footer that is one `Paragraph` is what every other modal already draws.
+fn with_lead(mut line: Line<'static>, lead: Option<(&str, Color)>) -> Line<'static> {
+  let Some((text, color)) = lead else {
+    return line;
+  };
+  let mut spans = vec![Span::styled(text.to_string(), chip_style(color)), Span::raw("  ")];
+  spans.append(&mut line.spans);
+  line.spans = spans;
+  line
 }
 
 /// As [`modal_hint_for_context`], for the two footers whose form knows which
@@ -3659,9 +4262,15 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   ));
   rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
+  rows.push(entry(Action::MergePr, "merge the linked PR (asks first)"));
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
+  rows.push(entry(Action::WorkingTree, "show the working tree listing at full size"));
+  rows.push(entry(
+    Action::Commits,
+    "show the commit listing full size, with load-more",
+  ));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
@@ -3792,6 +4401,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
+      modal_entry(
+        ModalAction::ConfirmCycleMethod,
+        "cycle merge / squash / rebase (merge confirmations only)",
+      ),
     ]);
     // #453: one section per modal context, in workflow order, every verb
     // resolved live against the modal keymap so rebinds show through (and
@@ -3849,6 +4462,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::DetailAttach, "attach to the selected session"),
       modal_entry(ModalAction::DetailDetach, "detach the selected session"),
       modal_entry(ModalAction::DetailInput, "attach by id (palette-style prompt)"),
+      modal_entry(
+        ModalAction::DetailOpenPane,
+        "resume the selected session in a multiplexer pane",
+      ),
       fixed("any char", "attach prompt: type to filter the session ids"),
       fixed("Backspace", "attach prompt: delete the last character"),
       fixed("Up/Down", "attach prompt: move the highlight"),
@@ -3874,6 +4491,17 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       modal_entry(ModalAction::RichViewNext, "next row"),
       modal_entry(ModalAction::RichViewPrev, "previous row"),
+      modal_entry(ModalAction::RichViewTab, "switch between the issue and the PR"),
+      modal_entry(ModalAction::RichViewLeft, "scroll code and diff lines left"),
+      modal_entry(ModalAction::RichViewRight, "scroll code and diff lines right"),
+      modal_entry(ModalAction::RichViewYankUrl, "copy the URL of the active tab"),
+      modal_entry(ModalAction::RichViewYankBody, "copy the description of the active tab"),
+      modal_entry(ModalAction::RichViewMerge, "merge the PR (asks first)"),
+      modal_entry(ModalAction::RichViewHalfDown, "half a page down"),
+      modal_entry(ModalAction::RichViewHalfUp, "half a page up"),
+      modal_entry(ModalAction::RichViewTop, "jump to the top"),
+      modal_entry(ModalAction::RichViewBottom, "jump to the bottom"),
+      modal_entry(ModalAction::RichViewCiChecks, "open this PR's CI checks"),
       modal_entry(ModalAction::RichViewOpen, "open the selected row's URL in the browser"),
       modal_entry(ModalAction::RichViewRefresh, "re-fetch and refresh the view"),
       modal_entry(ModalAction::RichViewClose, "close"),
@@ -3883,8 +4511,37 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("Left/Right/Up/Down", "move the cursor"),
       fixed("Home/End", "start / end of line"),
       fixed("PgUp/PgDn", "page through the note"),
+      modal_entry(
+        ModalAction::NoteToggleBullet,
+        "make the line a list item, or plain again",
+      ),
+      modal_entry(
+        ModalAction::NoteToggleCheckbox,
+        "tick the box on the line, spawning one first",
+      ),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
-      modal_entry(ModalAction::NoteClose, "save and close (empty the note to delete it)"),
+      modal_entry(ModalAction::NoteClose, "save and close (empty it to delete)"),
+      HelpRow::Blank,
+      // #557: the normal-mode verbs are hard-coded, so they are `fixed`
+      // rows. They belong here rather than only in the modal's own bar
+      // because `?` is a printable inside the editor: this overlay is the
+      // one place they can be read at leisure.
+      //
+      // Their own section, and the heading names the knob: `help_rows` has
+      // no config to read, and `note_vim = false` is a supported config
+      // where none of these letters is a verb — under a heading that says
+      // so, the rows stay true for both. Same reason the close row above
+      // stops at "save and close": with the mode on, the press that leaves
+      // insert is documented here instead (Codex review #582, second pass).
+      HelpRow::Section("Note Editor · normal mode ([tui] note_vim, on by default)".to_string()),
+      HelpRow::Blank,
+      fixed("h j k l", "move"),
+      fixed("w b e", "word forward / back / end (W B E: blank-separated)"),
+      fixed("0 ^ $", "first column / first non-blank / last char"),
+      fixed("gg G", "first / last line"),
+      fixed("x dd", "delete the char under the caret / the line"),
+      fixed("i I a A o O", "enter insert (o / O open a line, carrying the marker)"),
+      fixed("Esc", "insert to normal; from normal, save and close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -3921,6 +4578,26 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
         "copy the full transcript to the clipboard",
       ),
       modal_entry(ModalAction::CommandLogsClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Working Tree".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::WorkingTreeScrollDown, "scroll down"),
+      modal_entry(ModalAction::WorkingTreeScrollUp, "scroll up"),
+      modal_entry(ModalAction::WorkingTreeHalfDown, "scroll down half a screen"),
+      modal_entry(ModalAction::WorkingTreeHalfUp, "scroll up half a screen"),
+      modal_entry(ModalAction::WorkingTreeScrollTop, "jump to the top"),
+      modal_entry(ModalAction::WorkingTreeScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::WorkingTreeClose, "close"),
+      HelpRow::Section("Commits".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommitsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommitsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommitsHalfDown, "scroll down half a screen"),
+      modal_entry(ModalAction::CommitsHalfUp, "scroll up half a screen"),
+      modal_entry(ModalAction::CommitsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommitsScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::CommitsLoadMore, "read one page deeper"),
+      modal_entry(ModalAction::CommitsClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("Settings".to_string()),
       HelpRow::Blank,
@@ -4104,17 +4781,20 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     }
   }
 
-  let block = overlay_block_titled(&modal_title, accent);
-  let inner_area = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner_area = frame.render(f, area, &modal_title, None);
 
   // header (fixed) | body (scrollable) | footer hint (fixed). The header is
   // exactly as tall as its line count; the footer is one row; the body
   // takes the rest.
   let header_h = header_lines.len() as u16;
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner_area);
+  let [header_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(header_h),
+    Constraint::Min(1),
+    Constraint::Length(1), // the gap above the hints
+    Constraint::Length(1),
+  ])
+  .areas(inner_area);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -4139,6 +4819,105 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   );
 }
 
+/// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
+/// given the whole modal area.
+///
+/// Same shell as the Command Logs overlay: a fixed title on the top rule,
+/// a scrollable body with a scrollbar when it overflows, and a fixed footer
+/// hint line. The pane's change-count line (issue #287) rides the bottom
+/// rule right-aligned, exactly where the bordered sidebar pane puts it, so
+/// the two surfaces read as the same block at two sizes.
+///
+/// The rows are NOT rebuilt here — they are the snapshot
+/// [`App::enter_working_tree`] took, so this frame shells out to nothing
+/// (the #343 rule).
+fn draw_working_tree(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let theme = app.theme;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), theme.accent, &theme);
+  let inner = frame.render(
+    f,
+    area,
+    "Working Tree",
+    working_tree_counts_footer(&app.working_tree.counts, &theme),
+  );
+
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+
+  // While the worker is out, a muted loader rather than an empty canvas:
+  // blank reads as "nothing changed", which is the one answer this overlay
+  // must not give by accident (Copilot review, PR #612). Same word the
+  // sidebar's cold cache uses.
+  if app.working_tree.loading {
+    f.render_widget(
+      Paragraph::new(Line::from(Span::styled(
+        " loading…".to_string(),
+        Style::default().fg(theme.muted),
+      ))),
+      body_area,
+    );
+    let footer_owned = working_tree_footer_hints(&app.modal_keymap);
+    let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+    f.render_widget(modal_hint_line(&footer_hints, &theme), footer_area);
+    return;
+  }
+
+  // Publish the scroll bound against the BODY viewport only, then clamp the
+  // cursor the key handler moved (the help / command-logs contract).
+  let rows = app.working_tree.lines.len();
+  app.working_tree.viewport = body_area.height;
+  app.working_tree.max_scroll = (rows.saturating_sub(body_area.height as usize)) as u16;
+  app.working_tree.scroll = app.working_tree.scroll.min(app.working_tree.max_scroll);
+  let scroll = app.working_tree.scroll;
+
+  let text_area = scrollable_body_area(f, body_area, scroll, rows, &theme);
+  // One leading space per row, as the sidebar pane pads its own body, so the
+  // tree does not touch the left border. Spans borrow from the snapshot.
+  let padded: Vec<Line<'_>> = app
+    .working_tree
+    .lines
+    .iter()
+    .map(|l| {
+      let mut spans = Vec::with_capacity(l.spans.len() + 1);
+      spans.push(Span::raw(" "));
+      spans.extend(l.spans.iter().map(|s| Span::styled(s.content.as_ref(), s.style)));
+      Line::from(spans)
+    })
+    .collect();
+
+  // The counts ride their own rect on the right rather than being appended
+  // to each row, the shape the commit listing uses (#593): the tree is
+  // hard-clipped without an ellipsis, so narrowing the left rect IS that
+  // same rule applied at a nearer edge. Both paragraphs take the same
+  // scroll offset, so the columns stay aligned.
+  let meta_w = meta_pick(text_area.width as usize, &[app.working_tree.meta.width], WT_NAME_FLOOR);
+  match meta_w {
+    Some(meta_w) => {
+      let [left, _gap, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(META_GAP as u16),
+        Constraint::Length(meta_w as u16),
+      ])
+      .areas(text_area);
+      f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), left);
+      f.render_widget(
+        Paragraph::new(app.working_tree.meta.lines.clone())
+          .right_aligned()
+          .scroll((scroll, 0)),
+        right,
+      );
+    }
+    None => f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), text_area),
+  }
+
+  let footer_owned = working_tree_footer_hints(&app.modal_keymap);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &theme), footer_area);
+}
+
 /// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
 /// over the dimmed list showing the lazygit-style transcript of the
 /// external commands gwm ran, newest-first. Scrolls like the help overlay —
@@ -4146,6 +4925,103 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
+/// Render the full-size commit listing (issue #593).
+///
+/// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the
+/// snapshot `App::enter_commits` took — one row per commit, short hash /
+/// author initials / `o`-`@` graph / subject, exactly as the sidebar pane
+/// paints them.
+///
+/// No horizontal pan: `recent_commits_lines` deliberately leaves subjects
+/// untruncated and relies on ratatui's hard clip at the right edge, which is
+/// lazygit's behaviour. The whole point of the overlay is that the canvas is
+/// wide enough for that clip to stop mattering.
+///
+/// The title carries the row count so `load more` has visible feedback; a
+/// trailing `+` means a deeper page exists. It rides the top rule, which is
+/// clipped from the LEFT when centred, so the count sits last on purpose.
+fn draw_commits(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+
+  let more = app.commits_can_load_more();
+  let loading = app.commits.loading;
+  // The `+` tracks "a deeper page exists", which is true while one is being
+  // read too: `can_load_more` is false then only because the read is out.
+  let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
+  let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = frame.render(f, area, &title, None);
+
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+
+  // A muted loader rather than an empty canvas while the first page is
+  // being walked: blank reads as "no commits", which is the one answer this
+  // overlay must not give by accident. A deeper page keeps the rows it
+  // already has on screen instead, and says `loading` in the footer.
+  let lines: Vec<Line<'static>> = if !app.commits.lines.is_empty() {
+    app.commits.lines.clone()
+  } else if loading {
+    vec![Line::from(Span::styled(
+      " loading…".to_string(),
+      Style::default().fg(muted),
+    ))]
+  } else {
+    vec![Line::from(Span::styled(
+      "No commits.".to_string(),
+      Style::default().fg(muted),
+    ))]
+  };
+
+  // Publish the scroll bound against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.commits.viewport = body_area.height;
+  app.commits.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
+  app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
+  let scroll = app.commits.scroll;
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+
+  // The metadata rides its own rect on the right rather than being appended
+  // to each row: the subject is deliberately hard-clipped without an
+  // ellipsis (lazygit's gocui behaviour, documented on
+  // `recent_commits_lines` and shared with the sidebar pane), so narrowing
+  // the left rect IS that same rule applied at a nearer edge. Both
+  // paragraphs take the same scroll offset, so the columns stay aligned.
+  let widths = [
+    app.commits.tiers[0].width,
+    app.commits.tiers[1].width,
+    app.commits.tiers[2].width,
+  ];
+  let meta = commits_meta_pick(text_area.width as usize, widths);
+
+  match meta {
+    Some(meta_w) => {
+      let column = &app.commits.tiers[widths.iter().position(|&w| w == meta_w).unwrap_or(2)];
+      let meta_w = meta_w as u16;
+      let [left, _gap, right] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(META_GAP as u16),
+        Constraint::Length(meta_w),
+      ])
+      .areas(text_area);
+      f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), left);
+      f.render_widget(
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        right,
+      );
+    }
+    None => f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area),
+  }
+
+  let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
+}
+
 fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
@@ -4157,14 +5033,15 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
 
   // Scrollable body / fixed footer hint (issue #279) —
   // the title and the close hint stay pinned while the transcript scrolls.
-  let block = overlay_block_titled("Command Logs", accent);
-  let inner = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = frame.render(f, area, "Command Logs", None);
 
   // The title rides the top rule since #549, so the fixed header row it
   // used to occupy is gone and the transcript starts one row higher.
-  let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  // A blank row between the listing and the hints, the gap every other
+  // modal already leaves: content never sits flush against the footer.
+  let [body_area, _gap, footer_area] =
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
   // A full-width `-` rule, padded by a blank line above and below, separates
   // adjacent log entries (issue #279 follow-up).
@@ -4535,8 +5412,8 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // deliberate trade: the tabs are genuinely different lengths (3 rows for
   // Worktree, 173 for Keys), and with the floor and ceiling in place it
   // settles into two sizes rather than a continuum.
-  let content_rows =
-    header_h + body_lines.len() as u16 + 1 /* footer */ + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let content_rows = header_h + body_lines.len() as u16 + 2 /* gap + footer */ + frame.rows();
   let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
   let area = centered_content(
     60,
@@ -4546,13 +5423,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     f.area(),
   );
 
-  let block = overlay_block_titled("Settings", accent);
-  let inner = block.inner(area);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
+  let inner = frame.render(f, area, "Settings", None);
 
-  let [header_area, body_area, footer_area] =
-    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+  let [header_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(header_h),
+    Constraint::Min(1),
+    Constraint::Length(1), // the gap above the hints
+    Constraint::Length(1),
+  ])
+  .areas(inner);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
@@ -4779,17 +5658,15 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let block = overlay_block_titled(
-    if app.create_form.mode == Mode::Freeform {
-      "New Worktree (free-form)"
-    } else {
-      "New Worktree"
-    },
-    clean,
-  );
+  let title = if app.create_form.mode == Mode::Freeform {
+    "New Worktree (free-form)"
+  } else {
+    "New Worktree"
+  };
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
-  let inner_w = block.inner(outer).width as usize;
+  let inner_w = frame.inner(outer).width as usize;
 
   // Width of the background-filled value field: the inner width minus the
   // `  label  ` gutter (2 indent + label column + 2 gap).
@@ -4844,8 +5721,9 @@ fn draw_create(f: &mut Frame, app: &App) {
     lines.extend(fields);
   }
 
-  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let height = lines.len() as u16 + 4 + frame.rows();
   let area = centered_content(70, 56, 72, height, term);
+  let content = frame.render(f, area, title, None);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -4855,10 +5733,8 @@ fn draw_create(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
+    .split(content);
 
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
   render_form_body(f, inner[0], lines, focused_row, &app.theme);
 
   if app.is_create_worktree_loading() {
@@ -5108,6 +5984,87 @@ pub fn overlay_modal_width(term_width: u16) -> u16 {
   modal_width(term_width, 62, 72, 88)
 }
 
+/// The style one Markdown role is painted in (issue #551).
+///
+/// The other half of the parse: [`Emphasis`] is a semantic role precisely so
+/// that this mapping lives here, where the theme is, and the parser stays a
+/// pure function. Kept public and pure so the pairing is pinned by a test —
+/// a parse that produces perfect segments nobody paints differently is a
+/// feature that is dead on screen with the suite green.
+pub fn markdown_style(emphasis: crate::tui::state::markdown::Emphasis, theme: &Theme) -> Style {
+  use crate::tui::state::markdown::Emphasis;
+  let plain = Style::default().fg(theme.name);
+  match emphasis {
+    Emphasis::Plain => plain,
+    Emphasis::Bold => plain.add_modifier(Modifier::BOLD),
+    Emphasis::Italic => plain.add_modifier(Modifier::ITALIC),
+    Emphasis::BoldItalic => plain.add_modifier(Modifier::BOLD | Modifier::ITALIC),
+    // `staged` rather than `accent`: a literal reads as its own thing, and
+    // `accent` is already the overlay's border and its key hints.
+    Emphasis::Code => Style::default().fg(theme.staged),
+    Emphasis::Strike => Style::default().fg(theme.muted).add_modifier(Modifier::CROSSED_OUT),
+    Emphasis::Link => Style::default().fg(theme.accent).add_modifier(Modifier::UNDERLINED),
+    Emphasis::Heading => Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+    // The forge greys a quoted block whole, marker and text alike.
+    Emphasis::Quote => Style::default().fg(theme.muted),
+    Emphasis::Marker => Style::default().fg(theme.muted),
+    // The Status pane's own colours, so the same fact reads the same in the
+    // pane and in the overlay one keypress away. Written against the same
+    // theme roles `pr_badge_color`, `issue_badge_color` and `ci_indicator`
+    // resolve to rather than re-deciding them here.
+    Emphasis::Success => Style::default().fg(theme.clean),
+    Emphasis::Failure => Style::default().fg(theme.prunable),
+    Emphasis::Running => Style::default().fg(theme.dirty),
+    Emphasis::Notice => Style::default().fg(theme.locked),
+    Emphasis::Muted => Style::default().fg(theme.muted),
+    Emphasis::Branch => Style::default().fg(theme.branch),
+  }
+}
+
+/// How many rows the detail overlay shows at once, for a given terminal.
+///
+/// One answer shared by the renderer and by `App`, for the reason the width
+/// is shared: a half-page jump that guesses a different window than the one
+/// on screen lands somewhere the reader did not ask for. Ten rows go to the
+/// frame, the hint bar and the margins.
+pub fn detail_visible_rows(term_height: u16) -> usize {
+  (term_height as usize).saturating_sub(10).max(3)
+}
+
+/// Modal width for the rich PR / issue view (issue #551).
+///
+/// A policy of its own rather than [`overlay_modal_width`], because the two
+/// boxes hold different payloads. The shared overlay's 88-column ceiling was
+/// picked for the clean report, whose rows are an icon and a directory name
+/// pinned left with a size pinned right: past a point, extra columns only
+/// stretch the gap between the two. This box holds PROSE, which keeps earning
+/// columns until it hits the line length prose stops being readable at.
+///
+/// So: a bigger share of the terminal (80%, against 62%) and a ceiling at 120
+/// rather than 88. The ceiling is the point where a paragraph gets hard to
+/// track back to the next line, not a frame budget — on a 200-column terminal
+/// this leaves the modal reading as a modal.
+///
+/// The floor stays the shared 72 on purpose. The two policies must not cross
+/// over on a narrow terminal, where neither has room to express a preference.
+pub fn rich_view_modal_width(term_width: u16) -> u16 {
+  modal_width(term_width, 80, 72, 120)
+}
+
+/// The width the detail overlay is drawn at, for a given consumer.
+///
+/// The one place the routing lives, so the renderer and the row builder
+/// cannot drift apart (issue #551). Exhaustive `match`, no `_` arm, for the
+/// reason [`DetailKind::is_forge_linked`] gives: a fourth consumer does not
+/// compile until someone answers the question for it.
+pub fn detail_overlay_width(kind: crate::tui::state::detail_overlay::DetailKind, term_width: u16) -> u16 {
+  use crate::tui::state::detail_overlay::DetailKind;
+  match kind {
+    DetailKind::RichIssue | DetailKind::RichPr => rich_view_modal_width(term_width),
+    DetailKind::Agents | DetailKind::CiChecks => overlay_modal_width(term_width),
+  }
+}
+
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
 pub fn help_section_style(section: Color) -> Style {
@@ -5209,7 +6166,151 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
   lines
 }
 
+/// The merge confirmation (issue #551).
+///
+/// Built on the delete modal's own layout (validation feedback): the same
+/// five zones, the same `LoaderWidget` while it runs, the same countdown
+/// bar while it is armed, and the same buttons hidden mid-flight. A merge
+/// is no less irreversible than a delete, so it gets no less ceremony and
+/// no different shape to learn.
+///
+/// The summary names what the decision turns on: which PR, `head → base`,
+/// the resolved method AND what that method does to the history, and the CI
+/// rollup. That last one is why the modal earns its keypress; merging on a
+/// red CI is the mistake worth one moment of friction.
+fn draw_confirm_merge(f: &mut Frame, app: &App) {
+  let danger = app.theme.prunable;
+  let muted = app.theme.muted;
+  let Some(m) = app.pending_merge() else {
+    return;
+  };
+  let label_w = 7usize;
+  let row = |label: &str, value: String, style: Style| -> Line<'static> {
+    Line::from(vec![
+      Span::styled(format!("{label:label_w$}  "), Style::default().fg(muted)),
+      Span::styled(value, style),
+    ])
+  };
+
+  let mut content: Vec<Line<'static>> = Vec::new();
+  content.push(
+    Line::from(Span::styled(
+      format!("Merge {} #{}?", m.noun, m.number),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    ))
+    .centered(),
+  );
+  content.push(Line::from(String::new()));
+  content.push(row("title", m.title.clone(), Style::default().fg(app.theme.name)));
+  if !m.head_ref.is_empty() && !m.base_ref.is_empty() {
+    content.push(row(
+      "branch",
+      format!("{} → {}", m.head_ref, m.base_ref),
+      Style::default().fg(app.theme.branch),
+    ));
+  }
+  content.push(row(
+    "method",
+    format!("{}: {}", m.method.as_str(), m.method.summary()),
+    Style::default().fg(app.theme.name),
+  ));
+  // Shown, not enforced. A forge refuses a merge for reasons gwm does not
+  // model, and its own error says which; a client-side rule would add a
+  // second place to be wrong.
+  if let Some((label, color)) = ci_indicator(m.ci, m.checks_passed, m.checks_total, &app.theme) {
+    content.push(row("checks", label.trim().to_string(), Style::default().fg(color)));
+  }
+  content.push(Line::from(String::new()));
+  content.push(Line::from(Span::styled(
+    "the source branch is kept",
+    Style::default().fg(muted),
+  )));
+
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
+  let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + frame.rows();
+  let area = centered_content(62, 56, 80, height, f.area());
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // summary
+      Constraint::Length(1), // loader / countdown
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(frame.render(f, area, "Merge", None));
+
+  f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
+
+  // --- loader / failure / countdown, exactly the delete modal's ladder ---
+  if app.is_merge_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::MergePr.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.merge_failure() {
+    f.render_widget(
+      LoaderWidget::failed("merge failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
+    let now = Instant::now();
+    let mut spans = vec![Span::styled(
+      format!("{} ", app.spinner.glyph(DOT_FRAMES)),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(countdown_bar(
+      app.confirm_countdown_progress(now),
+      app.confirm_countdown_remaining_secs(now),
+      danger,
+      app.theme.dirty,
+      muted,
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), inner[1]);
+  }
+
+  // --- buttons + hint, gone while the merge is in flight ---
+  if !app.is_merge_loading() {
+    f.render_widget(
+      Paragraph::new(confirm_buttons_line(
+        app.confirm.focused_button(),
+        app.theme.accent,
+        muted,
+      ))
+      .alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(
+        // The merge's own verbs (validation feedback): `delete branch`
+        // belongs to the other flow and does nothing here, while cycling
+        // the method is the one thing this modal can offer and could not
+        // advertise.
+        HintContext::ConfirmMerge,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      ))
+      .alignment(Alignment::Center),
+      inner[4],
+    );
+  }
+}
+
 fn draw_confirm(f: &mut Frame, app: &App) {
+  // What this modal is about (issue #551). The countdown, the danger
+  // border and the button row are shared; the summary is not, because the
+  // consequence is not.
+  if app.confirm_kind() == crate::tui::ConfirmKind::MergePr {
+    draw_confirm_merge(f, app);
+    return;
+  }
   let muted = app.theme.muted;
   // The destructive modal reads in the theme's "danger" colour (the
   // same role the prunable `⚠` badge uses), so it tracks `[theme]`
@@ -5219,20 +6320,20 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // #484: the overlay is about the batch snapshotted when it opened, not
   // about wherever the cursor sits now.
   let targets = app.pending_delete();
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
   if targets.is_empty() {
-    let block = overlay_block_titled(delete_worktree_title(), danger);
     let lines: Vec<Line<'static>> = vec![Line::from("nothing selected").centered()];
-    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let height = lines.len() as u16 + frame.rows();
     let area = centered_content(40, 40, 64, height, f.area());
-    f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    let content = frame.render(f, area, delete_worktree_title(), None);
+    f.render_widget(Paragraph::new(lines), content);
     return;
   }
 
   // Title stays centred; details use an aligned label/value grid so the
   // destructive target is easier to scan (#220 visual follow-up).
   let term = f.area();
-  let block = overlay_block_titled(&delete_batch_title(targets.len()), danger);
+  let title = delete_batch_title(targets.len());
 
   // Width first so a long path / name can be middle-ellipsized to one line
   // instead of wrapping mid-path (#187 review). Measured on a throwaway
@@ -5246,7 +6347,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // disagreed — at 200 columns the text was sized for 124 columns inside an
   // 88-column frame, so nothing was ellipsized and the path wrapped across
   // three rows, breaking the very alignment #187 built this grid for.
-  let text_w = block.inner(centered_content(62, 64, 88, 1, term)).width as usize;
+  let text_w = frame.inner(centered_content(62, 64, 88, 1, term)).width as usize;
   let label_w = "Delete Branch".chars().count();
   let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
@@ -5319,9 +6420,8 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // fixed rows (loader / buttons / hint gap / hint), the rounded border and the
   // shared interior padding — no more fixed 44%-tall box that dwarfed its
   // few lines (#187 review).
-  let height = content.len() as u16 + 4 + 2 /* border */ + 2 /* padding */;
+  let height = content.len() as u16 + 4 + frame.rows();
   let area = centered_content(62, 64, 88, height, term);
-  f.render_widget(Clear, area);
 
   // Five stacked regions inside the padded frame: the title + description,
   // a loader/countdown row, the button row, a gap, and a statusbar-style hint. The
@@ -5337,8 +6437,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
-  f.render_widget(block, area);
+    .split(frame.render(f, area, &title, None));
 
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
@@ -5514,11 +6613,14 @@ fn draw_report(f: &mut Frame, app: &App) {
   // screen so a long report stays on-screen rather than a fixed 80%-tall
   // box (#187).
   let term = f.area();
-  let logs_height = (logs.len() as u16 + 2/* nested border */).max(3);
+  // The nested ` Logs ` pane follows `[tui] layout` like every other
+  // section (issue #594): boxed it costs two rows, compact one.
+  let logs_chrome = Chrome::resolve(app.config.tui.layout.is_compact(), true, false, &app.theme);
+  let logs_height = (logs.len() as u16 + logs_chrome.rows()).max(3);
   // Two rows shorter than pre-#549: the title and its spacer row moved
   // into the top rule.
-  let height =
-    (logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let height = (logs_height + 2 /* gap + hint */ + frame.rows()).min(term.height.saturating_mul(80) / 100);
   // A text canvas, so a bare percentage rather than the bounded
   // [`modal_width`] policy (issue #550) — the same call the PTY overlay, the
   // command-log transcript and the note editor make, and for the same
@@ -5532,8 +6634,7 @@ fn draw_report(f: &mut Frame, app: &App) {
   // matters: the worst case is a compiler error, and the cap cut 64 cells
   // off it at 200 columns. No defect ever motivated the cap.
   let area = centered_abs(term.width.saturating_mul(80) / 100, height, term);
-  let block = overlay_block_titled("Bootstrap Report", accent);
-  let inner = block.inner(area);
+  let inner = frame.render(f, area, "Bootstrap Report", None);
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -5542,19 +6643,11 @@ fn draw_report(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint
     ])
     .split(inner);
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
-  // A modal keeps its rules whatever `[tui] layout` says: a panel
-  // floating over content is exactly where a border earns its keep.
-  render_section(
-    f,
-    layout[0],
-    " Logs ",
-    SectionBody::new(&logs),
-    Chrome::boxed(accent),
-    0,
-    None,
-  );
+  // The nested ` Logs ` pane keeps its own rules whatever the modal frame
+  // spends: it is a section *inside* a surface, the way the sidebar's are,
+  // and the modal has already spent the layout's chrome budget for the
+  // frame around it.
+  render_section(f, layout[0], " Logs ", SectionBody::new(&logs), logs_chrome, 0, None);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::Report,
@@ -5578,17 +6671,74 @@ fn draw_report(f: &mut Frame, app: &App) {
 /// editor what a page key should move by.
 fn draw_note_editor(f: &mut Frame, app: &mut App) {
   let area = centered(80, 80, f.area());
-  f.render_widget(Clear, area);
 
   let title = match app.note_editor.as_ref() {
-    Some(editor) => format!("note · {}", crate::naming::sanitise_for_terminal(&editor.branch)),
+    Some(editor) => {
+      let branch = crate::naming::sanitise_for_terminal(&editor.branch);
+      // #557: the mode chip only exists behind `note_vim`. A mode the user
+      // cannot see is a mode they type verbs into by accident, and a chip
+      // for a mode that can never change is chrome nobody asked for.
+      //
+      // It sits AFTER the branch because a centred title that overflows is
+      // clipped from the LEFT (measured, not assumed: the guard in
+      // `tui_modal_render_tests` fails with the two halves the other way
+      // round). The chip is the half worth keeping, so it goes where the
+      // clip does not reach.
+      if app.config.tui.note_vim {
+        let mode = match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => "NORMAL",
+          crate::tui::state::note_editor::NoteMode::Insert => "INSERT",
+        };
+        format!("note · {branch} · {mode}")
+      } else {
+        format!("note · {branch}")
+      }
+    }
     None => "note".to_string(),
   };
   // Already rode the top rule before #549; routed through the shared
   // helper so it picks up the same bold accent as every other modal.
-  let block = overlay_block_titled(&title, app.theme.accent);
-  let inner = block.inner(area);
-  f.render_widget(block, area);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme);
+  let inner = frame.render(f, area, &title, None);
+
+  // #557: the modal carries its own mode line on its last row. The
+  // statusbar already says the same thing through the same
+  // `HintContext` (#418, so the two cannot disagree), but it sits at the
+  // bottom of the terminal — on a tall screen that is thirty rows away
+  // from the box the keys are being pressed in.
+  //
+  // Resolved before the buffer is borrowed mutably, the way the title is.
+  // #557: the mode reads as a badge, the way vim's own statusline does.
+  // `focus` is the anchor colour the statusbar context chip wears, and
+  // `clean` is the theme's green, so insert stands apart at a glance
+  // without inventing a role. With the mode off there is no badge, because
+  // there is no state to be in.
+  let mode_chip = app
+    .note_editor
+    .as_ref()
+    .filter(|_| app.config.tui.note_vim)
+    .map(|editor| match editor.mode {
+      crate::tui::state::note_editor::NoteMode::Normal => (" NORMAL ", app.theme.focus),
+      crate::tui::state::note_editor::NoteMode::Insert => (" INSERT ", app.theme.clean),
+    });
+  let hint = modal_hint_for_context_within(
+    app.hint_context(),
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+    inner.width as usize,
+    mode_chip,
+  );
+  let rows = Layout::default()
+    .direction(Direction::Vertical)
+    // `Min(1)`, not `Min(0)`: the text pane is what the modal is for, and
+    // at the two-row inner height where they compete the buffer wins the
+    // row. The mode line then renders into a zero-height rect, which
+    // ratatui draws as nothing rather than as a panic.
+    .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+    .split(inner);
+  let (inner, hint_row) = (rows[0], rows[2]);
+  f.render_widget(Paragraph::new(hint), hint_row);
 
   let Some(editor) = app.note_editor.as_mut() else {
     return;
@@ -5629,12 +6779,11 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   let term = f.area();
   let area = centered(90, 90, term);
 
-  f.render_widget(Clear, area);
-
   let title = match app.pty_overlay.as_ref().map(|p| (p.kind, p.finished)) {
     Some((PtyKind::LazyGit, _)) => "LazyGit",
     Some((PtyKind::Terminal, _)) => "Terminal",
     Some((PtyKind::Review, _)) => "Review",
+    Some((PtyKind::Browser, _)) => "Browser",
     Some((PtyKind::Exec, false)) => "Exec",
     // #325: once the one-shot command exits, the title invites dismissal.
     Some((PtyKind::Exec, true)) => "Exec · done · press any key",
@@ -5642,9 +6791,12 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   };
   // Already rode the top rule before #549; routed through the shared
   // helper so it picks up the same bold accent as every other modal.
-  let block = overlay_block_titled(title, app.theme.accent);
-  let inner = block.inner(area);
-  f.render_widget(block, area);
+  // No footer band: every row inside is the child process's own screen,
+  // and a ground painted under its last line would read as a footer that
+  // is not one.
+  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme)
+    .without_footer()
+    .render(f, area, title, None);
 
   if let Some(pty) = app.pty_overlay.as_ref() {
     let pseudo_terminal = tui_term::widget::PseudoTerminal::new(pty.parser.screen());
@@ -5734,12 +6886,15 @@ fn centered_content(pct_x: u16, min_x: u16, max_x: u16, height: u16, area: Rect)
   centered_abs(modal_width(area.width, pct_x, min_x, max_x), height, area)
 }
 
-/// A modal overlay frame: a rounded border in `color` with interior
-/// padding on every side. Shared by every overlay (#187) so the confirm /
-/// help / create / report / open / link / palette modals read consistently.
-/// The padding (2 cols horizontal, 1 row vertical) is the breathing room
-/// callers must account for when sizing — inner height shrinks by 2 rows,
-/// inner width by 4 cols, on top of the 2-cell border.
+/// The **boxed** modal frame: a rounded border in `color` with interior
+/// padding on every side (#187), what every overlay wore before #594 and
+/// what `[tui] layout = "bordered"` still gives them. The padding (2 cols
+/// horizontal, 1 row vertical) shrinks the inner height by 2 rows and the
+/// inner width by 4 cols on top of the 2-cell border.
+///
+/// Not called directly by a modal any more: [`ModalFrame`] owns the choice
+/// between this and the compact bands, and [`ModalFrame::rows`] /
+/// [`ModalFrame::cols`] are what a caller sizes against.
 ///
 /// Untitled frame. Modals that carry a title use [`overlay_block_titled`].
 fn overlay_block(color: Color) -> Block<'static> {
@@ -5760,8 +6915,9 @@ fn overlay_block(color: Color) -> Block<'static> {
 /// density; modals are the surfaces most likely to overflow a short
 /// terminal, so they get the same treatment.
 ///
-/// Callers size to `lines.len() + 2 /* border */ + 2 /* padding */` and
-/// keep that formula: the two title rows simply leave `lines`.
+/// The two title rows simply left `lines`, and since #594 what a caller
+/// sizes against is [`ModalFrame::rows`] rather than a literal, so the same
+/// arithmetic holds under either layout.
 fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
   overlay_block(color).title(
     Line::from(Span::styled(
@@ -5770,6 +6926,220 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
     ))
     .centered(),
   )
+}
+
+/// Darken everything already painted, so a modal with no rules still reads
+/// as a panel over content (issue #594).
+///
+/// Two mechanisms, because one of them is not enough on its own.
+///
+/// `DIM` is what a terminal offers, and it touches the **foreground** only.
+/// A compact pane's header is a filled band, and the full-size overlays open
+/// on the row directly under one: left at full saturation, the pane's band
+/// and the modal's own title band are the same colour on adjacent rows and
+/// read as a single strip (the #605 lesson: two grounds that are adjacent
+/// by design do not separate).
+///
+/// So the colours are mixed toward black as well, which is what "darken the
+/// background" means to the eye. Same mechanism as [`band_fill`], other
+/// direction. A colour with no components to mix (an ANSI name, whose
+/// value belongs to the terminal, or a 256-palette index) comes back
+/// unchanged and keeps `DIM` alone, which is exactly the pre-#594 look.
+fn shade_background(buf: &mut Buffer) {
+  for cell in buf.content.iter_mut() {
+    cell.fg = shade(cell.fg);
+    cell.bg = shade(cell.bg);
+    cell.modifier.insert(Modifier::DIM);
+  }
+}
+
+/// Weight kept on a colour when [`shade_background`] pushes it toward
+/// black. Settled on a capture, not by arithmetic, because the pair this
+/// has to separate is a background against a background and that is not
+/// something a test can judge. The one knob to turn if the shading reads
+/// wrong.
+const SHADE_MIX: u16 = 45;
+
+fn shade(color: Color) -> Color {
+  match color {
+    Color::Rgb(r, g, b) => {
+      let mix = |c: u8| ((c as u16 * SHADE_MIX) / 100) as u8;
+      Color::Rgb(mix(r), mix(g), mix(b))
+    }
+    other => other,
+  }
+}
+
+/// A modal's frame, resolved from `[tui] layout` (issue #594).
+///
+/// Two shapes, the same pair the panes have carried since #545, and for
+/// the same reason: a knob that says "no rules" and then draws a box
+/// around every overlay means "no rules on the surfaces I picked".
+///
+/// - **Bordered**: [`overlay_block_titled`] verbatim, a rounded rule on
+///   four sides, the title centred in the top one, two rows and four
+///   columns of interior padding.
+/// - **Compact**: no rules at all. The title rides a filled band on the
+///   frame's first row, exactly the pane treatment
+///   ([`compact_header_line`] over [`compact_header_fill`]'s mix), and the
+///   frame's LAST row is painted as the quiet `section_bg` band that
+///   carries the footer. One column of padding each side, none vertically.
+///
+/// The footer band is a **ground**, not a row of its own. Every modal
+/// already spends its last inner row on a hint line ([`push_modal_hint`]
+/// for the ones that build a `Vec<Line>`, the `footer_area` split the four
+/// full-size overlays make, `inner[4]` in the confirm / create family), so
+/// the band paints *under* what is already there and no content moves.
+/// The two surfaces whose last row carries data instead (the PTY overlay,
+/// the CI-checks filter) opt out through [`Self::without_footer`].
+///
+/// [`Self::rows`] and [`Self::cols`] are the sizing contract, and they are
+/// methods rather than a doc comment on purpose: #550 is the story of a
+/// modal width rule that lived in prose while its consumers recomputed it
+/// by hand. A caller sizes to `content.len() + frame.rows()`, never to a
+/// literal.
+#[derive(Debug, Clone, Copy)]
+pub struct ModalFrame {
+  /// `true` when the frame spends bands instead of rules.
+  compact: bool,
+  /// Bordered: the rule colour. Compact: the role the header band is mixed
+  /// from, so a destructive modal keeps its danger.
+  accent: Color,
+  /// Header band ground, compact only.
+  fill: Color,
+  /// Header band text style, compact only.
+  header: Style,
+  /// Footer band ground, compact only.
+  footer_fill: Color,
+  /// `false` on the surfaces whose last row is content, not a footer.
+  footer: bool,
+}
+
+impl ModalFrame {
+  /// Resolve the frame for `[tui] layout`. `accent` is the modal's own
+  /// colour (`theme.accent` for most, `theme.prunable` for the destructive
+  /// ones), and it drives the rules in one layout and the header band in
+  /// the other.
+  pub fn resolve(compact: bool, accent: Color, theme: &Theme) -> Self {
+    Self {
+      compact,
+      accent,
+      fill: band_fill(accent, theme.section_bg),
+      // A modal always holds focus, so the header takes the focused
+      // treatment unconditionally: dark bold text on the coloured ground.
+      header: compact_header_style(true, theme),
+      footer_fill: theme.section_bg,
+      footer: true,
+    }
+  }
+
+  /// Drop the footer band: this modal's last row carries content, and a
+  /// ground painted under it would read as a footer that is not one.
+  pub fn without_footer(self) -> Self {
+    Self { footer: false, ..self }
+  }
+
+  /// Rows the frame costs. Bordered: two rules plus two padding rows.
+  /// Compact: the header band plus the blank row under it. The footer band
+  /// is a ground under the modal's own last row, not an extra one, and the
+  /// blank row above that row belongs to the modal (every one of them
+  /// leaves a gap between its content and its hints).
+  pub const fn rows(&self) -> u16 {
+    if self.compact {
+      2
+    } else {
+      4
+    }
+  }
+
+  /// Columns the frame costs: two rules plus four padding columns, or one
+  /// padding column each side.
+  pub const fn cols(&self) -> u16 {
+    if self.compact {
+      2
+    } else {
+      6
+    }
+  }
+
+  /// The content rect inside the frame. Bordered delegates to the block
+  /// itself rather than reproducing its arithmetic: the two must agree,
+  /// and one of them owns padding.
+  pub fn inner(&self, area: Rect) -> Rect {
+    if self.compact {
+      Rect {
+        x: area.x.saturating_add(1),
+        // Past the band AND the blank row under it: a modal's first line of
+        // content never sits flush against its title, in either layout. The
+        // last row stays inside, because that is the one the footer band is
+        // painted under.
+        y: area.y.saturating_add(2),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+      }
+    } else {
+      overlay_block(self.accent).inner(area)
+    }
+  }
+
+  /// Paint the frame over `area` (clearing what is under it) and hand back
+  /// the content rect.
+  ///
+  /// `footer_right` is what the bordered layout puts in the bottom rule,
+  /// the Working Tree's per-category counts today. Compact has no rule to
+  /// put it in, so it rides the right of the footer band, which is where
+  /// the compact panes put their counter too.
+  pub fn render(&self, f: &mut Frame, area: Rect, title: &str, footer_right: Option<Line<'static>>) -> Rect {
+    f.render_widget(Clear, area);
+    if !self.compact {
+      let mut block = overlay_block_titled(title, self.accent);
+      if let Some(right) = footer_right {
+        block = block.title_bottom(right.right_aligned());
+      }
+      let inner = block.inner(area);
+      f.render_widget(block, area);
+      return inner;
+    }
+
+    // Header band. The title is NOT upper-cased the way a pane's is: a
+    // pane label is a fixed noun, while a modal title carries live text (a
+    // branch, a typed number prompt), and shouting a branch name reads as a
+    // different string.
+    let header_area = Rect { height: 1, ..area };
+    f.render_widget(
+      Paragraph::new(compact_header_line(
+        Line::from(format!(" {} ", title)),
+        None,
+        header_area.width,
+        self.header,
+      ))
+      .style(Style::default().bg(self.fill)),
+      header_area,
+    );
+
+    // Footer band, painted before the caller's content so the hint line it
+    // renders into that same row lands on top of the ground rather than
+    // under it.
+    if self.footer && area.height > 1 {
+      let footer_area = Rect {
+        y: area.y.saturating_add(area.height).saturating_sub(1),
+        height: 1,
+        ..area
+      };
+      f.render_widget(
+        Paragraph::new(compact_header_line(
+          Line::default(),
+          footer_right,
+          footer_area.width,
+          Style::default(),
+        ))
+        .style(Style::default().bg(self.footer_fill)),
+        footer_area,
+      );
+    }
+
+    self.inner(area)
+  }
 }
 
 /// Width of `s` in the cells ratatui will actually paint.
@@ -5794,7 +7164,7 @@ fn overlay_block_titled(title: &str, color: Color) -> Block<'static> {
 /// `debug_assert!` saying so. A Unix path may legally hold a `\n`, and this
 /// helper does not sanitise (that is `trunc`'s job, #506), so measuring one
 /// directly panicked every debug build.
-fn cells(s: &str) -> usize {
+pub fn cells(s: &str) -> usize {
   s.graphemes(true).map(grapheme_cells).sum()
 }
 
@@ -5814,7 +7184,7 @@ fn grapheme_cells(g: &str) -> usize {
 /// would straddle the budget is left out whole, so the prefix is `<= max`
 /// cells and the cut lands where a glyph ends rather than between a base and
 /// its combining mark.
-fn head_end(s: &str, max: usize) -> usize {
+pub fn head_end(s: &str, max: usize) -> usize {
   let mut end = 0usize;
   let mut used = 0usize;
   for (i, g) in s.grapheme_indices(true) {
@@ -5877,6 +7247,27 @@ pub fn ellipsize_middle(s: &str, max: usize) -> String {
   format!("{}…{}", &s[..head_end], &s[tail_start..])
 }
 
+/// Byte index at which `skip` terminal CELLS of `s` have been consumed.
+///
+/// The counterpart of [`head_end`], for the horizontal offset of the rich
+/// view (Codex review on #551): both the bound and the clip used to count
+/// characters, and a line of CJK is twice as wide as it is long, so the
+/// tail of one could not be reached at any offset. A glyph straddling the
+/// boundary is dropped whole rather than half-shown.
+pub fn skip_cells(s: &str, skip: usize) -> usize {
+  if skip == 0 {
+    return 0;
+  }
+  let mut used = 0usize;
+  for (i, g) in s.grapheme_indices(true) {
+    if used >= skip {
+      return i;
+    }
+    used += grapheme_cells(g);
+  }
+  s.len()
+}
+
 /// Right-pad `s` to `width` terminal cells.
 ///
 /// `{:<width$}` pads to a *char* count, which is the same thing only for
@@ -5936,12 +7327,13 @@ fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let title = "Open in Browser";
   let lines = link_open_modal_lines(app, title, Some(app.open_menu_selected));
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block_titled(title, accent)), area);
+  let content = frame.render(f, area, title, None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
@@ -5977,12 +7369,13 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       lines
     }
   };
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block_titled(&title, accent)), area);
+  let content = frame.render(f, area, &title, None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
@@ -6093,7 +7486,8 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = width.saturating_sub(frame.cols()) as usize;
   let mut lines: Vec<Line<'static>> = Vec::new();
   // Leave room for the title + hint + borders; the picker scrolls past that.
   let max_visible = (term.height as usize).saturating_sub(8).max(3);
@@ -6112,13 +7506,10 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
     &app.modal_keymap,
     &app.theme,
   );
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let height = lines.len() as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(
-    Paragraph::new(lines).block(overlay_block_titled("Run an exec profile", accent)),
-    area,
-  );
+  let content = frame.render(f, area, "Run an exec profile", None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Render the generic detail overlay (issue #408). A centred modal listing
@@ -6130,8 +7521,15 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   use crate::tui::state::detail_overlay::{DetailMode, DetailRole};
   let accent = app.theme.accent;
   let term = f.area();
-  let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
+  // The width policy follows the consumer (issue #551): the rich view holds
+  // prose and gets the wider box, the agents and CI lists keep the shared
+  // one. It MUST agree with `App::rich_view_width`, which wraps the rows
+  // against the same number before they ever reach here — wrapping at one
+  // width and painting at another either ellipsises the tail of every line
+  // or leaves a column of dead space down the right edge.
+  let width = detail_overlay_width(app.detail_overlay.kind, term.width);
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let inner = width.saturating_sub(frame.cols()) as usize;
   let ov = &app.detail_overlay;
 
   // CI checks filter (issue #436): palette-style query over the overlay's
@@ -6182,19 +7580,19 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // this count in #549 — the title rides the top rule now (Codex review,
     // PR #546: keeping them here left the frame two rows too tall and the
     // scrollbar two rows too low).
-    let height = (2 + list_h) as u16 + 2 /* border */ + 2 /* padding */;
+    // No footer band (#594): the last row here is a listing row when the
+    // window is full, and a ground under it would read as a footer.
+    let filter_frame = frame.without_footer();
+    let height = (2 + list_h) as u16 + filter_frame.rows();
     let area = centered_abs(width, height, term);
-    f.render_widget(Clear, area);
-    f.render_widget(
-      Paragraph::new(lines).block(overlay_block_titled("Filter CI checks", accent)),
-      area,
-    );
+    let content = filter_frame.render(f, area, "Filter CI checks", None);
+    f.render_widget(Paragraph::new(lines), content);
     // Scrollbar over the LISTING sub-area (Codex review #455): the rows
-    // start after border (1) + padding (1) + the query line + its blank
-    // spacer = y + 4.
+    // start after the frame's own chrome plus the query line and its blank
+    // spacer.
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 4,
+      y: content.y + 2,
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -6270,13 +7668,10 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       ],
       &app.theme,
     ));
-    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let height = lines.len() as u16 + frame.rows();
     let area = centered_abs(width, height, term);
-    f.render_widget(Clear, area);
-    f.render_widget(
-      Paragraph::new(lines).block(overlay_block_titled("Attach a session", accent)),
-      area,
-    );
+    let content = frame.render(f, area, "Attach a session", None);
+    f.render_widget(Paragraph::new(lines), content);
     // Scrollbar over the listing sub-area when the candidates overflow the
     // fixed window — same affordance as the detail mode below (issue #445).
     // Intersected with the modal's real area: on a tiny terminal
@@ -6284,7 +7679,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // past the ratatui buffer and panic (Codex review #445).
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 2 /* border + padding */ + 2, /* id line + blank */
+      y: content.y + 2, /* id line + blank */
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -6298,12 +7693,36 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // The modal height is derived from the VISIBLE row count, which is
   // constant while navigating — scrolling must never resize the frame
   // (user feedback 2026-07-22). The window follows the selection.
-  let max_visible = (term.height as usize).saturating_sub(10).max(3);
+  let max_visible = detail_visible_rows(term.height);
   let visible = total.min(max_visible);
   let (start, end) = picker_window(total, ov.selected, visible);
 
   let label_w = ov.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
   let mut lines: Vec<Line<'static>> = Vec::new();
+  // The issue / PR tab bar (issue #551). Empty unless BOTH sides are
+  // fetched: a lone tab is a label, not a tab, and would cost two rows to
+  // say what the title already says.
+  let tabs = app.rich_view_tabs();
+  let h_offset = app.rich_h_offset();
+  if !tabs.is_empty() {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (label, active) in &tabs {
+      if !spans.is_empty() {
+        spans.push(Span::styled("  ", Style::default().fg(app.theme.muted)));
+      }
+      let style = if *active {
+        Style::default()
+          .fg(app.theme.name)
+          .bg(app.theme.selection_bg)
+          .add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(app.theme.muted)
+      };
+      spans.push(Span::styled(format!(" {label} "), style));
+    }
+    lines.push(Line::from(spans));
+    lines.push(Line::from(String::new()));
+  }
   for (i, row) in ov.rows.iter().enumerate().take(end).skip(start) {
     let (label_color, value_color, value_bold) = match row.role {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
@@ -6320,6 +7739,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // aligned inside that bar, rendered muted. Its width is RESERVED
     // (Codex review #455): a long check name truncates with an ellipsis
     // instead of pushing the detail column past the clipping edge.
+    // A row with no label spans the whole inner width (issue #551). The
+    // agents and CI consumers label every row they emit, so this only ever
+    // fires for the rich view's prose, which is exactly the payload the
+    // reserved column was costing without giving anything back.
+    let gutter = if row.label.is_empty() { 0 } else { label_w + 2 };
     let mut extra: String = row.extra.as_deref().unwrap_or("").to_string();
     let mut extra_cols = extra.chars().count();
     // The detail column is bounded too (Codex review #455): on a narrow
@@ -6330,7 +7754,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // or its full width when shorter.
     if extra_cols > 0 {
       let reserve = row.value.chars().count().min(12);
-      let extra_budget = inner.saturating_sub(label_w + 2 + reserve + 2);
+      let extra_budget = inner.saturating_sub(gutter + reserve + 2);
       if extra_cols > extra_budget {
         if extra_budget == 0 {
           extra.clear();
@@ -6341,15 +7765,26 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         extra_cols = extra.chars().count();
       }
     }
-    let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
-    let value: String = if row.value.chars().count() > value_budget {
+    let value_budget = inner.saturating_sub(gutter + if extra_cols > 0 { extra_cols + 2 } else { 0 });
+    // A preformatted row is clipped by the offset below, not ellipsised
+    // here: an ellipsis would throw away the very columns the offset exists
+    // to reach (issue #551).
+    let value: String = if !row.preformatted && row.value.chars().count() > value_budget {
       let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
       v.push('…');
       v
     } else {
       row.value.clone()
     };
-    let text_cols = label_w + 2 + value.chars().count();
+    // Against what will actually be painted: a preformatted row clipped by
+    // the offset is shorter than its value, and padding for the full value
+    // would push the right-aligned detail column off the frame.
+    let painted = if row.segments.is_empty() || !row.preformatted {
+      value.chars().count()
+    } else {
+      cells(&value).saturating_sub(h_offset).min(value_budget)
+    };
+    let text_cols = gutter + painted;
     let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
@@ -6364,12 +7799,81 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       pad_style = pad_style.bg(app.theme.selection_bg);
       extra_style = extra_style.bg(app.theme.selection_bg);
     }
-    lines.push(Line::from(vec![
-      Span::styled(format!("{:label_w$}  ", row.label), label_style),
-      Span::styled(value, value_style),
-      Span::styled(" ".repeat(pad), pad_style),
-      Span::styled(extra, extra_style),
-    ]));
+    let mut spans = Vec::with_capacity(4);
+    if gutter > 0 {
+      spans.push(Span::styled(format!("{:label_w$}  ", row.label), label_style));
+    }
+    // A row that carries Markdown segments is painted run by run (issue
+    // #551); every other row keeps the single-span path it always had. The
+    // segments concatenate to `value`, so the truncation above still decides
+    // how many columns get painted.
+    if row.segments.is_empty() {
+      spans.push(Span::styled(value, value_style));
+    } else {
+      // A preformatted row was never wrapped — it is code, where the column
+      // is the meaning — so it is clipped against the view's horizontal
+      // offset instead (issue #551). Every other row already fits, and
+      // scrolling one would only hide its left edge.
+      let skip = if row.preformatted { h_offset } else { 0 };
+      let mut skipped = 0usize;
+      let mut left = value_budget;
+      for segment in &row.segments {
+        if left == 0 {
+          break;
+        }
+        // Measured in CELLS throughout (Codex review on #551). `value_budget`
+        // is a column count and so is the offset; counting the text in
+        // characters against them puts the tail of a CJK line out of reach
+        // at every offset.
+        let cols = cells(&segment.text);
+        if skipped + cols <= skip {
+          skipped += cols;
+          continue;
+        }
+        let drop = skip.saturating_sub(skipped);
+        skipped += cols;
+        let kept = &segment.text[skip_cells(&segment.text, drop)..];
+        // Does this run outrun what is left of the row? Answered BEFORE the
+        // cut, so the ellipsis can be given a column instead of being added
+        // on top of a full one (Codex review, pass 4).
+        //
+        // The first cut of this reserved against `value_budget`, the whole
+        // row's width, where `left` is what remains after the runs already
+        // painted. A row opening with a badge therefore came out one column
+        // over, and ratatui clipped the ellipsis itself — which put the
+        // silent truncation back exactly where pass 2 had removed it.
+        let overflows = cells(kept) > left;
+        let room = if overflows { left.saturating_sub(1) } else { left };
+        let mut text: String = kept[..head_end(kept, room)].to_string();
+        left -= cells(&text);
+        // `value` above already carries an ellipsised copy, but this branch
+        // paints the RUNS, so it has to mark the cut itself: losing the end
+        // of a URL with nothing saying so is the exact failure the ellipsis
+        // exists to prevent (Codex review, pass 2).
+        if overflows {
+          text.push('…');
+          left = left.saturating_sub(1);
+        }
+        let mut style = markdown_style(segment.emphasis, &app.theme);
+        // A badge run goes through the Status pane's own `chip_style`, so
+        // the two surfaces cannot drift into resembling each other instead
+        // of matching (validation feedback on issue #551).
+        if segment.chip {
+          style = match style.fg {
+            Some(fg) => chip_style(fg),
+            None => style,
+          };
+        } else if i == ov.selected {
+          // A chip is already reverse video; painting the selection
+          // background under it would swap its ground and erase it.
+          style = style.bg(app.theme.selection_bg);
+        }
+        spans.push(Span::styled(text, style));
+      }
+    }
+    spans.push(Span::styled(" ".repeat(pad), pad_style));
+    spans.push(Span::styled(extra, extra_style));
+    lines.push(Line::from(spans));
   }
   // #436 validation feedback: the CI checks consumer advertises ITS verbs,
   // not the agents' attach / detach — the hint context follows the kind.
@@ -6380,25 +7884,22 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     crate::tui::state::detail_overlay::DetailKind::Agents => HintContext::Detail,
   };
   push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
-  // `visible` rows + the hint's blank spacer and its line. The two title
-  // rows left this count in #549 — the title rides the top rule now, and
-  // keeping them here left the frame two rows too tall, so the hint row
-  // floated with dead space under it (validation feedback + Codex review,
-  // PR #546).
-  let height = (visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
+  // `visible` rows + the hint's blank spacer and its line, plus the tab bar
+  // and ITS spacer when there is one. A row added to `lines` that is not
+  // counted here leaves the frame short and the last row clipped; one
+  // counted but not added leaves dead space under the hint (#549 / PR #546).
+  let chrome = if tabs.is_empty() { 2 } else { 4 };
+  let height = (visible + chrome) as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(
-    Paragraph::new(lines).block(overlay_block_titled(&ov.title, accent)),
-    area,
-  );
+  let content = frame.render(f, area, &ov.title, None);
+  f.render_widget(Paragraph::new(lines), content);
   // Scrollbar over the rows sub-area (right padding column) when the list
   // overflows — the missing affordance from the feedback.
   // Intersected with the modal's real area for the same tiny-terminal
   // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
-    y: area.y + 2, /* border + padding */
+    y: content.y + if tabs.is_empty() { 0 } else { 2 },
     width: area.width.saturating_sub(2),
     height: visible as u16,
   }
@@ -6422,7 +7923,8 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let border = if armed { danger } else { accent };
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), border, &app.theme);
+  let inner = width.saturating_sub(frame.cols()) as usize;
 
   let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -6525,13 +8027,10 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
     &app.modal_keymap,
     &app.theme,
   );
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let height = lines.len() as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  f.render_widget(Clear, area);
-  f.render_widget(
-    Paragraph::new(lines).block(overlay_block_titled("Reclaim build artifacts", border)),
-    area,
-  );
+  let content = frame.render(f, area, "Reclaim build artifacts", None);
+  f.render_widget(Paragraph::new(lines), content);
 }
 
 /// Render the command palette overlay (issue #32).
@@ -6559,10 +8058,11 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let block = overlay_block_titled("Rename Worktree", clean);
+  let title = "Rename Worktree";
+  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
-  let inner_w = block.inner(outer).width as usize;
+  let inner_w = frame.inner(outer).width as usize;
   let label_w = 5usize;
   let gutter = 2 + label_w + 2;
   let value_w = inner_w.saturating_sub(gutter);
@@ -6626,8 +8126,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     lines.extend(fields);
   }
 
-  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let height = lines.len() as u16 + 4 + frame.rows();
   let area = centered_content(70, 56, 72, height, term);
+  let content = frame.render(f, area, title, None);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -6637,10 +8138,8 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(block.inner(area));
+    .split(content);
 
-  f.render_widget(Clear, area);
-  f.render_widget(block, area);
   render_form_body(f, inner[0], lines, focused_row, &app.theme);
 
   if app.is_edit_worktree_loading() {
@@ -6683,12 +8182,13 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 
 fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered_viewport(60, 64, 96, 50, f.area());
-  f.render_widget(Clear, area);
-
   let accent = app.theme.accent;
-  let outer = overlay_block_titled("Command Palette", accent);
-  let inner = outer.inner(area);
-  f.render_widget(outer, area);
+  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme).render(
+    f,
+    area,
+    "Command Palette",
+    None,
+  );
 
   // Input-first layout (issue #262): the `:` input field
   // (background-filled, mirroring the New Worktree modal's
@@ -6804,22 +8304,14 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
     // #436: advertise the key that opens the CI checks overlay right after
-    // the indicator, resolved live so a rebind shows through. The key is
-    // context-accurate (Codex review #455): the contextual `c`
-    // (EditWorktree's chord) only while the status pane holds the focus —
-    // in the worktrees context that key opens the rename modal, so the
-    // global `ci_checks` binding is advertised instead. An unbound
-    // EditWorktree falls back to the global binding (still live in that
-    // context); only when both are unbound does the suffix disappear. In
-    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
-    // printable keys feed the filter — so no key is advertised at all.
+    // the indicator, resolved live so a rebind shows through. Since #593
+    // that key is `ci_checks` in every context — the pane-dependent form
+    // this used to take existed only because the status pane borrowed
+    // `c`, and `c` now means the commit listing in both panes. In picker
+    // mode (`gwm switch`) run_action drops Action::CiChecks — printable
+    // keys feed the filter — so no key is advertised at all.
     let ci_key = if app.picker_mode {
       None
-    } else if app.sidebar.open && app.sidebar.focused {
-      app
-        .keymap
-        .primary_chord(Action::EditWorktree)
-        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
     } else {
       app.keymap.primary_chord(Action::CiChecks)
     };
@@ -7372,10 +8864,27 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
 /// pre-#73 convention). Every other row renders two Issue/PR slots:
 ///
 /// - left = **Issue** — `●` with the loaded issue-state colour when known,
-///   `●` in `clean` green when only a link is known, else `-` in white.
+///   `●` in `name` white when only a link is known, else `-` in white.
 /// - right = **PR** — `●` with the loaded PR-state colour when known, `●`
-///   in `locked` violet when only a link is known, else `-` in white.
+///   in `name` white when only a link is known, else `-` in white.
 /// - a `muted` `/` separates them.
+///
+/// Both "linked, not fetched yet" slots take `name` (#596). They used to take
+/// a status role each, `clean` for the issue and `locked` for the PR, so the
+/// row said two different things about one absence of data and each borrowed a
+/// colour a loaded state owns: `clean` is [`issue_badge_color`]'s and
+/// [`pr_badge_color`]'s Open, `locked` is Merged, Closed, and the
+/// locked-worktree badge.
+///
+/// `name` is the one role here that neither badge map can produce, and it is
+/// already the other half of this same cell (the empty-slot dash), so the two
+/// slots agree without claiming anything. `muted` is not the neutral it looks
+/// like: it is the Draft colour and the separator's. `sidebar_status_dot`
+/// reaches for the same idea on its own surface, though not the same value:
+/// it hard-codes `Color::White` because it has no glyph to vary and needs a
+/// colour outside the theme's roles entirely, where the marker can lean on
+/// `●` vs `-` instead. So `name` and that white coincide in the default theme
+/// and differ in every preset, by design on both sides.
 ///
 /// The table is normally the no-fetch read path. Once GitHub status has been
 /// fetched for linked rows, their snapshots carry loaded states so
@@ -7387,17 +8896,19 @@ pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
     return Line::from(Span::styled("★", Style::default().fg(theme.main)));
   }
-  // An empty slot stays `name`-white so "no link" reads as a neutral
-  // placeholder rather than borrowing a status colour that would claim the
-  // row. A linked slot takes its accent unless a live loaded state exists.
+  // A slot stays `name`-white until a live state is loaded, so neither "no
+  // link" nor "not fetched yet" borrows a status colour that would claim the
+  // row. The two cases stay apart on the glyph (`●` vs `-`), not the colour.
+  // The arms are kept split rather than collapsed to `_`: the day one of the
+  // two stops being white, the site to change is already there.
   let issue_color = match (w.link.issue, w.issue_state) {
     (Some(_), Some(state)) => issue_badge_color(state, theme),
-    (Some(_), None) => theme.clean,
+    (Some(_), None) => theme.name,
     (None, _) => theme.name,
   };
   let pr_color = match (w.link.pr, w.pr_state) {
     (Some(_), Some(state)) => pr_badge_color(state, theme),
-    (Some(_), None) => theme.locked,
+    (Some(_), None) => theme.name,
     (None, _) => theme.name,
   };
   Line::from(vec![

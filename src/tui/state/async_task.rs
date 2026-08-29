@@ -37,7 +37,9 @@
 use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
+use crate::tui::state::commits::{CommitsSnapshot, MetaColumn};
 use crate::tui::state::sidebar::SidebarMode;
+use crate::tui::state::working_tree::WorkingTreeSnapshot;
 use crate::tui::ui::SidebarSections;
 use crate::worktree::WorktreeInfo;
 use std::collections::{HashMap, HashSet};
@@ -90,6 +92,10 @@ pub enum TaskKind {
   /// directory, and optionally delete the branch, so it must not block the
   /// render loop while the confirm modal is open.
   DeleteWorktree,
+  /// Landing a PR / MR on its base branch (issue #551). A mutating global
+  /// op like [`Self::DeleteWorktree`]: one merge in flight at a time, and
+  /// it must not run while another mutation does.
+  MergePr,
   /// Off-thread `git pull` of the selected worktree's branch (#290). One
   /// global slot — a second `p` press coalesces while one is in flight.
   Pull,
@@ -122,12 +128,45 @@ pub enum TaskKind {
   /// per row; the render key-check discards a result for a since-moved
   /// selection and the next tick requests the settled one.
   Sidebar,
+  /// Off-thread snapshot for the full-size Working Tree overlay (issues
+  /// #592, #613). The same `git status --porcelain -z` the sidebar pane
+  /// runs, but requested by a keypress rather than by navigation, and it
+  /// cannot run inline: `STATUS_SCAN_CAP` bounds how many records are read,
+  /// not how long git takes to produce the first one, so an untracked tree
+  /// on a cold or network filesystem would freeze the event loop for as
+  /// long as the walk takes. A single global slot; a second `W` while one
+  /// is in flight coalesces onto it.
+  WorkingTree,
+  /// Off-thread snapshot for the full-size commit listing (issue #593).
+  /// The same revwalk the sidebar's Commits pane runs, but requested by a
+  /// keypress rather than by navigation, and it cannot run inline: the walk
+  /// sorts `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph
+  /// before yielding a row and the limit bounds the output, not the
+  /// latency. A single global slot; a repeated `6` on the same worktree at
+  /// the same limit coalesces onto the read already out.
+  Commits,
+  /// Off-thread diff stats for the commit listing (issue #593). A second,
+  /// slower read chained after [`Self::Commits`]: one `git log --raw
+  /// --numstat` over exactly the oids already on screen, about a second
+  /// for a page and under three for the deepest. It cannot ride the first
+  /// read — that would hold the rows back behind it — so the overlay shows
+  /// the log immediately and the column grows when this lands.
+  CommitStats,
   /// Off-thread agent-session detection (issue #408): the four artefact
   /// scans under the user's home (`agent_sessions::detect_all`) touch the
   /// filesystem and must never run inside `terminal.draw()`. A single global
   /// slot — a tick that finds a run in flight coalesces; the render reads
   /// the last completed snapshot only.
   AgentSessions,
+  /// Off-thread resume of an agent session in a herdr container (#591).
+  /// Unlike tmux and zellij, which take the command in the same argv that
+  /// opens the pane and return in ~40ms, herdr needs a sequenced round trip:
+  /// open, wait for the new shell to reach its prompt, then type the line
+  /// into it. The wait is the reason this is a task at all — measured at
+  /// ~60s on a worktree with `direnv` and a nix flake, which is 60s of
+  /// frozen TUI if it runs inline. One global slot: a second `o` coalesces
+  /// rather than opening a second pane.
+  AgentPane,
 }
 
 impl TaskKind {
@@ -143,12 +182,17 @@ impl TaskKind {
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
       TaskKind::DeleteWorktree => "deleting worktree…",
+      TaskKind::MergePr => "merging…",
       TaskKind::Pull => "pulling…",
       TaskKind::Push => "pushing…",
       TaskKind::EditWorktree => "renaming worktree…",
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
+      TaskKind::WorkingTree => "reading the working tree…",
+      TaskKind::Commits => "reading the log…",
+      TaskKind::CommitStats => "reading the diffs…",
       TaskKind::AgentSessions => "detecting agent sessions…",
+      TaskKind::AgentPane => "opening agent pane…",
     }
   }
 
@@ -173,6 +217,7 @@ impl TaskKind {
         | TaskKind::Sync
         | TaskKind::Bootstrap
         | TaskKind::DeleteWorktree
+        | TaskKind::MergePr
         | TaskKind::Pull
         | TaskKind::Push
         | TaskKind::EditWorktree
@@ -352,6 +397,8 @@ pub enum TaskMsg {
   /// and the per-target outcome of the batch. A single-row `d` is a batch of
   /// one, so there is one arm rather than two code paths.
   DeleteWorktree(u64, DeleteBatchOutcome),
+  /// `(generation, Ok(()) | Err(message))` for a merge (issue #551).
+  MergePr(u64, Result<(), String>),
   /// A `git pull` result (#290): the worker's generation, the worktree's
   /// display name, and the outcome (a one-line status string on success or
   /// a stringified error).
@@ -374,6 +421,28 @@ pub enum TaskMsg {
   /// `SidebarState::cache`; a result whose selection has since moved is dropped
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
+  /// Working Tree overlay snapshot (issues #592, #613): the generation, the
+  /// worktree `path` it was read for, and everything that read produced —
+  /// the file-explorer rows, their per-category counts and the right-hand
+  /// `+N -M` column. The drain hands it to `WorkingTreeModal::load`; a
+  /// result for a path the user has since navigated away from is dropped.
+  WorkingTree(u64, PathBuf, WorkingTreeSnapshot),
+  /// Commit-listing snapshot (issue #593): the generation, the worktree
+  /// `path` and the `limit` it was read at, and everything that read
+  /// produced: the rendered graph rows, the commit count they describe
+  /// (NOT `lines.len()` — the empty and error cases paint one sentinel
+  /// row), and the two right-hand metadata columns.
+  /// The drain hands the rows to `CommitsModal::load`; a result for a path
+  /// the user has navigated away from, or for a limit the overlay has since
+  /// paged past, is dropped.
+  Commits(u64, PathBuf, usize, CommitsSnapshot),
+  /// Commit-listing diff stats (issue #593): the generation, the worktree
+  /// `path`, the `limit` and the `tip` the listing was read at, and the
+  /// rebuilt metadata columns. All three identity fields travel because
+  /// the listing can be reopened, repaged or moved on while this slower
+  /// read is out, and a column describing another listing is worse than
+  /// no column.
+  CommitStats(u64, PathBuf, usize, Option<String>, [MetaColumn; 3]),
   /// An agent-session detection result (issue #408): the worker's generation
   /// and the per-worktree-path summary. The drain replaces the app snapshot
   /// atomically; a superseded late result is dropped by
@@ -391,6 +460,12 @@ pub enum TaskMsg {
     // repo — branch-config I/O stays off the event loop (round P).
     std::collections::BTreeMap<String, Vec<String>>,
   ),
+  /// An agent-resume result for a herdr container (#591): the worker's
+  /// generation, the status line it produced, and whether the open
+  /// succeeded. The line is built in the worker rather than here because
+  /// only it knows which of the three steps failed and what herdr said
+  /// about it.
+  AgentPane(u64, std::result::Result<String, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
@@ -497,6 +572,8 @@ impl TaskRunner {
       Some(TaskKind::Sync.loading_label())
     } else if self.running.contains(&TaskKind::Bootstrap) {
       Some(TaskKind::Bootstrap.loading_label())
+    } else if self.running.contains(&TaskKind::MergePr) {
+      Some(TaskKind::MergePr.loading_label())
     } else if self.running.contains(&TaskKind::DeleteWorktree) {
       Some(TaskKind::DeleteWorktree.loading_label())
     } else if self.running.contains(&TaskKind::Pull) {

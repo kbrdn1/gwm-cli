@@ -297,8 +297,8 @@ fn bindings_for_returns_only_that_contexts_verbs() {
   let km = ModalKeymap::defaults();
   let confirm = km.bindings_for(KeyContext::Confirm);
   assert!(confirm.iter().all(|b| b.action.context() == KeyContext::Confirm));
-  // confirm has six verbs
-  assert_eq!(confirm.len(), 6);
+  // confirm has seven verbs (#551 added `cycle_method`)
+  assert_eq!(confirm.len(), 7);
 }
 
 // ── BackTab / Shift-Tab terminal disagreement (issue #219 review) ──────────
@@ -320,5 +320,70 @@ fn backtab_with_shift_modifier_resolves_like_plain_backtab() {
   assert_eq!(
     km.resolve(KeyContext::Config, &shifted),
     Some(ModalAction::ConfigPrevTab)
+  );
+}
+
+#[test]
+fn detail_context_binds_o_to_the_resume_pane_verb() {
+  // Issue #591. `o` was unbound in the agents context, which is why it was
+  // available; in the list view it is `Action::TerminalPty`, so the letter
+  // already reads as "open a terminal here".
+  let km = ModalKeymap::defaults();
+  assert_eq!(
+    km.resolve(KeyContext::Detail, &ch('o')),
+    Some(ModalAction::DetailOpenPane)
+  );
+  // It joins the other three under `[tui.keys.modal.detail]`, so it stays
+  // rebindable rather than being a hardcoded key in the dispatch.
+  assert_eq!(
+    ModalAction::from_context_verb(KeyContext::Detail, "open_pane"),
+    Some(ModalAction::DetailOpenPane)
+  );
+  // The verb it must not have stolen: `a` is still the pin.
+  assert_eq!(
+    km.resolve(KeyContext::Detail, &ch('a')),
+    Some(ModalAction::DetailAttach)
+  );
+}
+
+#[test]
+fn the_working_tree_overlay_binds_its_own_scroll_and_exit() {
+  // Issue #592: the full-size Working Tree listing is a scroll-only overlay,
+  // so it ships the same verb set as the other read-only modals — and under
+  // its own context, so rebinding `[tui.keys.modal.working_tree]` does not
+  // reach into `command_logs`.
+  let km = ModalKeymap::defaults();
+  assert_eq!(KeyContext::WorkingTree.config_path(), "working_tree");
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &stroke(KeyCode::Esc)),
+    Some(ModalAction::WorkingTreeClose)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('q')),
+    Some(ModalAction::WorkingTreeClose)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('j')),
+    Some(ModalAction::WorkingTreeScrollDown)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('k')),
+    Some(ModalAction::WorkingTreeScrollUp)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('G')),
+    Some(ModalAction::WorkingTreeScrollBottom)
+  );
+  // The copy verb belongs to the command logs, not here.
+  assert_eq!(km.resolve(KeyContext::WorkingTree, &ch('y')), None);
+  // The open key closes the overlay too. Since #613 the toggle resolves
+  // BEFORE the modal verbs, so a verb bound to `W` no longer shadows the
+  // close: it is the verb that becomes unreachable. Still worth pinning
+  // that the default context leaves `W` alone, because a context claiming
+  // its own overlay's opener would silently cost the user that verb.
+  assert_eq!(
+    km.resolve(KeyContext::WorkingTree, &ch('W')),
+    None,
+    "the context must leave `W` to the global keymap, which is what closes the overlay"
   );
 }

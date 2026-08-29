@@ -327,6 +327,97 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [tui]
 # layout = "bordered"
 
+# --- TUI note editor: vim normal mode (issue #557) ---------------------------
+# `note_vim` gives the in-TUI note editor (`N`) a vim normal mode. ON by
+# default, and the cost is `Esc`: it leaves insert instead of writing and
+# closing, so saving takes two presses. Turn it off for the modeless editor,
+# where one `Esc` writes and closes.
+#
+# On, `N` opens in normal mode, the modal title carries a NORMAL / INSERT chip
+# and the statusbar under it lists that mode's keys. `i` / `I` / `a` / `A` /
+# `o` / `O` enter insert; `hjkl`, `w` / `b` / `e` (and `W` / `B` / `E`),
+# `0` / `^` / `$`, `gg` / `G`, `x` and `dd` are the motions. No counts, no
+# registers, no undo: `Ctrl+e` hands the file to the real vim for anything
+# past that.
+#
+# It changes no binding. `[tui.keys.modal.note]` holds the same four verbs
+# either way (`close`, `open_editor`, `toggle_bullet`, `toggle_checkbox`), and
+# an unmodified printable bound to one of them is still refused at load time.
+#
+# [tui]
+# note_vim = false
+
+# --- What a mux spawn opens (issues #589 / #608) -----------------------------
+# `mux_open_in` — what the TUI's `t` key opens in the multiplexer:
+#   "pane"       split the current pane (DEFAULT)
+#   "tab"        a whole screen: a tmux window, a zellij or herdr tab
+#   "workspace"  herdr's level above a tab. HERDR ONLY.
+#
+# "workspace" is REFUSED on tmux and zellij, not downgraded: neither has a
+# level there, so `t` says so on the status bar and opens nothing. A silent
+# tab would leave this setting describing something that did not happen.
+# (Both have sessions, the structural analogue, but gwm runs inside one:
+# tmux would need two commands to create and switch to a sibling, and zellij
+# refuses to nest sessions.)
+#
+# `mux_pane_direction` — which half a pane takes, under "pane" only:
+#   "right"  side by side (DEFAULT since #589)
+#   "down"   stacked below
+#   "left"   side by side, other side  (tmux `-h -b`, zellij; REFUSED by herdr)
+#   "up"     stacked above             (tmux `-v -b`, zellij; REFUSED by herdr)
+#
+# `right` is a behaviour change for tmux and zellij users, and a deliberate
+# one. Before #589 a split carried no direction at all, so each backend
+# answered for itself: tmux fell back to `-v` and stacked, zellij took "the
+# biggest available space", herdr went right because gwm hardcoded it. `right`
+# is what the `--split` help has promised since it shipped, and the half that
+# is free on a wide screen. Set "down" for the old tmux behaviour.
+#
+# `-b` ("before") flips the side on the axis `-h` / `-v` picked, which is where
+# left and up come from on tmux. herdr declares `[possible values: right, down]`
+# and REFUSES the other two rather than substituting one it does have.
+#
+# `gwm tmux|zellij|herdr <pattern> --direction <dir>` overrides the
+# direction for one invocation. The CLI spells its own target instead (bare is
+# a tab, `-p` is a pane), so `mux_open_in` does not reach it.
+#
+# A `[tui.macro*]` with `open_in = "mux_pane"` reads both, with one caveat:
+# under "tab" a zellij macro and under "workspace" every macro falls back to
+# the PTY overlay, because those verbs take no trailing command to run.
+#
+# [tui]
+# mux_open_in        = "workspace"
+# mux_pane_direction = "down"
+
+# --- Terminal browser (issue #590) -------------------------------------------
+# `terminal_browser` is a command that renders a URL INSIDE the terminal, so a
+# link opens next to gwm instead of pulling you out of the workspace gwm is
+# sitting in. It covers every link the TUI opens: the browse-links menu (`B`),
+# the open-menu Issue and PR picks, a row in the rich PR/issue view, a CI
+# check's details URL, and `.` for the docs.
+#
+# The `{url}` placeholder is optional: a bare "w3m" gets the URL appended as
+# its last argument, which w3m / lynx / carbonyl / browsh all take anyway.
+#
+# ONLY consulted when a multiplexer is detected ($TMUX / $ZELLIJ / $HERDR_ENV).
+# A terminal browser with nowhere to put it is worse than the system browser,
+# so unset (the DEFAULT) is gwm's behaviour up to 1.9 on every platform: every
+# link goes to `open` / `xdg-open` / `explorer`. The level a pane opens at is
+# `mux_open_in` / `mux_pane_direction` above, the pair `t` and `o` read.
+#
+# Where the container takes no command (herdr, a zellij tab, any "workspace")
+# the browser runs in the PTY overlay instead, and the status bar names the
+# backend that refused. A browser missing from $PATH falls back to the system
+# browser, with the binary named.
+#
+# The URL is always ONE argument: the template is tokenised BEFORE the
+# placeholder is substituted, so `w3m {url}` and `w3m "{url}"` are the same
+# command and a URL's `?`, `&` and `#` cannot become shell syntax. Only
+# absolute http/https URLs are passed on. An empty string reads as unset.
+#
+# [tui]
+# terminal_browser = "w3m {url}"
+
 # --- TUI clipboard (issue #367) ----------------------------------------------
 # How yanked text (path / branch / worktree name / command logs) reaches the
 # clipboard:
@@ -530,6 +621,26 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [clean.profiles.deep]
 # dirs = ["target", "node_modules", "dist", "build", ".cache", ".venv"]
+
+# --- agent resume commands (issue #591) -------------------------------------
+# What `o` runs in the new multiplexer pane when you resume a session from the
+# agents overlay (`a`). `{session}` is the detected session id; it is read out
+# of the tool's own artefacts, so gwm refuses to resume unless it is a plain id
+# (letters, digits, `-`, `_`, `.`) and quotes it on top. Quoting alone would not
+# hold if YOUR template puts the placeholder inside double quotes.
+#
+# The LEVEL the pane opens at is not set here: `o` reads `mux_open_in` and
+# `mux_pane_direction` above, the same pair `t` reads.
+#
+# The values below ARE the defaults, so this block only earns its keep when
+# one of the four CLIs changes its flags before gwm catches up. An empty
+# string reads as unset and restores the default.
+#
+# [tui.agent_resume]
+# claude   = "claude -r {session}"
+# codex    = "codex resume {session}"
+# opencode = "opencode -s {session}"
+# vibe     = "vibe --resume {session}"
 
 # --- `o: open` dispatch (issue #73) -----------------------------------------
 # How the `o` key behaves on the highlighted worktree. Three modes:

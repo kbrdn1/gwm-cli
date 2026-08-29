@@ -1,4 +1,5 @@
 use crate::error::{GwmError, Result};
+use crate::multiplexer::{SpawnMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -17,6 +18,15 @@ pub struct Config {
   /// key is the supported way in; it always wins over inference.
   #[serde(default)]
   pub forge: Option<crate::forge::ForgeKind>,
+  /// `merge_method` — how the TUI lands a PR / MR (validation feedback on
+  /// issue #551).
+  ///
+  /// Beside `forge` rather than under `[tui]` because it describes how gwm
+  /// talks to the forge, not how it draws. Defaults to a merge commit: the
+  /// least destructive of the three, and the one this repo's own rules
+  /// require.
+  #[serde(default)]
+  pub merge_method: crate::forge::MergeMethod,
   /// `[forge_hosts]` — the hosts this user authorises gwm to make an
   /// authenticated call against, each with the backend that drives it
   /// (issue #419).
@@ -798,6 +808,13 @@ pub struct TuiConfig {
   #[serde(default)]
   pub open: TuiOpenConfig,
 
+  /// `[tui.agent_resume]` sub-table — the command each agent backend
+  /// resumes a session with, used by `o` on the agents overlay (#591).
+  /// Absent keys fall back to the measured defaults, so no `.gwm.toml`
+  /// change is required.
+  #[serde(default)]
+  pub agent_resume: TuiAgentResumeConfig,
+
   /// Which side the worktree-details sidebar sits on in the side-by-side
   /// layout (issue #188). Default `right` preserves pre-#188 behaviour;
   /// `left` flips the split. Toggled live in the TUI with `v`. Ignored by
@@ -876,6 +893,162 @@ pub struct TuiConfig {
   /// long enough that sharing a row with anything else would clip both.
   #[serde(default = "default_status_one_line")]
   pub status_one_line: bool,
+
+  /// What the TUI opens in the multiplexer: a pane, a whole tab, or a
+  /// workspace (issue #608).
+  ///
+  /// Read by the two call sites that open one — the `t` key and a
+  /// `[tui.macro*]` with `open_in = "mux_pane"`. The CLI spells its own
+  /// target instead (bare is a tab, `--split` is a pane), so this key does
+  /// not reach it.
+  ///
+  /// Default `pane`, which is what `t` has always done.
+  #[serde(default)]
+  pub mux_open_in: MuxTarget,
+
+  /// Which half a mux pane takes (issue #589).
+  ///
+  /// Only meaningful under `mux_open_in = "pane"`. Also the direction
+  /// `gwm tmux|zellij|herdr --split` takes, unless `--direction` overrides
+  /// it for that invocation.
+  ///
+  /// Default `right`, which is a visible change for tmux and zellij users:
+  /// up to 1.9 a split carried no direction, so tmux fell back to `-v` and
+  /// stacked the pane. `right` is what the `--split` help has promised
+  /// since it shipped ("a horizontal split of the current pane"), what
+  /// herdr already hardcoded, and the half that is actually free on a wide
+  /// screen. Set `down` for the pre-#589 tmux behaviour.
+  #[serde(default)]
+  pub mux_pane_direction: SplitDirection,
+
+  /// Give the in-TUI note editor a vim normal mode (issue #557).
+  ///
+  /// Default `true`: `N` opens in normal mode, `i` / `I` / `a` / `A` / `o`
+  /// / `O` enter insert, `Esc` goes back to normal, and the second `Esc`
+  /// writes and closes. The cost is that last sentence, so it is stated
+  /// twice: `Esc` no longer writes and closes on the FIRST press.
+  ///
+  /// Set it to `false` for exactly the editor #515 shipped: every
+  /// printable is text, no modes, and one `Esc` writes and closes.
+  #[serde(default = "default_note_vim")]
+  pub note_vim: bool,
+
+  /// Command that renders a URL *inside the terminal* (issue #590).
+  ///
+  /// A shell line taking the `{url}` placeholder: `w3m {url}`, `lynx
+  /// {url}`, `carbonyl {url}`, `browsh {url}`. The placeholder is optional:
+  /// a bare `w3m` gets the URL appended as its last argument, which is what
+  /// every one of those tools takes anyway.
+  ///
+  /// **Only consulted when a multiplexer is detected.** A terminal browser
+  /// with nowhere to put it is worse than the system browser, so `$TMUX` /
+  /// `$ZELLIJ` / `$HERDR_ENV` gate it and the OS opener stays the fallback.
+  /// Unset (the default) is today's behaviour on every platform: every URL
+  /// the TUI opens goes to the external browser.
+  ///
+  /// Same `"" == omitted` convention as `[tui.open]`'s `shell_cmd`, so
+  /// blanking the key in the Settings panel turns the feature back off
+  /// rather than leaving an empty command nobody can spawn.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub terminal_browser: Option<String>,
+
+  /// Who gives the terminal browser its place on screen (issue #590).
+  ///
+  /// Default `overlay`: gwm hosts the command in a pane it opens, or in the
+  /// PTY overlay where the multiplexer cannot carry a command. That assumes
+  /// the browser draws inside whatever TTY it is handed, which is true of
+  /// w3m, lynx and every other text browser.
+  ///
+  /// `detached` is for a browser that places *itself*, which gwm must then
+  /// not host: `terminal-browser open {url} --split right` asks the
+  /// multiplexer for its own pane and exits. Hosting one of those in the PTY
+  /// overlay does not work and cannot be made to: it renders through the
+  /// terminal's image protocol, which positions against the real window and
+  /// so ignores the overlay entirely, drawing over the top-left corner of the
+  /// screen instead.
+  #[serde(default)]
+  pub terminal_browser_open_in: TerminalBrowserHost,
+}
+
+/// Who places the terminal browser (issue #590).
+///
+/// `kebab-case` for the same reason as [`TuiLayout`]: it keeps the serialised
+/// form equal to [`Self::label`], so a Settings-panel write-back produces a
+/// file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalBrowserHost {
+  /// gwm hosts it: a mux pane, or the PTY overlay. The default, and right for
+  /// any browser that draws in the TTY it is given.
+  #[default]
+  Overlay,
+  /// The browser places itself and gwm only launches it. No pane, no overlay,
+  /// which is the point: a browser that splits on its own would otherwise be
+  /// split twice, or hosted somewhere it cannot draw.
+  Detached,
+}
+
+impl TerminalBrowserHost {
+  /// Every variant, default first.
+  pub const ALL: [TerminalBrowserHost; 2] = [TerminalBrowserHost::Overlay, TerminalBrowserHost::Detached];
+
+  /// Settings-panel label, equal to the serialised TOML spelling.
+  pub const fn label(self) -> &'static str {
+    match self {
+      TerminalBrowserHost::Overlay => "overlay",
+      TerminalBrowserHost::Detached => "detached",
+    }
+  }
+}
+
+/// What a mux spawn opens (issue #608): the level of the multiplexer's own
+/// hierarchy the worktree lands in.
+///
+/// Split off `mux_pane_direction`, which carried a `window` value that was
+/// not a direction at all. The two questions are orthogonal: this one says
+/// *what*, [`SplitDirection`] says *which half* when the answer is a pane.
+///
+/// `kebab-case` for the same reason as [`TuiLayout`]: it keeps the
+/// serialised form equal to [`Self::label`], so a Settings-panel write-back
+/// produces a file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MuxTarget {
+  /// Split the current pane. The default, and what `t` has always done.
+  #[default]
+  Pane,
+  /// A whole screen of its own: a tmux window, a zellij or herdr tab. One
+  /// thing under three names, so the value takes the majority spelling and
+  /// [`crate::multiplexer::Multiplexer::window_noun`] renders the local one.
+  Tab,
+  /// herdr's level above a tab. **herdr only**: tmux and zellij have
+  /// nothing at that level, and the builders refuse rather than quietly
+  /// open a tab, which would make this setting lie about what it did.
+  Workspace,
+}
+
+impl MuxTarget {
+  /// Every variant, default first.
+  pub const ALL: [MuxTarget; 3] = [MuxTarget::Pane, MuxTarget::Tab, MuxTarget::Workspace];
+
+  /// Settings-panel label, equal to the serialised TOML spelling.
+  pub const fn label(self) -> &'static str {
+    match self {
+      MuxTarget::Pane => "pane",
+      MuxTarget::Tab => "tab",
+      MuxTarget::Workspace => "workspace",
+    }
+  }
+
+  /// What the TUI call sites build from this. `direction` is consumed only
+  /// by `Pane`; the other two targets have no half to take.
+  pub const fn spawn_mode(self, direction: SplitDirection) -> SpawnMode {
+    match self {
+      MuxTarget::Pane => SpawnMode::Split(direction),
+      MuxTarget::Tab => SpawnMode::Window,
+      MuxTarget::Workspace => SpawnMode::Workspace,
+    }
+  }
 }
 
 /// How the TUI frames its panes and sidebar sections (issue #545).
@@ -925,6 +1098,7 @@ impl Default for TuiConfig {
       confirm_countdown_secs: default_confirm_countdown_secs(),
       auto_refresh_secs: default_auto_refresh_secs(),
       open: TuiOpenConfig::default(),
+      agent_resume: TuiAgentResumeConfig::default(),
       sidebar_position: SidebarPosition::default(),
       sidebar_orientation: SidebarOrientation::default(),
       clipboard: ClipboardMode::default(),
@@ -934,6 +1108,11 @@ impl Default for TuiConfig {
       layout: TuiLayout::Compact,
       dim_unfocused: false,
       status_one_line: default_status_one_line(),
+      mux_open_in: MuxTarget::default(),
+      mux_pane_direction: SplitDirection::default(),
+      note_vim: default_note_vim(),
+      terminal_browser: None,
+      terminal_browser_open_in: TerminalBrowserHost::default(),
     }
   }
 }
@@ -1261,6 +1440,225 @@ where
   Ok(opt.filter(|s| !s.is_empty()))
 }
 
+/// `[tui.agent_resume]` — how `o` on the agents overlay (#591) resumes each
+/// detected backend in the new multiplexer pane.
+///
+/// These are four third-party CLIs on their own release cadence, so the
+/// mapping is configuration with measured defaults rather than a `match`: the
+/// day one of them renames its flag, a gwm release should not be what stands
+/// between the user and a working `o`. Same `"" == omitted` convention as
+/// `[tui.open]`'s `shell_cmd` / `editor_cmd`, so blanking a key gives the
+/// default back instead of a pane that runs nothing.
+///
+/// Each value is a shell line taking the `{session}` placeholder; see
+/// [`expand_agent_resume`] for how the id reaches it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TuiAgentResumeConfig {
+  /// Claude Code. Default `claude -r {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub claude: Option<String>,
+  /// Codex. Default `codex resume {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub codex: Option<String>,
+  /// opencode. Default `opencode -s {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub opencode: Option<String>,
+  /// Mistral Vibe. Default `vibe --resume {session}`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub vibe: Option<String>,
+}
+
+impl TuiAgentResumeConfig {
+  /// The resume template for `kind` — the user's override, else the default.
+  ///
+  /// The defaults were measured against the installed binaries on
+  /// 2026-08-25 (`--help` of each), not assumed:
+  /// `claude --resume` takes a session id or opens a picker, `codex resume`
+  /// takes a uuid or a session name, `opencode --session` takes an id, and
+  /// `vibe --resume` takes a session id.
+  ///
+  /// Written as an exhaustive `match` on purpose: a fifth backend added to
+  /// [`crate::agent_sessions::AgentKind`] does not compile until someone
+  /// gives it a resume line, which beats silently opening a pane that runs
+  /// the wrong tool.
+  pub fn template_for(&self, kind: crate::agent_sessions::AgentKind) -> &str {
+    use crate::agent_sessions::AgentKind;
+    let (configured, default) = match kind {
+      AgentKind::ClaudeCode => (&self.claude, "claude -r {session}"),
+      AgentKind::Codex => (&self.codex, "codex resume {session}"),
+      AgentKind::Opencode => (&self.opencode, "opencode -s {session}"),
+      AgentKind::Vibe => (&self.vibe, "vibe --resume {session}"),
+    };
+    configured.as_deref().unwrap_or(default)
+  }
+}
+
+/// `true` when `id` is safe to interpolate into a shell line **in any
+/// position**, quoted or not, under any shell.
+///
+/// Every id the four backends produce is a UUID or a plain slug, so the set
+/// is ASCII alphanumerics plus `-`, `_` and `.`. Nothing legitimate is
+/// excluded and nothing a shell reads specially is admitted.
+///
+/// This exists because quoting alone does **not** hold the promise
+/// [`expand_agent_resume`] used to make. `shell_words::quote` is only safe
+/// for a value dropped into an *unquoted* POSIX position, and a
+/// `[tui.agent_resume]` template is user-written text: `claude -r
+/// "{session}"` is a natural thing to write, and there
+/// `'$(id)'` sits inside double quotes, where the single quotes are literal
+/// and the substitution runs. `cmd.exe` never honours POSIX single quotes at
+/// all. So the value is constrained instead of trusted to its wrapping.
+pub fn is_shell_safe_session_id(id: &str) -> bool {
+  !id.is_empty()
+    && id
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Substitute `{session}` in a `[tui.agent_resume]` template, in **one pass**,
+/// shell-quoting the value. `None` when `session_id` is not one
+/// [`is_shell_safe_session_id`] admits.
+///
+/// Three properties, and the first is the one that took a review round to get
+/// right.
+///
+/// **Constrained, not merely quoted.** The result becomes a shell line: a
+/// tmux shell-command operand, or the script half of `zellij action new-pane
+/// -- <shell> -c <line>`. A session id is read out of a third-party tool's
+/// artefacts on disk, so it is *data* and must not be able to close the
+/// resume command and open its own. Quoting alone cannot promise that here,
+/// because the template around the placeholder is the user's: put `{session}`
+/// inside double quotes and `shell_words::quote` produces single quotes that
+/// the shell reads as literal characters, leaving `$(…)` live. Rejecting the
+/// id is the only answer that does not depend on where the template put it.
+/// The quoting stays as the second layer.
+///
+/// **Fail closed.** An id outside the set aborts the resume with a message,
+/// rather than running a line nobody can predict. In practice nothing is
+/// refused: every backend's id is a UUID or a slug.
+///
+/// **Single pass**, because chained `str::replace` calls re-scan what the
+/// previous call just wrote: an id that itself contains `{session}` would be
+/// rewritten from the inside, splicing quote characters into the middle of a
+/// value. An expansion is a value, not more template. Same rule
+/// [`crate::lifecycle`] learned in GHSA-fffq-vg6f-gxqm.
+///
+/// An unknown `{token}` is left verbatim, as every other gwm expander does.
+pub fn expand_agent_resume(template: &str, session_id: &str) -> Option<String> {
+  if !is_shell_safe_session_id(session_id) {
+    return None;
+  }
+  let mut out = String::with_capacity(template.len());
+  let mut rest = template;
+  while let Some(open) = rest.find('{') {
+    out.push_str(&rest[..open]);
+    let tail = &rest[open..];
+    let Some(close) = tail.find('}') else {
+      // Unbalanced `{` — nothing left to substitute, keep it verbatim.
+      out.push_str(tail);
+      return Some(out);
+    };
+    let token = &tail[..=close];
+    if token == "{session}" {
+      out.push_str(&shell_words::quote(session_id));
+    } else {
+      out.push_str(token);
+    }
+    rest = &tail[close + 1..];
+  }
+  out.push_str(rest);
+  Some(out)
+}
+
+/// `true` when `url` is a thing gwm will hand to a terminal browser.
+///
+/// Deliberately **not** the shape [`is_shell_safe_session_id`] takes. A
+/// session id is a slug, so an allowlist costs nothing there; a URL carries
+/// `: / ? # % = & +` by construction. `#` shows up in gwm's own branch
+/// names, and `?a=1&b=2` in the `details_url` GitHub hands back for a check
+/// run. An allowlist wide enough for a real URL would admit `&`, so the
+/// quoting is what holds here instead, and this stays the narrow check that
+/// nothing *else* gets through: an absolute `http`/`https` URL, with no
+/// whitespace and no control characters.
+///
+/// [`expand_terminal_browser`] is what makes the quoting sound: it splits
+/// the template **before** substituting, so the URL lands as one argv
+/// element whose quoting gwm owns, rather than as text spliced into a line
+/// the user wrote.
+pub fn is_browsable_url(url: &str) -> bool {
+  (url.starts_with("http://") || url.starts_with("https://"))
+    && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Expand `[tui] terminal_browser` into the argv that renders `url`, or
+/// `None` when the URL is refused or the template does not parse.
+///
+/// **Split first, substitute second.** This is the whole security argument,
+/// and it is the opposite order from [`expand_agent_resume`]. That one
+/// substitutes into the line and cannot control where the user's template
+/// put the placeholder, so it constrains the *value* instead: put
+/// `{session}` inside double quotes and `shell_words::quote` emits single
+/// quotes the shell reads as literal characters, leaving `$(…)` live. Here
+/// the template is tokenised first, so `w3m {url}` and `w3m "{url}"` both
+/// yield the token `{url}` and the URL becomes exactly one argv element.
+/// The template's own quoting is consumed by the split and can no longer
+/// reach the value, which is why a URL's `&` and `?` need no allowlist.
+///
+/// Substitution inside a token is **single pass**, the rule
+/// [`crate::lifecycle`] learned in GHSA-fffq-vg6f-gxqm: an expansion is a
+/// value, not more template, so a URL that itself spelled `{url}` is not
+/// rewritten from the inside.
+///
+/// **A template with no `{url}` gets it appended.** `terminal_browser =
+/// "w3m"` is what people write first, and every one of w3m / lynx /
+/// carbonyl / browsh takes the URL as its last argument. Refusing it would
+/// document a loss for nothing.
+pub fn expand_terminal_browser(template: &str, url: &str) -> Option<Vec<String>> {
+  if !is_browsable_url(url) {
+    return None;
+  }
+  // A template that names an existing file is that file, whole (Codex review
+  // on PR #615). `shell_words::split` is POSIX, so it reads a backslash as an
+  // escape and turns `C:\Tools\w3m.exe` into `C:Toolsw3m.exe`; the probe then
+  // misses and every link on that machine falls back to the system browser
+  // without a word about why. A space does the same thing anywhere.
+  //
+  // The same fast path [`crate::tui::launch_argv`] already runs ahead of its
+  // own split, and deliberately the same: one question asked by two surfaces
+  // deserves one answer, not a second convention. `is_file` rather than
+  // "looks like a path", so `w3m {url}` keeps going through the split.
+  if std::path::Path::new(template).is_file() {
+    return Some(vec![template.to_string(), url.to_string()]);
+  }
+  let tokens = shell_words::split(template).ok()?;
+  if tokens.is_empty() {
+    return None;
+  }
+  let mut used = false;
+  let mut argv: Vec<String> = Vec::with_capacity(tokens.len() + 1);
+  for token in tokens {
+    if !token.contains("{url}") {
+      argv.push(token);
+      continue;
+    }
+    used = true;
+    let mut out = String::with_capacity(token.len() + url.len());
+    let mut rest = token.as_str();
+    while let Some(at) = rest.find("{url}") {
+      out.push_str(&rest[..at]);
+      out.push_str(url);
+      rest = &rest[at + "{url}".len()..];
+    }
+    out.push_str(rest);
+    argv.push(out);
+  }
+  if !used {
+    argv.push(url.to_string());
+  }
+  Some(argv)
+}
+
 impl TuiConfig {
   /// Documented range cap. Centralised so the TUI and the doctor share
   /// the same clamp logic.
@@ -1283,6 +1681,13 @@ fn default_confirm_countdown_secs() -> u32 {
 /// (which yields `false` for a bool) would invert the contract for every
 /// config that does not spell the key out.
 fn default_status_one_line() -> bool {
+  true
+}
+
+/// `[tui] note_vim` defaults to `true` (issue #557), so a bare
+/// `#[serde(default)]` would hand every config that does not spell the key
+/// out the modeless editor instead of the mode.
+fn default_note_vim() -> bool {
   true
 }
 

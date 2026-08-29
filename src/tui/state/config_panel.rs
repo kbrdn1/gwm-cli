@@ -19,7 +19,11 @@
 //! the cursor lives here, `max_scroll` / `max_x_scroll` are republished by
 //! the renderer each frame against the live viewport.
 
-use crate::config::{ClipboardMode, Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition, TuiLayout};
+use crate::config::{
+  ClipboardMode, Config, ConfigRow, ConfigSource, MuxTarget, SidebarOrientation, SidebarPosition, TerminalBrowserHost,
+  TuiLayout,
+};
+use crate::multiplexer::SplitDirection;
 use crate::tui::keymap::{Action, KeyStroke, Keymap};
 use crate::tui::modal_keymap::{ModalAction, ModalKeymap};
 
@@ -79,6 +83,9 @@ impl SettingsTab {
         SettingField::Layout,
         SettingField::DimUnfocused,
         SettingField::StatusOneLine,
+        SettingField::NoteVim,
+        SettingField::MuxOpenIn,
+        SettingField::MuxPaneDirection,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::Clipboard,
@@ -87,6 +94,8 @@ impl SettingsTab {
         SettingField::AutoRefreshSecs,
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
+        SettingField::TerminalBrowser,
+        SettingField::TerminalBrowserOpenIn,
       ],
       // The Keys tab edits dynamic [`KeyRow`]s, not static fields, and `All`
       // is read-only.
@@ -286,6 +295,21 @@ const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &[
 // `TuiOpenMode` has no `label()` to derive from; the round-trip test
 // (`every_choice_is_a_value_the_config_can_load_back`) guards it instead.
 const OPEN_MODE_CHOICES: &[&str] = &["shell", "editor", "finder"];
+const MUX_OPEN_IN_CHOICES: &[&str] = &[
+  MuxTarget::Pane.label(),
+  MuxTarget::Tab.label(),
+  MuxTarget::Workspace.label(),
+];
+const MUX_PANE_DIRECTION_CHOICES: &[&str] = &[
+  SplitDirection::Right.label(),
+  SplitDirection::Down.label(),
+  SplitDirection::Left.label(),
+  SplitDirection::Up.label(),
+];
+const TERMINAL_BROWSER_HOST_CHOICES: &[&str] = &[
+  TerminalBrowserHost::Overlay.label(),
+  TerminalBrowserHost::Detached.label(),
+];
 const CLIPBOARD_CHOICES: &[&str] = &[
   ClipboardMode::Auto.label(),
   ClipboardMode::Osc52.label(),
@@ -309,6 +333,12 @@ pub enum SettingField {
   DimUnfocused,
   /// `tui.status_one_line` — fold the sidebar Status block (issue #547).
   StatusOneLine,
+  /// `tui.note_vim` — the note editor's vim normal mode (issue #557).
+  NoteVim,
+  /// `tui.mux_open_in` — pane / tab / workspace (issue #608).
+  MuxOpenIn,
+  /// `tui.mux_pane_direction` — right / down / left / up (issues #589 / #611).
+  MuxPaneDirection,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,
   /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
@@ -325,6 +355,10 @@ pub enum SettingField {
   OpenShellCmd,
   /// `tui.open.editor_cmd` — `$EDITOR` override (text).
   OpenEditorCmd,
+  /// `tui.terminal_browser`: the in-terminal browser command (issue #590).
+  TerminalBrowser,
+  /// `tui.terminal_browser_open_in`: who places it, gwm or the browser (#590).
+  TerminalBrowserOpenIn,
 }
 
 impl SettingField {
@@ -339,6 +373,9 @@ impl SettingField {
       SettingField::Layout => "layout",
       SettingField::DimUnfocused => "dim unfocused pane",
       SettingField::StatusOneLine => "status on one line",
+      SettingField::NoteVim => "note vim mode",
+      SettingField::MuxOpenIn => "mux opens in",
+      SettingField::MuxPaneDirection => "mux pane side",
       SettingField::SidebarOrientation => "sidebar layout",
       SettingField::Clipboard => "clipboard",
       SettingField::OpenMode => "open mode",
@@ -346,6 +383,8 @@ impl SettingField {
       SettingField::AutoRefreshSecs => "auto refresh (s)",
       SettingField::OpenShellCmd => "open shell cmd",
       SettingField::OpenEditorCmd => "open editor cmd",
+      SettingField::TerminalBrowser => "terminal browser",
+      SettingField::TerminalBrowserOpenIn => "terminal browser placed by",
     }
   }
 
@@ -360,6 +399,9 @@ impl SettingField {
       SettingField::Layout => "tui.layout",
       SettingField::DimUnfocused => "tui.dim_unfocused",
       SettingField::StatusOneLine => "tui.status_one_line",
+      SettingField::NoteVim => "tui.note_vim",
+      SettingField::MuxOpenIn => "tui.mux_open_in",
+      SettingField::MuxPaneDirection => "tui.mux_pane_direction",
       SettingField::SidebarOrientation => "tui.sidebar_orientation",
       SettingField::Clipboard => "tui.clipboard",
       SettingField::OpenMode => "tui.open.mode",
@@ -367,6 +409,8 @@ impl SettingField {
       SettingField::AutoRefreshSecs => "tui.auto_refresh_secs",
       SettingField::OpenShellCmd => "tui.open.shell_cmd",
       SettingField::OpenEditorCmd => "tui.open.editor_cmd",
+      SettingField::TerminalBrowser => "tui.terminal_browser",
+      SettingField::TerminalBrowserOpenIn => "tui.terminal_browser_open_in",
     }
   }
 
@@ -378,14 +422,18 @@ impl SettingField {
       | SettingField::SidebarPosition
       | SettingField::SidebarOrientation
       | SettingField::Clipboard
+      | SettingField::MuxOpenIn
+      | SettingField::MuxPaneDirection
+      | SettingField::TerminalBrowserOpenIn
       | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::DimUnfocused | SettingField::StatusOneLine => FieldKind::Bool,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => FieldKind::Bool,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
       | SettingField::WorktreeBranchPattern
       | SettingField::OpenShellCmd
-      | SettingField::OpenEditorCmd => FieldKind::Text,
+      | SettingField::OpenEditorCmd
+      | SettingField::TerminalBrowser => FieldKind::Text,
     }
   }
 
@@ -404,8 +452,11 @@ impl SettingField {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
       SettingField::Layout => LAYOUT_CHOICES,
-      SettingField::DimUnfocused | SettingField::StatusOneLine => BOOL_CHOICES,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => BOOL_CHOICES,
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
+      SettingField::MuxOpenIn => MUX_OPEN_IN_CHOICES,
+      SettingField::MuxPaneDirection => MUX_PANE_DIRECTION_CHOICES,
+      SettingField::TerminalBrowserOpenIn => TERMINAL_BROWSER_HOST_CHOICES,
       SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
       _ => &[],
@@ -423,6 +474,9 @@ impl SettingField {
       SettingField::Layout => cfg.tui.layout.label().into(),
       SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
       SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
+      SettingField::NoteVim => cfg.tui.note_vim.to_string(),
+      SettingField::MuxOpenIn => cfg.tui.mux_open_in.label().into(),
+      SettingField::MuxPaneDirection => cfg.tui.mux_pane_direction.label().into(),
       SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
       SettingField::Clipboard => cfg.tui.clipboard.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {
@@ -434,6 +488,8 @@ impl SettingField {
       SettingField::AutoRefreshSecs => cfg.tui.auto_refresh_secs.to_string(),
       SettingField::OpenShellCmd => cfg.tui.open.shell_cmd.clone().unwrap_or_default(),
       SettingField::OpenEditorCmd => cfg.tui.open.editor_cmd.clone().unwrap_or_default(),
+      SettingField::TerminalBrowser => cfg.tui.terminal_browser.clone().unwrap_or_default(),
+      SettingField::TerminalBrowserOpenIn => cfg.tui.terminal_browser_open_in.label().into(),
     }
   }
 

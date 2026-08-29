@@ -1647,3 +1647,44 @@ fn the_backend_answers_that_it_cannot_reach_inline_comments() {
   );
   assert!(threads.threads().is_empty());
 }
+
+#[test]
+fn mr_merge_argv_follows_glabs_own_flags_not_ghs() {
+  // Validation feedback on #551, and the reason the two backends do not
+  // share one argv builder. Measured on `glab mr merge --help`:
+  //
+  // - a merge commit is the DEFAULT and has no flag; passing an invented
+  //   `--merge` would be an unknown-flag error,
+  // - `--yes` is required or `glab` prompts, and a prompt from inside a
+  //   TUI is a hang,
+  // - the delete flag is spelled `--remove-source-branch`, and is absent
+  //   here for the same reason `--delete-branch` is absent on the GitHub
+  //   side.
+  use gwm::forge::MergeMethod;
+  use gwm::gitlab::mr_merge_argv;
+
+  assert_eq!(
+    mr_merge_argv("group/proj", 42, MergeMethod::Merge),
+    vec!["mr", "merge", "42", "--yes", "--repo", "group/proj"],
+    "a merge commit passes no method flag at all"
+  );
+  assert_eq!(
+    mr_merge_argv("group/proj", 42, MergeMethod::Squash),
+    vec!["mr", "merge", "42", "--squash", "--yes", "--repo", "group/proj"]
+  );
+  assert_eq!(
+    mr_merge_argv("group/proj", 42, MergeMethod::Rebase),
+    vec!["mr", "merge", "42", "--rebase", "--yes", "--repo", "group/proj"]
+  );
+  for method in MergeMethod::ALL {
+    let argv = mr_merge_argv("g/p", 1, method);
+    assert!(
+      !argv.iter().any(|a| a == "--remove-source-branch" || a == "-d"),
+      "{method:?} must not ask for a branch deletion: {argv:?}"
+    );
+    assert!(
+      !argv.iter().any(|a| a == "--merge"),
+      "{method:?} must not invent a flag glab does not have: {argv:?}"
+    );
+  }
+}

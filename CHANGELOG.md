@@ -12,27 +12,288 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **The libraries compiled into the binary ship their notices**
-  ([#577](https://github.com/kbrdn1/gwm-cli/issues/577)). `git2` builds with
-  `vendored-libgit2` and `libz-sys` with `static`, so every binary distributed
-  here statically contains libgit2 and zlib, and no package dependency carries
-  their terms. libgit2 is GPLv2 **with a linking exception**, and that
-  exception is what makes a permissively licensed binary possible at all: it
-  is conditional on the notice travelling with the distribution. zlib's terms
-  say its notice may not be removed. Neither was shipping, and neither had
-  anything to do with the project's own license, which is why this is separate
-  from #573 rather than part of it: both were unmet under MIT-only too.
+- **`W` opens the Working Tree listing at full size**
+  ([#592](https://github.com/kbrdn1/gwm-cli/issues/592)). The sidebar's
+  Working Tree pane is one block among five in a column that is a fraction of
+  the screen, so a worktree with more than a handful of changed files could
+  only be read two rows at a time through `J` / `K`. `W` now opens the same
+  file-explorer tree as a full-size overlay: same icons, same per-category
+  colours, the same change counts on the bottom rule, scrolled with
+  `j` / `k`, `g` / `G`, closed with `Esc` / `q` (or `W` again, whatever `W`
+  gets rebound to, see #613 below), and rebindable under
+  `[tui.keys.modal.working_tree]`.
 
-  Both notices now live under `third-party/` and reach the release archives,
-  the `.deb`, the `.rpm`, the AUR package and the published crate. They are
-  taken from the crate source cargo actually built, not from the libraries'
-  upstream repositories, because those diverge: `libgit2-sys` vendors a pinned
-  tree while libgit2 `main` moves.
+  The listing is read when the overlay opens rather than taken from the
+  sidebar's cache, so it does not go blank in the two states where that cache
+  is never built: sidebar hidden, or the Details panel showing stashes. The
+  read runs on a worker and the overlay opens on a loader, so a repository
+  whose untracked walk is slow does not freeze the event loop on the
+  keypress.
 
-  `third-party/README.md` records which crate version each came from, and that
-  record is checked against `Cargo.lock`. A dependency bump moves the vendored
-  library without touching a file anyone reads, so without the check the notice
-  would quietly go on describing a version the binary no longer contains.
+  The right of each row says how many lines the file gained and lost
+  (`+120 -34`), from one `git diff` against `HEAD` in the same read, so
+  staged and unstaged changes are counted together. A directory, an untracked
+  file and a binary file carry no counts: the first has no diff of its own,
+  and for the other two git counts no lines. The column rides its own rect on
+  the right and is dropped whole on a terminal too narrow to keep it and a
+  readable file name, so the name is never what goes. `D` / `U` page the
+  listing by half a screen, and the key is advertised in both pane footers,
+  matching the commit listing (#593).
+- **`o` on the agents overlay resumes the session in the multiplexer**
+  ([#591](https://github.com/kbrdn1/gwm-cli/issues/591)). The overlay told you
+  which agent was working where and then left you to get there by hand. `a`
+  did not help: it is a pin, it changes gwm's bookkeeping, not where the
+  session runs. `o` opens a pane running the selected session.
+
+  **In the worktree the overlay is about**, not in the session's recorded
+  directory. A pinned session is pinned precisely because that directory names
+  the wrong tree, and for a pinned Claude session it can be the slug directory
+  under `~/.claude/projects` rather than a worktree at all.
+
+  **Multiplexer only**, deliberately. With none active the key says so and
+  does nothing, because the point is to put the session next to gwm and the
+  PTY overlay would cover gwm instead. It opens at the level `mux_open_in`
+  names, exactly as `t` does. One target stays refused: a zellij **tab** takes
+  no trailing command in any form.
+
+  **herdr works too, in two steps.** None of its levels accepts a trailing
+  command, so gwm opens the container, waits for its new shell to reach a
+  prompt, then types the line in through the pane id herdr's response carries.
+  All three of `pane split`, `tab create` and `workspace create` name a pane
+  to run in. The wait is load-bearing rather than defensive: `herdr pane run`
+  types into the interactive shell instead of exec'ing, so a line sent while
+  the shell is still running its rc files lands in the middle of that output
+  and is dropped, measured on a worktree with `direnv` and a nix flake where
+  it took about a minute to settle. The whole sequence therefore runs off the
+  event loop, the status bar reads `opening agent pane…` meanwhile, and it
+  gives up after two minutes rather than leave a worker running.
+
+  What the pane runs is `[tui.agent_resume]`, defaulting to
+  `claude -r {session}`, `codex resume {session}`, `opencode -s {session}` and
+  `vibe --resume {session}`, measured against the installed binaries. They are
+  configuration rather than a hardcoded table because they are four
+  third-party CLIs on their own release cadence. The session id is read out of
+  each tool's own artefacts, so it reaches the shell quoted through a
+  single-pass expander, the same rule the hook placeholders learned in
+  GHSA-fffq-vg6f-gxqm.
+
+  A session that has ended resumes without comment; a live one is flagged on
+  the status bar, since resuming it in a second pane while it runs elsewhere
+  may fork or refuse depending on the tool.
+
+- **`c` opens the commit listing full size, with load-more**
+  ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)). The sidebar's
+  Commits pane is a fraction of a sidebar shared with four other blocks, and
+  it stops at 300 commits: seeing further meant leaving gwm for lazygit. `c`
+  now paints the same graph on the whole canvas, and `m` re-reads one page
+  deeper, up to 1500 commits, so history is paged rather than capped. The
+  title carries the row count and a trailing `+` while a deeper page exists;
+  the `load more` hint disappears once the revwalk runs out of history or the
+  cap is reached, so the key is never advertised where it would do nothing.
+  The walk runs on a worker, never on the keypress: it sorts
+  `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph before it
+  yields a row and the limit bounds the output, not the latency. The overlay
+  opens on a loader and fills in when the read lands.
+  The rows are snapshotted at open rather than read from the sidebar cache,
+  which is only rebuilt while the sidebar is open and in `commits` mode, so
+  the overlay works with the sidebar hidden or showing stashes. Scroll is
+  `j`/`k`, `g`/`G`, all rebindable under `[tui.keys.modal.commits]`.
+
+  Each row carries, on its right, what the hash / initials / subject columns
+  do not say: the author, what the commit changed (`3~ 1+ 2- +120 -34`, in
+  the Working Tree pane's colours, empty categories omitted) and how long
+  ago it landed. Three tiers, picked on what the **subject** can spare
+  rather than on the terminal width, since the graph is as wide as the
+  branch topology makes it: `author · counts · age`, `counts · age`, the age
+  alone, nothing.
+
+  The counts arrive from a second, chained read, so the log is on screen
+  immediately and the column grows about a second later (up to three on the
+  deepest page). One `git log --raw --numstat` over the rows already shown
+  costs about a second where a `diff_tree_to_tree` per commit costs
+  thirty-three, measured. `--diff-merges=first-parent` is load-bearing:
+  without it `git log` says nothing at all about a merge, and this project
+  merges rather than squashes.
+
+  `D` / `U` scroll half a screen, matching the rich PR view.
+
+- **Two settings for what a mux spawn opens, and where**
+  ([#589](https://github.com/kbrdn1/gwm-cli/issues/589),
+  [#608](https://github.com/kbrdn1/gwm-cli/issues/608),
+  [#611](https://github.com/kbrdn1/gwm-cli/issues/611)). The TUI's `t` key
+  took whatever each backend felt like giving it. Two `[tui]` keys now say:
+
+  ```toml
+  [tui]
+  mux_open_in        = "pane"    # "pane" | "tab" | "workspace"
+  mux_pane_direction = "right"   # "right" | "down" | "left" | "up", pane only
+  ```
+
+  `"tab"` is a whole screen of its own: a tmux window, a zellij or herdr tab,
+  one thing under three names. `"workspace"` is herdr's level above a tab and
+  runs `herdr workspace create --label <name> --cwd <path> --focus`.
+  `mux_pane_direction` is also the direction a bare
+  `gwm tmux|zellij|herdr <pattern> --split` takes, and the new
+  `--direction <dir>` overrides it for one invocation. Both keys cycle
+  live in the Settings panel under the **TUI** tab.
+
+  `mux_pane_direction` takes all four compass points
+  ([#611](https://github.com/kbrdn1/gwm-cli/issues/611)). `left` and `up` are
+  tmux's `-h -b` / `-v -b` (`-b` flips the side on the axis `-h` / `-v`
+  picked, measured on 3.7c through `split-window -P -F`) and zellij's own
+  words. **herdr takes only `right` and `down`**, declaring `[possible values:
+  right, down]`, so the other two are refused there rather than substituted:
+
+  ```
+  herdr splits only right or down: left and up are tmux and zellij directions
+  ```
+
+  **`"workspace"` is refused on tmux and zellij, not downgraded to a tab.**
+  Neither has a level there, and quietly opening something else would leave
+  the setting describing what did not happen. The status bar names the backend
+  that cannot and the one that can. (Both have *sessions*, the structural
+  analogue, but gwm runs inside one: tmux would need two commands to create
+  and switch to a sibling, and zellij refuses to nest sessions.)
+
+  One caveat, the same shape as the herdr one below: a `[tui.macro*]` with
+  `open_in = "mux_pane"` falls back to the PTY overlay under `"tab"` on
+  zellij and under `"workspace"` on every backend, because those verbs take
+  no trailing command to run. The status bar names which one refused.
+
+- **herdr is a third multiplexer backend**
+  ([#588](https://github.com/kbrdn1/gwm-cli/issues/588)). `gwm herdr <pattern>`
+  opens the matched worktree in a new [herdr](https://herdr.dev) tab, `-p`
+  splits the current pane instead, and the TUI's `t` key finds herdr the way
+  it finds tmux and zellij. Detection reads `$HERDR_ENV`, which herdr sets in
+  every pane it manages, and it comes last in the cascade so nothing changes
+  for a tmux or zellij user.
+
+  Under the hood: `herdr tab create --workspace <id> --label <name> --cwd
+  <path> --focus` and `herdr pane split --current --direction <right|down>
+  --cwd <path> --focus`, verified against a live herdr 0.8.2 rather than its
+  help text. The split needs a direction because herdr's parser has no default
+  for one; which one it gets is the `mux_pane_direction` entry above. The other two flags are
+  there because herdr's defaults are the opposite of what the names suggest:
+  without `--focus` the tab opens where you cannot see it, and without
+  `--workspace` it opens in whichever workspace the server had focused, which
+  is another project's window as often as not.
+
+  One surface stays on its old path: a `[tui.macro*]` with
+  `open_in = "mux_pane"` still falls back to the PTY overlay under herdr, and
+  now says so. A macro needs the new pane to run a command, and
+  `herdr pane split` has no trailing-command form, so running one takes a
+  second call with the pane id that `pane split` prints back.
+
+- **A worktree note can be a checklist**
+  ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `Ctrl+t` in the note
+  editor ticks the box on the line and spawns one when the line has none, from
+  anywhere on the line; `Ctrl+u` makes the line a list item or takes the marker
+  back off it; `Enter` continues the list and ends it on an empty item, the way
+  every Markdown editor does. Both chords are Ctrl-modified because an
+  unmodified printable is text in that modal, and which chord is left over is
+  tmux's call: `Ctrl+b` is its prefix, and `Ctrl+h` / `Ctrl+j` / `Ctrl+k` /
+  `Ctrl+l` are the vim-tmux-navigator pane set that tmux forwards only to a
+  pane running vim.
+
+  Ticking used to mean arrowing onto the right column and retyping a character
+  by hand, which is what a note becomes after a day: "what to check before
+  opening the PR" is a list you tick off.
+
+- **A vim normal mode for the note editor**
+  ([#557](https://github.com/kbrdn1/gwm-cli/issues/557)). `N` opens in normal
+  mode: `hjkl`, `w` / `b` / `e` and their `W` / `B` / `E`, `0` / `^` / `$`,
+  `gg` / `G`, `x`, `dd`, and `i` / `I` / `a` / `A` / `o` / `O` to enter
+  insert. `o` and `O` carry the list marker the way `Enter` does, the modal
+  title carries a `NORMAL` / `INSERT` chip, and the modal's own last row
+  leads with the mode as a reverse-video badge (the treatment the statusbar
+  context anchor already wears) before listing the keys that mode takes,
+  as does the statusbar behind it. A list too long for the row is cut with a `…` rather than
+  clipped at the frame, which reads as a list that ends there.
+
+  **The cost is `Esc`, so it gets its own line: it no longer writes and closes
+  on the first press.** It leaves insert, and the second press saves.
+  `[tui] note_vim = false` buys the single-press gesture back and returns the
+  editor to the modeless one, where every printable is text, and it is a
+  toggle in the Settings panel's TUI tab like the other two TUI booleans. No counts, no
+  registers, no undo: this is a scratch buffer, and `Ctrl+e` still hands the
+  file to the real vim. The verbs are hard-coded rather than bindable, so
+  `[tui.keys.modal.note]` holds the same four verbs either way and an
+  unmodified printable bound to one of them is still refused at load time.
+
+- **Merge a PR from the TUI** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)).
+  `m` from the worktree table merges the selected row's linked PR; `m` inside
+  the PR / issue view merges the active tab's. Both go through the delete
+  flow's confirmation, and it is the same modal: same layout, same countdown,
+  same spinner while it runs, same buttons hidden mid-flight. Its summary
+  names the PR, `head → base`, the resolved method and what it does to the
+  history, and the CI rollup. `m` cycles the method from inside it, and a
+  failure keeps the modal up with the forge's own message.
+
+  The check state is shown rather than enforced: a forge refuses a merge for
+  reasons gwm does not model, and its own error says which. **The source
+  branch is never deleted**: neither backend is ever asked to.
+
+  The method comes from the new `merge_method` key and defaults to `merge`,
+  the least destructive of the three:
+
+  ```toml
+  merge_method = "merge"   # or "squash", "rebase"
+  ```
+
+- **A link can open in a terminal browser instead of leaving the terminal**
+  ([#590](https://github.com/kbrdn1/gwm-cli/issues/590)). Every URL the TUI
+  opens went to the system browser: the browse-links menu (`B`), the
+  open-menu Issue and PR picks, a row in the rich PR/issue view, a CI check's
+  details URL, `.` for the docs. On a tiling setup that means losing the
+  workspace gwm is sitting in. The new `[tui] terminal_browser` names a
+  command that renders the page in the terminal instead:
+
+  ```toml
+  [tui]
+  terminal_browser = "w3m {url}"   # or lynx / carbonyl / browsh
+  ```
+
+  The `{url}` placeholder is optional: a bare `"w3m"` gets the URL appended
+  as its last argument, which all four of those tools take anyway.
+
+  **It is only consulted when a multiplexer is detected.** A terminal browser
+  with nowhere to put it is worse than the system browser, so `$TMUX` /
+  `$ZELLIJ` / `$HERDR_ENV` gate it, and the page opens in a new pane or tab
+  beside gwm, at the level `[tui] mux_open_in` and `mux_pane_direction`
+  already set for `t` and `o`. Where the container takes no command (herdr,
+  a zellij tab, any `workspace`) it runs in the PTY overlay instead, so the
+  browser still renders in the terminal, and the status bar names the backend
+  that refused a pane. Anywhere else, including a browser that is not on
+  `$PATH`, the system browser answers as it always has, with the reason on
+  the status bar rather than silently.
+
+  **A browser that places itself is launched rather than hosted**, via the
+  companion `[tui] terminal_browser_open_in`:
+
+  ```toml
+  [tui]
+  terminal_browser = "terminal-browser open {url} --split right"
+  terminal_browser_open_in = "detached"   # default "overlay"
+  ```
+
+  Both shapes above host the browser, which assumes it draws inside the TTY
+  it is handed. That holds for `w3m` and `lynx` and fails for one that
+  renders through the terminal's image protocol: it positions against the
+  real window, so in the PTY overlay it paints over the top-left corner of
+  the screen whatever rect gwm passes, and in a gwm pane it splits twice
+  because it splits on its own. `"detached"` launches the command and stops
+  there. The two gates stay in front of it: no multiplexer still means the
+  system browser, since placing itself means asking a multiplexer for a pane,
+  and a missing binary still falls back. An unknown value errors at load.
+
+  **Unset is the default and is exactly the behaviour up to 1.9**, on every
+  platform. The key is also editable in the Settings panel under the **TUI**
+  tab (`4`), where blanking it turns the feature back off.
+
+  The URL is always one argument: the template is tokenised *before* the
+  placeholder is substituted, so `w3m {url}` and `w3m "{url}"` are the same
+  command and a URL's `?`, `&` and `#` cannot become shell syntax. Only
+  absolute `http`/`https` URLs are passed on.
 
 ### Changed
 
@@ -45,193 +306,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captures at 2x. crates.io rewrites relative image links in a README against
   `repository`, so the crate page still shows `demo.gif`.
 
-- **The doc captures show what the binary actually prints**
-  ([#575](https://github.com/kbrdn1/gwm-cli/issues/575)). #567 rewrote 165
-  strings gwm prints and the captures predate it, so several showed text the
-  binary no longer says. They are images, so nothing in CI could notice. 21
-  moved, and they were behind on a second count the same regeneration fixes:
-  #568's tilde compression. `palette.png` shows it best. Its `PATH` column
-  read five near-identical `/Users/kbrdn1/gwm-demo/...` rows clipped mid-path,
-  and now starts at `~/gwm-demo/`, so what survives the clip is the part that
-  differs per row.
 
-  Five captures came back byte-identical, which is the correct answer rather
-  than a miss: `cli-list` and `cli-agents` are CLI output, where paths stay
-  absolute by design, and none of the five carries a rewritten string.
+- **Modals follow `[tui] layout` instead of always being bordered**
+  ([#594](https://github.com/kbrdn1/gwm-cli/issues/594)). `compact` has been
+  the default layout since
+  [#545](https://github.com/kbrdn1/gwm-cli/issues/545), and every surface
+  honoured it but the overlays, which kept their rounded box whatever the
+  config said. They now spend the same chrome the panes do:
 
-  Two tapes `generate.sh` does not run are now named in the script and the
-  capture README, because neither absence was reported and a run therefore
-  ended with a tick over a set that still held them stale. `demo.tape` is the
-  documented one and was run separately here. `github-linking.tape` is the
-  other, and it is the one capture in the set that nobody but the maintainer
-  can reproduce: it needs a repo with an open PR, which the demo fixture has
-  not, so it points at a hardcoded checkout and photographs whatever it is
-  doing. The published shot was taken during the v1.8.0 release and shows a
-  dirty release branch and a live CI count. Left as is: making it
-  deterministic is a design question, not a regeneration.
+  - the title rides a **filled band on the frame's first row**, the same
+    band a compact pane's header wears, mixed from the modal's own role so
+    a delete or a merge confirmation keeps its danger colour and the two
+    worktree forms keep their green;
+  - **no rules on any side**, top or bottom included;
+  - the row every modal already spends on its key hints is painted as a
+    quiet `section_bg` **footer band**. It is a ground under a row that was
+    already there, not an extra one, so nothing moved to make room for it.
+    A bordered modal's bottom-rule counter (the Working Tree's per-category
+    counts) rides the right of that band;
+  - **a blank row at each end of the content**, so nothing sits flush
+    against a band. The boxed layout's interior padding already gave that,
+    and the four full-size overlays plus the note editor gained the one
+    above their hints under both layouts.
 
-  **The version chip is not fixed by this.** It comes from
-  `CARGO_PKG_VERSION`, so all 24 TUI tapes bake the version into the image.
-  These read `1.8.0`, which is correct today and stops being correct the
-  moment the next version is cut. Regenerating captures is not part of the
-  release protocol, so the cut has to bump first and regenerate after, or the
-  published set advertises the previous release.
+  That is **two rows and four columns back per overlay**, which is what the
+  layout was asked for in the first place: modals are the surfaces most
+  likely to overflow a short terminal.
 
-- **gwm is now dual-licensed under MIT OR Apache-2.0**
-  ([#573](https://github.com/kbrdn1/gwm-cli/issues/573)). Nothing is taken
-  away: MIT stays, in full, under its own file. What is added is the option
-  of Apache-2.0, whose §3 is an express patent grant from every contributor.
-  MIT has no patent clause at all, and that gap is the one thing a corporate
-  legal review reliably stops on. It is also the ecosystem's default (rustc,
-  cargo, clap, serde, ratatui and git2 all ship this exact pair), so packagers
-  recognise the layout without asking.
+  A rule around a panel floating over content is worth something, and what
+  replaces it is the ground: while a compact modal is up, everything behind
+  it is **darkened**. The colours are mixed toward black rather than only
+  dimmed, because `DIM` reaches the foreground alone and a pane's header
+  band sits directly above a full-size overlay's own band. A palette with no
+  components to mix, an ANSI colour name or a 256-palette index, keeps `DIM`
+  by itself.
 
-  `LICENSE.md` becomes `LICENSE-MIT`, copyright line untouched, and
-  `LICENSE-APACHE` joins it carrying the upstream Apache text verbatim,
-  appendix placeholders left unfilled. **Users pick either one, and never have
-  to say which.**
+  `layout = "bordered"` is the opt-out and is untouched, rules, padding,
+  sizes and undimmed background alike.
 
-  Both texts now travel in every artefact: the release tarballs and zips, the
-  `.deb` and `.rpm` payloads, the AUR package, and the published crate. The
-  declaration itself had to be written six times in six syntaxes, none of them
-  interchangeable: `MIT OR Apache-2.0` for crates.io and Arch, `any_of:` for
-  Homebrew, a `|` separator for Scoop, `[ licenses.asl20 licenses.mit ]` for
-  nixpkgs. A walk over `packaging/`, `Cargo.toml` and `flake.nix` now fails
-  the suite if any channel declares one half without the other, and a second
-  guard ties the files the release workflow stages into the tarball to the
-  files the AUR `PKGBUILD` installs back out of it.
+- **`c` and `C` now mean the same thing in both panes, which moved three
+  bindings** ([#593](https://github.com/kbrdn1/gwm-cli/issues/593)).
+  `c` opens the commit listing and `C` the CI checks, in the worktrees pane
+  and in the status pane alike. A key that changes meaning under the focus
+  is a key you have to think about, so:
 
-  The contribution terms are stated in
-  [`CONTRIBUTING.md`](CONTRIBUTING.md#license) and at the foot of the README:
-  a contribution is dual-licensed the same way unless its author says
-  otherwise. There is no CLA and nothing to sign.
+  | Action | Was | Now |
+  |:---|:---|:---|
+  | `commits` | (new) | `c` |
+  | `ci_checks` | `C`, plus a contextual `c` on the status pane | `C` everywhere |
+  | `edit_worktree` (rename) | `c` | `e` |
+  | `exit_to_worktree` | `e` | `E` |
 
-  A license change is worth seeing in the version, so the next release is a
-  **minor**, not a patch.
+  The contextual routing from
+  [#436](https://github.com/kbrdn1/gwm-cli/issues/436), which existed to give
+  the status pane its own `c` for the checks, is gone with it, and the PR
+  line's CI badge no longer changes between `[c]` and `[C]` under the focus.
+  Existing `[tui.keys]` overrides are untouched; only the defaults moved.
 
-- **A message gwm prints reads without an em dash**
-  ([#567](https://github.com/kbrdn1/gwm-cli/issues/567)). The rule this
-  project writes under is that published prose does not use the em dash, and
-  the binary's own output is as published as the README. #516 swept `docs/`
-  and #543 finished the skills; neither reached `src/`, so a user hitting an
-  `exec` error read a dash the documentation for that same feature no longer
-  used. 165 of them across 161 string literals, in every error message, status
-  line and TUI hint the binary carries, and 49 more in `gwm --help`, which
-  `clap` builds out of the doc comments on the CLI types. The completion
-  scripts carried the same text and are fixed with it: `gwm completions zsh`
-  went from 23 to none.
+- **The rich PR / issue view (`I`) had its design pass** ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)). It was
+  built to get the data on screen and had never been laid out; the compact
+  layout of 1.8 made its own density the next thing that read as unpolished.
+  Six things changed:
+  - **The issue and the PR are two tabs**, switched with `Tab`. The view
+    still opens on the PR, which left the issue unreachable from a worktree
+    in review. A PR landing while the view is open still replaces an issue
+    that was only standing in for it, and does not replace one you tabbed
+    to.
+  - **Bodies render as Markdown** rather than as their source. Headings,
+    emphasis, inline code, fenced blocks, lists, task lists, block quotes,
+    GitHub alerts, links by their text, and HTML comments not shown at all.
+  - **Nothing is capped.** The view scrolls, so the window is the terminal
+    and the row count costs only the rows. Descriptions, reviews and the
+    whole conversation render in full; a `… N more` row now only reports
+    what the fetch itself did not return.
+  - **The metadata block wears the Status pane's colours**, resolved through
+    the pane's own helpers rather than a second set of rules.
+  - **A width policy of its own**, 80% of the terminal capped at 120 columns
+    against the shared overlay's 62% capped at 88. That ceiling was chosen
+    for the clean report, whose rows stop earning columns; prose does not.
+    A label-less row also spans the whole inner width now, which the view
+    was paying for twice.
+  - **Code and diff lines are kept whole and scroll sideways** with `h` /
+    `l`. In YAML or Python the indentation is the program, and a wrapped
+    `+` line's continuation carries no sigil and reads as context.
+  - **`y` copies the active tab's URL, `Y` its description.**
+  - **Pager motions**: `D` / `U` move half a window, `g` / `G` jump to the
+    ends, and `c` opens the same PR's CI checks without leaving the view.
+  - **A modal opened from the view closes back to it**, on the tab that was
+    being read. The CI list and the merge confirmation are both reached from
+    inside it, and landing on the worktree table meant re-selecting the row
+    and pressing `I` again to carry on reading. Opened from the table, both
+    still close to the table.
 
-  The connector was chosen at each call site rather than substituted. A colon
-  where the dash introduced the remedy, a semicolon where the clause already
-  carried a colon, a full stop where a second colon would have made the
-  sentence unreadable. In the TUI the dash was often not punctuation at all
-  but a separator, and there is already one in use there, so `/ filter`, the
-  create form hints and the loader detail now read the way the segments beside
-  them already did.
-
-  Comments are untouched, roughly 1900 of them: a doc comment quoting a spec
-  or a command's real output has to stay verbatim, and it is read in the source
-  rather than printed. Two tests hold the rule from here on. One scans `src/`
-  with a Rust literal scanner rather than a grep, since telling a literal from
-  a doc comment is the whole difference between a guard that holds and one
-  nobody can keep green. The other walks `gwm --help` and every subcommand's,
-  because that is where a doc comment stops being a comment, and no scanner
-  can answer that question as reliably as reading what the binary prints.
-
-  Several doc captures still show the old wording and are tracked separately.
-  The published site follows `main`, never `dev`, so they go stale at the next
-  release cut and not before.
-
-- **The one-line description reads without an em dash in every package
-  listing** ([#567](https://github.com/kbrdn1/gwm-cli/issues/567)). #567 swept
-  `src/`, and its guard is scoped there, so the same tagline kept its dash in
-  eight published fields no test could see: the crates.io description, the deb
-  `extended-description`, the rpm `summary`, both `flake.nix` descriptions, and
-  the Homebrew, Scoop and AUR blurbs. A ninth sat in the flake's `shellHook`,
-  printed to whoever runs `nix develop`. A package listing is read by a user,
-  which is the surface #567 is about. The connector is a colon: the dash was
-  introducing an expansion of the noun before it. Comments in those same files
-  keep theirs, which stays #567's to sweep.
-
-- **The Settings panel sizes to its active tab**
-  ([#569](https://github.com/kbrdn1/gwm-cli/issues/569)). #550 gave every
-  bounded overlay one width policy; height stayed a flat percentage of the
-  frame, so the panel took 60% of the terminal whether the tab under it had 3
-  rows or 173. On a 40-row terminal that is a 24-row box for the Worktree tab's
-  three fields, roughly six rows of it blank.
-
-  The box is now the header, the body, the footer hint, the border and the
-  padding, clamped between a floor of 11 rows (the shortest tab that carries a
-  real form) and a ceiling that leaves about 25 rows of body. It therefore
-  changes size as tabs are cycled, which is the deliberate trade: the tabs are
-  genuinely different lengths, and the alternative was blank rows on three tabs
-  out of five.
-
-  The `?` overlay and the command palette keep their percentage. Measured, they
-  carry about 220 rows and 52 commands, so sizing to content would resolve to
-  the ceiling in every ordinary state and only ever engage on a heavily
-  filtered palette, where it becomes a live resize while typing.
-
-  The exact-height modals (create, rename, both delete dialogues) keep sizing
-  the way they did, border flush with the frame and all. They have no scroll
-  path, so the policy's two rows of margin would not shrink those boxes, it
-  would take rows off the bottom of them: a delete confirmation for a target
-  carrying a branch would lose its `Delete Branch` row on a 16-row terminal.
-
-- **One spelling for a worktree path, everywhere it is printed in full**
-  ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The header rendered
-  `$HOME` as `~` and the table printed the same value raw, so one path appeared
-  twice on one screen in two spellings. The column paying for it is the one that
-  can least afford it: `PATH` is `Fill(1)`, it takes whatever the other columns
-  leave and by design vanishes first, and it spent 13 of its columns on the home
-  directory on *every* row. Measured on the demo fixture at 103 columns the
-  column gets about 22 cells, and all five rows read `/Users/kbrdn1/gwm-demo`,
-  identical, hard-clipped mid-path with no ellipsis. They now start at
-  `~/gwm-demo/`, so what survives the clip is the part that differs per row.
-
-  Compression runs before the terminal sanitiser, not after, and that order is
-  load-bearing: the prefix is matched byte for byte against `dirs::home_dir()`,
-  so sanitising first would rewrite whatever `$HOME` itself carries and
-  compression would silently stop firing for exactly the users whose home is
-  hostile. The tail is still sanitised, so a worktree directory name cannot ride
-  the tilde into the cell.
-
-  The sidebar's `Path` row had the other half of the problem and now shares the
-  same helper: it compressed but never sanitised. Nothing leaked, because
-  ratatui drops a zero-width formatting character rather than painting it, but
-  the row silently showed a path the filesystem does not have.
-
-  `gwm path --format=json` is unaffected and stays absolute: this is a rendering
-  change in the TUI only.
-
-### Docs
-
-- **The frontmatter says what the published page should say**
-  ([#579](https://github.com/kbrdn1/gwm-cli/issues/579)). The frontmatter of
-  `docs/` is the source of the `<title>` and the `<meta name="description">` on
-  [gwm.kbrdn.dev](https://gwm.kbrdn.dev): the bridge carries it through
-  verbatim, so a defect there is only fixable here, and it ships green because
-  nothing in the build reads a description.
-
-  Three of them are closed. `3.cli/index.md` and `3.cli/1.reference.md` said
-  the same sentence to a word, in both locales, so two separately crawled URLs
-  competed for one snippet; the section landing now describes the section it
-  routes to rather than the reference it links. Both roadmap descriptions ran
-  to 297 and 307 characters by enumerating every version line since v1.0.0,
-  which put what is shipping now behind the truncation; they stop at the
-  current line. `Getting Started` was the only title-cased page in a
-  sentence-case tree and disagreed with the sidebar label and the OG card table
-  the site builds, both of which say `Getting started`; the title, the
-  `navigation.title`, the H1 and the ten cross-references that spell the page
-  name follow. The French `.gwm.toml` page also started on a lowercase
-  `schéma`, which the bridge was quietly capitalising on publish.
-
-  Two of the three are now pinned by `tests/docs_frontmatter_tests.rs`: a
-  description over 250 characters, and two pages of the same locale describing
-  themselves the same way. Title casing is left to the author, since separating
-  `Getting Started` from `GitHub issue / PR linking` needs a hand-written list
-  of proper nouns that goes stale on the first page named after something not
-  on it.
+- **A tmux or zellij split now opens to the right by default**
+  ([#589](https://github.com/kbrdn1/gwm-cli/issues/589)). Up to 1.9 a split
+  carried no direction at all, so each backend answered for itself: `tmux
+  split-window` fell back to `-v` and stacked the pane, `zellij action
+  new-pane` took "the biggest available space", and herdr went right because
+  gwm hardcoded it. All three now pass a direction, and it defaults to
+  `right`: it is what the `--split` help has promised since it shipped ("a
+  horizontal split of the current pane"), and the half that is actually free
+  on a wide screen. Set `[tui] mux_pane_direction = "down"` to get the old
+  tmux behaviour back.
 
 ### Fixed
 
@@ -262,26 +438,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   density; that is tracked as
   [kbrdn-docs#76](https://github.com/kbrdn1/kbrdn-docs/issues/76).
 
-- **Tilde compression fires on Windows, and with a trailing separator on
-  `$HOME`** ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The home
-  prefix was matched byte for byte, which failed in two ways that had been
-  silent since the helper was written, so the header and the sidebar rendered
-  absolute paths for the affected users rather than `~`.
 
-  On Windows the two sources spell the same path differently: a worktree path
-  comes from libgit2, which emits `/` there, while the home directory comes back
-  with `\`, so `C:/Users/alice/repo` never matched `C:\Users\alice`. Separator
-  spellings are now compared as equivalent, on Windows only, since a backslash
-  is an ordinary character in a Unix directory name.
+- **The rich Issue/PR view keeps its inline comments through a relist**
+  ([#619](https://github.com/kbrdn1/gwm-cli/issues/619)). With the rich PR
+  view open on a PR whose review threads had landed, a worktree relist (the
+  periodic `tui.auto_refresh_secs` one, or an explicit `f`) emptied the
+  thread cache, and the next PR result to land rebuilt the open view against
+  an empty one. The inline comments disappeared from under the reader, and
+  only closing and reopening the view, or refreshing it with `f`, brought
+  them back.
 
-  `HOME=/home/alice/` is legal and is handed back with the separator intact,
-  which left the match ending mid-boundary and refused. Trailing separators are
-  now trimmed before the comparison.
+  The view survives that same expiry for the PR itself because it renders
+  its own snapshot of it; the threads were the one thing it read live from
+  the cache. A relist now keeps the threads of the PR it is showing, which
+  are as authoritative as the PR they hang from, and expires everyone
+  else's as before. Re-requesting them on each tick instead would be fresher
+  and worse: the section collapses to a loading line for the round trip,
+  once per refresh interval, taking the reader's place in the comments with
+  it. Refreshing the view with `f` still asks for them again.
+
+- **The selected worktree keeps the GitHub context that was fetched for it**
+  ([#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Standing on any row
+  but the one the TUI opened on, `C` / `c` said "no CI checks to show: link a
+  PR and fetch (F) first" for a worktree whose PR was linked and whose checks
+  had already been fetched, and the rich Issue/PR view (`I`) refused for the
+  same reason. `f` did not help: it refreshes the worktree list, not the
+  GitHub layer, so only an `F` on that exact row filled the state back in.
+
+  gwm was throwing away its own prefetch. It fetches every linked issue and
+  PR at startup and on every relist, but the link re-read that runs on each
+  selection change flushed the whole result cache and dropped any in-flight
+  `gh` worker with it, so the prefetch died on the first `j`. That flush was
+  a leftover: the cache has been keyed by number since #138, so it cannot
+  serve one row's status for another, and a row that never fetched still
+  reads as unfetched. It is now dropped only when the origin actually moves
+  between two forge instances, which is the one case where a cached number
+  means something else.
+
+  The two verbs also stopped reading "nobody asked yet" as "nothing to show".
+  A linked PR that has never been fetched is now fetched on the spot, on the
+  same task spine, and reported as `fetching Pull request #61...`; one
+  already in flight says the same without starting a second call; one whose
+  probe failed shows what `gh` said instead of pointing at a fetch that had
+  already run; and a PR that is fetched with an empty rollup says its checks
+  have not been reported rather than naming a link and a fetch that are both
+  already done. Only a row with nothing linked still gets the link hint.
+  Workspace mode gains the most: it skips the bulk prefetch by design, so
+  before this the verbs there were fed by nothing at all.
+
+  Freshness is unchanged: a relist still expires every fetched status, so
+  `tui.auto_refresh_secs` (60 by default) still bounds how stale one can be.
+  That expiry moved ahead of the bulk prefetch's early returns, which is what
+  gives workspace mode the same bound rather than none.
+- **An overlay's toggle key closes it whatever it is bound to**
+  ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `W`
+  each close the overlay they open, but the guard doing it asked
+  `key_matches_action`, which reads a single stroke and only ran after the
+  modal verbs had their turn. Two silent holes: a multi-stroke binding
+  (`working_tree = ["g w"]`) could open the overlay and never shut it, and a
+  binding the overlay's own context already claimed (`= ["j"]`) opened it and
+  then scrolled it. The toggle now resolves first, against that one action
+  rather than the whole keymap, and it accumulates its chord, so a prefix
+  stroke is consumed instead of firing a scroll verb on the way through.
+
+  Each of the three overlays routes its keys through an `App` method now
+  (the shape the create overlay has had since #217), because the ordering
+  is the fix and a `match` in the run loop cannot be tested. `d` still
+  cannot reach the delete confirm from behind an overlay: the toggle
+  resolves against its one action, not the whole keymap.
+- **A compact pane's header says where you are, and its name no longer
+  dims when it is not**
+  ([#605](https://github.com/kbrdn1/gwm-cli/issues/605)). In the default
+  compact layout the header carried the focus signal twice, and both halves
+  were weak. The text was repainted from `focus` to `muted` — so a pane's
+  name, the thing you read to know which pane to `Tab` into, was rendered in
+  the role reserved for deliberately secondary text the moment it went
+  inactive, while the spans that already carry a colour (the filter `/`
+  prompt, the Working Tree counts) did not follow, leaving one header line
+  running two rules side by side. And the fill under it stepped from
+  `section_bg` to `selection_bg`, two tones that are adjacent by design (14
+  grey levels apart on `claude-dark`) and that read as a permutation of grey
+  rather than as a place.
+
+  The two states now trade the same pair of roles instead of dimming one of
+  them. An inactive header is `accent` text on the `section_bg` band; the
+  focused one is that band's tone written on an **`accent` band**, bold —
+  the same dark-on-colour treatment the version chip and the footer's
+  context anchor already use. `muted` appears in neither, the focused pane
+  is findable without hunting, and the header no longer borrows
+  `selection_bg` from the cursor row.
+
+  The band is `accent` pulled down toward `section_bg` rather than `accent`
+  at full strength, which was too loud, and rather than `focus` — the border
+  tone, which is *more* saturated and so does not fix the half of "too
+  strong" that darkening does. It is mixed from the two roles it sits
+  between rather than declared as a sixth background role, so a `[theme]`
+  override of either keeps them in tune; a palette with nothing to mix — an
+  ANSI name, whose value belongs to the terminal, or a 256-palette index,
+  which is the default theme's case — keeps `accent` itself rather than
+  falling back to a grey. How far it can be pulled down is bounded by the
+  dark text written on it: the two keep the 3:1 WCAG asks of bold display
+  text, which is pinned by a test.
+
+  Spans that carry their own colour keep it on either band — the header
+  style is patched onto them, not substituted — so a filter prompt or a
+  per-category count still says what it says. The right-flushed counter
+  follows the title, which bordered mode already does with the border
+  colour. An inactive header is no longer bold, which is what makes the
+  weight a signal.
+
+  Bordered mode is otherwise untouched: there the accent still paints the
+  four rules and the title inside the top one.
+
+- **A linked row with nothing fetched yet is white, not green and purple**
+  ([#596](https://github.com/kbrdn1/gwm-cli/issues/596)). The table's `I/P`
+  marker painted its two placeholder slots with a different status role each:
+  `clean` green for the issue, `locked` purple for the PR. So one row said two
+  different things about the same missing data, and both colours were on loan
+  from a loaded state (`clean` is an open issue and an open PR, `locked` is a
+  merged PR, a closed issue, and the locked-worktree badge). That is the state
+  every linked row launches in, since nothing is fetched until `F`. Both slots
+  now take `name`, the one role in the marker that neither badge map can
+  produce and the colour the empty slot beside them already uses. The glyph
+  still tells the two apart: `-` is "no link", `●` is "linked, not fetched
+  yet".
+
+- **The note column captions itself**
+  ([#595](https://github.com/kbrdn1/gwm-cli/issues/595)). The column shipped
+  with an empty header on the grounds that its marker is binary, which left
+  the marker sitting under a blank caption immediately right of the two-slot
+  `I/P` group, where it read as a third slot of that group rather than as its
+  own column. It now carries the same glyph it marks rows with, and both moved
+  from `≡` to the `nf-oct-markdown` glyph the Working Tree pane already paints
+  on a `.md` file, since a note is one. The column stays conditional, so a
+  user who never writes a note keeps the exact table they had before.
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.9.0`](changelogs/1.9.0.md), 2026-08-16
 - [`1.8.0`](changelogs/1.8.0.md), 2026-08-13
 - [`1.7.1`](changelogs/1.7.1.md), 2026-08-12
 - [`1.7.0`](changelogs/1.7.0.md), 2026-08-12

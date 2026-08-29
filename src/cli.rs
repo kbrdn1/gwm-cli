@@ -16,7 +16,7 @@ use crate::labels::{self, LabelDiff};
 use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
-  build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
+  build_command, detect_herdr, detect_tmux, detect_zellij, Multiplexer, SpawnMode, SplitDirection,
 };
 use crate::naming::{BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
@@ -528,26 +528,53 @@ pub enum Command {
   /// Requires `$TMUX` to be set, i.e. gwm must be invoked from inside an
   /// existing tmux session. Outside a tmux session the command exits
   /// non-zero with a clear error rather than spawning a stray server.
-  /// Use `--split` to open in a horizontal split of the current pane
-  /// instead of a new window.
+  /// Use `--split` to open in a split of the current pane instead of a
+  /// new window; `--direction` picks which half it takes.
   Tmux {
     /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
     pattern: String,
     /// Split the current pane instead of opening a new window.
     #[arg(short = 'p', long = "split")]
     split: bool,
+    /// Which half the new pane takes. Implies `--split`; defaults to
+    /// `[tui] mux_pane_direction`.
+    #[arg(long = "direction", value_enum)]
+    direction: Option<SplitDirection>,
   },
   /// Open the matched worktree in a new zellij tab (current session).
   ///
   /// Requires `$ZELLIJ` to be set. `--cwd` on `zellij action new-tab`
   /// needs zellij ≥ 0.40. Use `--split` to open in a new pane of the
-  /// current tab instead of a new tab.
+  /// current tab instead of a new tab; `--direction` picks which half it
+  /// takes, where zellij would otherwise use the biggest free space.
   Zellij {
     /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
     pattern: String,
     /// Split the current tab into a new pane instead of opening a new tab.
     #[arg(short = 'p', long = "split")]
     split: bool,
+    /// Which half the new pane takes. Implies `--split`; defaults to
+    /// `[tui] mux_pane_direction`.
+    #[arg(long = "direction", value_enum)]
+    direction: Option<SplitDirection>,
+  },
+  /// Open the matched worktree in a new herdr tab (current session).
+  ///
+  /// Requires `$HERDR_ENV` to be set, i.e. gwm must be invoked from a
+  /// pane herdr manages. Uses `herdr tab create`, or `herdr pane split`
+  /// with `--split` to open in a pane of the current tab instead. herdr
+  /// has no implicit direction, so the split takes the one from
+  /// `--direction` or from `[tui] mux_pane_direction`.
+  Herdr {
+    /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
+    pattern: String,
+    /// Split the current pane instead of opening a new tab.
+    #[arg(short = 'p', long = "split")]
+    split: bool,
+    /// Which half the new pane takes. Implies `--split`; defaults to
+    /// `[tui] mux_pane_direction`.
+    #[arg(long = "direction", value_enum)]
+    direction: Option<SplitDirection>,
   },
   /// Link the current (or named) worktree to a GitHub issue or pull request.
   ///
@@ -1139,8 +1166,21 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
     Command::Switch => cmd_switch(),
-    Command::Tmux { pattern, split } => cmd_multiplexer(Multiplexer::Tmux, pattern, split),
-    Command::Zellij { pattern, split } => cmd_multiplexer(Multiplexer::Zellij, pattern, split),
+    Command::Tmux {
+      pattern,
+      split,
+      direction,
+    } => cmd_multiplexer(Multiplexer::Tmux, pattern, split, direction),
+    Command::Zellij {
+      pattern,
+      split,
+      direction,
+    } => cmd_multiplexer(Multiplexer::Zellij, pattern, split, direction),
+    Command::Herdr {
+      pattern,
+      split,
+      direction,
+    } => cmd_multiplexer(Multiplexer::Herdr, pattern, split, direction),
     Command::Link {
       target,
       number,
@@ -3931,10 +3971,17 @@ fn cmd_switch() -> Result<()> {
   }
 }
 
-/// `gwm tmux <pattern>` / `gwm zellij <pattern>` — open the matched
-/// worktree in a new window/tab (or split with `--split`). The handler
-/// is shared between the two multiplexers because the only difference
-/// is the argv shape, already encoded in `multiplexer::build_*_command`.
+/// `gwm tmux <pattern>` / `gwm zellij <pattern>` / `gwm herdr <pattern>`
+/// — open the matched worktree in a new window/tab (or split with
+/// `--split`). The handler is shared between the three multiplexers
+/// because the only difference is the argv shape, already encoded in
+/// `multiplexer::build_command`.
+///
+/// A split takes its direction from `--direction`, else from
+/// `[tui] mux_pane_direction` (issue #589). Reading the config is the one
+/// step this handler does lazily: it happens only for a bare `--split`, so
+/// the other two forms keep working on a repo whose `.gwm.toml` does not
+/// parse.
 ///
 /// Error contract (ordered, first match wins):
 ///   1. Not inside a git repo → `NotInGitRepo`.
@@ -3944,17 +3991,21 @@ fn cmd_switch() -> Result<()> {
 ///
 /// Ordering #1 before #2 matches `gwm cd` / `gwm switch`: the repo gate
 /// is the more fundamental problem, so we surface it first.
-fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()> {
+fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool, direction: Option<SplitDirection>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
 
   let env_name = match mux {
     Multiplexer::Tmux => "TMUX",
     Multiplexer::Zellij => "ZELLIJ",
+    // Herdr sets HERDR_ENV=1 in every pane it manages; the other
+    // HERDR_* variables (pane id, tab id, socket) ride along with it.
+    Multiplexer::Herdr => "HERDR_ENV",
   };
   let env_value = std::env::var(env_name).ok();
   let running = match mux {
     Multiplexer::Tmux => detect_tmux(env_value),
     Multiplexer::Zellij => detect_zellij(env_value),
+    Multiplexer::Herdr => detect_herdr(env_value),
   };
   if !running {
     // `${env_name}` renders bare in stderr (not shell source, so no
@@ -3968,11 +4019,36 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()>
   }
 
   let found = worktree::find_fuzzy(&repo, &pattern)?;
-  let mode = if split { SpawnMode::Split } else { SpawnMode::Window };
-  let argv = match mux {
-    Multiplexer::Tmux => build_tmux_command(&found.name, &found.path, mode),
-    Multiplexer::Zellij => build_zellij_command(&found.name, &found.path, mode),
+  let mode = match (split, direction) {
+    // `--direction` is the per-invocation override, and it says "pane"
+    // loudly enough that requiring `--split` alongside it would only be
+    // ceremony.
+    (_, Some(dir)) => SpawnMode::Split(dir),
+    // Only a bare `--split` reads the config, so a malformed `.gwm.toml`
+    // cannot break the two forms that never needed a direction.
+    (true, None) => {
+      let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+      SpawnMode::Split(Config::load_for_repo(&workdir)?.tui.mux_pane_direction)
+    }
+    (false, None) => SpawnMode::Window,
   };
+  // `$HERDR_WORKSPACE_ID` pins a new herdr tab to the calling pane's
+  // workspace; without it herdr uses whichever workspace the server has
+  // focused, which is a different project's window as often as not. The
+  // other two backends ignore it, and so does a herdr split.
+  // The refusal is unreachable from here today — this handler never builds a
+  // `Workspace`, because the CLI spells its own target (bare is a tab, `-p`
+  // is a pane) and `--workspace` is taken by the repo-set flag (#36). It is
+  // still surfaced rather than unwrapped: the day a flag does reach it, the
+  // user gets the builder's own sentence instead of a panic.
+  let argv = build_command(
+    mux,
+    &found.name,
+    &found.path,
+    mode,
+    std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
+  )
+  .map_err(|why| GwmError::Other(why.to_string()))?;
   spawn_multiplexer(mux, &argv)
 }
 
@@ -3987,7 +4063,8 @@ fn spawn_multiplexer(mux: Multiplexer, argv: &[String]) -> Result<()> {
       mux.binary()
     ))
   })?;
-  // The data string already names the binary (`tmux` / `zellij`), so
+  // The data string already names the binary (`tmux` / `zellij` /
+  // `herdr`), so
   // the rendered message reads `command failed: tmux exited with
   // status Some(1)` — attributable to the verb the user typed.
   let status = std::process::Command::new(bin)

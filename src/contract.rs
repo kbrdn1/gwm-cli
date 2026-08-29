@@ -71,6 +71,11 @@ pub const CONFIG_SECTIONS: &[&str] = &[
   // only (issue #419). Also additive; an absent table authorises nothing,
   // which is the safe default rather than a permissive one.
   "forge_hosts",
+  // Scalar, not a section: `merge_method = "merge" | "squash" | "rebase"`
+  // (issue #551). Additive and optional, and its default is the least
+  // destructive of the three, so a config written before it keeps behaving
+  // exactly as it did.
+  "merge_method",
   "worktree",
   "bootstrap",
   "hooks",

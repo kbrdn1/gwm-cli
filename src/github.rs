@@ -1278,6 +1278,27 @@ pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatu
 }
 
 /// Argv for `gh pr view <n> --repo <slug> --json …`.
+/// Argv for `gh pr merge …`.
+///
+/// The method flag is always passed explicitly. Without one `gh` prompts,
+/// and a prompt from inside a TUI is a hang: the terminal is ours, not its.
+///
+/// `--delete-branch` is deliberately absent — see [`Forge::merge_pr`].
+pub fn pr_merge_argv(slug: &str, number: u64, method: crate::forge::MergeMethod) -> Vec<String> {
+  use crate::forge::MergeMethod;
+  let mut argv: Vec<String> = vec!["pr".into(), "merge".into(), number.to_string()];
+  argv.push(
+    match method {
+      MergeMethod::Merge => "--merge",
+      MergeMethod::Squash => "--squash",
+      MergeMethod::Rebase => "--rebase",
+    }
+    .into(),
+  );
+  argv.extend(repo_flag(slug));
+  argv
+}
+
 pub fn pr_view_argv(slug: &str, number: u64) -> Vec<String> {
   let mut argv: Vec<String> = vec!["pr".into(), "view".into(), number.to_string()];
   argv.extend(repo_flag(slug));
@@ -2239,6 +2260,11 @@ impl Forge for GitHubForge {
 
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
     parse_created_pr(&self.run(pr_create_argv(self.repo_selector(), req))?)
+  }
+
+  fn merge_pr(&self, number: u64, method: crate::forge::MergeMethod) -> Result<()> {
+    self.run(pr_merge_argv(self.repo_selector(), number, method))?;
+    Ok(())
   }
 
   fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {

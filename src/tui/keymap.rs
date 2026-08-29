@@ -134,6 +134,7 @@ define_actions! {
   LazyGitFullscreen => "lazygit_fullscreen",
   ReviewFullscreen  => "review_fullscreen",
   ReviewPty         => "review_pty",
+  MergePr           => "merge_pr",
   YankPath          => "yank_path",
   YankBranchName    => "yank_branch_name",
   YankWorktreeName  => "yank_worktree_name",
@@ -149,6 +150,11 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  // #592: the sidebar's Working Tree pane, given the whole terminal.
+  WorkingTree       => "working_tree",
+  // #593: the sidebar's Commits pane, given the whole terminal, with a
+  // load-more key so history is paged rather than capped.
+  Commits           => "commits",
   // #436: CI checks overlay — also reachable via `c` in the status context.
   CiChecks          => "ci_checks",
   // #420: rich PR / issue view — description, checks, reviews, comments.
@@ -518,6 +524,17 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #592: `W` for the Working Tree listing at full size. A letter and
+      // not the next number in the `3` / `4` family: those two open gwm's
+      // own panels (the command transcript, the settings), while this one
+      // and `c` / `C` open a pane's content, which is the register the
+      // letters name.
+      def(Action::WorkingTree, &["W"]),
+      // #593: `c` for commits, `C` for the checks — the same pair in both
+      // panes, so the key does not change meaning under the focus. It cost
+      // `c` its rename, which moved to `E`, and the #436 contextual
+      // routing, which existed to give the status pane its own `c`.
+      def(Action::Commits, &["c"]),
       // #436: `C` opens the CI checks overlay from anywhere in the list
       // view; `c` does the same while the status pane holds the focus
       // (contextual routing, same mechanism as j/k sidebar scroll).
@@ -546,12 +563,16 @@ impl Keymap {
       // #290: `P` is Push.
       def(Action::Push, &["P"]),
       // #290: `c` opens the edit-worktree modal (rename branch).
-      def(Action::EditWorktree, &["c"]),
+      // #593: `e` for edit. `c` went to the commit listing in both panes,
+      // and the rename took the letter that names it, which sent
+      // `exit_to_worktree` to `E`.
+      def(Action::EditWorktree, &["e"]),
       // #515: `N` opens the selected worktree's note in $EDITOR. `i`, which
       // the reference implementation uses, is taken here — it is LinkPrompt.
       def(Action::EditNote, &["N"]),
       // #290: `e` exits the TUI and prints the selected worktree path to stdout.
-      def(Action::ExitToWorktree, &["e"]),
+      // #593: `E`, having lent `e` to the rename it names.
+      def(Action::ExitToWorktree, &["E"]),
       // #35/#290: `l` opens lazygit in an embedded PTY overlay.
       def(Action::LazyGitPty, &["l"]),
       // #290: `L` opens lazygit fullscreen (was unbound before #290).
@@ -561,6 +582,8 @@ impl Keymap {
       // #35/#290: `r` opens the review launcher in an embedded PTY overlay.
       def(Action::ReviewPty, &["r"]),
       // #290: `Y` yanks the worktree path (was `y` before #290).
+      // #551 validation feedback: land the selected worktree's PR.
+      def(Action::MergePr, &["m"]),
       def(Action::YankPath, &["Y"]),
       // #290: `y` yanks the branch name (was yank-path `y` before #290).
       def(Action::YankBranchName, &["y"]),
@@ -742,6 +765,24 @@ impl Keymap {
       .find(|b| b.action == action)
       .and_then(|b| b.chords.first())
       .map(|chord| format_chord(chord))
+  }
+
+  /// Every chord bound to `action`, as the parsed stroke sequences, or an
+  /// empty slice when the action is unbound.
+  ///
+  /// [`Self::lookup`] answers "what does this buffer resolve to", which is
+  /// the wrong question inside a modal: there, the only binding that may
+  /// fire is the overlay's own toggle, and every other global action has to
+  /// stay unreachable. Issue #613 needs the inverse lookup, so a caller can
+  /// ask whether a buffer matches (or is a prefix of) one specific action
+  /// without letting the rest of the keymap through.
+  pub fn chords_for(&self, action: Action) -> &[Vec<KeyStroke>] {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.chords.as_slice())
+      .unwrap_or(&[])
   }
 
   /// Every chord bound to `action`, comma-joined (`"j, Down"`) or empty when

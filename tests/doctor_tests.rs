@@ -773,6 +773,45 @@ fn resolvable_command_binary_is_ok() {
 }
 
 #[test]
+fn missing_terminal_browser_is_warning_and_the_placeholder_is_not_probed() {
+  // #590: `[tui] terminal_browser` is a third configurable binary, opt-in
+  // like `[review]`. The TUI probes it at open time and falls back to the
+  // system browser, so a missing one is never fatal. Surfacing it here is
+  // what stops a user from setting the key, seeing links keep opening
+  // externally, and having nothing tell them why (the #392 shape: a config
+  // surface doctor could not see).
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.tui.terminal_browser = Some("definitely-not-on-path-browser-xyz {url}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("PATH"))
+    .expect("expected a PATH check");
+  assert_eq!(c.status, CheckStatus::Warning, "opt-in binaries warn, never fail");
+  assert!(
+    c.detail.contains("definitely-not-on-path-browser-xyz"),
+    "the browser must be named in the missing list, got: {}",
+    c.detail
+  );
+  // The placeholder is an argument, never the binary: probing `{url}` would
+  // report a permanently missing "binary" nobody can install.
+  assert!(!c.detail.contains("{url}"), "got: {}", c.detail);
+
+  // Unset is the default and must add nothing to probe.
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    !c.detail.contains("definitely-not-on-path-browser-xyz"),
+    "got: {}",
+    c.detail
+  );
+}
+
+#[test]
 fn missing_review_binary_is_warning_not_failure() {
   // Issue #75: [review] is opt-in. A missing review binary should
   // surface as Warning (exit code 1), never Failed (exit code 2),

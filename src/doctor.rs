@@ -422,8 +422,37 @@ const SHELL_KEYWORDS: &[&str] = &[
 /// — better to surface nothing than a garbage binary name that would
 /// produce a confusing PATH warning).
 fn extract_binary(run: &str) -> Option<String> {
-  let tokens = shell_words::split(run).ok()?;
-  let mut iter = tokens.into_iter().peekable();
+  executable_in(&shell_words::split(run).ok()?)
+}
+
+/// [`extract_binary`] for a caller that already holds an argv, which is the
+/// half `[tui] terminal_browser` needs (issue #590): it expands to an argv
+/// before anything probes it, and re-joining it only to re-split here would
+/// be a round trip through a quoting layer for nothing.
+///
+/// Same skipping rules, which is the point of sharing it: a `terminal_browser
+/// = "env -u NO_COLOR w3m {url}"` must probe `w3m`, not `env`, or the check
+/// passes on a browser that is not installed and the pane the plan opens dies
+/// on the spot (Codex review on PR #615). The `env -u NAME` operand rule this
+/// walks was itself a fix (`env -u NODE_OPTIONS npm ci` resolved to
+/// `NODE_OPTIONS`), which is exactly why there should be one copy of it.
+/// Is `token` one of [`COMMAND_WRAPPERS`], however it was spelled?
+///
+/// Compared by basename because writing the wrapper by its path is ordinary
+/// (a pinned coreutils, a nix store path, plain habit), and matching the exact
+/// token missed every one of them (Codex review on PR #615). `/usr/bin/env -u
+/// NO_COLOR w3m` then resolved to `/usr/bin/env`, hiding the binary the walk
+/// exists to find.
+fn is_command_wrapper(token: &str) -> bool {
+  let base = std::path::Path::new(token)
+    .file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or(token);
+  COMMAND_WRAPPERS.contains(&base)
+}
+
+pub(crate) fn executable_in(tokens: &[String]) -> Option<String> {
+  let mut iter = tokens.iter().cloned().peekable();
 
   // Skip leading `KEY=VAL` env assignments (POSIX `FOO=bar tool` form).
   while iter.peek().is_some_and(|t| !t.starts_with('=') && t.contains('=')) {
@@ -433,7 +462,7 @@ fn extract_binary(run: &str) -> Option<String> {
   // Recognise a wrapper (`env`, `command`) and skip its own `-flag` /
   // `KEY=VAL` arguments before reaching the real binary. Stops on the
   // first positional non-flag, non-assignment token.
-  if iter.peek().is_some_and(|t| COMMAND_WRAPPERS.contains(&t.as_str())) {
+  if iter.peek().is_some_and(|t| is_command_wrapper(t)) {
     iter.next(); // consume the wrapper itself
     while let Some(t) = iter.peek() {
       if t.starts_with('-') {
@@ -479,8 +508,9 @@ fn extract_launcher_binary(command: &str) -> Option<String> {
 /// `$PATH`. `lazygit` (the TUI's `l` keybinding's default) and `direnv`
 /// (only if the repo has an `.envrc`) are also checked because they're
 /// the two "ambient" dependencies whose absence routinely confuses new
-/// users. Configured launchers ([git_tui], [review] — issue #75) are
-/// added to the same set so the user gets one consolidated warning.
+/// users. Configured launchers ([git_tui] and [review] from issue #75, plus
+/// [tui] terminal_browser from #590) are added to the same set so the user
+/// gets one consolidated warning.
 ///
 /// Issue #415: `worktree.branch_pattern` is honoured when a branch name is
 /// *written* and ignored when one is *read back*, so a pattern the parser
@@ -642,6 +672,20 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
     if let Some(bin) = extract_launcher_binary(&review.command) {
       needed.insert(bin);
     }
+  }
+  // `[tui] terminal_browser` is a third configurable binary (issue #590),
+  // opt-in like the review launcher. The TUI probes it too and falls back to
+  // the system browser, so a missing one is never fatal; surfacing it here is
+  // what stops a user from setting the key, seeing links keep opening
+  // externally, and having nothing tell them why.
+  if let Some(bin) = ctx
+    .config
+    .tui
+    .terminal_browser
+    .as_deref()
+    .and_then(extract_launcher_binary)
+  {
+    needed.insert(bin);
   }
 
   // Whatever the user's own bootstrap commands and lifecycle hooks invoke.

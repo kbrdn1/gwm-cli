@@ -33,8 +33,9 @@ Down@500ms 4
 Sleep 1500ms
 Type "o"
 # Typing before the child shell has drawn its prompt leaves the command echoed
-# but never run.
-Sleep 4s
+# above it, and further back leaves it echoed but never run. Six seconds, not
+# four: at four the echo still landed on this machine in 2026-08.
+Sleep 6s
 Type@80ms "git status -sb"
 Enter
 Sleep 5s

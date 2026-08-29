@@ -217,6 +217,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "open the linked PR/issue: description, checks, reviews, comments",
     },
     PaletteEntry {
+      action: Action::MergePr,
+      name: "merge-pr",
+      description: "merge the linked PR (asks first; never deletes the branch)",
+    },
+    PaletteEntry {
       action: Action::WtScrollDown,
       name: "wt-scroll-down",
       description: "scroll the Working Tree pane down (status focus)",
@@ -255,6 +260,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       action: Action::ConfigPanel,
       name: "config-panel",
       description: "show the resolved configuration panel",
+    },
+    PaletteEntry {
+      action: Action::WorkingTree,
+      name: "working-tree",
+      description: "show the working tree listing at full size",
+    },
+    PaletteEntry {
+      action: Action::Commits,
+      name: "commits",
+      description: "show the commit listing full size, with load-more",
     },
     PaletteEntry {
       action: Action::ExecOverlay,

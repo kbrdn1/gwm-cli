@@ -2,10 +2,11 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
+use gwm::tui::keymap::Action;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
-  ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, View,
+  CommandLogsKey, ConfirmKeyAction, CountdownTickOutcome, Field, NoteKey, SettingsTab, ToggleStroke, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -1816,6 +1817,498 @@ fn exit_filter_cancel_clears_query() {
 }
 
 #[test]
+fn mux_pane_status_reports_the_multiplexers_own_refusal() {
+  // Issue #588, second Codex pass. The spawn used to inherit both pipes,
+  // which let a failing multiplexer draw its error over the ratatui frame;
+  // sending them to `/dev/null` fixed that and traded it for a status bar
+  // that said "opened" whatever happened. herdr answers a refusal with a
+  // non-zero exit and a JSON body on stdout, so the message is built from
+  // whichever stream spoke.
+  let ok = gwm::tui::mux_pane_status("feat-7-foo", "pane", true, "{\"result\":{}}", "");
+  assert_eq!(ok, "opened feat-7-foo in new pane");
+
+  // The noun is a parameter because `t` no longer always opens a pane:
+  // `mux_pane_direction = "window"` opens a tmux window or a zellij/herdr
+  // tab, and a status bar that still said "pane" would be describing the
+  // key rather than the screen (#589).
+  let ok = gwm::tui::mux_pane_status("feat-7-foo", "tab", true, "", "");
+  assert_eq!(ok, "opened feat-7-foo in new tab");
+
+  let err = gwm::tui::mux_pane_status(
+    "feat-7-foo",
+    "pane",
+    false,
+    "{\"error\":{\"message\":\"unknown workspace w9Z\"}}\n",
+    "",
+  );
+  assert!(
+    err.contains("unknown workspace w9Z"),
+    "the multiplexer's own words must reach the status bar, got: {}",
+    err
+  );
+  assert!(!err.contains('\n'), "the status bar is one line, got: {}", err);
+
+  // stderr wins when both spoke: tmux and zellij put their diagnostics
+  // there, and it is the more specific of the two.
+  let err = gwm::tui::mux_pane_status("feat-7-foo", "pane", false, "some stdout", "no server running");
+  assert!(
+    err.contains("no server running"),
+    "expected the stderr text, got: {}",
+    err
+  );
+
+  // A refusal with nothing on either stream still has to read as a failure,
+  // not as a success with an empty reason.
+  let quiet = gwm::tui::mux_pane_status("feat-7-foo", "pane", false, "", "");
+  assert!(
+    !quiet.starts_with("opened"),
+    "a silent non-zero exit is still a failure, got: {}",
+    quiet
+  );
+}
+
+#[test]
+fn mux_pane_without_a_selection_says_so_and_spawns_nothing() {
+  // Issue #588. `t` on an empty list (or a filter that matches nothing) must
+  // refuse on the status bar rather than reach the multiplexer with no path.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+  app.open_in_mux_pane_from(None, None, Some("1".into()), None);
+  assert_eq!(
+    app.status, "no worktree selected",
+    "the selection gate comes before the multiplexer probe"
+  );
+}
+
+#[test]
+fn mux_pane_with_no_multiplexer_names_all_three_variables() {
+  // The hint is the only thing a user gets when `t` does nothing, so it has
+  // to name what gwm actually looked for. Before #588 it said `$TMUX /
+  // $ZELLIJ`, which reads as "gwm has no idea what you are running" to
+  // someone sitting in a herdr pane.
+  //
+  // The three values are passed in rather than removed from the environment:
+  // `$TMUX` is also read by the clipboard path, so rewriting it here would
+  // pull every yank test in this binary under the env lock.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-7-foo")];
+  app.list_state.select(Some(0));
+  app.open_in_mux_pane_from(None, None, None, None);
+  assert!(
+    app.status.contains("$TMUX") && app.status.contains("$ZELLIJ") && app.status.contains("$HERDR_ENV"),
+    "the hint must name all three probes, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn the_mux_knobs_pick_the_mode_the_t_key_builds() {
+  // `t` reads `[tui] mux_open_in` and `mux_pane_direction` (#608 / #589).
+  // The spawn itself is not reachable from a test (it shells out to a
+  // multiplexer that is not on the runner), so this pins the pure steps the
+  // key runs on: the two config values it resolves, and the argv they
+  // produce for the backend the cascade would have picked.
+  use gwm::config::MuxTarget;
+  use gwm::multiplexer::{build_command, spawn_noun, Multiplexer, SpawnMode, SplitDirection};
+
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-7-foo")];
+  app.list_state.select(Some(0));
+  let path = app.worktrees[0].path.clone();
+  let mode_of = |app: &gwm::tui::App| app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
+
+  // Default: a pane on the right, where 1.9 and earlier left the choice to
+  // the backend and tmux answered "below".
+  assert_eq!(app.config.tui.mux_open_in, MuxTarget::Pane);
+  assert_eq!(app.config.tui.mux_pane_direction, SplitDirection::Right);
+  let mode = mode_of(&app);
+  assert_eq!(mode, SpawnMode::Split(SplitDirection::Right));
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None).unwrap();
+  assert_eq!(argv[1], "split-window");
+  assert_eq!(argv[2], "-h", "the default must reach tmux as `-h`, got: {:?}", argv);
+  assert_eq!(spawn_noun(Multiplexer::Tmux, mode), "pane");
+
+  app.config.tui.mux_pane_direction = SplitDirection::Down;
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode_of(&app), None).unwrap();
+  assert_eq!(argv[2], "-v", "`down` must reach tmux as `-v`, got: {:?}", argv);
+
+  // `tab` is the whole-screen target: a tmux window, a zellij or herdr tab.
+  // The direction is still set and must be ignored rather than leak.
+  app.config.tui.mux_open_in = MuxTarget::Tab;
+  let mode = mode_of(&app);
+  assert_eq!(mode, SpawnMode::Window);
+  let argv = build_command(Multiplexer::Tmux, "feat-7-foo", &path, mode, None).unwrap();
+  assert_eq!(argv[1], "new-window", "`tab` must not split, got: {:?}", argv);
+  assert!(
+    !argv.iter().any(|a| a == "-v" || a == "-h"),
+    "a leftover direction must not reach a window, got: {:?}",
+    argv
+  );
+  assert_eq!(spawn_noun(Multiplexer::Tmux, mode), "window");
+  assert_eq!(spawn_noun(Multiplexer::Zellij, mode), "tab");
+  assert_eq!(spawn_noun(Multiplexer::Herdr, mode), "tab");
+
+  // `workspace` is herdr's level and nobody else's: the other two refuse
+  // instead of opening a tab, so the setting cannot describe something that
+  // did not happen (#608).
+  app.config.tui.mux_open_in = MuxTarget::Workspace;
+  let mode = mode_of(&app);
+  assert_eq!(mode, SpawnMode::Workspace);
+  let argv = build_command(Multiplexer::Herdr, "feat-7-foo", &path, mode, None).unwrap();
+  assert_eq!(argv[1], "workspace");
+  assert_eq!(argv[2], "create");
+  assert_eq!(spawn_noun(Multiplexer::Herdr, mode), "workspace");
+  for mux in [Multiplexer::Tmux, Multiplexer::Zellij] {
+    assert!(
+      build_command(mux, "feat-7-foo", &path, mode, None).is_err(),
+      "{mux:?} has no workspace level to open"
+    );
+  }
+}
+
+#[test]
+fn the_t_key_puts_a_refused_target_on_the_status_bar() {
+  // The refusal has to reach the user: `t` under `mux_open_in = "workspace"`
+  // inside tmux opens nothing, and a silent no-op reads as a broken key.
+  use gwm::config::MuxTarget;
+
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-7-foo")];
+  app.list_state.select(Some(0));
+  app.config.tui.mux_open_in = MuxTarget::Workspace;
+  app.open_in_mux_pane_from(Some("/tmp/tmux-501/default,1,0".into()), None, None, None);
+  assert!(
+    app.status.contains("tmux") && app.status.contains("workspace"),
+    "the status must name the backend and the level it cannot open, got: {}",
+    app.status
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #591: `o` on the agents overlay resumes the session in a mux pane
+// ---------------------------------------------------------------------------
+
+/// An agents overlay open on one worktree carrying one detected session.
+/// The snapshot is seeded directly rather than through `apply_agent_snapshot`
+/// because what is under test is the overlay's `o`, not the landing path.
+fn app_with_agent_overlay(kind: gwm::agent_sessions::AgentKind, id: &str, age_secs: u64) -> (tempfile::TempDir, App) {
+  use gwm::agent_sessions::{AgentSession, WorktreeAgents};
+  use std::collections::BTreeMap;
+  let (dir, mut app) = make_app();
+  let w = worktree_fixture("feat-591-foo");
+  let mut map = BTreeMap::new();
+  map.insert(
+    gwm::agent_sessions::path_display_key(&w.path),
+    WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind,
+        cwd: w.path.clone(),
+        last_activity: std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs),
+        ended: false,
+        id: id.into(),
+        name: None,
+      }],
+    },
+  );
+  app.agent_snapshot = Some(map);
+  app.worktrees = vec![w];
+  app.list_state.select(Some(0));
+  app.open_agent_overlay();
+  (dir, app)
+}
+
+#[test]
+fn agent_pane_with_no_multiplexer_names_all_three_variables() {
+  // #591 is multiplexer-only BY DESIGN: no PTY-overlay fallback, because the
+  // point is to put the session next to gwm and an overlay that covers gwm
+  // is not that. So the refusal is all the user gets, and it names what gwm
+  // looked for — the same sentence `t` shows, not the macro path's shorter
+  // "no multiplexer".
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::ClaudeCode, "s1", 10);
+  app.open_selected_agent_pane_from(None, None, None, None);
+  assert!(
+    app.status.contains("$TMUX") && app.status.contains("$ZELLIJ") && app.status.contains("$HERDR_ENV"),
+    "the hint must name all three probes, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn agent_pane_inside_herdr_plans_the_sequenced_round_trip() {
+  // #591 after the herdr measurement. herdr takes no command in the argv
+  // that opens the container, which is why `macro_refusal` refuses it for a
+  // `[tui.macro*]`. It is not unable to run one: the command goes in
+  // afterwards through the pane id the response carries (#599).
+  //
+  // Planned rather than driven: the sequenced path spawns a worker that
+  // talks to a real herdr, and a test must not open a pane in the developer's
+  // session. What the worker does with this plan is covered by the parser
+  // tests in `multiplexer_tests.rs` and by the drain test below.
+  use gwm::agent_sessions::{AgentKind, AgentSession};
+  let session = AgentSession {
+    kind: AgentKind::Codex,
+    cwd: std::path::PathBuf::from("/tmp/gwm-test/feat-591-foo"),
+    last_activity: std::time::SystemTime::now(),
+    ended: true,
+    id: "s1".into(),
+    name: None,
+  };
+  let plan = gwm::tui::plan_agent_pane(
+    &session,
+    std::path::Path::new("/tmp/gwm-test/feat-591-foo"),
+    &gwm::config::TuiConfig::default(),
+    None,
+    None,
+    Some("1".into()),
+    None,
+  )
+  .expect("herdr can resume, it just needs two steps");
+  let gwm::tui::AgentPanePlan::Sequenced { open, line, noun } = plan else {
+    panic!("herdr must plan the sequenced round trip, not a one-shot argv");
+  };
+  assert_eq!(open[0], "herdr");
+  assert!(
+    open.iter().any(|a| a == "split") && open.iter().any(|a| a == "/tmp/gwm-test/feat-591-foo"),
+    "the container opens in the overlay's worktree, got: {open:?}"
+  );
+  assert!(
+    !open.iter().any(|a| a.contains("codex resume")),
+    "the command must NOT ride the opening argv: herdr ignores it there, got: {open:?}"
+  );
+  assert_eq!(line, "codex resume s1", "the line is typed in afterwards");
+  assert_eq!(noun, "pane");
+}
+
+#[test]
+fn agent_pane_under_a_zellij_tab_is_still_refused() {
+  // The refusal families herdr no longer belongs to are untouched: a zellij
+  // TAB takes no trailing command in any shape, and there is no pane id to
+  // type into afterwards either.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::Opencode, "s1", 10);
+  app.config.tui.mux_open_in = gwm::config::MuxTarget::Tab;
+  app.open_selected_agent_pane_from(None, Some("0".into()), None, None);
+  assert!(
+    app.status.contains("zellij") && app.status.contains("no command"),
+    "expected the zellij-tab refusal, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn agent_pane_worker_result_reaches_the_status_bar() {
+  // The herdr path answers through the task drain, so the worker's wording
+  // is what the user reads. Both arms, because a failure at step 2 or 3
+  // leaves a container open and saying "opened" there would be a lie.
+  let (_d, mut app) = make_app();
+  let generation = app.tasks.request(gwm::tui::TaskKind::AgentPane).unwrap();
+  app.apply_agent_pane_result(generation, Ok("opened codex session in new pane".into()));
+  assert_eq!(app.status, "opened codex session in new pane");
+
+  let generation = app.tasks.request(gwm::tui::TaskKind::AgentPane).unwrap();
+  app.apply_agent_pane_result(generation, Err("herdr refused the resume: no such pane".into()));
+  assert!(
+    app.status.contains("no such pane") && !app.status.starts_with("opened"),
+    "a refusal must not read as a success, got: {}",
+    app.status
+  );
+
+  // A superseded worker cannot clobber a newer one's status.
+  let stale = 0;
+  app.status = "current".into();
+  app.apply_agent_pane_result(stale, Ok("late arrival".into()));
+  assert_eq!(app.status, "current", "a stale generation is dropped");
+}
+
+#[test]
+fn agent_pane_refuses_a_zellij_tab_because_the_level_is_a_setting_now() {
+  // `o` reads `[tui] mux_open_in` like `t` does (#608), so its refusals are
+  // the whole `macro_refusal` set, not just herdr: a zellij TAB takes no
+  // trailing command either. Hardcoding the herdr sentence would make `o`
+  // lie under a setting the user can already flip for `t`.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::Opencode, "s1", 10);
+  app.config.tui.mux_open_in = gwm::config::MuxTarget::Tab;
+  app.open_selected_agent_pane_from(None, Some("0".into()), None, None);
+  assert!(
+    app.status.contains("zellij") && app.status.contains("no command"),
+    "expected the zellij-tab refusal, got: {}",
+    app.status
+  );
+}
+
+#[test]
+fn agent_pane_without_a_selected_session_refuses() {
+  // `agent_detail_rows` emits a `no agent session found` placeholder with no
+  // meta. `attach` deliberately falls through to the attach-by-id prompt
+  // there; `o` has nothing to resume, so it refuses instead — opening a
+  // prompt from a key that promises a pane would be a different verb.
+  let (_d, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("feat-591-foo")];
+  app.list_state.select(Some(0));
+  app.open_agent_overlay();
+  app.open_selected_agent_pane_from(None, None, Some("1".into()), None);
+  assert!(
+    app.status.contains("no agent session"),
+    "expected a refusal naming the missing session, got: {}",
+    app.status
+  );
+  assert_eq!(
+    app.detail_overlay.mode,
+    gwm::tui::state::detail_overlay::DetailMode::List,
+    "`o` must not open the attach-by-id prompt the way `a` does"
+  );
+}
+
+#[test]
+fn agent_pane_opens_at_the_overlay_target_not_the_recorded_cwd() {
+  // The defect the obvious reading of #591 ships. The overlay lists PINNED
+  // sessions too, and a pin exists exactly when the recorded directory names
+  // the wrong tree — `gwm agents attach` right after `gwm create` is the
+  // documented workflow, so this is the common row, not the exotic one.
+  // `overlay_pins` leaves `cwd` alone "purely as provenance", and for a
+  // pinned Claude session resolved by the id sweep it is the slug directory
+  // under `~/.claude/projects`: resuming there drops the agent inside its own
+  // artefact store.
+  use gwm::agent_sessions::{AgentKind, AgentSession};
+  let session = AgentSession {
+    kind: AgentKind::ClaudeCode,
+    cwd: std::path::PathBuf::from("/home/u/.claude/projects/-home-u-main-checkout"),
+    last_activity: std::time::SystemTime::now(),
+    ended: true,
+    id: "s1".into(),
+    name: None,
+  };
+  let target = std::path::Path::new("/tmp/gwm-test/feat-591-foo");
+  let plan = gwm::tui::plan_agent_pane(
+    &session,
+    target,
+    &gwm::config::TuiConfig::default(),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+  )
+  .expect("tmux takes a command");
+  let gwm::tui::AgentPanePlan::OneShot { argv, .. } = plan else {
+    panic!("tmux carries its command in the opening argv");
+  };
+  assert!(
+    argv.iter().any(|a| a == "/tmp/gwm-test/feat-591-foo"),
+    "the pane must open in the worktree the overlay is about, got: {argv:?}"
+  );
+  assert!(
+    !argv.iter().any(|a| a.contains(".claude/projects")),
+    "the recorded cwd is provenance, not a place to run an agent: {argv:?}"
+  );
+  // And it resumes the session rather than landing a bare shell there.
+  assert_eq!(argv.last().map(String::as_str), Some("claude -r s1"), "got: {argv:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn agent_pane_spawn_hands_the_planned_command_to_the_multiplexer() {
+  // Copilot review on PR #610: every other test here stops at a refusal or
+  // at pure argv planning, so a regression that plans correctly and then
+  // never launches — or launches with the wrong cwd, or builds the status
+  // from the wrong session — would pass. This one drives the real spawn
+  // against a recording fake `tmux`, the same shape `cli_binary.rs` uses for
+  // the CLI verb.
+  //
+  // Unix-only for the same reason the `glab` fake is: what is under test is
+  // gwm's argv and status, and a `.cmd` shim would mostly exercise `cmd.exe`
+  // quoting rules instead.
+  use std::os::unix::fs::PermissionsExt;
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
+  let fake = tempfile::TempDir::new().unwrap();
+  let log = fake.path().join("argv.log");
+  let tmux = fake.path().join("tmux");
+  std::fs::write(
+    &tmux,
+    format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n", log.display()),
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&tmux).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&tmux, perms).unwrap();
+
+  // An IDLE session (2h old), so the status must NOT carry the live warning.
+  let (_d, mut app) = app_with_agent_overlay(gwm::agent_sessions::AgentKind::ClaudeCode, "s1", 7200);
+
+  let previous = std::env::var("PATH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` above.
+  unsafe {
+    std::env::set_var(
+      "PATH",
+      format!("{}:{}", fake.path().display(), previous.clone().unwrap_or_default()),
+    );
+  }
+  app.open_selected_agent_pane_from(Some("/tmp/tmux-501/default,1,0".into()), None, None, None);
+  unsafe {
+    match previous {
+      Some(v) => std::env::set_var("PATH", v),
+      None => std::env::remove_var("PATH"),
+    }
+  }
+
+  let argv = std::fs::read_to_string(&log).unwrap_or_default();
+  assert!(
+    argv.contains("split-window"),
+    "the planned argv must actually reach the multiplexer, got: {argv:?} / status: {}",
+    app.status
+  );
+  assert!(
+    argv.contains("claude -r s1"),
+    "the pane must run the RESUME command, not a bare shell, got: {argv:?}"
+  );
+  assert!(
+    argv.contains("/tmp/gwm-test/feat-591-foo"),
+    "the pane must open in the overlay's worktree, got: {argv:?}"
+  );
+  // The status is built from the spawn's own outcome and this session's
+  // freshness, which is the wiring the planning tests cannot see.
+  assert_eq!(
+    app.status, "opened claude session in new pane",
+    "an idle session opens without the live warning"
+  );
+}
+
+#[test]
+fn agent_pane_status_warns_when_the_session_is_still_active() {
+  // A session with `ended = true` resumes without comment: that is what
+  // resume is for. A LIVE one is the interesting case — resuming it in a
+  // second pane while it runs elsewhere may fork or refuse depending on the
+  // tool, so the status says so rather than leaving a silent second pane.
+  let live = gwm::tui::agent_pane_status("claude", "pane", true, true, "", "");
+  assert!(
+    live.contains("still active"),
+    "a live session must be flagged, got: {}",
+    live
+  );
+  let idle = gwm::tui::agent_pane_status("claude", "pane", false, true, "", "");
+  assert!(
+    !idle.contains("still active"),
+    "an idle session resumes without a warning, got: {}",
+    idle
+  );
+  assert!(idle.contains("claude"), "the status names the backend, got: {}", idle);
+  // The noun comes from `spawn_noun`, so `mux_open_in = "tab"` does not leave
+  // the status describing a pane the user is not looking at (#589).
+  let tab = gwm::tui::agent_pane_status("claude", "tab", false, true, "", "");
+  assert!(tab.contains("tab") && !tab.contains("pane"), "got: {}", tab);
+
+  // A refusal keeps the multiplexer's own words and gains no warning: what
+  // failed is the spawn, and "still active elsewhere" would read as a cause.
+  let refused = gwm::tui::agent_pane_status("claude", "pane", true, false, "", "no server running");
+  assert!(
+    refused.contains("no server running") && !refused.contains("still active"),
+    "got: {}",
+    refused
+  );
+}
+
+#[test]
 fn filtered_indices_returns_all_when_query_empty() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![
@@ -2995,31 +3488,32 @@ fn pr_line_ci_hint_follows_the_focus_context() {
       .collect()
   };
 
-  app.focus_worktrees();
-  let unfocused = text_of(&app);
-  assert!(
-    unfocused.contains("10/10 [C]"),
-    "worktrees focus advertises the global ci_checks binding: {unfocused}"
-  );
+  // #593: `C` opens the checks in both panes, so the badge no longer
+  // changes under the focus. The pane-dependent form it used to take
+  // existed only because the status pane borrowed `c` for the checks.
+  for focus_status in [false, true] {
+    if focus_status {
+      app.focus_status();
+    } else {
+      app.focus_worktrees();
+    }
+    let text = text_of(&app);
+    assert!(
+      text.contains("10/10 [C]"),
+      "the ci_checks binding is advertised in both panes (status focus = {focus_status}): {text}"
+    );
+  }
 
-  app.focus_status();
-  let focused = text_of(&app);
-  assert!(
-    focused.contains("10/10 [c]"),
-    "status focus advertises the contextual c: {focused}"
-  );
-
-  // Codex review #455 (P2): with `edit_worktree` explicitly unbound the
-  // contextual key is gone, but the global `ci_checks` binding still opens
-  // the overlay — advertise it instead of dropping the hint entirely.
+  // With `ci_checks` explicitly unbound there is no key to advertise and
+  // the suffix disappears rather than naming a phantom one.
   app
     .keymap
-    .apply_override(gwm::tui::keymap::Action::EditWorktree, vec![])
+    .apply_override(gwm::tui::keymap::Action::CiChecks, vec![])
     .unwrap();
   let unbound = text_of(&app);
   assert!(
-    unbound.contains("10/10 [C]"),
-    "unbound edit_worktree falls back to the global ci_checks key: {unbound}"
+    unbound.contains("10/10") && !unbound.contains("10/10 ["),
+    "an unbound ci_checks drops the key suffix: {unbound}"
   );
 }
 
@@ -3148,7 +3642,7 @@ fn ci_filter_enter_on_a_urlless_check_leaves_the_filter_and_signals_it() {
 }
 
 #[test]
-fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
+fn the_ci_overlay_opens_from_the_status_pane() {
   // Issue #436: `c` is contextual, same dispatch mechanism that turns j/k
   // into sidebar scroll — worktrees context keeps the rename modal, status
   // context opens the CI checks overlay.
@@ -3177,31 +3671,9 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
     detail: Default::default(),
   }));
 
-  // Codex review on PR #455: the contextual routing lives on the KEY path
-  // only — a pure pre-resolution the event loop applies before run_action.
-  // The palette's `edit-worktree` entry must stay a rename everywhere, so
-  // accept_command_palette returns the action unresolved.
-  use gwm::tui::keymap::Action;
-  app.focus_status();
-  assert_eq!(
-    app.resolve_contextual_action(Action::EditWorktree),
-    Action::CiChecks,
-    "status focus routes the edit-worktree KEY to the CI overlay"
-  );
-  assert_eq!(
-    app.resolve_contextual_action(Action::Down),
-    Action::Down,
-    "other actions pass through untouched"
-  );
-
-  app.focus_worktrees();
-  assert_eq!(
-    app.resolve_contextual_action(Action::EditWorktree),
-    Action::EditWorktree,
-    "worktrees context keeps the rename on c"
-  );
-
-  // The resolved CiChecks action opens the overlay as before.
+  // #593 replaced the #436 contextual routing: `c` and `C` mean the same
+  // thing in both panes now, so there is nothing left to re-resolve under
+  // the focus, and `enter_ci_checks` is reached the same way from either.
   app.focus_status();
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
@@ -3825,6 +4297,145 @@ fn enter_ci_checks_error_resolves_the_fetch_key() {
   );
 }
 
+/// An App on `feat/#42-tui-search` with a GitHub origin and PR 61 linked,
+/// its fetch never started — the cold shape the #597 tests below act on.
+fn app_with_a_linked_unfetched_pr() -> (tempfile::TempDir, git2::Repository, App) {
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // The origin is what resolves the forge, and with it `link_slug` — the
+  // fetch refuses to start without one, exactly as the bulk prefetch does.
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  (dir, repo, app)
+}
+
+#[test]
+fn enter_ci_checks_starts_the_fetch_nobody_asked_for() {
+  // Issue #597: `Idle` on a LINKED PR is "nobody asked yet", not "nothing
+  // to show". Workspace mode skips the bulk prefetch entirely, so before
+  // this the only filler was an explicit `F` on the right row — and the
+  // message sent the user to link a PR that was already linked.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Idle),
+    "the fixture must start unfetched, or the assertions below pass vacuously"
+  );
+
+  app.enter_ci_checks();
+
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "the verb must ask for what it needs instead of refusing"
+  );
+  assert!(
+    app.status.contains("fetching") && app.status.contains("61"),
+    "and say which fetch it started: {}",
+    app.status
+  );
+  assert_ne!(app.view, View::DetailOverlay, "still nothing to render yet");
+}
+
+#[test]
+fn enter_ci_checks_while_the_pr_fetch_is_in_flight_says_so() {
+  // Issue #597: `Loading` is not a missing link either — a second spawn
+  // would be wrong and the link hint would be a lie.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  let _generation = request_github_pr(&mut app, 61);
+
+  app.enter_ci_checks();
+
+  assert!(
+    app.status.contains("fetching") && app.status.contains("61"),
+    "an in-flight fetch is reported as one: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_ci_checks_after_a_failed_fetch_reports_the_failure() {
+  // Issue #597: `Error` is terminal in the cache, so the "fetch (F) first"
+  // hint pointed at a fetch that had already run and failed. The reason
+  // the user needs is the one `gh` gave.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  app.enter_ci_checks();
+
+  assert!(
+    app.status.contains("HTTP 502"),
+    "the probe failure is what the user has to act on: {}",
+    app.status
+  );
+  assert!(
+    !app.status.contains("link a PR"),
+    "a PR that is linked must not be reported as unlinked: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_ci_checks_on_a_fetched_pr_with_an_empty_rollup_says_that() {
+  // Issue #597: the fetched-but-empty case shared the unlinked message,
+  // which named the two things that were already done. The rollup is
+  // empty because the workflows have not started, and that is what to say.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "no checks yet".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+    checks: vec![],
+    detail: Default::default(),
+  }));
+
+  app.enter_ci_checks();
+
+  assert_ne!(app.view, View::DetailOverlay, "an empty rollup opens nothing");
+  assert!(
+    app.status.contains("no CI checks") && !app.status.contains("link a PR"),
+    "a linked, fetched PR must not be reported as unlinked: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_rich_view_starts_the_fetch_nobody_asked_for() {
+  // Issue #597: the rich view reads the same cache and refused for the
+  // same reason. Same contract, same verb-level fix.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+
+  app.enter_rich_view();
+
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "the view must ask for the PR it wants to show"
+  );
+  assert!(
+    app.status.contains("fetching") && app.status.contains("61"),
+    "and say so: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_rich_view_after_a_failed_fetch_reports_the_failure() {
+  // Issue #597, PR side, same reasoning as the CI checks counterpart.
+  let (_dir, _repo, mut app) = app_with_a_linked_unfetched_pr();
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  app.enter_rich_view();
+
+  assert!(
+    app.status.contains("HTTP 502"),
+    "the probe failure is what the user has to act on: {}",
+    app.status
+  );
+}
+
 #[test]
 fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
@@ -4242,14 +4853,83 @@ fn apply_fetch_error_stores_error_state() {
 }
 
 #[test]
-fn refresh_link_invalidates_fetch_state() {
-  // After the user changes selection or the branch link changes, any
-  // previously fetched status no longer applies. The state must reset.
+fn refresh_link_keeps_the_status_it_re_reads_the_link_for() {
+  // Issue #597. The result cache has been keyed by (side, number) since
+  // #138, so a link re-read cannot serve one row's status for another: a
+  // row reads its OWN number, and a number it never fetched reads `Idle`.
+  // Flushing the whole cache here was a leftover of the pre-#138 single
+  // slot (PR #68), and it threw away the prefetch that `App::new` and
+  // every relist run — the reason `C` / `I` had nothing to show.
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  app.apply_issue_fetch_result(Err("e".into()));
+  app.apply_issue_fetch_result(Ok(sample_issue(42)));
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)),
+    "the fixture must start Loaded, or the assertion below passes vacuously"
+  );
+
   app.refresh_link();
-  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
-  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.number, 42),
+    other => panic!("re-reading the link must keep the fetched status: {other:?}"),
+  }
+}
+
+#[test]
+fn walking_the_list_and_back_finds_the_status_still_there() {
+  // Issue #597, the behaviour the acceptance test in the issue describes:
+  // open on a worktree with a fetched PR, move away, move back, and the
+  // context is still loaded. Pre-#597 `on_navigation` -> `refresh_link`
+  // flushed the cache and bumped the spine generation, so the prefetch
+  // died on the first `j` and every context-dependent verb reported
+  // "nothing to show" from then until an explicit `F`.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  app.apply_issue_fetch_result(Ok(sample_issue(42)));
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)),
+    "the fixture must start Loaded, or the assertions below pass vacuously"
+  );
+
+  app.next();
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Idle),
+    "the other row reads its own number: #42's status must not leak onto it"
+  );
+
+  app.prev();
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.number, 42),
+    other => panic!("coming back must find #42's status still cached: {other:?}"),
+  }
+}
+
+#[test]
+fn navigation_keeps_an_in_flight_fetch_alive() {
+  // Issue #597, the half the cache alone does not cover: `refresh_link`
+  // also bumped the spine generation on every navigation, so a worker
+  // started by the prefetch had its result dropped by `drain` if the user
+  // pressed a key while it was in flight. Nothing then refilled the slot,
+  // which is how a row could sit on `Loading` forever.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  let generation = request_github_issue(&mut app, 42);
+
+  app.next();
+  app.prev();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
+    .unwrap();
+  app.drain_task_results();
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.number, 42),
+    other => panic!("the in-flight worker must survive the navigation: {other:?}"),
+  }
 }
 
 #[test]
@@ -4278,10 +4958,15 @@ fn prev_resets_fetch_state_on_selection_change() {
 
 #[test]
 fn first_resets_fetch_state_on_selection_change() {
+  // The row `first()` lands on links #42, and it must not be handed the
+  // status of a number it does not link to. Seeded under the fixture row's
+  // own number rather than through `apply_issue_fetch_result` (which keys
+  // on the CURRENT link, so it would have stored #42's status and, since
+  // #597, that one legitimately survives).
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.worktrees.push(worktree_fixture("alt"));
   app.list_state.select(Some(1));
-  app.apply_issue_fetch_result(Err("stale".into()));
+  app.github.complete_issue(0, Ok(sample_issue(0)));
   app.first();
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
 }
@@ -4297,20 +4982,43 @@ fn last_resets_fetch_state_on_selection_change() {
 }
 
 #[test]
-fn filter_clamping_resets_fetch_state_when_selection_moves() {
+fn filter_clamping_re_resolves_the_status_when_selection_moves() {
   // When typing into the filter narrows the visible set so much that the
-  // current selection no longer points at the same worktree, the link
-  // cache must invalidate too. Otherwise the right-panel block lies.
+  // current selection no longer points at the same worktree, the panel
+  // must follow — otherwise the right-panel block describes a row that is
+  // no longer selected. Since #597 that is a re-resolution, not a flush:
+  // both numbers stay cached and the selection decides which one is read.
+  //
+  // The full fixture name is typed rather than a single `z`: the repo row
+  // is a `tempfile` directory whose random name can contain one, which
+  // left two rows matching and the assertion at the mercy of the draw.
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.worktrees.push(worktree_fixture("zzz-unique"));
-  app.list_state.select(Some(1));
-  app.apply_issue_fetch_result(Err("stale".into()));
+  app.list_state.select(Some(0));
+  app
+    .github
+    .complete_issue(42, Ok(sample_issue_titled(42, "the branch row")));
+  app
+    .github
+    .complete_issue(0, Ok(sample_issue_titled(0, "the fixture row")));
+  app.refresh_link();
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(i.title, "the branch row", "precondition"),
+    other => panic!("precondition: the branch row must read #42: {other:?}"),
+  }
+
   app.enter_filter();
-  app.filter_push_char('z'); // only the second fixture matches
-                             // The selection survives but the link cache should still reset because
-                             // the filter operation can drop selection back to index 0 on the
-                             // filtered subset. The contract: any selection-state mutation refreshes.
-  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+  for c in "zzz-unique".chars() {
+    app.filter_push_char(c);
+  }
+
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(i) => assert_eq!(
+      i.title, "the fixture row",
+      "the narrowed selection must read its own number"
+    ),
+    other => panic!("expected the fixture row's own status: {other:?}"),
+  }
 }
 
 #[test]
@@ -5291,7 +5999,7 @@ fn table_marker_for_main_worktree_is_a_yellow_star() {
 }
 
 #[test]
-fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
+fn table_marker_paints_both_unfetched_pastilles_white() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
@@ -5309,9 +6017,9 @@ fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
   assert_eq!(
     marker_cells(&line),
     vec![
-      ("●".to_string(), Some(Color::Green)),    // issue linked → clean role
+      ("●".to_string(), Some(Color::White)),    // issue linked, unfetched → name role
       ("/".to_string(), Some(Color::DarkGray)), // muted separator
-      ("●".to_string(), Some(Color::Magenta)),  // pr linked → locked role
+      ("●".to_string(), Some(Color::White)),    // pr linked, unfetched → name role too (#596)
     ]
   );
 }
@@ -5333,7 +6041,7 @@ fn table_marker_issue_only_leaves_the_pr_slot_as_dash() {
   };
   let line = gwm::tui::table_marker(&w, &Theme::default());
   let cells = marker_cells(&line);
-  assert_eq!(cells[0].1, Some(Color::Green), "issue dot green");
+  assert_eq!(cells[0].1, Some(Color::White), "unfetched issue dot white (#596)");
   assert_eq!(cells[2].0, "-", "empty pr slot uses a dash");
   assert_eq!(cells[2].1, Some(Color::White), "empty pr dash white");
 }
@@ -5464,7 +6172,7 @@ fn table_marker_pr_only_leaves_the_issue_slot_as_dash() {
   let cells = marker_cells(&line);
   assert_eq!(cells[0].0, "-", "empty issue slot uses a dash");
   assert_eq!(cells[0].1, Some(Color::White), "empty issue dash white");
-  assert_eq!(cells[2].1, Some(Color::Magenta), "pr dot violet");
+  assert_eq!(cells[2].1, Some(Color::White), "unfetched pr dot white (#596)");
 }
 
 #[test]
@@ -12983,6 +13691,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Open the note editor on the main row, which always carries a branch.
 fn app_with_note_open() -> (tempfile::TempDir, App) {
   let (dir, mut app) = make_app();
+  // #557: the mode ships on, so the #515 editor is now the opt-out. These
+  // tests are the contract for `note_vim = false`, which is a supported
+  // config and not a leftover — every printable is text and one `Esc`
+  // writes and closes.
+  app.config.tui.note_vim = false;
   app.list_state.select(Some(0));
   app.open_note_editor();
   assert_eq!(app.view, View::Note, "the editor must be the active view");
@@ -13059,7 +13772,11 @@ fn clearing_the_buffer_removes_the_note_instead_of_writing_a_blank_file() {
   // The only way to discard, so it has to actually delete: a one-byte file
   // reads as "no note" everywhere but would still sit on disk and be found
   // by `gwm doctor` once the branch is gone.
+  //
+  // Backspace is the gesture with the mode off (#557); `dd` is its twin in
+  // the default mode, pinned by the test below.
   let (dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
   app.list_state.select(Some(0));
   let branch = app.selected().unwrap().branch.clone().unwrap();
   let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
@@ -13246,11 +13963,15 @@ fn a_failed_thread_fetch_is_shown_not_swallowed() {
 }
 
 #[test]
-fn a_link_refresh_drops_cached_threads_with_everything_else() {
-  // Threads live in their own cache, so the invalidation that clears the
-  // PR must clear them too — otherwise a refreshed PR renders next to the
-  // previous run's inline comments.
+fn cached_threads_move_with_the_pr_they_hang_from() {
+  // Threads live in their own cache, so whatever happens to the PR cache
+  // must happen to them — otherwise a refreshed PR renders next to the
+  // previous run's inline comments. Both halves of that, in order: a plain
+  // link re-read keeps them (they are keyed by PR number, so they are as
+  // authoritative as the PR itself — issue #597), and an origin moving
+  // between two instances that share a slug drops them (Codex review #458).
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
   app.refresh_link();
   app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
@@ -13260,10 +13981,74 @@ fn a_link_refresh_drops_cached_threads_with_everything_else() {
   );
 
   app.refresh_link();
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "a link re-read on the same instance must keep #61's threads"
+  );
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.refresh_link();
 
   assert!(
     matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Idle),
-    "stale threads survived the invalidation"
+    "threads from the previous instance survived the identity change"
+  );
+}
+
+#[test]
+fn a_relist_keeps_the_threads_the_open_rich_view_is_showing() {
+  // Issue #619. The relist expires the fetched statuses, and the rich view
+  // survives that for the PR itself because it renders its OWN snapshot
+  // (`rich_overlay_source`) — but it reads the threads live from the cache.
+  // So the PR landing that follows rebuilt the open view against an `Idle`
+  // threads cache and the inline comments vanished from under the reader.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  assert!(
+    overlay_text(&app).contains("This drops the guard."),
+    "precondition: the comments must be on screen before the relist"
+  );
+
+  app.refresh().unwrap();
+  // The landing is what rebuilds the open view — asserting on the cache
+  // alone would never touch the path that blanks the section.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert!(
+    overlay_text(&app).contains("This drops the guard."),
+    "the relist blanked the inline comments of the view on screen:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_relist_still_expires_the_threads_of_a_pr_nobody_is_looking_at() {
+  // The keep is scoped to what is on screen, not a blanket exemption:
+  // #62's threads have no reader to disturb, so they expire with every
+  // other settled result and the next open re-requests them.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  app.apply_pr_threads_fetch_result(62, Ok(one_thread()));
+
+  app.refresh().unwrap();
+
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "the open view's threads must survive"
+  );
+  assert!(
+    matches!(app.pr_threads_fetch_state(62), gwm::tui::GitHubFetchState::Idle),
+    "an unwatched PR's threads must still expire: {:?}",
+    app.pr_threads_fetch_state(62)
   );
 }
 
@@ -13516,4 +14301,3219 @@ fn every_panel_choice_survives_the_write_it_triggers() {
       }
     }
   }
+}
+
+/// A worktree with both an issue and a PR linked and fetched, the rich view
+/// open on the PR (issue #551).
+fn app_with_both_sides_linked() -> (tempfile::TempDir, git2::Repository, App) {
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  (dir, repo, app)
+}
+
+#[test]
+fn tab_reaches_the_issue_the_pr_was_standing_in_front_of() {
+  // Issue #551. The PR wins whenever one is linked, which is the right
+  // default and left the issue unreachable: a worktree in review had no way
+  // back to the thing it is solving without unlinking the PR.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+
+  app.rich_view_next_tab();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  let vals: Vec<&str> = app.detail_overlay.rows.iter().map(|r| r.value.as_str()).collect();
+  assert!(vals.iter().any(|v| v.contains("The issue body.")), "{vals:?}");
+  assert!(
+    app.detail_overlay.title.contains("Issue #42"),
+    "the title follows the tab: {}",
+    app.detail_overlay.title
+  );
+
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "and back again");
+}
+
+#[test]
+fn the_overlay_link_follows_the_active_tab() {
+  // The overlay is pinned to the link it renders so a disagreeing mutation
+  // closes it (#529). With tabs that pin has to follow the TAB, or switching
+  // to the issue would leave the overlay claiming to be the PR and a moved
+  // PR link would close the issue tab out from under the reader.
+  let (_dir, repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+
+  // The PR link moves. The issue tab has nothing to do with it.
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "a PR link change must not close the issue tab"
+  );
+}
+
+#[test]
+fn a_landing_pr_does_not_yank_the_reader_off_a_chosen_issue_tab() {
+  // The interaction the tabs create, and the one that would have shipped
+  // silently: `sync_rich_overlay` promotes the issue to the PR the moment
+  // the PR lands, which is right when the view opened on the issue only
+  // because the PR was not there yet, and wrong when the reader ASKED for
+  // the issue. Same class as the bug the promotion itself fixed (#529).
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  // A refresh lands the PR again while the reader is on the issue tab.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "the reader chose this tab; a landing fetch does not get to overrule it"
+  );
+}
+
+#[test]
+fn an_unchosen_issue_tab_is_still_promoted_when_the_pr_lands() {
+  // The other side of the pin, and the reason it is a pin rather than a
+  // switch: with no PR fetched yet the view opens on the issue because that
+  // is all there is, and the reader never asked for it. Promoting is exactly
+  // right there, and removing the promotion to make the test above pass
+  // would have re-broken #529.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+}
+
+#[test]
+fn closing_the_view_forgets_which_tab_was_chosen() {
+  // The pin belongs to one open overlay. Left behind, it would silently
+  // change what the NEXT `I` opens on, which is a setting nobody set.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  app.rich_view_next_tab();
+  app.close_detail_overlay();
+
+  app.enter_rich_view();
+
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichPr,
+    "a fresh open goes back to preferring the PR"
+  );
+}
+
+#[test]
+fn tab_is_inert_when_there_is_only_one_side() {
+  // No second tab to reach, so the key must do nothing rather than close the
+  // view or blank it.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+
+  app.rich_view_next_tab();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+  assert_eq!(app.view, View::DetailOverlay);
+  assert!(
+    app.rich_view_tabs().is_empty(),
+    "and no tab bar is offered: {:?}",
+    app.rich_view_tabs()
+  );
+}
+
+#[test]
+fn the_tab_bar_names_both_sides_and_marks_the_active_one() {
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(
+    app.rich_view_tabs(),
+    vec![("Issue #42".to_string(), false), ("PR #61".to_string(), true)]
+  );
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.rich_view_tabs(),
+    vec![("Issue #42".to_string(), true), ("PR #61".to_string(), false)]
+  );
+}
+
+#[test]
+fn the_horizontal_offset_only_moves_as_far_as_there_is_something_to_see() {
+  // Issue #551. A fenced line or a diff hunk is kept whole rather than
+  // reflowed, so the offset is the only way to its tail. Unbounded, it would
+  // scroll a view full of prose into blank space and leave the reader with
+  // no clue how to get back.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  let long = "x".repeat(400);
+  pr.detail.body = format!("prose\n\n```\n{long}\n```");
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(200);
+  app.enter_rich_view();
+
+  assert_eq!(app.rich_h_offset(), 0, "it starts at the left edge");
+  app.rich_view_scroll_left();
+  assert_eq!(app.rich_h_offset(), 0, "and cannot go further left than that");
+
+  for _ in 0..200 {
+    app.rich_view_scroll_right();
+  }
+  let stopped = app.rich_h_offset();
+  assert!(stopped > 0, "the offset moved");
+  assert!(
+    stopped < 400,
+    "and stopped once the widest row's tail was on screen, at {stopped}"
+  );
+
+  app.rich_view_scroll_left();
+  assert!(app.rich_h_offset() < stopped, "left walks it back");
+}
+
+#[test]
+fn a_view_with_nothing_to_scroll_does_not_scroll() {
+  // Every row is wrapped to fit, so there is no tail to reach and moving
+  // would only hide the left edge of the text.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.set_term_width(200);
+  app.enter_rich_view();
+
+  app.rich_view_scroll_right();
+
+  assert_eq!(app.rich_h_offset(), 0);
+}
+
+#[test]
+fn switching_tab_or_closing_puts_the_offset_back_at_the_left_edge() {
+  // The offset describes one side's widest row. Carried across, it would
+  // open the other tab already scrolled, with its first columns hidden and
+  // nothing on screen saying why.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  app.rich_view_scroll_right();
+  assert!(app.rich_h_offset() > 0);
+
+  app.rich_view_next_tab();
+  assert_eq!(app.rich_h_offset(), 0, "a tab switch resets it");
+
+  app.rich_view_next_tab();
+  app.rich_view_scroll_right();
+  app.close_detail_overlay();
+  app.enter_rich_view();
+  assert_eq!(app.rich_h_offset(), 0, "and so does closing the view");
+}
+
+#[test]
+fn widening_the_terminal_does_not_leave_the_offset_past_the_end() {
+  // Issue #551. The offset is bounded by what the widest preformatted row
+  // has left to show, and that bound MOVES: a wider terminal is a wider
+  // modal, so the same row runs out of tail sooner. Left where it was, the
+  // renderer skips past the end of the line and paints a blank row with
+  // nothing on screen to say why. Same class as the stale wrap
+  // `set_term_width` already exists to prevent, and a refresh that returns
+  // a shorter body gets there the same way.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(60);
+  app.enter_rich_view();
+
+  for _ in 0..100 {
+    app.rich_view_scroll_right();
+  }
+  let narrow = app.rich_h_offset();
+  assert!(narrow > 0, "precondition: it scrolled on the narrow terminal");
+
+  app.set_term_width(200);
+
+  let widest = app
+    .detail_overlay
+    .rows
+    .iter()
+    .filter(|r| r.preformatted)
+    .map(|r| r.value.chars().count())
+    .max()
+    .unwrap_or(0);
+  assert!(
+    app.rich_h_offset() < widest,
+    "the offset must still land inside the widest row, got {} of {widest}",
+    app.rich_h_offset()
+  );
+  assert!(
+    app.rich_h_offset() < narrow,
+    "and a wider modal leaves less to scroll, not the same"
+  );
+}
+
+#[test]
+fn the_tab_bar_survives_a_refresh_that_only_one_side_answers() {
+  // Codex review, pass 2 (P2). `rich_view_tabs` demanded BOTH caches be
+  // `Loaded`, but the overlay deliberately keeps its own source when a
+  // refresh fails. So a refresh where the displayed side errors and the
+  // other lands took the bar away and made `Tab` inert, stranding the
+  // reader on stale data with no way across until they closed the view.
+  //
+  // The active side comes from the overlay's own source, which survives;
+  // only the DESTINATION has to be loaded.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert_eq!(app.rich_view_tabs().len(), 2);
+
+  // The PR side fails, the issue side is still there.
+  app.apply_pr_fetch_result(Err("gh: HTTP 502".into()));
+
+  assert_eq!(
+    app.rich_view_tabs().len(),
+    2,
+    "the bar must still offer the side that IS loaded: {:?}",
+    app.rich_view_tabs()
+  );
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "and Tab must still cross to it"
+  );
+}
+
+#[test]
+fn a_promotion_puts_the_horizontal_offset_back_at_the_left_edge() {
+  // Codex review, pass 6 (P2). The offset resets on a tab switch and on
+  // close, but a PR landing on an issue the view was standing in for
+  // changes sides through `sync_rich_overlay`, which went past both. A PR
+  // carrying a preformatted line of its own then opened already scrolled,
+  // with its first columns hidden and nothing on screen saying why — the
+  // exact failure the two existing resets were added to prevent.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut issue = rich_issue_fixture(42);
+  issue.detail.body = format!("```\n{}\n```", "x".repeat(400));
+  app.apply_issue_fetch_result(Ok(issue));
+  app.set_term_width(200);
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.rich_view_scroll_right();
+  assert!(app.rich_h_offset() > 0, "precondition: the issue scrolled");
+
+  // The PR the issue was standing in for lands, carrying a long line too.
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = format!("```\n{}\n```", "y".repeat(400));
+  app.apply_pr_fetch_result(Ok(pr));
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr, "it promoted");
+  assert_eq!(app.rich_h_offset(), 0, "and the new side opens at its left edge");
+}
+
+#[test]
+fn the_rich_view_yanks_the_url_and_the_body_of_the_active_tab() {
+  // Validation feedback: `y` copies the URL, `Y` copies the description.
+  // Both read the OVERLAY's own source rather than the fetch cache, for the
+  // reason `rebuild_rich_rows` gives — a manual refresh flushes that cache,
+  // so a yank landing in that window would find nothing and copy an empty
+  // string over whatever the user had.
+  let (_dir, _repo, mut app) = app_with_both_sides_linked();
+
+  assert_eq!(
+    app.rich_yank_url().as_deref(),
+    Some("https://example.test/pull/61"),
+    "the PR tab yanks the PR"
+  );
+  assert_eq!(app.rich_yank_body().as_deref(), Some("A description worth reading."),);
+
+  app.rich_view_next_tab();
+  assert_eq!(
+    app.rich_yank_url().as_deref(),
+    Some("https://example.test/issues/42"),
+    "and the issue tab yanks the issue"
+  );
+  assert_eq!(app.rich_yank_body().as_deref(), Some("The issue body."));
+}
+
+#[test]
+fn yanking_a_body_that_is_empty_says_so_instead_of_copying_nothing() {
+  // A PR with no description is ordinary. Copying an empty string over
+  // whatever the user had on the clipboard is the worst of the options.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = String::new();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+
+  assert_eq!(app.rich_yank_body(), None);
+  assert!(
+    app.rich_yank_url().is_some(),
+    "the URL is still there; only the body is missing"
+  );
+}
+
+#[test]
+fn merging_needs_a_pr_that_is_linked_and_fetched() {
+  // Validation feedback on #551. Three states, told apart rather than
+  // collapsed into one refusal, the way `enter_rich_view` tells them apart:
+  // the way out differs, so the message has to.
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.refresh_link();
+
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::List, "nothing linked: no modal");
+  assert!(
+    app.status.contains("link"),
+    "the status names the way out: {}",
+    app.status
+  );
+
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::List, "linked but not fetched: still no modal");
+  assert!(app.status.contains("fetch"), "and a different way out: {}", app.status);
+
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.confirm_kind(), ConfirmKind::MergePr);
+  let pending = app.pending_merge().expect("the modal holds the merge");
+  assert_eq!(pending.number, 61);
+  assert_eq!(pending.base_ref, "dev");
+}
+
+#[test]
+fn a_stale_workspace_selection_cannot_merge_the_wrong_repos_pr() {
+  // The guard `enter_rich_view` and `rich_view_refresh` both carry, and the
+  // one that cannot be skipped here: a failed `Repository::open` for the
+  // selected row leaves the link pointing at the PREVIOUSLY active repo, so
+  // a merge would land a PR in a repository the user is not looking at.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.workspace_active_stale = true;
+
+  app.enter_confirm_merge();
+
+  assert_eq!(app.view, View::List, "no modal opens on a stale selection");
+  assert!(app.pending_merge().is_none());
+  assert!(
+    app.status.contains("unavailable"),
+    "the status says why: {}",
+    app.status
+  );
+}
+
+#[test]
+fn dismissing_a_merge_confirmation_leaves_the_delete_flow_as_it_was() {
+  // `View::Confirm` was single-purpose before this. The delete path is the
+  // one with a safety countdown and a batch snapshot, and it must come back
+  // to its own default rather than inherit whatever the merge left behind.
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.confirm_kind(), ConfirmKind::MergePr);
+
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List);
+  assert!(app.pending_merge().is_none());
+  assert_eq!(
+    app.confirm_kind(),
+    ConfirmKind::DeleteWorktree,
+    "the next confirmation is a delete until something says otherwise"
+  );
+}
+
+#[test]
+fn the_merge_confirmation_carries_the_configured_method() {
+  // The method is resolved when the modal opens and fired from that
+  // snapshot, so what the summary showed is what runs.
+  use gwm::forge::MergeMethod;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert_eq!(
+    app.config.merge_method,
+    MergeMethod::Merge,
+    "the default is a merge commit, which is what this repo requires"
+  );
+  app.config.merge_method = MergeMethod::Squash;
+  app.enter_confirm_merge();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
+}
+
+#[test]
+fn the_rich_view_has_pager_motions() {
+  // Validation feedback on #551: `D` / `U` move half a window, `g` / `G`
+  // jump to the ends. A description now runs to hundreds of rows, so `j`
+  // sixty times was the only way across it.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.detail.body = (0..200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+  app.apply_pr_fetch_result(Ok(pr));
+  app.set_term_width(120);
+  app.set_term_height(40);
+  app.enter_rich_view();
+  let last = app.detail_overlay.rows.len() - 1;
+
+  let half = app.rich_half_page();
+  assert!(half > 1, "half a 40-row window is a real jump, got {half}");
+
+  app.detail_overlay.select_page_down(half);
+  assert_eq!(app.detail_overlay.selected, half);
+  app.detail_overlay.select_page_up(half);
+  assert_eq!(app.detail_overlay.selected, 0);
+
+  // Clamped, not wrapped: a pager stops at the ends, and wrapping would
+  // lose the reader's place in a body this long.
+  app.detail_overlay.select_page_up(half);
+  assert_eq!(app.detail_overlay.selected, 0, "up from the top stays");
+  app.detail_overlay.select_last();
+  assert_eq!(app.detail_overlay.selected, last);
+  app.detail_overlay.select_page_down(half);
+  assert_eq!(app.detail_overlay.selected, last, "down from the bottom stays");
+  app.detail_overlay.select_first();
+  assert_eq!(app.detail_overlay.selected, 0);
+}
+
+#[test]
+fn the_half_page_jump_follows_the_window_the_reader_sees() {
+  // The distance is half of what is ON SCREEN, so it has to come from the
+  // renderer's own answer rather than a second guess at the same number.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.set_term_height(40);
+  let tall = app.rich_half_page();
+  app.set_term_height(20);
+  let short = app.rich_half_page();
+
+  assert!(short < tall, "a shorter terminal jumps less: {short} vs {tall}");
+  assert_eq!(tall, gwm::tui::detail_visible_rows(40) / 2);
+  assert!(app.rich_half_page() >= 1, "never zero, or the key would be inert");
+}
+
+#[test]
+fn a_failed_merge_keeps_the_modal_and_the_forges_own_words() {
+  // Validation feedback: the merge modal behaves like the delete one. It
+  // stays up with a loader while the work runs, and a failure leaves its
+  // banner where the decision was made instead of flashing on a status bar
+  // the reader may miss. The forge refuses for reasons gwm does not model,
+  // so its message is the only accurate one available.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+
+  app.apply_merge_result(Err(
+    "Pull request is not mergeable: the base branch is protected".into(),
+  ));
+
+  assert_eq!(app.view, View::Confirm, "the modal does not vanish on failure");
+  assert!(
+    app.merge_failure().unwrap().contains("protected"),
+    "and it carries the forge's own words: {:?}",
+    app.merge_failure()
+  );
+  assert!(app.pending_merge().is_some(), "so a retry is one keypress");
+}
+
+#[test]
+fn a_successful_merge_closes_the_modal_and_forgets_the_target() {
+  use gwm::tui::ConfirmKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_confirm_merge();
+
+  app.apply_merge_result(Ok(()));
+
+  assert_eq!(app.view, View::List);
+  assert!(app.pending_merge().is_none());
+  assert!(app.merge_failure().is_none());
+  assert_eq!(app.confirm_kind(), ConfirmKind::DeleteWorktree);
+  assert!(app.status.contains("merged"), "status: {}", app.status);
+}
+
+#[test]
+fn closing_the_ci_list_comes_back_to_the_view_it_was_opened_from() {
+  // Validation feedback on #551. `c` is reached from inside the rich view,
+  // so `Esc` there returning to the worktree table threw away where the
+  // reader was: re-select the row, press `I` again, find your place.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.checks = vec![gwm::github::PrCheck {
+    name: "test (ubuntu-latest)".into(),
+    outcome: gwm::github::CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+
+  app.enter_ci_checks();
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+
+  app.close_detail_overlay();
+
+  assert_eq!(app.view, View::DetailOverlay, "not all the way out to the table");
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichPr);
+  assert!(
+    app
+      .detail_overlay
+      .rows
+      .iter()
+      .any(|r| r.value.contains("worth reading")),
+    "and it is the same view, rebuilt from its own source"
+  );
+}
+
+#[test]
+fn the_ci_list_opened_from_the_table_still_closes_to_the_table() {
+  // The other half: nothing to come back to when `c` was pressed on the
+  // worktree table, and inventing a rich view there would be worse than
+  // the bug this fixes.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mut pr = rich_pr_fixture(61);
+  pr.checks = vec![gwm::github::PrCheck {
+    name: "test".into(),
+    outcome: gwm::github::CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  app.apply_pr_fetch_result(Ok(pr));
+
+  app.enter_ci_checks();
+  app.close_detail_overlay();
+
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn cancelling_a_merge_started_from_the_rich_view_comes_back_to_it() {
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
+  app.enter_rich_view();
+  // On the issue tab by choice, which the round trip must not undo.
+  app.rich_view_next_tab();
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+
+  app.enter_confirm_merge();
+  assert_eq!(app.view, View::Confirm);
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::RichIssue,
+    "the chosen tab survives the round trip"
+  );
+
+  // And the pin with it: a PR landing now must not promote it away.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  assert_eq!(app.detail_overlay.kind, DetailKind::RichIssue);
+}
+
+#[test]
+fn a_merge_started_from_the_table_still_ends_on_the_table() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_confirm_merge();
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn the_merge_modal_advertises_its_own_verbs_not_the_delete_flows() {
+  // Validation feedback on #551: the merge modal was showing the delete
+  // flow's hint bar, so it advertised `D  branch` — a key that means
+  // nothing over a merge and does nothing when pressed. It has its own
+  // thing to offer instead, and could not say so.
+  use gwm::forge::MergeMethod;
+  use gwm::tui::HintContext;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  app.enter_confirm_merge();
+  assert_eq!(app.hint_context(), HintContext::ConfirmMerge);
+
+  // And the verb it advertises actually does something.
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Merge);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Squash);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Rebase);
+  app.cycle_merge_method();
+  assert_eq!(app.pending_merge().unwrap().method, MergeMethod::Merge, "it cycles");
+}
+
+#[test]
+fn a_delete_confirmation_keeps_the_delete_hint_bar() {
+  // The other half: routing on the kind must not take the delete flow's
+  // own verb away from it.
+  use gwm::tui::HintContext;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_confirm_delete();
+  if app.view == View::Confirm {
+    assert_eq!(app.hint_context(), HintContext::Confirm);
+  }
+}
+
+#[test]
+fn cycling_the_method_cannot_touch_a_delete_confirmation() {
+  // The verb lives in the shared `confirm` key context, so it is reachable
+  // while a DELETE modal is up. It has to be inert there rather than
+  // quietly mutating a merge that is not on screen.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_confirm_delete();
+
+  app.cycle_merge_method();
+
+  assert!(app.pending_merge().is_none());
+}
+
+// ---- lists in the note editor (#557) -------------------------------------
+
+#[test]
+fn the_checkbox_chord_spawns_a_box_then_ticks_it() {
+  // Ctrl-modified on purpose: the note editor reserves every unmodified
+  // printable for the buffer, so a bare letter here would be swallowed
+  // mid-sentence.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "ship it".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- [ ] ship it"]);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- [x] ship it"]);
+}
+
+#[test]
+fn the_bullet_chord_marks_the_line_as_an_item() {
+  let (_dir, mut app) = app_with_note_open();
+  for c in "one".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- one"]);
+
+  // And Enter continues what the chord started, without a second chord.
+  app.handle_note_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  for c in "two".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- one", "- two"]);
+}
+
+#[test]
+fn a_ticked_box_survives_the_round_trip_to_disk() {
+  // The end of the gesture: tick, leave, and the file reads as a checklist
+  // in an editor that never saw gwm.
+  let (_dir, mut app) = app_with_note_open();
+  for c in "check the CI".chars() {
+    app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] check the CI\n");
+}
+
+// ---- the note editor's normal mode (#557) --------------------------------
+
+use gwm::tui::state::note_editor::NoteMode;
+
+/// Open the note editor with `[tui] note_vim = true`, which is the only way
+/// normal mode is reachable at all.
+fn app_with_vim_note_open() -> (tempfile::TempDir, App) {
+  let (dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  (dir, app)
+}
+
+fn note_key(app: &mut App, c: char) {
+  app.handle_note_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+}
+
+#[test]
+fn the_knob_opens_the_note_in_normal_mode() {
+  let (_dir, app) = app_with_vim_note_open();
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+}
+
+#[test]
+fn with_the_knob_on_the_motion_keys_are_verbs_not_letters() {
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'j');
+  note_key(&mut app, 'l');
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["one", "two"], "nothing was typed");
+  assert_eq!((editor.cursor_line, editor.cursor_col), (1, 1));
+}
+
+#[test]
+fn with_the_knob_off_the_same_keys_are_still_letters() {
+  // The #515 editor, untouched: this is what the knob defends.
+  let (_dir, mut app) = app_with_note_open();
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Insert);
+  for c in "jkl".chars() {
+    note_key(&mut app, c);
+  }
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["jkl"]);
+}
+
+#[test]
+fn i_opens_insert_mode_and_the_next_keys_are_text_again() {
+  let (_dir, mut app) = app_with_vim_note_open();
+  note_key(&mut app, 'i');
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Insert);
+  for c in "done".chars() {
+    note_key(&mut app, c);
+  }
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["done"]);
+  assert_eq!(app.view, View::Note, "and no global verb fired on the `d`");
+}
+
+#[test]
+fn esc_leaves_insert_mode_before_it_leaves_the_note() {
+  // The whole reason the knob exists: with a mode, the first `Esc` is the
+  // one that leaves insert, so closing takes two.
+  let (_dir, mut app) = app_with_vim_note_open();
+  note_key(&mut app, 'i');
+  for c in "kept".chars() {
+    note_key(&mut app, c);
+  }
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert_eq!(app.view, View::Note, "the first Esc only left insert mode");
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert_eq!(app.view, View::List, "the second one closed it");
+  assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+}
+
+#[test]
+fn enter_and_backspace_are_motions_in_normal_mode() {
+  // They are text keys in insert mode, so in normal mode they must not
+  // edit: a Backspace that eats a character there is prose lost to a key
+  // the user pressed to move.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 2;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  app.handle_note_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["one", "two"], "the buffer is untouched");
+  assert_eq!((editor.cursor_line, editor.cursor_col), (1, 1));
+}
+
+#[test]
+fn the_list_chords_still_work_from_normal_mode() {
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["ship it".into()];
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- [ ] ship it"]);
+}
+
+#[test]
+fn the_mode_survives_a_trip_through_the_real_editor() {
+  // `Ctrl+e` re-reads the file into a fresh buffer; landing back in insert
+  // mode would leave the user typing verbs into their note.
+  let (_dir, mut app) = app_with_vim_note_open();
+  let path = app.note_editor.as_ref().unwrap().path.clone();
+  std::fs::write(&path, "written outside\n").unwrap();
+
+  app.reload_note_after_editor();
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["written outside", ""]);
+  assert_eq!(editor.mode, NoteMode::Normal, "still in normal mode");
+}
+
+#[test]
+fn a_shifted_letter_reaches_normal_mode_as_its_uppercase_verb() {
+  // Terminals disagree on how they report a shifted letter: legacy sends
+  // `Char('G')` bare, many modern ones `Char('G')` + SHIFT, the kitty
+  // protocol the base key `Char('g')` + SHIFT. `KeyStroke::new` folds all
+  // three to `Char('G')` (PR #192) — routing `key.code` instead would turn
+  // `G` into `g` and take every uppercase verb (`G W B E I A O`) with it.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT));
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.cursor_line, 1, "`Shift+g` is `G`, the last-line verb");
+  assert!(editor.pending.is_none(), "and not a half-typed `gg`");
+}
+
+#[test]
+fn the_arrows_keep_the_caret_on_a_character_in_normal_mode() {
+  // The arrows are insert-mode movement: `End` parks one past the last
+  // char, which is where typing goes. In normal mode that position has no
+  // character under it, so `x` would delete nothing and `i` would insert
+  // past the end of the line.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["abc".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+  assert_eq!(app.note_editor.as_ref().unwrap().cursor_col, 2, "on `c`, not past it");
+
+  note_key(&mut app, 'x');
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["ab"],
+    "so `x` has something to delete"
+  );
+}
+
+#[test]
+fn a_list_chord_leaves_the_caret_on_a_character_in_normal_mode() {
+  // `Ctrl+t` on an empty line writes `- [ ] ` and parks the caret where the
+  // item text goes, which is past the end. Same invariant, same fix.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec![String::new()];
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["- [ ] "]);
+  assert_eq!(editor.cursor_col, 5, "the caret sits on the last char, not after it");
+}
+
+#[test]
+fn a_key_that_is_not_the_pair_abandons_a_half_typed_sequence() {
+  // `d` then an arrow then `d`: the second `d` must open a fresh sequence,
+  // not complete the first one on the line the arrow landed on. There is no
+  // undo here, so a `dd` the user did not type is prose gone for good.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into(), "three".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'd');
+  app.handle_note_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  note_key(&mut app, 'd');
+
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["one", "two", "three"],
+    "the arrow dropped the pending `d`"
+  );
+}
+
+#[test]
+fn a_chord_also_abandons_a_half_typed_sequence() {
+  // Same contract for the Ctrl-modified verbs, which route past
+  // `normal_key` entirely.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["one".into(), "two".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'd');
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+  note_key(&mut app, 'd');
+
+  let editor = app.note_editor.as_ref().unwrap();
+  assert_eq!(editor.lines, vec!["- one", "two"], "the bullet landed, the line stayed");
+}
+
+// ---- the mode ships on, and the bullet chord moved (#557, install pass) ---
+
+#[test]
+fn the_note_editor_opens_in_normal_mode_out_of_the_box() {
+  // The knob flipped after the first install pass: `note_vim = false` is
+  // the opt-out now, not the default. An editor whose vim keys type
+  // themselves into the prose is the surface a vim user actually meets,
+  // and a knob nobody knows to set is a mode nobody gets.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+}
+
+#[test]
+fn esc_leaves_insert_before_it_closes_out_of_the_box() {
+  // The cost of the flip, pinned: `Esc` no longer writes and closes on the
+  // first press. It leaves insert, and the second press is the one that
+  // saves. `note_vim = false` buys the old gesture back.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  note_key(&mut app, 'i');
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert_eq!(app.view, View::Note, "the first Esc only leaves insert");
+  assert_eq!(app.note_editor.as_ref().unwrap().mode, NoteMode::Normal);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+  assert!(app.note_editor.is_none(), "the second one writes and closes");
+}
+
+#[test]
+fn the_bullet_chord_is_ctrl_u_because_tmux_eats_ctrl_l() {
+  // `Ctrl+h` / `j` / `k` / `l` are the tmux.nvim pane-navigation set: tmux
+  // consumes them unless the pane runs vim, so gwm never sees the key.
+  // Measured on a real config, same class as `Ctrl+b` being the prefix.
+  let (_dir, mut app) = app_with_note_open();
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["- "]);
+
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+  assert_eq!(
+    app.note_editor.as_ref().unwrap().lines,
+    vec!["- "],
+    "and the chord tmux steals no longer toggles anything"
+  );
+}
+
+#[test]
+fn appending_at_the_end_of_the_line_types_past_the_last_char() {
+  // `A` is the one verb that legally leaves the caret one past the end of
+  // the line: it enters insert before the normal-mode clamp runs, so the
+  // clamp does not pull it back onto the last character.
+  let (_dir, mut app) = app_with_vim_note_open();
+  app.note_editor.as_mut().unwrap().lines = vec!["abc".into()];
+  app.note_editor.as_mut().unwrap().cursor_line = 0;
+  app.note_editor.as_mut().unwrap().cursor_col = 0;
+
+  note_key(&mut app, 'A');
+  app.handle_note_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+
+  assert_eq!(app.note_editor.as_ref().unwrap().lines, vec!["abcX"]);
+}
+
+#[test]
+fn the_note_hint_context_follows_the_mode() {
+  // The bar is redrawn every frame from `hint_context()`, so the mode line
+  // is only ever as truthful as this mapping.
+  use gwm::tui::HintContext;
+
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  assert_eq!(app.hint_context(), HintContext::NoteNormal);
+
+  note_key(&mut app, 'i');
+  assert_eq!(app.hint_context(), HintContext::NoteInsert);
+
+  let (_dir, app) = app_with_note_open();
+  assert_eq!(
+    app.hint_context(),
+    HintContext::Note,
+    "with the mode off the #515 bar is what stays"
+  );
+}
+
+#[test]
+fn emptying_the_buffer_with_dd_removes_the_note_too() {
+  // The discard gesture in the mode that now ships by default: `dd` on the
+  // last line leaves an empty buffer, and an empty buffer is a deleted
+  // note rather than a one-byte file `gwm doctor` will report later.
+  let (dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  let branch = app.selected().unwrap().branch.clone().unwrap();
+  let path = gwm::notes::prepare(&git2::Repository::open(dir.path()).unwrap(), &branch)
+    .unwrap()
+    .unwrap();
+  std::fs::write(&path, "old prose\n").unwrap();
+
+  app.open_note_editor();
+  // Twice: the file's trailing newline is a blank last line, and that is
+  // the line the caret opens on. Both go before the buffer reads empty.
+  for _ in 0..2 {
+    note_key(&mut app, 'd');
+    note_key(&mut app, 'd');
+  }
+  app.handle_note_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+  assert!(!path.exists(), "an emptied note is removed, not blanked");
+}
+
+/// Drain until the Working Tree overlay's worker lands (issues #592, #613).
+/// The snapshot runs off-thread, so a test that reads the rows has to wait
+/// for the payload the same way the event loop does.
+fn settle_working_tree(app: &mut App) {
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_working_tree_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_working_tree_loading(),
+    "the working-tree worker never landed within 10s"
+  );
+}
+
+/// Rebind `action` to `chords` on a live `App`, the way a `[tui.keys]`
+/// override would. Used by the #613 toggle tests, which are exactly about
+/// what a rebind does to the dispatch.
+fn rebind(app: &mut App, action: Action, chords: &[&str]) {
+  use gwm::tui::keymap::KeyStroke;
+  let parsed: Vec<Vec<KeyStroke>> = chords.iter().map(|c| KeyStroke::parse_chord(c).unwrap()).collect();
+  app.keymap.apply_override(action, parsed).unwrap();
+}
+
+/// Flatten a rendered sidebar/modal line into its plain text.
+fn line_text(l: &ratatui::text::Line<'_>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn working_tree_modal_snapshots_the_dirty_tree_on_open() {
+  // Issue #592: `5` opens the Working Tree listing full size. The snapshot
+  // is taken AT OPEN, not read from the sidebar cache — the sidebar is a
+  // hidden pane here (`open = false`), the state in which that cache is
+  // never rebuilt, and the overlay must still show the change set.
+  let (dir, mut app) = make_app();
+  std::fs::write(dir.path().join("scratch.rs"), "fn main() {}\n").unwrap();
+  app.sidebar.open = false;
+
+  app.enter_working_tree();
+  assert!(
+    app.is_working_tree_loading(),
+    "the overlay opens on a loader; the git read is on a worker, not the keypress"
+  );
+  settle_working_tree(&mut app);
+
+  assert_eq!(app.view, View::WorkingTree);
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("scratch.rs")),
+    "the untracked file is listed — got {text:?}"
+  );
+  assert_eq!(app.working_tree.scroll, 0, "a fresh open starts at the top");
+  assert_eq!(
+    app.working_tree.counts.created, 1,
+    "the footer counts come with the snapshot — got {:?}",
+    app.working_tree.counts
+  );
+}
+
+/// Commit `name` with `body` on top of HEAD, so a later rewrite of it is a
+/// real diff against a tracked file rather than an untracked add.
+///
+/// The repo handle is scoped: libgit2 mmaps the index, and a live handle
+/// keeps the file mapped on Windows.
+fn commit_file(dir: &std::path::Path, name: &str, body: &str) {
+  std::fs::write(dir.join(name), body).unwrap();
+  let repo = git2::Repository::open(dir).unwrap();
+  let mut idx = repo.index().unwrap();
+  idx.add_path(std::path::Path::new(name)).unwrap();
+  idx.write().unwrap();
+  let tree_id = idx.write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let parent = repo.head().unwrap().peel_to_commit().unwrap();
+  repo
+    .commit(
+      Some("HEAD"),
+      &sig,
+      &sig,
+      format!("add {name}").as_str(),
+      &tree,
+      &[&parent],
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_working_tree_listing_says_how_many_lines_each_file_changed() {
+  // Issue #592, the treatment #593 gave the commit listing: the row says
+  // WHAT changed (badge, colour), the right-hand column says HOW MUCH.
+  let (dir, mut app) = make_app();
+  commit_file(dir.path(), "notes.md", "one\ntwo\nthree\n");
+  // Two lines gone, one arrived: `+1 -2`.
+  std::fs::write(dir.path().join("notes.md"), "one\nfour\n").unwrap();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let rows: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  let at = rows
+    .iter()
+    .position(|l| l.contains("notes.md"))
+    .unwrap_or_else(|| panic!("no row for the changed file — got {rows:?}"));
+  let meta: Vec<String> = app.working_tree.meta.lines.iter().map(line_text).collect();
+  assert_eq!(
+    meta.len(),
+    rows.len(),
+    "the column carries one entry per row or it scrolls out of step — {meta:?} vs {rows:?}"
+  );
+  assert_eq!(
+    meta[at].trim(),
+    "+1 -2",
+    "the counts sit on the row they describe — got {meta:?}"
+  );
+  assert!(
+    app.working_tree.meta.width >= "+1 -2".len(),
+    "the width is measured once so the column cannot jump while scrolling"
+  );
+}
+
+#[test]
+fn a_row_with_nothing_to_count_still_takes_a_slot_in_the_column() {
+  // The invariant the test above can only half-see: a directory row and an
+  // untracked file have no counts, and git has nothing to diff an untracked
+  // file against. Skipping them would slide every count below onto the
+  // wrong row, which is the failure the reader cannot spot.
+  let (dir, mut app) = make_app();
+  commit_file(dir.path(), "tracked.md", "one\ntwo\n");
+  std::fs::write(dir.path().join("tracked.md"), "one\ntwo\nthree\n").unwrap();
+  std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+  std::fs::write(dir.path().join("nested/fresh.md"), "brand new\n").unwrap();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let rows: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  let meta: Vec<String> = app.working_tree.meta.lines.iter().map(line_text).collect();
+  assert_eq!(meta.len(), rows.len(), "one entry per row — {meta:?} vs {rows:?}");
+
+  let tracked = rows.iter().position(|l| l.contains("tracked.md")).unwrap();
+  assert_eq!(meta[tracked].trim(), "+1", "the tracked rewrite is counted");
+
+  let untracked = rows.iter().position(|l| l.contains("fresh.md")).unwrap();
+  assert_eq!(
+    meta[untracked].trim(),
+    "",
+    "git cannot diff an untracked file, and the badge already says it is new"
+  );
+  let dir_row = rows.iter().position(|l| l.contains("nested")).unwrap();
+  assert_eq!(meta[dir_row].trim(), "", "a directory has no diff of its own");
+}
+
+#[test]
+fn the_working_tree_half_page_moves_by_the_viewport_the_reader_sees() {
+  // `D` / `U`, the pair the commit listing carries. Half of what the BODY
+  // last showed, not half the content: the renderer publishes the viewport
+  // alongside the bound, and only it knows both.
+  let (_dir, mut app) = make_app();
+  app.working_tree.max_scroll = 100;
+  app.working_tree.viewport = 20;
+
+  app.working_tree.scroll_half_down();
+  assert_eq!(app.working_tree.scroll, 10, "half of 20 rows");
+  app.working_tree.scroll_half_up();
+  assert_eq!(app.working_tree.scroll, 0);
+
+  // Never past the ends, whatever the viewport.
+  app.working_tree.scroll_half_up();
+  assert_eq!(app.working_tree.scroll, 0, "never above the top");
+  app.working_tree.scroll = 95;
+  app.working_tree.scroll_half_down();
+  assert_eq!(app.working_tree.scroll, 100, "never past the last row");
+
+  // Nothing drawn yet: a zero viewport would make the key inert rather than
+  // slow, which reads as a dead key.
+  app.working_tree.viewport = 0;
+  app.working_tree.scroll = 0;
+  app.working_tree.scroll_half_down();
+  assert_eq!(app.working_tree.scroll, 1, "a half page is never zero");
+}
+
+#[test]
+fn the_working_tree_column_is_dropped_before_the_file_name_is() {
+  // The width policy both listings share (`meta_pick`): the column is worth
+  // showing only while the left side keeps its floor. `WT_NAME_FLOOR` is
+  // lower than the commit listing's, because a row here is a leaf name
+  // under a connector, not a sentence.
+  use gwm::tui::{meta_pick, META_GAP, WT_NAME_FLOOR};
+  let col = 7usize;
+  let room = col + META_GAP + WT_NAME_FLOOR;
+
+  assert_eq!(meta_pick(room, &[col], WT_NAME_FLOOR), Some(col), "exactly enough fits");
+  assert_eq!(
+    meta_pick(room - 1, &[col], WT_NAME_FLOOR),
+    None,
+    "one cell short and the name wins"
+  );
+  assert_eq!(
+    meta_pick(room, &[0], WT_NAME_FLOOR),
+    None,
+    "an empty column is never picked, however much room there is"
+  );
+}
+
+#[test]
+fn the_working_tree_open_key_is_also_what_closes_it() {
+  // `W` toggles. The dispatch resolves the toggle before the modal verbs
+  // and against the action alone, so this is the pin for the default: one
+  // stroke, `Fired`.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('W'), KeyModifiers::NONE),
+      gwm::tui::keymap::Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+}
+
+#[test]
+fn a_multi_stroke_toggle_closes_the_overlay_it_opened() {
+  // Issue #613, first hole: the old guard asked `key_matches_action`, which
+  // looks up ONE stroke, so `working_tree = ["g w"]` opened the overlay
+  // through the chord-aware list dispatch and then had no way to shut it.
+  // The prefix must be consumed (`Pending`), not handed to the modal verbs,
+  // or `g` jumps the listing to the top on its way through.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Pending
+  );
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+}
+
+#[test]
+fn a_stray_prefix_stroke_does_not_arm_a_phantom_toggle() {
+  // The other half of the chord contract: a `g` that is not followed by the
+  // toggle's own continuation must drop the buffer, or the next unrelated
+  // stroke would complete a chord the user never typed.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Pending
+  );
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed,
+    "`j` is not the continuation, so it falls through to the modal verbs"
+  );
+  assert!(app.pending_chord_is_empty(), "the half-typed prefix is dropped");
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed,
+    "a bare `w` must not complete the chord the dropped `g` started"
+  );
+}
+
+#[test]
+fn a_toggle_rebound_onto_a_modal_verbs_key_still_closes() {
+  // Issue #613, second hole: the guard used to run AFTER the modal
+  // resolution, so `working_tree = ["j"]` opened the overlay and then
+  // scrolled it. The toggle wins now, which is what the user asked for by
+  // binding it there.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["j"]);
+  app.enter_working_tree();
+
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Fired
+  );
+  // `k` is untouched: only the rebound key is taken from the context.
+  assert_eq!(
+    app.modal_toggle_stroke(
+      KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+      Action::WorkingTree
+    ),
+    ToggleStroke::Unclaimed
+  );
+}
+
+#[test]
+fn a_rebound_toggle_beats_the_scroll_verb_it_shadows() {
+  // The precedence itself, not just the resolver: `handle_working_tree_key`
+  // asks the toggle first. With `working_tree = ["j"]`, `j` closes and the
+  // listing does NOT scroll. Put the modal resolution back in front and the
+  // scroll assertion below goes red.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["j"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+
+  let close = app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+  assert!(close, "the rebound toggle closes the overlay");
+  assert_eq!(app.working_tree.scroll, 0, "and the shadowed scroll verb never ran");
+}
+
+#[test]
+fn an_unclaimed_key_still_reaches_the_modal_verbs() {
+  // The other side of that precedence: taking the toggle first must not
+  // swallow the rest of the context.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.working_tree.scroll, 1);
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+}
+
+#[test]
+fn a_chord_prefix_does_not_reach_the_scroll_verbs() {
+  // `working_tree = ["g w"]`: the `g` is consumed as a prefix. Were it
+  // handed to the modal verbs it would fire `scroll_top`, so the listing
+  // would jump to the top on the way to closing.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+  app.working_tree.scroll = 7;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert_eq!(app.working_tree.scroll, 7, "the prefix did not fire `scroll_top`");
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+}
+
+#[test]
+fn the_modal_toggle_never_fires_another_global_action() {
+  // The reason this is not `dispatch_key`: inside an overlay the toggle is
+  // the ONE global binding allowed through. `d` would otherwise open the
+  // delete confirm from behind the modal.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+
+  for c in ['d', 'n', 'q', 'x', '3', '4'] {
+    assert_eq!(
+      app.modal_toggle_stroke(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), Action::WorkingTree),
+      ToggleStroke::Unclaimed,
+      "`{c}` is not the working_tree toggle and must not resolve here"
+    );
+  }
+}
+
+#[test]
+fn the_command_logs_toggle_beats_the_verb_it_shadows() {
+  // #613's precedence, pinned on the second of the three overlays rather
+  // than assumed from the first. `command_logs = ["j"]`: `j` closes, and
+  // the transcript does not scroll on the way out.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::CommandLogs, &["j"]);
+  app.enter_command_logs();
+  app.command_logs.max_scroll = 10;
+
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CommandLogsKey::Close
+  );
+  assert_eq!(app.command_logs.scroll, 0, "the shadowed scroll verb never ran");
+
+  // And the rest of the context is untouched.
+  rebind(&mut app, Action::CommandLogs, &["3"]);
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CommandLogsKey::Handled
+  );
+  assert_eq!(app.command_logs.scroll, 1);
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+    CommandLogsKey::Copy,
+    "the clipboard side effect still comes back for the run loop to perform"
+  );
+}
+
+#[test]
+fn the_settings_toggle_beats_the_verb_it_shadows() {
+  // Third of the three. `config_panel = ["j"]`: `j` closes instead of
+  // moving the selection.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::ConfigPanel, &["j"]);
+  app.enter_config_panel();
+  // The read-only `All` tab routes select onto scroll, so pick an editable
+  // tab and watch the field cursor, which is what `j` moves there.
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+
+  assert!(app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.selected, 0, "the shadowed select verb never ran");
+
+  rebind(&mut app, Action::ConfigPanel, &["4"]);
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.selected, 1, "and `j` navigates again once unbound");
+}
+
+#[test]
+fn a_multi_stroke_toggle_closes_every_overlay_that_has_one() {
+  // The chord half, across all three. Each takes the prefix without firing
+  // a verb, then closes on the continuation.
+  // Distinct chords per action: the keymap refuses one chord bound twice,
+  // which is itself the guarantee that makes a per-action lookup sound.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::CommandLogs, &["g l"]);
+  rebind(&mut app, Action::ConfigPanel, &["g c"]);
+  rebind(&mut app, Action::WorkingTree, &["g w"]);
+  app.enter_command_logs();
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+    CommandLogsKey::Handled
+  );
+  assert_eq!(
+    app.handle_command_logs_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+    CommandLogsKey::Close
+  );
+
+  app.enter_config_panel();
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert!(app.handle_config_nav_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+
+  app.enter_working_tree();
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+}
+
+#[test]
+fn every_overlay_that_advertises_a_toggle_resolves_one() {
+  // The three overlays whose docs promise "the open key closes it too"
+  // (issue #613 fixed all of them at once, not just #592's). Enumerated so
+  // a fourth overlay copying the shape has a place to declare itself.
+  let (_dir, mut app) = make_app();
+  for (action, chord, ch) in [
+    (Action::CommandLogs, "3", '3'),
+    (Action::ConfigPanel, "4", '4'),
+    (Action::WorkingTree, "W", 'W'),
+  ] {
+    assert_eq!(
+      app.keymap.primary_chord(action).as_deref(),
+      Some(chord),
+      "{action:?} default chord moved; update this table"
+    );
+    assert_eq!(
+      app.modal_toggle_stroke(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), action),
+      ToggleStroke::Fired
+    );
+  }
+}
+
+#[test]
+fn a_second_chord_bound_to_the_same_action_can_start_after_a_failed_one() {
+  // Copilot review, PR #612: one action may hold several chords. With two of
+  // them, a first stroke that is not followed by its own continuation must
+  // not just drop the buffer, it has to retry that stroke as the start of
+  // the other chord. `dispatch_key` does this for the list view; the toggle
+  // now does too.
+  //
+  // `6` / `7` because the keymap refuses a chord whose prefix is another
+  // action's key, so `j k` cannot be used here: `j` is `down`.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::WorkingTree, &["6 w", "7 k"]);
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 10;
+  app.working_tree.scroll = 5;
+
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE)));
+  // `7` is not `6`'s continuation, but it IS the start of the second chord,
+  // so it must arm rather than fall through to the modal verbs.
+  assert!(!app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE)));
+  assert!(app.handle_working_tree_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)));
+  assert_eq!(
+    app.working_tree.scroll, 5,
+    "neither the retried stroke nor the continuation reached `scroll_up`"
+  );
+}
+
+#[test]
+fn a_working_tree_payload_for_a_worktree_left_behind_is_dropped() {
+  // The read is off-thread, so the user can navigate (or reopen elsewhere)
+  // while it runs. A payload that describes a worktree the overlay is no
+  // longer showing must not be painted as if it were the current one.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  let real = app.working_tree.lines.clone();
+
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let generation = app.tasks.request(TaskKind::WorkingTree).expect("a free slot");
+  app
+    .task_result_sender()
+    .send(TaskMsg::WorkingTree(
+      generation,
+      PathBuf::from("/tmp/gwm-test/some-other-worktree"),
+      gwm::tui::WorkingTreeSnapshot {
+        lines: vec![ratatui::text::Line::from("rows from the wrong worktree")],
+        ..Default::default()
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    !text.iter().any(|l| l.contains("wrong worktree")),
+    "a payload for another path is dropped, not shown — got {text:?}"
+  );
+  assert_eq!(
+    app.working_tree.lines.len(),
+    real.len(),
+    "and the listing that was already there survives"
+  );
+}
+
+#[test]
+fn the_overlay_never_waits_on_a_worker_that_is_not_there() {
+  // The invariant behind three rounds of review on PR #612, each of which
+  // found a different unenumerated state of this slot: the loader is up if
+  // and only if a read is actually in flight. Every way in is walked here,
+  // rather than waiting for a fourth state to be reported.
+  //
+  // | selection | slot            | what must happen                     |
+  // |-----------|-----------------|--------------------------------------|
+  // | none      | free            | no worker, no loader                 |
+  // | some      | free            | worker spawned, loader up            |
+  // | some      | busy same path  | coalesce onto it, loader stays up    |
+  // | some      | busy other path | invalidate, own worker, loader up    |
+  //
+  // The two drop paths (stale generation, path mismatch) are covered by
+  // `a_working_tree_payload_for_a_worktree_left_behind_is_dropped` and by
+  // `TaskRunner::complete`'s own tests; neither can leave the loader up,
+  // because both only run once the slot has already been settled.
+  //
+  // A worker that dies without sending would break this after the fact
+  // (`let _ = tx.send(..)` swallows the failure and the slot stays claimed),
+  // but `working_tree_lines` is total: every arm of its `git_status_short`
+  // match returns rows, an `Err` included. No defensive machinery for a
+  // state that cannot be reached.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  let inflight = |app: &App| app.tasks.is_loading(TaskKind::WorkingTree);
+
+  // none / free
+  app.worktrees.clear();
+  app.list_state.select(None);
+  app.enter_working_tree();
+  assert!(!app.is_working_tree_loading(), "nothing selected, nothing to wait on");
+  assert_eq!(app.is_working_tree_loading(), inflight(&app));
+
+  // some / free
+  let (_dir2, mut app) = make_app();
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "the loader tracks the worker, both up"
+  );
+  settle_working_tree(&mut app);
+  assert_eq!(app.is_working_tree_loading(), inflight(&app), "and both down");
+
+  // some / busy, same path
+  app.working_tree.begin(Some(&a));
+  let _held = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "coalesced onto the read already out"
+  );
+
+  // some / busy, other path
+  app.worktrees.push(worktree_fixture("elsewhere"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_working_tree();
+  assert_eq!(
+    app.is_working_tree_loading(),
+    inflight(&app),
+    "the stale slot was invalidated and a fresh worker claimed it"
+  );
+  settle_working_tree(&mut app);
+  assert_eq!(app.is_working_tree_loading(), inflight(&app));
+}
+
+#[test]
+fn reopening_on_another_worktree_does_not_wait_on_the_previous_read() {
+  // Copilot review, PR #612: the coalescing that makes a held `W` cheap is
+  // only sound while the in-flight read is for the SAME worktree. Close a
+  // slow snapshot for A, select B, reopen: `request` would hand back `None`
+  // (slot busy with A), no worker would exist for B, and A's payload gets
+  // dropped by the path check, so the loader stays up forever.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  // A read for A is out: the slot is claimed and the overlay is waiting.
+  app.working_tree.begin(Some(&a));
+  let _inflight = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+  assert!(app.is_working_tree_loading());
+
+  // The user moves to another worktree and reopens before A lands.
+  app.worktrees.push(worktree_fixture("some-other-worktree"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_working_tree();
+
+  settle_working_tree(&mut app);
+  assert_eq!(
+    app.working_tree.path.as_deref(),
+    Some(app.selected().unwrap().path.as_path()),
+    "the listing that landed is the one the overlay is showing"
+  );
+}
+
+#[test]
+fn reopening_on_the_same_worktree_still_coalesces() {
+  // The other half: same path must NOT invalidate, or a held `W` spawns a
+  // `git status` per repeat.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  let a = app.selected().expect("a worktree is selected").path.clone();
+  app.working_tree.begin(Some(&a));
+  let inflight = app.tasks.request(TaskKind::WorkingTree).expect("slot free");
+
+  app.enter_working_tree();
+
+  assert!(
+    app.tasks.request(TaskKind::WorkingTree).is_none(),
+    "the slot is still held by the first read, so the reopen coalesced"
+  );
+  // And the generation was not bumped, which is what `invalidate` would do.
+  app
+    .task_result_sender()
+    .send(gwm::tui::state::async_task::TaskMsg::WorkingTree(
+      inflight,
+      a.clone(),
+      gwm::tui::WorkingTreeSnapshot {
+        lines: vec![ratatui::text::Line::from("from the coalesced read")],
+        ..Default::default()
+      },
+    ))
+    .unwrap();
+  app.drain_task_results();
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("coalesced")),
+    "the original worker's payload is still the authoritative one — got {text:?}"
+  );
+}
+
+#[test]
+fn opening_the_overlay_with_nothing_selected_does_not_wait_on_a_worker() {
+  // The empty-selection path spawns nothing, so the loader would never
+  // clear: `begin` must leave `loading` false when there is no worktree.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.enter_working_tree();
+
+  assert_eq!(app.view, View::WorkingTree);
+  assert!(!app.is_working_tree_loading(), "nothing to wait for, so no loader");
+  assert!(app.working_tree.lines.is_empty());
+}
+
+#[test]
+fn working_tree_modal_reports_a_clean_tree() {
+  // The empty-state: `init_repo` leaves no dirty file, so the overlay says
+  // so rather than rendering a blank canvas.
+  let (_dir, mut app) = make_app();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("clean")),
+    "a clean worktree gets the clean row — got {text:?}"
+  );
+}
+
+#[test]
+fn reopening_the_working_tree_modal_rewinds_the_scroll_and_resnapshots() {
+  // Two invariants in one gesture: a stale scroll offset from the previous
+  // visit does not survive the re-open (the `enter_help` / `enter_command_logs`
+  // contract), and the listing is re-read, so a file created while the
+  // overlay was closed shows up on the next open.
+  let (dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 40;
+  app.working_tree.scroll = 12;
+
+  std::fs::write(dir.path().join("late.rs"), "// added after the first open\n").unwrap();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  assert_eq!(app.working_tree.scroll, 0);
+  let text: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("late.rs")),
+    "the re-open re-reads the tree — got {text:?}"
+  );
+}
+
+#[test]
+fn the_working_tree_modal_scroll_clamps_to_the_published_bound() {
+  // Same scroll contract as the help overlay: the renderer publishes
+  // `max_scroll` against the live viewport and the cursor never passes it.
+  let (_dir, mut app) = make_app();
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+  app.working_tree.max_scroll = 2;
+
+  for _ in 0..5 {
+    app.working_tree.scroll_down();
+  }
+  assert_eq!(app.working_tree.scroll, 2);
+
+  app.working_tree.scroll_to_top();
+  assert_eq!(app.working_tree.scroll, 0);
+  app.working_tree.scroll_up();
+  assert_eq!(app.working_tree.scroll, 0, "the top is a floor, not a wrap");
+  app.working_tree.scroll_to_bottom();
+  assert_eq!(app.working_tree.scroll, 2);
+}
+
+// ---- full-size commit listing (issue #593) ---------------------------------
+
+/// Flatten a rendered modal line into its plain text.
+fn commits_line_text(l: &ratatui::text::Line<'_>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Drain until the commit-listing worker lands, or fail loudly.
+fn settle_commits(app: &mut App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_commits_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_commits_loading(),
+    "the commit-listing worker never landed within 10s"
+  );
+}
+
+#[test]
+fn commits_modal_snapshots_the_log_on_open() {
+  // Issue #593: `6` opens the commit listing full size. The snapshot is
+  // taken AT OPEN, not read from the sidebar cache — the sidebar is a
+  // hidden pane here (`open = false`), the state in which that cache is
+  // never rebuilt, and the overlay must still show the log.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+
+  app.enter_commits();
+  assert_eq!(app.view, View::Commits);
+  assert!(
+    app.is_commits_loading(),
+    "the overlay opens on a loader; the revwalk is on a worker, not the keypress"
+  );
+  settle_commits(&mut app);
+
+  let text: Vec<String> = app.commits.lines.iter().map(commits_line_text).collect();
+  assert!(
+    text.iter().any(|l| l.contains("init")),
+    "the repo's only commit subject is listed — got {text:?}"
+  );
+  assert_eq!(app.commits.limit, COMMITS_PAGE, "the first page reads one page deep");
+  assert_eq!(app.commits.loaded, 1, "one row per commit — got {text:?}");
+  assert_eq!(app.commits.scroll, 0, "a fresh open starts at the top");
+}
+
+#[test]
+fn load_more_is_refused_once_history_runs_out() {
+  // The revwalk returned fewer rows than the limit asked for, so the whole
+  // history is already on screen: raising the limit would re-walk the same
+  // graph for the same rows. This is the common case — most worktrees have
+  // far fewer than a page of commits.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  assert!(
+    !app.commits.can_load_more(),
+    "1 row against a {COMMITS_PAGE}-row limit is an exhausted history"
+  );
+  app.load_more_commits();
+  assert_eq!(
+    app.commits.limit, COMMITS_PAGE,
+    "a refused page must not raise the limit"
+  );
+}
+
+#[test]
+fn load_more_raises_the_limit_by_one_page() {
+  // A full first page means there is probably more behind it. `loaded` is
+  // forced here rather than committing 300 times: the fixture repo cannot
+  // fill a page, and this pins the App-level wiring (limit -> worker ->
+  // payload), not the revwalk.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  assert!(app.commits.can_load_more(), "a full page can be paged past");
+  app.load_more_commits();
+  assert_eq!(app.commits.limit, COMMITS_PAGE * 2, "load-more reads one page deeper");
+  assert!(app.is_commits_loading(), "the deeper read is on a worker too");
+  assert!(
+    !app.commits.lines.is_empty(),
+    "the rows already read stay on screen while the deeper page loads"
+  );
+
+  settle_commits(&mut app);
+  assert_eq!(
+    app.commits.limit,
+    COMMITS_PAGE * 2,
+    "the payload lands on the deeper page"
+  );
+  assert!(
+    !app.commits.lines.is_empty(),
+    "the deeper page is installed, not left blank"
+  );
+}
+
+#[test]
+fn a_second_load_more_cannot_queue_while_the_first_is_out() {
+  // `loaded` still describes the previous page while the worker runs, so
+  // without the loading gate a held `m` would raise the limit again and
+  // queue a duplicate walk — and the slot would coalesce the second onto
+  // the first, whose payload the drain then drops on the limit check,
+  // leaving the loader up forever.
+  use gwm::tui::COMMITS_PAGE;
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  app.load_more_commits();
+  app.load_more_commits();
+  assert_eq!(
+    app.commits.limit,
+    COMMITS_PAGE * 2,
+    "the second press while a read is out must not page again"
+  );
+  settle_commits(&mut app);
+}
+
+#[test]
+fn reopening_on_another_worktree_gets_its_own_read() {
+  // Coalescing is only sound for the same worktree at the same limit: the
+  // drain drops a payload whose path does not match, so without freeing the
+  // slot the reopen waits on a worker whose result it will never accept and
+  // the loader never clears.
+  //
+  // The in-flight read is staged by hand rather than raced against a real
+  // worker: on a one-commit fixture the thread finishes before the second
+  // open, so a raced version passes with the invalidate removed. Occupying
+  // the slot is what makes the guard the only thing standing between this
+  // test and a 10s timeout.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (dir, mut app) = make_app();
+  let other = dir.path().join("elsewhere");
+
+  app.commits.begin(Some(&other), COMMITS_PAGE, None);
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert!(!app.is_commits_loading(), "the reopen's own read cleared the loader");
+}
+
+#[test]
+fn reopening_after_a_deeper_page_gets_its_own_read() {
+  // Same hole, reached by the limit rather than the path: close the overlay
+  // while a 600-commit page is out, reopen, and the first page's request
+  // would coalesce onto a read whose payload the drain drops on the limit
+  // check.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (dir, mut app) = make_app();
+
+  app.commits.begin(Some(dir.path()), COMMITS_PAGE * 2, None);
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert_eq!(app.commits.limit, COMMITS_PAGE, "the reopen is back at the first page");
+}
+
+#[test]
+fn load_more_pages_the_worktree_the_overlay_opened_on() {
+  // Codex review, PR #614: the auto-refresh can move the selection while
+  // the overlay is up. Paging from `selected()` would fire a read for the
+  // NEW worktree, which the drain then drops on the path check — after
+  // `complete` freed the slot — so nothing is ever left to clear the
+  // loader. The target captured at open is the only sound one.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+
+  // The selection drifts, the overlay does not.
+  app.worktrees.push(worktree_fixture("feat-0-elsewhere"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+
+  app.load_more_commits();
+  settle_commits(&mut app);
+  assert!(
+    !app.is_commits_loading(),
+    "the deeper page landed on the captured target"
+  );
+}
+
+#[test]
+fn a_vanished_worktree_stops_advertising_load_more() {
+  // Codex review, PR #614: another process removes the worktree while the
+  // overlay is up and the auto-refresh drops it from the list. The modal's
+  // own arithmetic still says "a full page, under the cap", so the footer
+  // kept offering `m` for a read that can no longer resolve a target. The
+  // hint and the handler have to agree, or a live key reads as broken.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  assert!(app.commits_can_load_more(), "a full page on a live worktree pages");
+
+  app.worktrees.clear();
+
+  assert!(
+    app.commits.can_load_more(),
+    "the modal's own arithmetic cannot see the list, and still says yes"
+  );
+  assert!(
+    !app.commits_can_load_more(),
+    "but the App knows the target is gone, so the key is not offered"
+  );
+}
+
+#[test]
+fn a_moved_tip_is_not_coalesced_onto_the_previous_read() {
+  // Codex review, PR #614: close the overlay mid-read, land a commit, and
+  // reopen on the same worktree. Path and limit both match, so the request
+  // coalesced onto the worker already out — which still holds the OLD
+  // `WorktreeInfo.head`, so its payload passes both drain checks and the
+  // reopen silently shows a log missing the new commits. The tip is part
+  // of what identifies a read.
+  //
+  // The in-flight read is staged rather than raced: the fixture's walk
+  // finishes long before a second open could reach the guard.
+  use gwm::tui::{TaskKind, COMMITS_PAGE};
+  let (_dir, mut app) = make_app();
+  let path = app.selected().expect("the fixture repo is listed").path.clone();
+
+  app.commits.begin(Some(&path), COMMITS_PAGE, Some("0".repeat(40)));
+  app.tasks.request(TaskKind::Commits).expect("the slot starts free");
+
+  app.enter_commits();
+  settle_commits(&mut app);
+  assert!(!app.is_commits_loading(), "the reopen at the new tip got its own read");
+}
+
+#[test]
+fn the_count_is_commits_not_rendered_rows() {
+  // Codex review, PR #614: `recent_commits_lines` paints ONE sentinel row
+  // for an unborn HEAD or a failed read, so counting rows called that
+  // "1 commit" and the title read `Commits (1)` over a repo with none.
+  // The count travels with the rows instead of being inferred from them.
+  use gwm::tui::recent_commits_listing;
+  let dir = tempfile::tempdir().unwrap();
+  git2::Repository::init(dir.path()).unwrap();
+  let w = worktree_pointing_at_dir(dir.path());
+
+  let snap = recent_commits_listing(&w, 10, 0, &Theme::default());
+  assert_eq!(snap.loaded, 0, "an unborn HEAD has no commits");
+  assert_eq!(snap.lines.len(), 1, "but it still paints one sentinel row");
+  assert!(
+    snap.tiers.iter().all(|t| t.lines.is_empty()),
+    "and a sentinel carries no metadata column"
+  );
+}
+
+#[test]
+fn a_sentinel_row_is_not_a_full_page() {
+  // The consequence that matters: a sentinel counted as a row would make
+  // `loaded >= limit` true at limit 1 and offer a page that does not exist.
+  use gwm::tui::{CommitsModal, CommitsSnapshot};
+  let mut m = CommitsModal::new();
+  m.begin(Some(std::path::Path::new("/tmp/x")), 1, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("! unborn HEAD")],
+    loaded: 0,
+    ..Default::default()
+  });
+  assert_eq!(m.loaded, 0, "the sentinel is a row, not a commit");
+  assert!(!m.can_load_more(), "and an empty history has no deeper page");
+}
+
+#[test]
+fn a_commit_dated_in_the_future_reads_as_just_now() {
+  // A commit time can be AHEAD of the local clock: skew, a rewritten
+  // history, a rebase that preserved author dates. The naive subtraction
+  // underflows into "55 thousand years"; saturating at zero renders `0s`,
+  // which is the least wrong thing to say about a timestamp we have not
+  // reached. No panic either, and this is a render path.
+  use gwm::worktree::{commit_age, format_relative_duration};
+  let now = 1_000_000i64;
+  assert_eq!(commit_age(now + 3600, now).as_secs(), 0, "the future saturates");
+  assert_eq!(format_relative_duration(commit_age(now + 3600, now)), "0s");
+  assert_eq!(commit_age(now - 3600, now).as_secs(), 3600, "the past is unaffected");
+}
+
+#[test]
+fn the_metadata_column_only_takes_room_the_subject_can_spare() {
+  // The graph is variable-width, so what the left side needs cannot be a
+  // constant — the policy is a floor on what survives instead. A
+  // merge-heavy history at 80 columns would otherwise buy an author column
+  // with a ten-cell subject, which is a worse listing than no column.
+  use gwm::tui::{commits_meta_pick, COMMITS_SUBJECT_FLOOR, META_GAP};
+  // author · stats · age / stats · age / age
+  let tiers = [30usize, 14, 4];
+  let room_for = |w: usize| w + META_GAP + COMMITS_SUBJECT_FLOOR;
+
+  assert_eq!(commits_meta_pick(room_for(tiers[0]), tiers), Some(tiers[0]));
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[0]) - 1, tiers),
+    Some(tiers[1]),
+    "one cell short of the widest tier drops the author, not the stats"
+  );
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[1]) - 1, tiers),
+    Some(tiers[2]),
+    "one cell short of the middle tier keeps the age alone"
+  );
+  assert_eq!(
+    commits_meta_pick(room_for(tiers[2]) - 1, tiers),
+    None,
+    "below the floor the listing keeps the whole width"
+  );
+
+  assert_eq!(
+    commits_meta_pick(500, [0, 0, 0]),
+    None,
+    "a sentinel row carries no column, however wide the terminal"
+  );
+}
+
+#[test]
+fn the_metadata_columns_carry_the_author_and_the_age() {
+  // `wide` is `author · age`, `narrow` the age alone: the initials are
+  // already on the left, so the full author is the second tier of
+  // information and the age is the first — it is what the listing lacks.
+  use gwm::tui::commit_meta_columns;
+  use gwm::worktree::CommitRow;
+  let now = 1_000_000i64;
+  let row = CommitRow {
+    hash: git2::Oid::ZERO_SHA1,
+    author: "Kylian Bardini".into(),
+    parents: vec![],
+    subject: "whatever".into(),
+    time: now - 3 * 86_400,
+  };
+  let none = std::collections::HashMap::new();
+  let [wide, mid, narrow] = commit_meta_columns(&[row], now, &none, &Theme::default());
+
+  let text = |l: &ratatui::text::Line<'_>| -> String { l.spans.iter().map(|s| s.content.as_ref()).collect() };
+  assert_eq!(text(&wide.lines[0]), "Kylian Bardini · 3d");
+  assert_eq!(
+    text(&mid.lines[0]),
+    "3d",
+    "with no stats reads the middle tier is the age"
+  );
+  assert_eq!(text(&narrow.lines[0]), "3d");
+  assert_eq!(wide.width, "Kylian Bardini · 3d".chars().count());
+  assert_eq!(narrow.width, 2);
+}
+
+#[test]
+fn an_authorless_commit_keeps_the_age_alone() {
+  // The `git log` fallback parser can yield an empty author, and a
+  // dangling ` · ` separator with nothing before it reads as a bug.
+  use gwm::tui::commit_meta_columns;
+  use gwm::worktree::CommitRow;
+  let now = 1_000_000i64;
+  let row = CommitRow {
+    hash: git2::Oid::ZERO_SHA1,
+    author: "   ".into(),
+    parents: vec![],
+    subject: String::new(),
+    time: now - 60,
+  };
+  let none = std::collections::HashMap::new();
+  let [wide, _, _] = commit_meta_columns(&[row], now, &none, &Theme::default());
+  let text: String = wide.lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  assert_eq!(text, "1m", "no author, no separator");
+}
+
+#[test]
+fn paging_stops_at_the_cap() {
+  // #593 notes the memo in `recent_commits_cached` is keyed on the limit
+  // and evicts an arbitrary entry when full, so unbounded paging would push
+  // other worktrees' sidebar entries out. The cap is what bounds it.
+  use gwm::tui::{CommitsModal, CommitsSnapshot, COMMITS_MAX, COMMITS_PAGE};
+  let mut m = CommitsModal::new();
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_MAX, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); COMMITS_MAX],
+    loaded: COMMITS_MAX,
+    ..Default::default()
+  });
+
+  assert!(!m.can_load_more(), "the cap is a hard stop even on a full page");
+
+  m.limit = COMMITS_MAX - 1;
+  assert_eq!(m.next_limit(), COMMITS_MAX, "the last page clamps to the cap");
+
+  // And the cap leaves room for more than the first page, or load-more
+  // would be dead on arrival.
+  m.begin(Some(std::path::Path::new("/tmp/x")), COMMITS_PAGE, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); COMMITS_PAGE],
+    loaded: COMMITS_PAGE,
+    ..Default::default()
+  });
+  assert!(m.can_load_more(), "a full first page is under the cap");
+}
+
+#[test]
+fn a_deeper_page_keeps_the_scroll_position() {
+  // The user pages from the bottom of the list. Rewinding to the top there
+  // would throw away the position they paged from — unlike a fresh open,
+  // which does rewind.
+  use gwm::tui::{CommitsModal, CommitsSnapshot};
+  let path = std::path::Path::new("/tmp/x");
+  let mut m = CommitsModal::new();
+  m.begin(Some(path), 10, None);
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); 10],
+    loaded: 10,
+    ..Default::default()
+  });
+  m.max_scroll = 8;
+  m.scroll_to_bottom();
+  assert_eq!(m.scroll, 8);
+
+  m.begin_more(20);
+  assert_eq!(m.scroll, 8, "arming a deeper page keeps the cursor and the rows");
+  assert_eq!(m.lines.len(), 10, "the rows already read stay up while it loads");
+  m.load(CommitsSnapshot {
+    lines: vec![ratatui::text::Line::from("x"); 20],
+    loaded: 20,
+    ..Default::default()
+  });
+  assert_eq!(m.scroll, 8, "and the payload does not rewind either");
+
+  m.begin(Some(path), 20, None);
+  assert_eq!(m.scroll, 0, "a fresh open still rewinds");
+  assert!(m.lines.is_empty(), "and drops the previous listing");
+}
+
+/// Drain until the chained diff-stat read lands, or fail loudly.
+fn settle_commit_stats(app: &mut App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !app.commits.stats_loaded && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(app.commits.stats_loaded, "the chained stats read never landed");
+}
+
+#[test]
+fn the_stats_read_is_chained_after_the_rows_and_grows_the_column() {
+  // Issue #593: the rows come from a ~0.4s revwalk, the diff counts from a
+  // one-to-three second `git log`. Folding them into one read would hold
+  // the listing behind the slower half, so the second is chained from the
+  // drain and the column grows under rows already on screen.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+
+  let before = app.commits.tiers[1].width;
+  assert!(!app.commits.stats_loaded, "the rows land without the stats");
+
+  settle_commit_stats(&mut app);
+  assert!(
+    app.commits.tiers[1].width > before,
+    "the middle tier grew by the diff counts: {} -> {}",
+    before,
+    app.commits.tiers[1].width
+  );
+}
+
+#[test]
+fn a_stats_payload_for_another_listing_is_dropped() {
+  // Same three-part identity the rows are matched on. Unlike the rows,
+  // dropping one strands nothing: the columns already carry author and
+  // age, and the next chained request covers the current listing.
+  use gwm::tui::{MetaColumn, TaskKind, TaskMsg, COMMITS_PAGE};
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  // Let the chained read this open fired land FIRST, then pretend it never
+  // did. Injecting while it is still in flight makes the assertion a race
+  // with a worker the test did not start: green locally, red on CI, which
+  // is exactly what happened.
+  settle_commit_stats(&mut app);
+  app.commits.stats_loaded = false;
+
+  let fat = MetaColumn {
+    lines: vec![ratatui::text::Line::from("XXXXXXXXXXXX")],
+    width: 12,
+  };
+  let tiers = [fat.clone(), fat.clone(), fat];
+  let path = app.commits.path.clone().unwrap();
+  let generation = app
+    .tasks
+    .request(TaskKind::CommitStats)
+    .expect("the chained read has landed, so the slot is free");
+
+  // Right path, wrong limit — injected through the spine, the path a real
+  // worker takes.
+  app
+    .task_result_sender()
+    .send(TaskMsg::CommitStats(
+      generation,
+      path.clone(),
+      COMMITS_PAGE * 2,
+      app.commits.head.clone(),
+      tiers,
+    ))
+    .unwrap();
+  app.drain_task_results();
+  assert!(
+    !app.commits.stats_loaded,
+    "a payload read at another page depth is not this listing's"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// #590: where a URL opens. Terminal browser in a mux pane, else the OS opener
+// ---------------------------------------------------------------------------
+
+/// `[tui] terminal_browser` set to `w3m {url}`, everything else default.
+fn tui_with_browser(template: &str) -> gwm::config::TuiConfig {
+  gwm::config::TuiConfig {
+    terminal_browser: Some(template.into()),
+    ..Default::default()
+  }
+}
+
+const URL: &str = "https://github.com/kbrdn1/gwm-cli/issues/590";
+
+#[test]
+fn terminal_browser_unset_opens_the_system_browser_without_a_word() {
+  // The default, on every platform, and the compatibility promise of #590:
+  // unset is gwm's behaviour up to 1.9, unchanged. Silent too, because a note on
+  // every link about a feature nobody asked for is noise.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &gwm::config::TuiConfig::default(),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert_eq!(plan, gwm::tui::BrowserPlan::System { why: None });
+}
+
+#[test]
+fn terminal_browser_without_a_multiplexer_falls_back_and_names_the_probes() {
+  // The gate the issue asks for: "a terminal browser with nowhere to put it
+  // is worse than the system browser". The fallback is not silent here,
+  // because the user DID configure one, and an opt-in that quietly does nothing
+  // reads as a broken feature.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("no multiplexer must reach the system browser, with a reason");
+  };
+  assert!(
+    why.contains("$TMUX") && why.contains("$ZELLIJ") && why.contains("$HERDR_ENV"),
+    "the reason must name what gwm probed, got: {why}"
+  );
+}
+
+#[test]
+fn terminal_browser_inside_tmux_opens_a_pane_running_it() {
+  // The point of #590: the page renders beside gwm instead of pulling the
+  // user out of the workspace gwm is sitting in.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, noun } = plan else {
+    panic!("tmux carries its command in the argv that opens the pane");
+  };
+  assert_eq!(argv[0], "tmux");
+  assert!(
+    argv.iter().any(|a| a == "split-window") && argv.iter().any(|a| a == "-h"),
+    "the level and side come from [tui] mux_open_in / mux_pane_direction, got: {argv:?}"
+  );
+  // The browser line is the LAST operand, and the URL is one word in it.
+  assert_eq!(
+    argv.last().map(String::as_str),
+    Some("w3m {url}".replace("{url}", URL).as_str())
+  );
+  assert_eq!(noun, "pane");
+}
+
+#[test]
+fn terminal_browser_inside_herdr_runs_in_the_overlay_and_says_why() {
+  // herdr panes take no command in the argv that opens them, and the resume
+  // path's answer to that (#591 / #599) is a round trip that waited ~60s for
+  // the new shell in the worst measured case. For a browser that is the wrong
+  // trade: the key was pressed, something must appear. The PTY overlay still
+  // renders the page in the terminal; it just covers gwm, which is what the
+  // status line has to say out loud.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Overlay { argv, why } = plan else {
+    panic!("herdr must reach the overlay, not the system browser");
+  };
+  // An argv, not a shell line: `PtyOverlay::spawn` execs it directly, so
+  // joining it and handing the result to `platform_shell()` would add a
+  // re-parse for nothing, and on Windows that shell is `cmd.exe`, which reads
+  // neither POSIX quoting nor `&` as anything but a command separator (Codex
+  // review on PR #615).
+  assert_eq!(argv, vec!["w3m".to_string(), URL.to_string()]);
+  assert!(why.contains("herdr"), "the reason must name the backend, got: {why}");
+}
+
+#[test]
+fn terminal_browser_under_a_level_that_takes_no_command_still_renders_in_the_terminal() {
+  // Two refusals that are not herdr's: a zellij TAB takes no trailing
+  // command, and no backend but herdr has a workspace level at all. Both are
+  // reachable from `[tui] mux_open_in`, which the user sets for `t`, so
+  // neither may silently downgrade to the external browser.
+  for (mux_open_in, zellij, tmux, expect) in [
+    (gwm::config::MuxTarget::Tab, Some("0".to_string()), None, "zellij"),
+    (
+      gwm::config::MuxTarget::Workspace,
+      None,
+      Some("/tmp/sock,1,0".to_string()),
+      "workspace",
+    ),
+  ] {
+    let tui = gwm::config::TuiConfig {
+      mux_open_in,
+      ..tui_with_browser("w3m {url}")
+    };
+    let plan = gwm::tui::plan_terminal_browser(
+      URL,
+      std::path::Path::new("/tmp/gwm-test/wt"),
+      &tui,
+      tmux,
+      zellij,
+      None,
+      None,
+      &|_| true,
+    );
+    let gwm::tui::BrowserPlan::Overlay { why, .. } = plan else {
+      panic!("{mux_open_in:?} must still render in the terminal, via the overlay");
+    };
+    assert!(why.contains(expect), "expected a {expect} refusal, got: {why}");
+  }
+}
+
+#[test]
+fn terminal_browser_that_is_not_installed_is_caught_before_the_spawn() {
+  // "detect if install" from the issue. Probing beats spawning: a failed
+  // spawn inside a fresh mux pane closes the pane before anyone can read the
+  // error, so the user would see a pane flash and no page.
+  //
+  // The REASON is pinned, not just the variant: `System` is also what an
+  // absent multiplexer and a refused URL produce, and a test that only
+  // asserted the variant would stay green if this branch disappeared.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("carbonyl {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin != "carbonyl",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser must fall back rather than open an empty pane");
+  };
+  assert!(
+    why.contains("carbonyl") && why.contains("PATH"),
+    "the reason must name the binary gwm looked for, got: {why}"
+  );
+}
+
+#[test]
+fn terminal_browser_refuses_a_url_it_will_not_hand_to_a_shell() {
+  // The expander's refusal has to survive as a fallback rather than as a
+  // dead key: whatever `is_browsable_url` turns down still opens somewhere.
+  let plan = gwm::tui::plan_terminal_browser(
+    "file:///etc/passwd",
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a refused URL must still reach the OS opener");
+  };
+  assert!(why.contains("terminal_browser"), "got: {why}");
+}
+
+#[test]
+#[cfg(unix)]
+fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
+  // tmux is the one backend with no argv form: it takes a single
+  // shell-command operand and hands it to its own `default-shell`. So that
+  // operand is a real shell line, and the whole security claim of #590 is
+  // about what a shell does with it, not about what the Vec looks like.
+  //
+  // The fake browser is `printf %s\n`, so its arguments come back one per
+  // line: a URL that stayed one word prints one line, and a URL that was
+  // re-split or substituted prints something else.
+  let url = "https://example.com/a;id&whoami?q=$(id)`id`&x=1";
+  let plan = gwm::tui::plan_terminal_browser(
+    url,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &gwm::config::TuiConfig {
+      // The quoted form, which is where `expand_agent_resume`'s
+      // substitute-into-the-line order would have leaked.
+      terminal_browser: Some("printf '%s\\n' \"{url}\"".into()),
+      ..Default::default()
+    },
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, .. } = plan else {
+    panic!("tmux carries the browser as a shell-command operand");
+  };
+  let line = argv.last().expect("the operand is the last word").clone();
+  let out = std::process::Command::new("/bin/sh")
+    .arg("-c")
+    .arg(&line)
+    .output()
+    .expect("/bin/sh runs on every unix runner");
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert_eq!(
+    stdout.lines().collect::<Vec<_>>(),
+    vec![url],
+    "the URL must reach the browser as exactly one argument, verbatim; line was {line:?}"
+  );
+  assert!(
+    !stdout.contains("uid=") && !String::from_utf8_lossy(&out.stderr).contains("uid="),
+    "nothing in the URL may be executed by the shell, got {stdout:?}"
+  );
+}
+
+#[test]
+// `/bin/sh` is the child, so this is a unix test, like every other PTY
+// lifecycle test in the suite. Pushed without the gate it took
+// `test (windows-latest)` red: `spawn` cannot find the binary there, and the
+// `expect` fails the whole suite before the assertion runs. Exactly the trap
+// CLAUDE.md names under "pre-validate environment-dependent tests".
+#[cfg(unix)]
+fn the_pty_overlay_returns_to_the_view_it_covered() {
+  // Codex review on PR #615. Before #590 every PTY overlay opened from the
+  // worktree table, so closing it back to `View::List` was always right. A
+  // `terminal_browser` link is the first caller that can open from ON TOP of
+  // a modal: the rich PR/issue view and the CI checks overlay both open URLs.
+  // Landing the reader on the table there loses the modal AND the row they
+  // were on, which the system-browser and mux-pane paths never do.
+  //
+  // Driven through the two state methods rather than through `open_url`,
+  // which needs a live `Terminal` and would spawn a real browser.
+  let (_d, mut app) = make_app();
+  app.view = gwm::tui::View::DetailOverlay;
+  // A PTY the test can own without spawning a browser: `spawn` execs argv[0]
+  // directly, so a shell that reads nothing is the cheapest live child.
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .expect("/bin/sh spawns on every runner this test runs on");
+  app.open_pty_overlay_over_current(pty);
+  assert_eq!(app.view, gwm::tui::View::Pty);
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    gwm::tui::View::DetailOverlay,
+    "closing the browser must land back on the modal it covered, not the table"
+  );
+
+  // And every pre-#590 caller is untouched, which is why this is a separate
+  // entry point. The exec picker spawns its PTY from `View::ExecPicker`, so a
+  // rule that stashed the current view unconditionally would drop the user
+  // back on the picker after every run instead of on the list, contradicting
+  // `close_exec_picker` (Codex review on PR #615).
+  for from in [gwm::tui::View::List, gwm::tui::View::ExecPicker] {
+    app.view = from;
+    let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+      gwm::tui::state::pty_overlay::PtyKind::Exec,
+      &["/bin/sh", "-c", "sleep 30"],
+      std::path::Path::new("."),
+      80,
+      24,
+    )
+    .unwrap();
+    app.open_pty_overlay(pty);
+    app.close_pty_overlay();
+    assert_eq!(app.view, gwm::tui::View::List, "opened from {from:?}");
+  }
+}
+
+#[test]
+fn terminal_browser_probes_the_binary_behind_a_wrapper() {
+  // Codex review on PR #615. `terminal_browser = "env -u NO_COLOR w3m {url}"`
+  // is a valid setting, and probing `argv[0]` there checks that `env` exists,
+  // which it always does. The promise the probe makes is "detect if install",
+  // so on a machine with no `w3m` it has to fall back, not open a pane whose
+  // process dies on the spot.
+  //
+  // `doctor` already walks past `env` and its detached `-u NAME` operand, a
+  // walk that was itself a fix (`env -u NODE_OPTIONS npm ci` resolved to
+  // `NODE_OPTIONS`), so this shares it rather than growing a second copy.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The shape of a real machine with `env` but no browser.
+    &|bin| bin == "env",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser behind a wrapper must still fall back");
+  };
+  assert!(
+    why.contains("w3m") && !why.contains("env"),
+    "the reason must name the browser, not the wrapper, got: {why}"
+  );
+
+  // And the wrapper form still opens a pane when the browser IS there, so the
+  // probe did not become a refusal of wrappers.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, .. } = plan else {
+    panic!("with the browser installed the wrapper form opens a pane");
+  };
+  assert_eq!(
+    argv.last().map(String::as_str),
+    Some(format!("env -u NO_COLOR w3m {URL}").as_str()),
+    "the wrapper stays in the command that runs, got: {argv:?}"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_link_that_moved_under_the_browser_does_not_come_back_as_stale_rows() {
+  // Codex review on PR #615. `a_link_change_closes_the_rich_view` covers the
+  // link moving while the modal is on screen. A `terminal_browser` link opens
+  // the PTY overlay ON TOP of that modal, and two things then hold at once:
+  // `View::Pty` does not suspend the auto refresh, and
+  // `close_forge_overlay_if_link_disagrees` returns early on any view but
+  // `DetailOverlay`. So the move lands with nothing to catch it, and without
+  // re-asking the guard on the way back the reader gets rows nobody
+  // re-checked, with `Enter` opening the old PR's URL.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  // `B` on a row: the browser covers the modal.
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .expect("/bin/sh spawns on every unix runner");
+  app.open_pty_overlay_over_current(pty);
+  assert_eq!(app.view, View::Pty);
+
+  // The refresh lands while the page is up, and the guard cannot see it.
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+  assert_eq!(app.view, View::Pty, "the refresh must not disturb the open browser");
+
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a modal whose link moved must not be restored: it would hand `Enter` the old PR's URL"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_modal_whose_link_held_still_is_restored_after_the_browser() {
+  // The other half, and the one that makes the guard above a guard rather
+  // than a blanket close: nothing moved, so the reader comes back to the row
+  // they were on. Without this a "fix" that always closed the modal would
+  // pass the test above and silently undo the restore #590 added.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay_over_current(pty);
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "an unchanged link must come back to the modal the reader left"
+  );
+}
+
+#[test]
+fn a_browser_that_places_itself_is_launched_and_not_hosted() {
+  // #590, after trying `terminal-browser` in a real herdr session. gwm's two
+  // hosting shapes both assume the browser draws inside the TTY it is handed,
+  // which is true of w3m and lynx and false of a graphical one:
+  // `terminal-browser` renders through the terminal's image protocol, which
+  // positions against the real window, so it landed in the screen's top-left
+  // corner and ignored the overlay's rect entirely. No rect gwm passes can fix
+  // that, and the mouse has the same wall.
+  //
+  // `detached` is the answer: `terminal-browser open {url} --split right`
+  // asks the multiplexer for its own pane and exits (~4s, measured), so the
+  // rendering and the clicks are the terminal's business and gwm hosts
+  // nothing.
+  let tui = gwm::config::TuiConfig {
+    terminal_browser: Some("terminal-browser open {url} --split right".into()),
+    terminal_browser_open_in: gwm::config::TerminalBrowserHost::Detached,
+    ..Default::default()
+  };
+  // herdr, where the overlay was the only option before this.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Detached { argv } = plan else {
+    panic!("a self-placing browser must not be hosted in the overlay");
+  };
+  assert_eq!(
+    argv,
+    vec![
+      "terminal-browser".to_string(),
+      "open".into(),
+      URL.into(),
+      "--split".into(),
+      "right".into()
+    ]
+  );
+
+  // Same under tmux, which CAN host a pane: hosting one here would split
+  // twice, since the browser splits on its own.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::Detached { .. }),
+    "detached must win over the pane path, or the browser is split twice"
+  );
+}
+
+#[test]
+fn a_self_placing_browser_still_needs_a_multiplexer_and_a_binary() {
+  // The two gates stay in front of `detached`, and the order is the reason
+  // this test exists. Placing itself still means asking a multiplexer for a
+  // pane: with none running, `terminal-browser open` takes over the pane gwm
+  // is drawing in, which is worse than the system browser it would have used.
+  let tui = gwm::config::TuiConfig {
+    terminal_browser: Some("terminal-browser open {url} --split right".into()),
+    terminal_browser_open_in: gwm::config::TerminalBrowserHost::Detached,
+    ..Default::default()
+  };
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::System { why: Some(_) }),
+    "no multiplexer means the system browser, detached or not"
+  );
+
+  // And a browser that is not installed falls back rather than being launched
+  // into nothing.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|bin| bin != "terminal-browser",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing self-placing browser must fall back too");
+  };
+  assert!(why.contains("terminal-browser") && why.contains("PATH"), "got: {why}");
+}
+
+#[test]
+fn the_default_host_is_the_one_that_hosts() {
+  // `overlay` is the default because a text browser is the common case and
+  // gwm placing it beside the worktree list is the point of #590. `detached`
+  // is the opt-in for the browsers that cannot be hosted.
+  assert_eq!(
+    gwm::config::TerminalBrowserHost::default(),
+    gwm::config::TerminalBrowserHost::Overlay
+  );
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::Overlay { .. }),
+    "an unset host key keeps the hosting behaviour w3m needs"
+  );
+}
+
+#[test]
+fn a_detached_browser_reports_itself_and_never_blames_the_multiplexer() {
+  // #590. The shortcut this pins down is `mux_pane_status(url, "pane", …)`,
+  // which reads naturally at the call site and lies: `detached` asks the
+  // multiplexer for nothing, so "mux-pane refused" names a step that never
+  // ran and sends the user reading their tmux config because a browser
+  // exited non-zero.
+  let ok = gwm::tui::detached_browser_status(URL, true, "", "");
+  assert_eq!(ok, format!("opened {URL} in its own pane"));
+
+  let err = gwm::tui::detached_browser_status(URL, false, "", "terminal-browser: no such split\n");
+  assert!(
+    err.contains("browser refused") && err.contains("no such split"),
+    "the browser is what failed, and the line has to say so: {err}"
+  );
+  assert!(
+    !err.contains("mux-pane"),
+    "gwm asked for no pane here, so nothing may blame one: {err}"
+  );
+
+  // stderr wins over stdout, and a child that said nothing at all still
+  // produces a line rather than a bare "browser refused:".
+  let both = gwm::tui::detached_browser_status(URL, false, "opening...", "cannot reach display");
+  assert!(both.contains("cannot reach display"), "stderr comes first: {both}");
+  assert!(
+    gwm::tui::detached_browser_status(URL, false, "", "").contains("no output"),
+    "a silent failure still explains itself"
+  );
+}
+
+#[test]
+fn a_leading_shell_assignment_is_refused_rather_than_half_honoured() {
+  // Codex review on PR #615, and the defect is the disagreement between two
+  // halves that each look right on their own.
+  //
+  // `terminal_browser = "NO_COLOR=1 w3m {url}"` is shell syntax, and nothing
+  // on this path runs a shell: the template is tokenised precisely so the URL
+  // can never meet one. `doctor::executable_in` walks *past* a leading
+  // `KEY=VAL` to find the real binary, which is right for the surfaces that do
+  // go through a shell, so the probe resolves `w3m`, finds it, and waves the
+  // config through. Every consumer then execs `argv[0]` verbatim, which is the
+  // string `"NO_COLOR=1"`. The overlay and the detached path fail outright,
+  // and zellij is worse: it opens the pane, reports success, and the process
+  // inside is already dead.
+  //
+  // So the probe must not accept what the spawn cannot honour. `env` is the
+  // portable spelling and keeps working, because it is a real binary.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The machine where the shortcut hides: `w3m` really is installed, so
+    // the probe walking past the assignment finds it and says yes.
+    &|bin| bin == "w3m",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a template gwm cannot exec must fall back, not open a dead pane");
+  };
+  assert!(
+    why.contains("NO_COLOR=1") && why.contains("env"),
+    "the refusal must name the assignment and the spelling that works: {why}"
+  );
+
+  // The same variable set the portable way stays supported, argv[0] being a
+  // real binary. This is the line that stops the fix from being a blanket ban
+  // on `=` anywhere in the template.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "`env KEY=VAL tool` is a real argv and must still open a pane"
+  );
+
+  // And a `=` inside an argument is not an assignment: `--url={url}` is the
+  // form the docs give for a browser that wants the URL somewhere else.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("browser --url={url} --no-sandbox"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "browser",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "only a leading assignment is refused, not any token carrying `=`"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_modal_covered_by_the_browser_comes_back_holding_what_landed_meanwhile() {
+  // Codex review on PR #615, and the other half of the restore #590 added.
+  //
+  // `View::Pty` does not suspend the auto refresh, so a PR, CI or threads
+  // result can land while the browser covers the modal. Every sync that would
+  // absorb it returns early on `view != DetailOverlay`, and the modal keeps
+  // its OWN rows rather than reading the cache at render time. The guard on
+  // the way back only compares the link's *identity*, so an unchanged number
+  // restores the pre-browser rows over a cache that has since moved: the
+  // reader is looking at stale content with nothing saying so, until the next
+  // manual refresh.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(
+    app.detail_overlay.title.contains("rich fixture"),
+    "precondition: the modal opened on the fixture title, got {:?}",
+    app.detail_overlay.title
+  );
+
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay_over_current(pty);
+
+  // The refresh lands while the browser is up. Same PR number, so the
+  // identity guard will be satisfied and the modal restored.
+  let mut moved = rich_pr_fixture(61);
+  moved.title = "retitled while the browser was up".into();
+  app.apply_pr_fetch_result(Ok(moved));
+
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "an unchanged link still comes back to the modal"
+  );
+  assert!(
+    app.detail_overlay.title.contains("retitled while the browser was up"),
+    "the restored modal must hold what landed while it was covered, got {:?}",
+    app.detail_overlay.title
+  );
+}
+
+#[test]
+fn a_wrapper_that_is_itself_missing_is_caught_like_the_browser_behind_it() {
+  // Codex review on PR #615, the mirror image of
+  // `terminal_browser_probes_the_binary_behind_a_wrapper`. That one fixed
+  // probing `argv[0]` and never the real browser; this is the half it left:
+  // probing the real browser and never `argv[0]`.
+  //
+  // `env NO_COLOR=1 w3m {url}` on Windows is the case that bites. `w3m.exe`
+  // can be installed while `env.exe` is not, since `env` is a coreutil rather
+  // than something Windows ships. The probe walks past the wrapper, finds
+  // `w3m`, and accepts; the consumers then exec `argv[0]`, which is `env`, and
+  // it is not there. The overlay and the detached path fail, and zellij opens
+  // a pane reporting success around a process that never started.
+  //
+  // Both have to be on PATH, because both are needed to run the thing.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The Windows shape: the browser is installed, the wrapper is not.
+    &|bin| bin == "w3m",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing wrapper must fall back, not open a pane that cannot run");
+  };
+  assert!(
+    why.contains("env") && why.contains("PATH"),
+    "the refusal must name the wrapper that is missing: {why}"
+  );
+
+  // And the pane still opens when both are there, so this is a second probe
+  // rather than a ban on wrappers.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "a wrapper and a browser both on PATH must still open a pane"
+  );
+}
+
+#[test]
+fn a_wrapper_named_by_its_full_path_still_reveals_the_browser_behind_it() {
+  // Codex review on PR #615. `COMMAND_WRAPPERS` matched the exact token, so
+  // `/usr/bin/env -u NO_COLOR w3m {url}` was not recognised as a wrapper at
+  // all: `executable_in` returned `/usr/bin/env`, and the pair of probes then
+  // checked the wrapper twice while never looking for `w3m`. A machine
+  // without the browser was waved through, and under tmux or zellij the pane
+  // opens, reports success, and dies with the process inside it.
+  //
+  // Writing the wrapper by its path is ordinary (a shebang-ish habit, a
+  // pinned coreutils, a nix store path), so the walk compares basenames.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("/usr/bin/env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The wrapper is there, the browser is not: the exact shape the probe
+    // exists to catch.
+    &|bin| bin == "/usr/bin/env",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser behind a qualified wrapper must still fall back");
+  };
+  assert!(
+    why.contains("w3m"),
+    "the refusal must name the browser, not the wrapper it hid behind: {why}"
+  );
+
+  // And it still opens when the browser is there too, so recognising the
+  // wrapper did not turn into refusing it.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("/usr/bin/env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "/usr/bin/env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "a qualified wrapper with its browser present must open a pane"
+  );
 }

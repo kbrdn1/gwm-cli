@@ -27,10 +27,14 @@ assets (#575):
 `github-linking.tape` is the one capture in the set that is not deterministic
 and not reproducible by anyone else: it hardcodes the maintainer's checkout
 path and photographs whatever that repo happens to be doing. The published
-`github-linking.png` was taken during the v1.8.0 release, so it shows a dirty
-`chore/release-1.8.0` branch, the real commit history, and a live `CI running
-10/12`. Regenerating it means being on a branch whose PR is open, or it captures
+`github-linking.png` was taken during the v1.9.0 release, so it shows a dirty
+`chore/release-1.9.0` branch, the real commit history, and a live `CI running
+11/12`. Regenerating it means being on a branch whose PR is open, or it captures
 an empty pane. Tracked separately rather than papered over here.
+
+The Working Tree pane photographs whatever is uncommitted at that moment, so
+check `git status` before the shot: an untracked scratch directory left by some
+other tool lands in the published image and reads as part of the project.
 
 Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
 (`CaskaydiaCove Nerd Font Mono`, as set in each tape's `Set FontFamily`).

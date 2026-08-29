@@ -90,20 +90,25 @@ fn mismatched_second_key_falls_back_to_single_key_dispatch() {
 
 #[test]
 fn mismatched_second_key_with_no_fallback_clears_buffer() {
-  // `g` then `m` — neither a chord match nor a single-key binding.
+  // `g` then `u` — neither a chord match nor a single-key binding.
   // Returns None and clears the buffer; the event loop ignores it.
-  // (`m` rather than `z`: #484 moved `cycle_sidebar_layout` onto `z`.)
+  //
+  // The key here is whichever one is currently UNBOUND, and it has moved
+  // twice: `z` until #484 gave it `cycle_sidebar_layout`, then `m` until
+  // #551 gave it `merge_pr`. That churn is the test doing its job — it can
+  // only assert "an unbound key arms nothing" while the key it names is
+  // actually unbound.
   let (_dir, mut app) = make_app();
   assert_eq!(app.dispatch_key(press('g')), None);
-  assert_eq!(app.dispatch_key(press('m')), None);
+  assert_eq!(app.dispatch_key(press('u')), None);
   assert!(app.pending_chord_is_empty());
 }
 
 #[test]
 fn unbound_key_returns_none_without_arming_buffer() {
   let (_dir, mut app) = make_app();
-  // `m` is the free key since #484 put `cycle_sidebar_layout` on `z`.
-  assert_eq!(app.dispatch_key(press('m')), None);
+  // `u` is the free key since #551 put `merge_pr` on `m`.
+  assert_eq!(app.dispatch_key(press('u')), None);
   assert!(app.pending_chord_is_empty());
 }
 
@@ -154,6 +159,43 @@ fn digit_keys_dispatch_pane_focus_actions() {
   let (_dir, mut app) = make_app();
   assert_eq!(app.dispatch_key(press('1')), Some(Action::FocusWorktrees));
   assert_eq!(app.dispatch_key(press('2')), Some(Action::FocusStatus));
+}
+
+#[test]
+fn the_commit_and_check_keys_mean_the_same_in_both_panes() {
+  // Issue #593: `c` opens the commit listing, `C` the CI checks, and
+  // neither changes meaning under the focus. That uniformity is the whole
+  // point of the rebind: it replaced the #436 contextual routing, which
+  // gave the status pane its own `c`. It displaced the rename onto `e`,
+  // the letter that names it, and `exit_to_worktree` onto `E`.
+  let (_dir, mut app) = make_app();
+  for focus_status in [false, true] {
+    if focus_status {
+      app.focus_status();
+    } else {
+      app.focus_worktrees();
+    }
+    assert_eq!(
+      app.dispatch_key(press('c')),
+      Some(Action::Commits),
+      "c is the commit listing (status focus = {focus_status})"
+    );
+    assert_eq!(
+      app.dispatch_key(press_shift_upper('C')),
+      Some(Action::CiChecks),
+      "C is the CI checks (status focus = {focus_status})"
+    );
+    assert_eq!(
+      app.dispatch_key(press('e')),
+      Some(Action::EditWorktree),
+      "the rename took the letter that names it (status focus = {focus_status})"
+    );
+    assert_eq!(
+      app.dispatch_key(press_shift_upper('E')),
+      Some(Action::ExitToWorktree),
+      "and the exit took the shifted one (status focus = {focus_status})"
+    );
+  }
 }
 
 #[test]
@@ -540,6 +582,8 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       KeyContext::Help => "Help Overlay",
       KeyContext::Detail => "Agent Sessions",
       KeyContext::CommandLogs => "Command Logs",
+      KeyContext::WorkingTree => "Working Tree",
+      KeyContext::Commits => "Commits",
       KeyContext::Config | KeyContext::ConfigEdit => "Settings",
       KeyContext::Report => "Bootstrap Report",
       KeyContext::OpenMenu => "Browse Links",
