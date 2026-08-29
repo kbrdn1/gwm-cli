@@ -7610,6 +7610,26 @@ impl App {
     spawned
   }
 
+  /// The PR whose inline review threads the rich view is currently
+  /// rendering, if that is what is on screen (issue #619).
+  ///
+  /// Gated on the VIEW rather than on `rich_overlay_source` alone: the
+  /// source outlives the overlay until [`Self::close_detail_overlay`]
+  /// clears it, and a keep that outlives the reader would pin one PR's
+  /// threads in the cache for the rest of the session. `DetailOverlay`
+  /// covers the child modals that are overlays themselves (the CI checks
+  /// list, the agents list) — they come back to this view, so what they
+  /// come back to must still have its comments.
+  fn rich_view_pr_number(&self) -> Option<u64> {
+    if self.view != View::DetailOverlay {
+      return None;
+    }
+    match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => Some(pr.number),
+      RichSource::Issue(_) => None,
+    }
+  }
+
   fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
     // A relist is the moment the fetched statuses stop being authoritative,
     // and since #597 nothing else expires them: the link re-read on every
@@ -7622,7 +7642,12 @@ impl App {
     // has no stale answer behind it to expire, so cancelling it would throw
     // away work and expire nothing (Codex review on #618). The respawns
     // below coalesce onto it through `TaskRunner::request`.
-    self.github.invalidate_settled();
+    //
+    // Except the inline review threads of a PR a rich view has on screen
+    // (#619): that view reads them live from the cache, so expiring them
+    // blanked the section under the reader on the next PR landing.
+    let on_screen = self.rich_view_pr_number();
+    self.github.invalidate_settled(on_screen);
 
     // Workspace mode (#36): this bulk prefetch resolves every merged row's
     // issue/PR against a single repo's slug (`self.github.link_slug`), which

@@ -265,7 +265,18 @@ impl GitHubFetch {
   /// change what a number means: only a move between forge instances does,
   /// and `App::refresh_link` still answers that with the full flush and the
   /// generation-bump that must move with it.
-  pub fn invalidate_settled(&mut self) {
+  ///
+  /// `keep_pr_threads` names the one PR whose inline review threads a rich
+  /// view has on screen (issue #619). That view renders the PR from its own
+  /// snapshot, so expiring the PR cache never blanks it — but it reads the
+  /// threads live from here, so expiring them emptied the section under the
+  /// reader the moment the PR landed and rebuilt the rows. Re-requesting
+  /// them instead would be fresher and worse: the section collapses to
+  /// `loading…` for the round trip, once per `tui.auto_refresh_secs`,
+  /// taking the reader's scroll position with it. So the threads on screen
+  /// are held until the view is closed or refreshed (`f`), which flushes
+  /// them through [`Self::invalidate`] and asks again.
+  pub fn invalidate_settled(&mut self, keep_pr_threads: Option<u64>) {
     // A fn, not a closure: the three caches hold three different payload
     // types and a closure cannot be generic over them.
     fn in_flight<T>(state: &GitHubFetchState<T>) -> bool {
@@ -273,7 +284,9 @@ impl GitHubFetch {
     }
     self.issue_cache.retain(|_, s| in_flight(s));
     self.pr_cache.retain(|_, s| in_flight(s));
-    self.pr_threads_cache.retain(|_, s| in_flight(s));
+    self
+      .pr_threads_cache
+      .retain(|n, s| in_flight(s) || Some(*n) == keep_pr_threads);
   }
 
   /// Stamp an auto-detected PR onto the resolved `link` when none is
