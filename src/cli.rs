@@ -214,19 +214,19 @@ pub enum Command {
     from_issue: Option<u64>,
     /// Branch type for `--issue <N>` when the issue's labels do not select
     /// exactly one, or to override the one they do select.
-    ///
-    /// `conflicts_with_all` as well as `requires`: clap drops a `requires`
-    /// target from the required set when it conflicts with an argument that
-    /// *is* present, so `requires` alone lets `gwm create feat 1 x --type
-    /// fix` through as a silent no-op.
+    //
+    // `conflicts_with_all` as well as `requires`, and a `//` because it is a
+    // note for the next maintainer rather than for `--help`: clap drops a
+    // `requires` target from the required set when it conflicts with an
+    // argument that *is* present, so `requires` alone let `gwm create feat 1
+    // x --type fix` through as a silent no-op.
     #[arg(long = "type", value_name = "TYPE", requires = "from_issue",
           conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
     type_override: Option<String>,
     /// With `--issue <N>`, open a worktree for a closed issue instead of
     /// refusing. A worktree for a closed issue is usually a wrong number,
     /// so it takes saying so.
-    ///
-    /// Same double declaration as `--type`, for the same clap reason.
+    // Same double declaration as `--type`, for the same clap reason.
     #[arg(long, requires = "from_issue",
           conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
     force: bool,
