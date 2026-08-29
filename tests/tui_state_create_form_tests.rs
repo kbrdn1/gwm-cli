@@ -492,3 +492,76 @@ fn reset_clears_the_buffers_but_keeps_the_configured_field_set() {
   assert_eq!(form.fields(), expected.as_slice());
   assert!(form.desc.is_empty());
 }
+
+// ---- Mode::FromIssue (issue #625) ---------------------------------------
+
+#[test]
+fn enter_from_issue_opens_on_the_number_and_clears_what_was_typed() {
+  let mut form = CreateForm::new();
+  form.desc.push_str("stale");
+  form.name.push_str("stale");
+  form.type_index = 2;
+
+  form.enter_from_issue();
+
+  assert_eq!(form.mode, Mode::FromIssue);
+  assert_eq!(form.field, Field::Issue);
+  assert!(form.issue.is_empty());
+  assert!(form.desc.is_empty(), "a stale slug would survive the derivation");
+  assert_eq!(form.awaiting_issue, None);
+}
+
+#[test]
+fn from_issue_accepts_the_number_even_when_the_patterns_write_none() {
+  // A `{type}/{desc}` repo discards the number from the branch, so `Issue`
+  // is not in its field list — and this mode still has to collect it, since
+  // the number is what gets fetched rather than what gets written. Reading
+  // the pattern's field list here would make the form untypeable.
+  let mut form = CreateForm::new();
+  form.set_fields(vec![Field::Type, Field::Desc]);
+  form.enter_from_issue();
+
+  form.push_char('5');
+  form.push_char('9');
+  form.push_char('4');
+
+  assert_eq!(form.issue, "594");
+}
+
+#[test]
+fn from_issue_has_one_field_so_rotation_stays_put() {
+  let mut form = CreateForm::new();
+  form.enter_from_issue();
+
+  form.next_field();
+  assert_eq!(form.field, Field::Issue);
+  form.prev_field();
+  assert_eq!(form.field, Field::Issue);
+}
+
+#[test]
+fn from_issue_toggles_back_to_the_structured_triple() {
+  // One key out of a mode the user opened by name, rather than a three-way
+  // cycle that would make the toggle unpredictable.
+  let mut form = CreateForm::new();
+  form.enter_from_issue();
+
+  form.toggle_mode();
+
+  assert_eq!(form.mode, Mode::Structured);
+  assert_eq!(form.field, form.entry_field());
+}
+
+#[test]
+fn reset_clears_the_awaited_issue() {
+  // A form reopened while a fetch is still in flight must not adopt that
+  // fetch's answer: `reset` is what `enter_create` calls.
+  let mut form = CreateForm::new();
+  form.enter_from_issue();
+  form.awaiting_issue = Some(594);
+
+  form.reset();
+
+  assert_eq!(form.awaiting_issue, None);
+  assert_eq!(form.mode, Mode::Structured);
+}
