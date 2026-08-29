@@ -8656,6 +8656,27 @@ pub fn plan_terminal_browser(
       why: Some(format!("terminal_browser cannot render {url:?}")),
     };
   };
+  // A leading `KEY=VAL` is shell syntax, and no shell runs on this path: the
+  // template is tokenised precisely so the URL never meets one. Refused here
+  // rather than half-honoured, because the two halves disagree otherwise
+  // (Codex review on PR #615). `doctor::executable_in` deliberately walks
+  // *past* a leading assignment to find the real binary, which is right for
+  // the surfaces that do go through a shell, so the probe below would resolve
+  // `w3m`, find it, and wave the config through. Every consumer then execs
+  // `argv[0]` verbatim, the literal string `"NO_COLOR=1"`: the overlay and the
+  // detached path fail outright, and zellij opens the pane, reports success,
+  // and leaves a dead process inside it.
+  //
+  // `env` is the portable spelling and keeps working, being a real binary, so
+  // the refusal names it instead of just saying no. Only the *first* token is
+  // checked: `--url={url}` is a documented form and carries no assignment.
+  if let Some(assignment) = argv.first().filter(|t| !t.starts_with('=') && t.contains('=')) {
+    return BrowserPlan::System {
+      why: Some(format!(
+        "terminal_browser starts with the shell assignment {assignment:?}; write `env {assignment} ...` instead"
+      )),
+    };
+  }
   // "detect if install" from the issue: probing beats spawning a missing
   // file, because a failed spawn inside a mux pane closes the pane before
   // anyone reads the error.

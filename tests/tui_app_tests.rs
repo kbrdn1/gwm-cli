@@ -16986,3 +16986,76 @@ fn a_detached_browser_reports_itself_and_never_blames_the_multiplexer() {
     "a silent failure still explains itself"
   );
 }
+
+#[test]
+fn a_leading_shell_assignment_is_refused_rather_than_half_honoured() {
+  // Codex review on PR #615, and the defect is the disagreement between two
+  // halves that each look right on their own.
+  //
+  // `terminal_browser = "NO_COLOR=1 w3m {url}"` is shell syntax, and nothing
+  // on this path runs a shell: the template is tokenised precisely so the URL
+  // can never meet one. `doctor::executable_in` walks *past* a leading
+  // `KEY=VAL` to find the real binary, which is right for the surfaces that do
+  // go through a shell, so the probe resolves `w3m`, finds it, and waves the
+  // config through. Every consumer then execs `argv[0]` verbatim, which is the
+  // string `"NO_COLOR=1"`. The overlay and the detached path fail outright,
+  // and zellij is worse: it opens the pane, reports success, and the process
+  // inside is already dead.
+  //
+  // So the probe must not accept what the spawn cannot honour. `env` is the
+  // portable spelling and keeps working, because it is a real binary.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The machine where the shortcut hides: `w3m` really is installed, so
+    // the probe walking past the assignment finds it and says yes.
+    &|bin| bin == "w3m",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a template gwm cannot exec must fall back, not open a dead pane");
+  };
+  assert!(
+    why.contains("NO_COLOR=1") && why.contains("env"),
+    "the refusal must name the assignment and the spelling that works: {why}"
+  );
+
+  // The same variable set the portable way stays supported, argv[0] being a
+  // real binary. This is the line that stops the fix from being a blanket ban
+  // on `=` anywhere in the template.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "`env KEY=VAL tool` is a real argv and must still open a pane"
+  );
+
+  // And a `=` inside an argument is not an assignment: `--url={url}` is the
+  // form the docs give for a browser that wants the URL somewhere else.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("browser --url={url} --no-sandbox"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "browser",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "only a leading assignment is refused, not any token carrying `=`"
+  );
+}
