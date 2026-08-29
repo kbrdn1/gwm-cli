@@ -12,6 +12,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Ctrl+n` opens the create form on an issue that already exists**
+  ([#625](https://github.com/kbrdn1/gwm-cli/issues/625)). `gwm create --issue`
+  (#617) derives the whole `<type> <issue> <desc>` triple from an issue on the
+  forge, and it was CLI-only. The TUI is where a worktree usually gets created,
+  so the one place already showing a worktree list and its linked issues was
+  the one place that still asked for the title to be retyped as a slug and the
+  branch type to be read off the labels by hand.
+
+  `Ctrl+n` (and `create-from-issue` in the command palette) opens the form on a
+  single field, the issue number. Enter looks the issue up rather than creating
+  anything; when the answer lands the form becomes the ordinary structured form
+  with the type, the number and the derived slug in it, and a second Enter
+  creates the worktree. Prefilling rather than creating is the point: the slug
+  is a guess about a title, and this is the surface that can show the guess
+  before committing to it. The derivation runs through the very functions the
+  CLI uses, so the two cannot produce different slugs for the same title.
+
+  Where the CLI has to refuse, the form asks. A non-interactive command has
+  nowhere to ask when the labels name no branch type or name two, which is what
+  `--type` is for; the form lands the cursor on the type selector with
+  everything else filled. A closed issue prefills with a warning rather than
+  refusing, since nothing is written until you confirm. A number that already
+  has a worktree closes the form and names it, matching the CLI's exit-0
+  behaviour, and reads the same link `gwm list` shows, so a worktree attached
+  by hand with `gwm link` counts too.
+
+  The lookup runs on the async task spine, never the render path, and a result
+  is applied only when the form asked for that exact number: the form is a
+  second consumer of a message that also fires for the sidebar prefetch and for
+  an explicit refresh. An issue already in the cache prefills straight away
+  rather than waiting for a message that would never arrive, since the fetch
+  coalesces on a cache hit.
+
 - **`gwm create --issue <N>` opens a worktree for an issue that already
   exists** ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)). `gwm new`
   covered the issue that does not exist yet: it renders the issue from
