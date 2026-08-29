@@ -2761,6 +2761,44 @@ pub struct RepoContext {
 /// Surfaces [`GwmError::NotInGitRepo`] outside a repo or in a bare
 /// repo (no workdir), and propagates any `.gwm.toml` parse error from
 /// [`Config::load_for_repo`].
+/// Stack size for the thread the CLI actually runs on.
+///
+/// Windows gives a process's main thread 1 MiB, against 8 MiB on macOS and
+/// Linux, and [`Cli::parse_from`] alone sits at that ceiling in a debug build:
+/// clap's derive expands one `Command` builder per subcommand and per argument
+/// into a single frame, and every `///` in this file is a `long_help` string
+/// inside it. Measured while adding three arguments to `Create` for #617: the
+/// binary before survived a 1024 KiB stack and died at 512 KiB, the binary
+/// after died at 1024 KiB and survived 2048 KiB. So every `gwm.exe`
+/// invocation aborted with `STATUS_STACK_OVERFLOW`, the whole CLI test suite
+/// included, while every Unix runner stayed green.
+///
+/// Trimming doc comments back under the ceiling buys one release and hands the
+/// same failure to the next argument anyone adds. Running the work on a thread
+/// whose stack size gwm chooses takes the ceiling out of the picture, and
+/// costs address space rather than memory: a thread stack is reserved up
+/// front and committed page by page as it is used.
+///
+/// Pinned by `tests/main_stack_tests.rs`, which probes from a thread the size
+/// of the one Windows gives main.
+pub const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Run `f` on a thread with [`STACK_SIZE`] bytes of stack and hand back what
+/// it returned.
+///
+/// A panic inside `f` is re-raised here rather than swallowed, so the process
+/// still aborts with the message and status it would have had running inline.
+/// `Err` is a failed *spawn* (thread limit, out of memory), which the caller
+/// reports rather than silently degrading: falling back to the caller's own
+/// stack is exactly the state this function exists to avoid.
+pub fn on_own_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
+  let worker = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(f)?;
+  match worker.join() {
+    Ok(value) => Ok(value),
+    Err(payload) => std::panic::resume_unwind(payload),
+  }
+}
+
 pub fn repo_context(start: Option<&Path>) -> Result<RepoContext> {
   let repo = worktree::discover_repo(start)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();

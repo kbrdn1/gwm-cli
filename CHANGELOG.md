@@ -460,6 +460,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once per refresh interval, taking the reader's place in the comments with
   it. Refreshing the view with `f` still asks for them again.
 
+- **The CLI no longer runs on the 1 MiB stack Windows gives a process's main
+  thread** ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)).
+  `Cli::parse` alone was sitting at that ceiling in a debug build: clap's
+  derive expands one `Command` builder per subcommand and per argument into a
+  single frame, and every `///` in `cli.rs` is a `long_help` string inside it.
+  Adding three arguments to `gwm create` took the binary from "survives a
+  1024 KiB stack, dies at 512" to "dies at 1024, survives 2048", so every
+  `gwm.exe` invocation aborted with `STATUS_STACK_OVERFLOW` while macOS and
+  Linux, which give main 8 MiB, stayed green.
+
+  `main` now does nothing but spawn a worker with a 16 MiB stack and relay its
+  exit status. Trimming doc comments back under the ceiling would have bought
+  one release and handed the same failure to the next argument anyone adds;
+  choosing the stack takes the ceiling out of the picture, and costs address
+  space rather than memory, since a thread stack is reserved up front and
+  committed page by page as it is used. `tests/main_stack_tests.rs` probes
+  from a thread the size of the one Windows gives main, so the guard cannot
+  pass vacuously on a Unix runner.
+
 - **The selected worktree keeps the GitHub context that was fetched for it**
   ([#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Standing on any row
   but the one the TUI opened on, `C` / `c` said "no CI checks to show: link a
