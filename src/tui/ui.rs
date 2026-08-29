@@ -3095,6 +3095,10 @@ pub enum HintContext {
   /// one field and no type selector, so the `field` / `type` hints would
   /// name verbs that do nothing there.
   CreateFreeform,
+  /// Create-worktree form modal, deriving from an existing issue (issue
+  /// #625). One field, the issue number, and no type selector, so the
+  /// `field` / `type` hints would name verbs that do nothing here.
+  CreateFromIssue,
   /// Confirm-delete modal.
   Confirm,
   /// The confirmation modal when it is holding a merge (issue #551).
@@ -3163,7 +3167,7 @@ impl HintContext {
       HintContext::Worktrees => "worktrees",
       HintContext::Status => "status",
       HintContext::Picker => "switch",
-      HintContext::Create | HintContext::CreateFreeform => "create",
+      HintContext::Create | HintContext::CreateFreeform | HintContext::CreateFromIssue => "create",
       HintContext::Confirm => "confirm",
       HintContext::ConfirmMerge => "merge",
       HintContext::OpenMenu => "open",
@@ -3293,6 +3297,14 @@ impl HintContext {
       HintContext::CreateFreeform => &[
         Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
+      ],
+      // #625: one field and no type selector, so `field` / `type` are out.
+      // `submit` reads as "look it up" here because that is what Enter does
+      // in this mode; the create is the Enter after the prefill.
+      HintContext::CreateFromIssue => &[
+        Hint::Modal(ModalAction::CreateSubmit, "look up"),
+        Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
       HintContext::Confirm => &[
@@ -3522,9 +3534,11 @@ impl HintContext {
   /// hint key shadowed by a modal binding in the same context.
   fn modal_context(self) -> Option<KeyContext> {
     Some(match self {
-      HintContext::Create | HintContext::CreateFreeform | HintContext::Rename | HintContext::RenameFreeform => {
-        KeyContext::Create
-      }
+      HintContext::Create
+      | HintContext::CreateFreeform
+      | HintContext::CreateFromIssue
+      | HintContext::Rename
+      | HintContext::RenameFreeform => KeyContext::Create,
       // Both render the confirmation modal, so both resolve through its
       // key context; only the verbs they advertise differ (#551).
       HintContext::Confirm | HintContext::ConfirmMerge => KeyContext::Confirm,
@@ -4222,6 +4236,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
   } else {
     rows.push(entry(Action::Create, "new worktree"));
+    rows.push(entry(
+      Action::CreateFromIssue,
+      "new worktree from an existing issue (derives type + slug)",
+    ));
     // #484: the mark set is what `d` acts on when it is non-empty.
     rows.push(entry(
       Action::ToggleSelect,
@@ -5658,10 +5676,10 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let title = if app.create_form.mode == Mode::Freeform {
-    "New Worktree (free-form)"
-  } else {
-    "New Worktree"
+  let title = match app.create_form.mode {
+    Mode::Freeform => "New Worktree (free-form)",
+    Mode::FromIssue => "New Worktree (from issue)",
+    Mode::Structured => "New Worktree",
   };
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
   let term = f.area();
@@ -5676,6 +5694,10 @@ fn draw_create(f: &mut Frame, app: &App) {
 
   let label = |s: &str| format!("{:<label_w$}", s);
   let freeform = app.create_form.mode == Mode::Freeform;
+  // Issue #625: nothing to preview yet. The triple is empty until the forge
+  // answers, and expanding the patterns over it renders the literal `/#-`,
+  // which reads as a branch this form is about to write.
+  let from_issue = app.create_form.mode == Mode::FromIssue;
   // Issue #416: a free-form name IS the branch, and the directory is that
   // name with `/` flattened — mirroring `WorktreeName::worktree_dirname`.
   let (branch_raw, dir_raw) = if freeform {
@@ -5691,19 +5713,42 @@ fn draw_create(f: &mut Frame, app: &App) {
   // the inputs so the resulting names stay in view while typing (issue #217
   // follow-up). Which inputs those are comes from the patterns (#418), so a
   // repo whose convention writes no issue number is not shown a field for one.
-  lines.push(Line::from(vec![
-    Span::raw("  Branch : "),
-    Span::styled(branch, Style::default().fg(app.theme.branch)),
-  ]));
-  lines.push(Line::from(vec![
-    Span::raw("  Dir    : "),
-    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
-  ]));
+  if from_issue {
+    lines.push(Line::from(vec![
+      Span::raw("  "),
+      Span::styled(
+        "the type and the slug are read off the issue",
+        Style::default().fg(muted),
+      ),
+    ]));
+  } else {
+    lines.push(Line::from(vec![
+      Span::raw("  Branch : "),
+      Span::styled(branch, Style::default().fg(app.theme.branch)),
+    ]));
+    lines.push(Line::from(vec![
+      Span::raw("  Dir    : "),
+      Span::styled(dirname, Style::default().fg(app.theme.dirty)),
+    ]));
+  }
   lines.push(Line::from(String::new()));
   // Which row carries the focused input, so a form taller than the terminal
   // can scroll it into view rather than lose it off the bottom (issue #553).
   let focused_row;
-  if freeform {
+  if from_issue {
+    // One input, whatever the patterns carry: the number is fetched, not
+    // written, so a `{type}/{desc}` repo still has an issue to read.
+    focused_row = Some(lines.len());
+    lines.push(field_input_line(
+      &label("Issue"),
+      &app.create_form.issue,
+      app.create_form.field == Field::Issue,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  } else if freeform {
     focused_row = Some(lines.len());
     lines.push(field_input_line(
       &label("Name"),
