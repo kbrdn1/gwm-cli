@@ -241,20 +241,29 @@ fn the_published_crate_excludes_the_docs_tree() {
     .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
     .unwrap_or_default();
   assert!(
-    excluded.iter().any(|pattern| pattern == "docs/" || pattern == "/docs/" || pattern == "docs"),
+    excluded
+      .iter()
+      .any(|pattern| pattern == "docs/" || pattern == "/docs/" || pattern == "docs"),
     "[package] exclude must drop `docs/` from the published crate, or the 2x captures take the \
      tarball over the crates.io size limit; found {excluded:?}"
   );
 }
 
-/// The narrowest terminal any tape photographs is 800 logical px
-/// (`narrow.tape`), so at 2x no capture may ship narrower than this.
+/// The narrowest terminal any tape photographs is `narrow.tape`, and it ships
+/// at 1580 px rather than the 1600 a straight doubling would suggest.
 ///
-/// A floor rather than an exact width: widths are per-tape (800 to 1400
-/// logical) and `promo.png` is not a vhs capture at all. What keeps a *new*
-/// tape honest is [`every_tape_renders_at_retina_density`]; this one catches
-/// an asset that was regenerated from somewhere other than its tape.
-const MIN_CAPTURE_WIDTH: u32 = 1600;
+/// The 20 px are the point. Doubling `Set Width` exactly moves the terminal
+/// grid: measured with a `tput cols` tape, 800 px at `FontSize 15` gives
+/// 81x31 and 1600 px at `FontSize 30` gives one column more, which reframes
+/// the capture instead of merely sharpening it. 1580 px lands back on 81x31.
+/// The same trim applies to every tape (`hero` is 1980, not 2000, and holds
+/// its 103x31).
+///
+/// A floor rather than an exact width: widths are per-tape (1580 to 2760) and
+/// `promo.png` is not a vhs capture at all. What keeps a *new* tape honest is
+/// [`every_tape_renders_at_retina_density`]; this one catches an asset that
+/// was regenerated from somewhere other than its tape.
+const MIN_CAPTURE_WIDTH: u32 = 1580;
 
 /// The `Set FontSize` every tape must declare: 15 was the 1x size, so 2x is
 /// 30. vhs 0.11 has no `Set Scale` (`Unknown setting: Scale`), and font size

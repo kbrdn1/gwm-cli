@@ -52,14 +52,26 @@ Sleep 2200ms
 Escape
 Sleep 1000ms
 
-# The note: `N` opens it in a modal, `Esc` saves and closes (#515).
+# The note: `N` opens it in a modal (#515), and since #557 that modal opens in
+# vim NORMAL mode, because `[tui] note_vim` defaults to true. Two consequences
+# the tape has to spell out, both learned by watching this recording break:
+#
+#   - typing prose straight away feeds it to the normal-mode verbs (`R` opened
+#     replace and ate the first characters), so `i` comes first.
+#   - closing takes TWO `Esc`: the first leaves insert, the second saves and
+#     closes. With one, the modal stayed up and every later keystroke of this
+#     tape landed in the note instead of the list.
 Type "N"
 Sleep 900ms
+Type "i"
+Sleep 300ms
 Type@55ms "Rate limiter drops the burst allowance under load."
 Sleep 400ms
 Enter
 Type@55ms "Check the 429 headers before opening the PR."
 Sleep 1500ms
+Escape
+Sleep 400ms
 Escape
 Sleep 1200ms
 

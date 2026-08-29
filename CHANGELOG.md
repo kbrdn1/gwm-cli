@@ -411,6 +411,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`demo.gif` records the demo again, and shows the note marker**
+  ([#601](https://github.com/kbrdn1/gwm-cli/issues/601)). The recording was
+  meant to be reshot for one reason, the note column's marker moving to the
+  `nf-oct-markdown` glyph in
+  [#595](https://github.com/kbrdn1/gwm-cli/issues/595). Watching the reshoot
+  frame by frame turned up a bigger one: the tape had been broken since
+  [#557](https://github.com/kbrdn1/gwm-cli/issues/557) shipped vim normal mode
+  on by default. `N` opens the note in NORMAL, so the prose the tape types was
+  read as normal-mode verbs (`R` opened replace and ate the first characters),
+  and closing takes **two** `Esc` where the tape had one. The modal therefore
+  never closed, and every later keystroke, the worktree it creates, the filter,
+  the delete, landed in the note instead of the list: roughly the last two
+  thirds of the recording showed something other than what it claims. The tape
+  now enters insert first and closes with both presses, with the reason written
+  above the sequence so the next reader does not rediscover it.
+
 - **The doc captures are rendered at 2x and stop blurring on the site**
   ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)). Every capture was
   generated at terminal scale, so the PNG that shipped was exactly as wide as
