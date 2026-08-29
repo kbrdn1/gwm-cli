@@ -1381,6 +1381,15 @@ impl App {
     // (the bulk prefetch is a no-op in workspace mode).
     self.sync_active_repo();
     self.refresh_link();
+    // The shared tail above expired every fetched status, and workspace mode
+    // has no bulk refill behind it: a fetch in flight when the auto-refresh
+    // timer fires would lose its generation and have its result dropped, with
+    // nothing to replace it — and with an `auto_refresh_secs` shorter than the
+    // forge's latency, every fetch a context verb starts could be cancelled
+    // that way (Codex review on #618). Refilled here rather than in that tail
+    // because only now has the repo swap resolved the link and the slug
+    // against the row actually selected.
+    self.spawn_selected_github();
   }
 
   /// Builder-style setter for `trust_mode`. The TUI entrypoint
@@ -3796,6 +3805,74 @@ impl App {
     self.view = View::DetailOverlay;
   }
 
+  /// Why a verb that needs the selected row's forge context cannot run
+  /// yet, and — when the answer is "nobody asked" — the fetch that fixes
+  /// it (issue #597).
+  ///
+  /// `Idle` on a LINKED side is not "nothing to show", it is "never
+  /// fetched". The bulk prefetch runs at startup and on every relist but
+  /// is skipped entirely in workspace mode, so a row can reach a verb with
+  /// a perfectly good link and a cold cache; reporting that as a missing
+  /// link sent the reader off to fix the one thing that was fine. An
+  /// `Error` is terminal in the cache, so it deserves the same distinction
+  /// for the opposite reason: the fetch the hint asked for has already run.
+  ///
+  /// Returns `None` when the side is `Loaded` (the caller renders it) or
+  /// unlinked — only the caller knows how to word which side it needed —
+  /// and otherwise the status line to show.
+  fn forge_fetch_gap(&mut self, side: LinkTarget) -> Option<String> {
+    /// The cache states without their payloads: the two sides carry
+    /// different ones and this decision reads neither.
+    enum Phase {
+      Fetched,
+      InFlight,
+      Failed(String),
+      Unfetched,
+    }
+    fn phase_of<T>(state: &GitHubFetchState<T>) -> Phase {
+      match state {
+        GitHubFetchState::Loaded(_) => Phase::Fetched,
+        GitHubFetchState::Loading => Phase::InFlight,
+        GitHubFetchState::Error(e) => Phase::Failed(e.clone()),
+        GitHubFetchState::Idle => Phase::Unfetched,
+      }
+    }
+
+    let number = match side {
+      LinkTarget::Issue => self.github.link.issue?,
+      LinkTarget::Pr => self.github.link.pr?,
+    };
+    let noun = match side {
+      LinkTarget::Issue => "Issue".to_string(),
+      LinkTarget::Pr => self.pr_noun_titlecase(),
+    };
+    let phase = match side {
+      LinkTarget::Issue => phase_of(self.github.issue_fetch_state(number)),
+      LinkTarget::Pr => phase_of(self.github.pr_fetch_state(number)),
+    };
+    match phase {
+      Phase::Fetched => None,
+      Phase::InFlight => Some(format!("fetching {noun} #{number}…")),
+      Phase::Failed(e) => Some(format!("{noun} #{number} could not be fetched: {e}")),
+      Phase::Unfetched => {
+        // Ask now, through the same spawn helpers and behind the same slug
+        // guard the bulk prefetch uses: without a resolved forge the spawn
+        // marks the cache `Loading` for a request that is never made, and
+        // the section would spin for good.
+        let slug = self.github.link_slug.clone()?;
+        let started = match side {
+          LinkTarget::Issue => self.spawn_github_issue(number, &slug),
+          LinkTarget::Pr => self.spawn_github_pr(number, &slug),
+        };
+        if !started {
+          return None;
+        }
+        self.spinner.reset();
+        Some(format!("fetching {noun} #{number}…"))
+      }
+    }
+  }
+
   /// Open the CI checks overlay (issue #436): one row per classified
   /// `statusCheckRollup` entry of the linked PR, in rollup order. With no
   /// linked PR or an empty rollup the overlay would be a bordered void —
@@ -3812,13 +3889,28 @@ impl App {
     }
     let checks = match self.pr_fetch_state() {
       GitHubFetchState::Loaded(pr) if !pr.checks.is_empty() => pr.checks.clone(),
+      // Fetched, and the rollup really is empty: a commit was just pushed
+      // and the workflows have not started. Naming the link and the fetch
+      // here named the two things that were already done (issue #597).
+      GitHubFetchState::Loaded(pr) => {
+        let number = pr.number;
+        self.status = format!("no CI checks reported by {} #{number}", self.pr_noun_titlecase());
+        return;
+      }
       _ => {
-        // Resolve the active fetch binding instead of hard-coding `F`
+        // A linked-but-unfetched PR is asked for rather than refused, and
+        // an in-flight or failed one is reported as what it is (#597).
+        // Only a row with no PR at all gets the link hint, and that hint
+        // resolves the active fetch binding instead of hard-coding `F`
         // (Codex review #455); an unbound action drops the parenthetical.
-        self.status = match self.keymap.primary_chord(Action::FetchGithub) {
-          Some(key) => format!("no CI checks to show: link a PR and fetch ({key}) first"),
-          None => "no CI checks to show: link a PR and fetch first".into(),
+        let msg = match self.forge_fetch_gap(LinkTarget::Pr) {
+          Some(msg) => msg,
+          None => match self.keymap.primary_chord(Action::FetchGithub) {
+            Some(key) => format!("no CI checks to show: link a PR and fetch ({key}) first"),
+            None => "no CI checks to show: link a PR and fetch first".into(),
+          },
         };
+        self.status = msg;
         return;
       }
     };
@@ -3896,12 +3988,22 @@ impl App {
       self.open_rich_overlay(source, title, width);
       return;
     }
+    // Neither side can be shown yet. A linked side that nobody has asked
+    // for is asked for here rather than reported as absent (issue #597) —
+    // the PR first, the side this view prefers. Both are probed, since
+    // either one landing is enough to fill the view.
+    let pr_gap = self.forge_fetch_gap(LinkTarget::Pr);
+    let issue_gap = self.forge_fetch_gap(LinkTarget::Issue);
     // Resolve the active binding rather than hard-coding `F`, the same way
     // `enter_ci_checks` does.
-    self.status = match self.keymap.primary_chord(Action::FetchGithub) {
-      Some(key) => format!("nothing to show: link an issue or PR and fetch ({key}) first"),
-      None => "nothing to show: link an issue or PR and fetch first".into(),
+    let msg = match pr_gap.or(issue_gap) {
+      Some(msg) => msg,
+      None => match self.keymap.primary_chord(Action::FetchGithub) {
+        Some(key) => format!("nothing to show: link an issue or PR and fetch ({key}) first"),
+        None => "nothing to show: link an issue or PR and fetch first".into(),
+      },
     };
+    self.status = msg;
   }
 
   /// Common tail of [`Self::enter_rich_view`]: build the rows, pin the
@@ -7181,22 +7283,31 @@ impl App {
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
 
-  /// Re-read the link for the currently selected worktree's branch. Also
-  /// re-resolves the repo slug from the origin remote, and resets any
-  /// previously cached GitHub fetch state since it would refer to a
-  /// different (issue, pr) tuple now. Delegates to
-  /// [`GitHubFetch::refresh_link`] for the pure state mutation; the
-  /// branch resolution still lives here because it depends on
-  /// `App`'s `selected()` + `repo.head()` fallback.
+  /// Re-read the link for the currently selected worktree's branch, and
+  /// re-resolve the repo slug from the origin remote. Delegates to
+  /// [`GitHubFetch::reread_link`] for the pure state mutation; the branch
+  /// resolution still lives here because it depends on `App`'s
+  /// `selected()` + `repo.head()` fallback.
+  ///
+  /// **The fetched statuses survive this** (issue #597). The result cache
+  /// has been keyed by `(side, number)` since #138, so it cannot serve one
+  /// row's status for another: a row reads its own number, and a number it
+  /// never fetched reads `Idle`. Flushing it on every link re-read was a
+  /// leftover of the pre-#138 single slot (PR #68), and since this runs on
+  /// every navigation it threw away the prefetch `App::new` and every
+  /// relist start — which is why standing on any row but the one the TUI
+  /// opened on left `C` / `I` with nothing to show.
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
-    self.github.refresh_link(&self.repo, branch.as_deref(), &self.config);
-    // Navigation invariant (issue #255): the cache clear above must be paired
-    // with a spine generation-bump so any in-flight `gh` worker for the
-    // previous worktree's link is dropped instead of stamping the now-active
-    // worktree's cache. `refresh_link` no longer holds the old issue/PR
-    // numbers, so invalidate by predicate.
-    self.tasks.invalidate_matching(TaskKind::is_github);
+    // Only a change of forge *instance* makes a cached number mean
+    // something else, and `reread_link` reports exactly that by dropping
+    // the caches and returning `true`. Navigation invariant (issue #255):
+    // that flush must be paired with a spine generation-bump, so any
+    // in-flight `gh` worker started against the previous instance is
+    // dropped instead of stamping the new one's cache.
+    if self.github.reread_link(&self.repo, branch.as_deref(), &self.config) {
+      self.tasks.invalidate_matching(TaskKind::is_github);
+    }
     // Every link mutation funnels through here or through the
     // `refresh_github_status` re-probe — both revalidate the CI overlay's
     // pinned identity (Codex review #455): an auto-refresh relist can move
@@ -7469,14 +7580,58 @@ impl App {
     }
   }
 
+  /// Request the SELECTED row's linked issue / PR, returning how many
+  /// workers actually started (issue #597, Codex review on #618).
+  ///
+  /// The narrow counterpart to
+  /// [`Self::refresh_linked_github_statuses_for_worktrees`]: the link and the
+  /// slug both belong to the active repo, so this is sound in workspace mode
+  /// where resolving *every* merged row against one slug is not (#303). Both
+  /// guards the bulk path uses still apply — no slug, no request; a terminal
+  /// cache hit or a coalesced spine slot does not spawn a second subprocess.
+  fn spawn_selected_github(&mut self) -> u32 {
+    let Some(slug) = self.github.link_slug.clone() else {
+      return 0;
+    };
+    let mut spawned = 0u32;
+    if let Some(n) = self.github.link.issue {
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if let Some(n) = self.github.link.pr {
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if spawned > 0 {
+      self.spinner.reset();
+    }
+    spawned
+  }
+
   fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    // A relist is the moment the fetched statuses stop being authoritative,
+    // and since #597 nothing else expires them: the link re-read on every
+    // navigation keeps them now. So the expiry runs FIRST, ahead of every
+    // early return below, and it is what bounds staleness to
+    // `tui.auto_refresh_secs`. Workspace mode needs it most, since it takes
+    // the early return and refills per-selection instead.
+    //
+    // Settled entries only, and no spine generation-bump: a fetch in flight
+    // has no stale answer behind it to expire, so cancelling it would throw
+    // away work and expire nothing (Codex review on #618). The respawns
+    // below coalesce onto it through `TaskRunner::request`.
+    self.github.invalidate_settled();
+
     // Workspace mode (#36): this bulk prefetch resolves every merged row's
     // issue/PR against a single repo's slug (`self.github.link_slug`), which
     // mis-attributes numbers across child repos with different remotes (Codex
     // review #303 P2). In workspace mode GitHub state is fetched per-selection
-    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, which
-    // re-resolves the slug from the selected row's own repo. So skip the bulk
-    // cross-repo prefetch here.
+    // instead — the relist refills the selected row through
+    // `spawn_selected_github`, and the context verbs ask for what they need
+    // through `forge_fetch_gap` (#597). So skip the bulk cross-repo prefetch
+    // here, having already expired what it would have replaced.
     if self.is_workspace() {
       return 0;
     }
@@ -7501,7 +7656,6 @@ impl App {
       return 0;
     }
 
-    self.invalidate_github();
     let mut spawned = 0u32;
     for n in issues {
       if self.spawn_github_issue(n, &slug) {

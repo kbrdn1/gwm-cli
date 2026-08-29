@@ -602,3 +602,133 @@ fn overlay_pin_markers_survive_an_active_repo_swap() {
       .collect::<Vec<_>>()
   );
 }
+
+// -- GitHub statuses stay bounded in workspace mode (issue #597) -----------
+
+fn sample_issue(n: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number: n,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+    detail: Default::default(),
+  }
+}
+
+#[test]
+fn a_workspace_relist_expires_the_fetched_github_statuses() {
+  // Issue #597 made the fetch cache survive a selection change, which leaves
+  // the relist as the only thing bounding how stale it can get (60 s by
+  // default, `tui.auto_refresh_secs`). Single-repo mode gets that from the
+  // bulk prefetch, which invalidates before re-spawning; workspace mode
+  // skips that prefetch by design (one slug cannot resolve every child
+  // repo's numbers, Codex review #303), so the expiry has to run before that
+  // early return. Without it a workspace row would keep showing a CI state
+  // that went red hours ago, and only `F` would ever correct it.
+  use gwm::tui::GitHubFetchState;
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  app.github.complete_issue(42, Ok(sample_issue(42)));
+  assert!(
+    matches!(app.github.issue_fetch_state(42), GitHubFetchState::Loaded(_)),
+    "precondition: the status must be cached, or the assertion below is vacuous"
+  );
+
+  app.refresh().unwrap();
+
+  assert!(
+    matches!(app.github.issue_fetch_state(42), GitHubFetchState::Idle),
+    "a relist must expire the statuses it can no longer vouch for"
+  );
+}
+
+fn sample_pr(n: u64) -> gwm::github::PrStatus {
+  gwm::github::PrStatus {
+    number: n,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: gwm::github::CiState::None,
+    checks: vec![],
+    detail: Default::default(),
+  }
+}
+
+/// A workspace whose anchor repo (alpha) has a GitHub origin and PR 61
+/// linked on `main`, with the anchor's own prefetch already landed: the
+/// spine slot is free and the cache holds a terminal result, which is the
+/// steady state a relist acts on.
+fn workspace_with_a_fetched_pr() -> (TempDir, App) {
+  use gwm::tui::TaskKind;
+  let root = workspace_root();
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  alpha.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&alpha, "main", 61).unwrap();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  // The anchor constructor's prefetch left a worker in flight; land it, so
+  // the state under test is "fetched", not "still fetching".
+  app.tasks.invalidate_matching(TaskKind::is_github);
+  app.github.complete_pr(61, Ok(sample_pr(61)));
+  (root, app)
+}
+
+#[test]
+fn a_workspace_relist_re_requests_the_selection_it_just_expired() {
+  // Codex review on PR #618. The relist expires every fetched status, and
+  // workspace mode has no bulk refill behind it (one slug cannot resolve
+  // every child repo's numbers, #303), so the selected row would drop to
+  // `Idle` on every auto-refresh tick and only fill back in if the user
+  // happened to press a context verb. Its link resolves against the ACTIVE
+  // repo, so re-requesting that one row is sound where the bulk pass is not.
+  use gwm::tui::GitHubFetchState;
+  let (_root, mut app) = workspace_with_a_fetched_pr();
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loaded(_)),
+    "precondition: the status must be fetched, or the assertion below is vacuous"
+  );
+
+  app.refresh().unwrap();
+
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "the relist expired the selection and put nothing back"
+  );
+}
+
+#[test]
+fn a_relist_does_not_cancel_the_fetch_it_is_waiting_on() {
+  // Codex review on PR #618, round 2. Expiring a `Loading` entry throws away
+  // work in progress without expiring anything: there is no stale result
+  // behind it to be wrong. With `tui.auto_refresh_secs` shorter than the
+  // forge's latency the relist did that on every tick, so the worker was
+  // always superseded before it could land, the row sat unfilled for good,
+  // and the cancelled subprocesses kept running behind it.
+  use gwm::tui::{FetchKey, GitHubFetchState, TaskKind, TaskMsg};
+  let (_root, mut app) = workspace_with_a_fetched_pr();
+  let generation = app
+    .tasks
+    .request(TaskKind::GithubPr(61))
+    .expect("the landed prefetch freed the slot");
+  app.github.mark_loading(FetchKey::Pr(61));
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loading),
+    "precondition: the fetch must be in flight, or the assertion below is vacuous"
+  );
+
+  app.refresh().unwrap();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(generation, 61, Ok(sample_pr(61))))
+    .unwrap();
+  app.drain_task_results();
+  assert!(
+    matches!(app.pr_fetch_state(), GitHubFetchState::Loaded(_)),
+    "the relist cancelled the worker it was waiting on"
+  );
+}

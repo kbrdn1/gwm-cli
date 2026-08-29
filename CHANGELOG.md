@@ -346,6 +346,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The selected worktree keeps the GitHub context that was fetched for it**
+  ([#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Standing on any row
+  but the one the TUI opened on, `C` / `c` said "no CI checks to show: link a
+  PR and fetch (F) first" for a worktree whose PR was linked and whose checks
+  had already been fetched, and the rich Issue/PR view (`I`) refused for the
+  same reason. `f` did not help: it refreshes the worktree list, not the
+  GitHub layer, so only an `F` on that exact row filled the state back in.
+
+  gwm was throwing away its own prefetch. It fetches every linked issue and
+  PR at startup and on every relist, but the link re-read that runs on each
+  selection change flushed the whole result cache and dropped any in-flight
+  `gh` worker with it, so the prefetch died on the first `j`. That flush was
+  a leftover: the cache has been keyed by number since #138, so it cannot
+  serve one row's status for another, and a row that never fetched still
+  reads as unfetched. It is now dropped only when the origin actually moves
+  between two forge instances, which is the one case where a cached number
+  means something else.
+
+  The two verbs also stopped reading "nobody asked yet" as "nothing to show".
+  A linked PR that has never been fetched is now fetched on the spot, on the
+  same task spine, and reported as `fetching Pull request #61...`; one
+  already in flight says the same without starting a second call; one whose
+  probe failed shows what `gh` said instead of pointing at a fetch that had
+  already run; and a PR that is fetched with an empty rollup says its checks
+  have not been reported rather than naming a link and a fetch that are both
+  already done. Only a row with nothing linked still gets the link hint.
+  Workspace mode gains the most: it skips the bulk prefetch by design, so
+  before this the verbs there were fed by nothing at all.
+
+  Freshness is unchanged: a relist still expires every fetched status, so
+  `tui.auto_refresh_secs` (60 by default) still bounds how stale one can be.
+  That expiry moved ahead of the bulk prefetch's early returns, which is what
+  gives workspace mode the same bound rather than none.
 - **An overlay's toggle key closes it whatever it is bound to**
   ([#613](https://github.com/kbrdn1/gwm-cli/issues/613)). `3`, `4` and `W`
   each close the overlay they open, but the guard doing it asked
