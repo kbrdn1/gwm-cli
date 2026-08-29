@@ -248,6 +248,34 @@ impl GitHubFetch {
     self.pr_threads_cache.clear();
   }
 
+  /// Flush the cached *outcomes* and leave the fetches still in flight
+  /// alone (issue #597, Codex review on #618).
+  ///
+  /// What a relist expires is a result that has stopped being
+  /// authoritative. A `Loading` entry is not one: nothing has been read
+  /// yet, so there is no stale answer behind it, and dropping it only
+  /// throws away work in progress. Worse, the caller pairs a full
+  /// [`Self::invalidate`] with a spine generation-bump, so the worker's
+  /// result is discarded when it lands — and with a
+  /// `tui.auto_refresh_secs` shorter than the forge's latency, every tick
+  /// superseded the fetch before it could arrive, leaving the row unfilled
+  /// for good while the cancelled subprocesses kept running.
+  ///
+  /// Keeping an in-flight fetch is sound here because a relist does not
+  /// change what a number means: only a move between forge instances does,
+  /// and `App::refresh_link` still answers that with the full flush and the
+  /// generation-bump that must move with it.
+  pub fn invalidate_settled(&mut self) {
+    // A fn, not a closure: the three caches hold three different payload
+    // types and a closure cannot be generic over them.
+    fn in_flight<T>(state: &GitHubFetchState<T>) -> bool {
+      matches!(state, GitHubFetchState::Loading)
+    }
+    self.issue_cache.retain(|_, s| in_flight(s));
+    self.pr_cache.retain(|_, s| in_flight(s));
+    self.pr_threads_cache.retain(|_, s| in_flight(s));
+  }
+
   /// Stamp an auto-detected PR onto the resolved `link` when none is
   /// already linked (issue #181). Pure: the `App` orchestrator owns the
   /// `gh pr list --head <branch>` shell-out and feeds the detected number

@@ -7617,7 +7617,12 @@ impl App {
     // early return below, and it is what bounds staleness to
     // `tui.auto_refresh_secs`. Workspace mode needs it most, since it takes
     // the early return and refills per-selection instead.
-    self.invalidate_github();
+    //
+    // Settled entries only, and no spine generation-bump: a fetch in flight
+    // has no stale answer behind it to expire, so cancelling it would throw
+    // away work and expire nothing (Codex review on #618). The respawns
+    // below coalesce onto it through `TaskRunner::request`.
+    self.github.invalidate_settled();
 
     // Workspace mode (#36): this bulk prefetch resolves every merged row's
     // issue/PR against a single repo's slug (`self.github.link_slug`), which
