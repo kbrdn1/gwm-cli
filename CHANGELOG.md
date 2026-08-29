@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The published crate no longer carries the doc tree**
+  ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)). `cargo package` on
+  1.8.0 measured 9.8 MiB compressed against the 10 MiB crates.io limit, and
+  `docs/` was 9.2 MiB of the 14.7 MiB it packaged, nearly all of it captures
+  that build nothing. `exclude = ["docs/"]` brings the same manifest to 5.7 MiB
+  and 1.6 MiB compressed, which is what leaves room for rendering those
+  captures at 2x. crates.io rewrites relative image links in a README against
+  `repository`, so the crate page still shows `demo.gif`.
+
 - **The doc captures show what the binary actually prints**
   ([#575](https://github.com/kbrdn1/gwm-cli/issues/575)). #567 rewrote 165
   strings gwm prints and the captures predate it, so several showed text the
@@ -225,6 +234,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on it.
 
 ### Fixed
+
+- **The doc captures are rendered at 2x and stop blurring on the site**
+  ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)). Every capture was
+  generated at terminal scale, so the PNG that shipped was exactly as wide as
+  the terminal it photographed. The docs site paints a capture wider than that
+  (`hero.png` is 1000px and measured 1230 CSS px in a 2560px viewport) and a
+  HiDPI display doubles the demand again, so the browser was upscaling text
+  before anyone read it. Nothing could catch it: the reference resolved, the
+  build was green, the text was simply soft.
+
+  vhs 0.11 has no `Set Scale`, so density comes from doubling `Set FontSize`
+  with the geometry: 30 instead of 15, and twice every `Set Width`,
+  `Set Height` and `Set Padding`. The framing is unchanged because the grid is,
+  give or take the residue of a division: `hero` was 103 columns and is 104,
+  `narrow` 81 and now 82, which keeps it under the 120 that would flip it to
+  the side-by-side layout it exists to contrast.
+
+  All 29 captures were regenerated, the two that `generate.sh` skips
+  (`demo.tape`, `github-linking.tape`) by hand. Two guards in
+  `tests/docs_assets_tests.rs` hold the line: a 1600px floor on every shipped
+  `.png` / `.gif`, and `Set FontSize 30` on every tape, since a new tape copied
+  from an old one is how 1x comes back.
+
+  Half of the symptom is not fixable here. The site sets `width: 100%` on
+  content images, which stretches a capture past its own pixels whatever its
+  density; that is tracked as
+  [kbrdn-docs#76](https://github.com/kbrdn1/kbrdn-docs/issues/76).
 
 - **Tilde compression fires on Windows, and with a trailing separator on
   `$HOME`** ([#568](https://github.com/kbrdn1/gwm-cli/issues/568)). The home
