@@ -436,6 +436,21 @@ fn extract_binary(run: &str) -> Option<String> {
 /// on the spot (Codex review on PR #615). The `env -u NAME` operand rule this
 /// walks was itself a fix (`env -u NODE_OPTIONS npm ci` resolved to
 /// `NODE_OPTIONS`), which is exactly why there should be one copy of it.
+/// Is `token` one of [`COMMAND_WRAPPERS`], however it was spelled?
+///
+/// Compared by basename because writing the wrapper by its path is ordinary
+/// (a pinned coreutils, a nix store path, plain habit), and matching the exact
+/// token missed every one of them (Codex review on PR #615). `/usr/bin/env -u
+/// NO_COLOR w3m` then resolved to `/usr/bin/env`, hiding the binary the walk
+/// exists to find.
+fn is_command_wrapper(token: &str) -> bool {
+  let base = std::path::Path::new(token)
+    .file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or(token);
+  COMMAND_WRAPPERS.contains(&base)
+}
+
 pub(crate) fn executable_in(tokens: &[String]) -> Option<String> {
   let mut iter = tokens.iter().cloned().peekable();
 
@@ -447,7 +462,7 @@ pub(crate) fn executable_in(tokens: &[String]) -> Option<String> {
   // Recognise a wrapper (`env`, `command`) and skip its own `-flag` /
   // `KEY=VAL` arguments before reaching the real binary. Stops on the
   // first positional non-flag, non-assignment token.
-  if iter.peek().is_some_and(|t| COMMAND_WRAPPERS.contains(&t.as_str())) {
+  if iter.peek().is_some_and(|t| is_command_wrapper(t)) {
     iter.next(); // consume the wrapper itself
     while let Some(t) = iter.peek() {
       if t.starts_with('-') {

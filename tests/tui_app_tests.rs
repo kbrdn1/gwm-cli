@@ -17163,3 +17163,52 @@ fn a_wrapper_that_is_itself_missing_is_caught_like_the_browser_behind_it() {
     "a wrapper and a browser both on PATH must still open a pane"
   );
 }
+
+#[test]
+fn a_wrapper_named_by_its_full_path_still_reveals_the_browser_behind_it() {
+  // Codex review on PR #615. `COMMAND_WRAPPERS` matched the exact token, so
+  // `/usr/bin/env -u NO_COLOR w3m {url}` was not recognised as a wrapper at
+  // all: `executable_in` returned `/usr/bin/env`, and the pair of probes then
+  // checked the wrapper twice while never looking for `w3m`. A machine
+  // without the browser was waved through, and under tmux or zellij the pane
+  // opens, reports success, and dies with the process inside it.
+  //
+  // Writing the wrapper by its path is ordinary (a shebang-ish habit, a
+  // pinned coreutils, a nix store path), so the walk compares basenames.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("/usr/bin/env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The wrapper is there, the browser is not: the exact shape the probe
+    // exists to catch.
+    &|bin| bin == "/usr/bin/env",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser behind a qualified wrapper must still fall back");
+  };
+  assert!(
+    why.contains("w3m"),
+    "the refusal must name the browser, not the wrapper it hid behind: {why}"
+  );
+
+  // And it still opens when the browser is there too, so recognising the
+  // wrapper did not turn into refusing it.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("/usr/bin/env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "/usr/bin/env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "a qualified wrapper with its browser present must open a pane"
+  );
+}

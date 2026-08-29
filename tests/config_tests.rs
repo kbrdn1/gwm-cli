@@ -3416,3 +3416,40 @@ fn tui_terminal_browser_open_in_round_trips_every_variant_and_rejects_the_rest()
     "the error must name the key, got: {err}"
   );
 }
+
+#[test]
+fn terminal_browser_keeps_a_windows_path_that_shell_splitting_would_eat() {
+  // Codex review on PR #615. `shell_words::split` is POSIX: an unescaped
+  // backslash is an escape character, so `C:\Tools\w3m.exe` comes out as
+  // `C:Toolsw3m.exe`, the PATH probe misses, and every link on that machine
+  // silently falls back to the system browser.
+  //
+  // `tui::launch_argv` already answers this with a `Path::is_file` fast path
+  // ahead of the split, and this is the same question asked by a second
+  // surface, so it gets the same answer rather than a second convention.
+  // A space rather than a backslash, so the test exercises the same split on
+  // every runner: macOS has no `C:\\` to build and would pass vacuously,
+  // since a POSIX temp path survives `shell_words::split` untouched.
+  let dir = TempDir::new().unwrap();
+  let exe = dir.path().join("terminal browser.exe");
+  std::fs::write(&exe, b"").unwrap();
+  let literal = exe.to_string_lossy().to_string();
+  assert!(
+    literal.contains(' '),
+    "precondition: the fixture path must be one the split would tear apart"
+  );
+
+  let argv = gwm::config::expand_terminal_browser(&literal, "https://e.co/x").expect("a real file is a command");
+  assert_eq!(
+    argv[0], literal,
+    "a path that exists on disk must survive verbatim, got {:?}",
+    argv[0]
+  );
+  assert_eq!(argv.last().unwrap(), "https://e.co/x", "the URL is still appended");
+
+  // The fast path is `is_file`, not "contains a backslash": a template that
+  // is not a file on this machine keeps going through the split, which is
+  // what makes `w3m {url}` work at all.
+  let argv = gwm::config::expand_terminal_browser("w3m {url}", "https://e.co/x").unwrap();
+  assert_eq!(argv, vec!["w3m".to_string(), "https://e.co/x".to_string()]);
+}

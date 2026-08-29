@@ -1618,6 +1618,19 @@ pub fn expand_terminal_browser(template: &str, url: &str) -> Option<Vec<String>>
   if !is_browsable_url(url) {
     return None;
   }
+  // A template that names an existing file is that file, whole (Codex review
+  // on PR #615). `shell_words::split` is POSIX, so it reads a backslash as an
+  // escape and turns `C:\Tools\w3m.exe` into `C:Toolsw3m.exe`; the probe then
+  // misses and every link on that machine falls back to the system browser
+  // without a word about why. A space does the same thing anywhere.
+  //
+  // The same fast path [`crate::tui::launch_argv`] already runs ahead of its
+  // own split, and deliberately the same: one question asked by two surfaces
+  // deserves one answer, not a second convention. `is_file` rather than
+  // "looks like a path", so `w3m {url}` keeps going through the split.
+  if std::path::Path::new(template).is_file() {
+    return Some(vec![template.to_string(), url.to_string()]);
+  }
   let tokens = shell_words::split(template).ok()?;
   if tokens.is_empty() {
     return None;
