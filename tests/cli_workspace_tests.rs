@@ -139,6 +139,110 @@ fn create_in_workspace_targets_the_named_repo() {
   );
 }
 
+/// Fake `gh` answering `gh issue view <n> …` with one canned issue, written
+/// to a file the script cats back so an arbitrary title survives `cmd.exe`.
+/// Mirrors the helper in `cli_binary.rs`; duplicated rather than shared
+/// because `tests/common` is compiled into every integration target and this
+/// one is only needed by two of them.
+fn write_issue_gh(root: &Path, issue_json: &str) -> std::path::PathBuf {
+  let payload = root.join("issue.json");
+  fs::write(&payload, issue_json).unwrap();
+  #[cfg(unix)]
+  {
+    let script = root.join("gh");
+    fs::write(
+      &script,
+      format!(
+        "#!/bin/sh\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n  cat \"{}\"\nfi\n",
+        payload.display()
+      ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+  }
+  #[cfg(windows)]
+  {
+    let script = root.join("gh.cmd");
+    fs::write(
+      &script,
+      format!(
+        "@echo off\r\nif \"%~1\"==\"issue\" if \"%~2\"==\"view\" type \"{}\"\r\n",
+        payload.display()
+      ),
+    )
+    .unwrap();
+    script
+  }
+}
+
+fn prepend_path(dir: &Path) -> String {
+  let old = std::env::var_os("PATH").unwrap_or_default();
+  let mut paths = vec![dir.to_path_buf()];
+  paths.extend(std::env::split_paths(&old));
+  std::env::join_paths(paths).unwrap().to_string_lossy().into_owned()
+}
+
+#[test]
+fn create_from_issue_in_workspace_targets_the_named_repo() {
+  // `--issue <N>` (issue #617) reads the existing-worktree link and resolves
+  // the forge from the repo `cmd_create` discovered, so both have to be the
+  // child `--repo` named rather than whatever the current directory is. The
+  // origin lives on alpha alone: if the derivation looked anywhere else it
+  // would have no slug to query.
+  let root = workspace_root();
+  let base = TempDir::new().unwrap();
+  let alpha_root = root.path().join("alpha");
+  write_min_config(&alpha_root, base.path());
+  fs::write(
+    alpha_root.join(".gwm.toml"),
+    format!(
+      "{}\n[issue_template.by_type]\nfeat = {{ title_prefix = \"[Feature]: \", labels = [\"feature\"] }}\n",
+      fs::read_to_string(alpha_root.join(".gwm.toml")).unwrap()
+    ),
+  )
+  .unwrap();
+  Repository::open(&alpha_root)
+    .unwrap()
+    .remote("origin", "https://github.com/kbrdn1/gwm-cli.git")
+    .unwrap();
+
+  let fake_bin = TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    r#"{"number":594,"title":"[Feature]: modal layout","state":"OPEN","url":"https://github.com/kbrdn1/gwm-cli/issues/594","labels":[{"name":"feature"}],"updatedAt":"2026-08-29T00:00:00Z"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .arg("--workspace")
+    .arg(root.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594", "--repo", "alpha", "--no-bootstrap"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#594-modal-layout"));
+
+  let alpha = Repository::open(&alpha_root).unwrap();
+  assert!(
+    alpha
+      .find_branch("feat/#594-modal-layout", git2::BranchType::Local)
+      .is_ok(),
+    "the derived branch must land in the alpha repo"
+  );
+  let beta = Repository::open(root.path().join("beta")).unwrap();
+  assert!(
+    beta
+      .find_branch("feat/#594-modal-layout", git2::BranchType::Local)
+      .is_err(),
+    "the derived branch must NOT leak into the beta repo"
+  );
+}
+
 #[test]
 fn create_in_workspace_with_unknown_repo_lists_available() {
   let root = workspace_root();

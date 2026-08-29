@@ -12,6 +12,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gwm create --issue <N>` opens a worktree for an issue that already
+  exists** ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)). `gwm new`
+  covered the issue that does not exist yet: it renders the issue from
+  `[issue_template.by_type.<type>]`, creates it, and opens its worktree.
+  Nothing covered the other half, the issue a teammate, a bot, or you last
+  week already filed, where the way through was to open the issue in a
+  browser, read its title, decide which branch type its labels implied, and
+  type a kebab-case slug that restated the title. Three of those four steps
+  were transcription, and the transcription drifted.
+
+  `--issue <N>` fetches the issue and derives the triple. `<desc>` comes from
+  the title with the type's `title_prefix` taken back off, normalised through
+  the same kebab-case path a hand-typed `<desc>` goes through and truncated
+  on a word boundary rather than mid-word. The prefix is resolved through the
+  same combinator `gwm new` uses when it writes the title, falling back to
+  the issue form's own `title:`, so the two halves of the flow produce the
+  same slug for the same title. `<type>` comes from the labels:
+  `[issue_template.by_type.*].labels` is the type-to-labels map `gwm new`
+  writes with, read backwards. A type declaring no labels is never a
+  candidate, since an empty list says nothing about which issues belong to
+  it.
+
+  Nothing is guessed. Labels matching no type, labels matching two, and a
+  repo that never configured the map are three distinct refusals, each
+  naming what it saw and pointing at `--type <TYPE>`. A closed issue is
+  refused too, because a worktree for one is usually a wrong number, and
+  `--force` proceeds. A worktree that already carries the number is printed
+  and the command exits 0, so the command is safe to re-run; that check runs
+  before the closed-issue refusal, since an issue closes while its worktree
+  is still alive. It reads the same link `gwm list` shows, so a worktree
+  attached by hand with `gwm link --issue` counts too.
+
+  `--issue` is exclusive with the positional triple and with `--name`, the
+  way `--name` already is: the mode is chosen explicitly, never inferred from
+  how many arguments were supplied. Everything after the derivation is the
+  existing `gwm create` path unchanged, `#{issue}` in `branch_pattern`
+  included. An issue title is arbitrary text from the forge, so it reaches
+  the slug through the same normaliser as a hand-typed `<desc>` rather than
+  around it, and the echoed title, URL and labels are sanitised for the
+  terminal.
+
 - **`W` opens the Working Tree listing at full size**
   ([#592](https://github.com/kbrdn1/gwm-cli/issues/592)). The sidebar's
   Working Tree pane is one block among five in a column that is a fraction of
@@ -418,6 +459,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and worse: the section collapses to a loading line for the round trip,
   once per refresh interval, taking the reader's place in the comments with
   it. Refreshing the view with `f` still asks for them again.
+
+- **`gwm create --issue` sanitises every value it echoes**
+  ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)). The branch type was
+  printed raw on the summary line, and it reaches that line from two untrusted
+  places: `--type` is argv, which clap hands through with its control bytes
+  intact, and a type derived from the issue's labels is a key of
+  `[issue_template.by_type]`, a string out of an unvetted repo's `.gwm.toml`.
+  The echo happens before `BranchSpec::new_with_types` gets to reject the
+  type, so validation was not the guard. All three values on those lines now
+  go through `sanitise_for_terminal` rather than the diagnostic variant, which
+  deliberately lets a newline through and would break a line these values are
+  spliced into.
+
+- **The CLI no longer runs on the 1 MiB stack Windows gives a process's main
+  thread** ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)).
+  `Cli::parse` alone was sitting at that ceiling in a debug build: clap's
+  derive expands one `Command` builder per subcommand and per argument into a
+  single frame, and every `///` in `cli.rs` is a `long_help` string inside it.
+  Adding three arguments to `gwm create` took the binary from "survives a
+  1024 KiB stack, dies at 512" to "dies at 1024, survives 2048", so every
+  `gwm.exe` invocation aborted with `STATUS_STACK_OVERFLOW` while macOS and
+  Linux, which give main 8 MiB, stayed green.
+
+  `main` now does nothing but spawn a worker with a 16 MiB stack and relay its
+  exit status. Trimming doc comments back under the ceiling would have bought
+  one release and handed the same failure to the next argument anyone adds;
+  choosing the stack takes the ceiling out of the picture, and costs address
+  space rather than memory, since a thread stack is reserved up front and
+  committed page by page as it is used. `tests/main_stack_tests.rs` probes
+  from a thread the size of the one Windows gives main, so the guard cannot
+  pass vacuously on a Unix runner.
 
 - **The selected worktree keeps the GitHub context that was fetched for it**
   ([#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Standing on any row
