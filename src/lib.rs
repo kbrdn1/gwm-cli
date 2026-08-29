@@ -35,9 +35,11 @@ pub mod gitlab;
 pub mod gitmoji;
 pub mod history;
 pub mod hooks;
-// `issue_templates` is reached only through `crate::issue_templates` from
-// `cli.rs`; no integration test imports it, so it need not be `pub` (#342).
-pub(crate) mod issue_templates;
+// Public since #617: `tests/issue_templates_tests.rs` reaches the pure
+// derivation `gwm create --issue` runs on (labels to branch type, title to
+// desc). Same seam caveat as every other module here (#342) — no SemVer
+// guarantee, the lib is `#![doc(hidden)]`.
+pub mod issue_templates;
 pub mod json_api;
 pub mod labels;
 pub mod launcher;
