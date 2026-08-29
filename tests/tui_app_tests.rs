@@ -17061,6 +17061,7 @@ fn a_leading_shell_assignment_is_refused_rather_than_half_honoured() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_modal_covered_by_the_browser_comes_back_holding_what_landed_meanwhile() {
   // Codex review on PR #615, and the other half of the restore #590 added.
   //
