@@ -346,6 +346,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The rich Issue/PR view keeps its inline comments through a relist**
+  ([#619](https://github.com/kbrdn1/gwm-cli/issues/619)). With the rich PR
+  view open on a PR whose review threads had landed, a worktree relist (the
+  periodic `tui.auto_refresh_secs` one, or an explicit `f`) emptied the
+  thread cache, and the next PR result to land rebuilt the open view against
+  an empty one. The inline comments disappeared from under the reader, and
+  only closing and reopening the view, or refreshing it with `f`, brought
+  them back.
+
+  The view survives that same expiry for the PR itself because it renders
+  its own snapshot of it; the threads were the one thing it read live from
+  the cache. A relist now keeps the threads of the PR it is showing, which
+  are as authoritative as the PR they hang from, and expires everyone
+  else's as before. Re-requesting them on each tick instead would be fresher
+  and worse: the section collapses to a loading line for the round trip,
+  once per refresh interval, taking the reader's place in the comments with
+  it. Refreshing the view with `f` still asks for them again.
+
 - **The selected worktree keeps the GitHub context that was fetched for it**
   ([#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Standing on any row
   but the one the TUI opened on, `C` / `c` said "no CI checks to show: link a

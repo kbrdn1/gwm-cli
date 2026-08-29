@@ -13997,6 +13997,62 @@ fn cached_threads_move_with_the_pr_they_hang_from() {
 }
 
 #[test]
+fn a_relist_keeps_the_threads_the_open_rich_view_is_showing() {
+  // Issue #619. The relist expires the fetched statuses, and the rich view
+  // survives that for the PR itself because it renders its OWN snapshot
+  // (`rich_overlay_source`) — but it reads the threads live from the cache.
+  // So the PR landing that follows rebuilt the open view against an `Idle`
+  // threads cache and the inline comments vanished from under the reader.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  assert!(
+    overlay_text(&app).contains("This drops the guard."),
+    "precondition: the comments must be on screen before the relist"
+  );
+
+  app.refresh().unwrap();
+  // The landing is what rebuilds the open view — asserting on the cache
+  // alone would never touch the path that blanks the section.
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+
+  assert!(
+    overlay_text(&app).contains("This drops the guard."),
+    "the relist blanked the inline comments of the view on screen:\n{}",
+    overlay_text(&app)
+  );
+}
+
+#[test]
+fn a_relist_still_expires_the_threads_of_a_pr_nobody_is_looking_at() {
+  // The keep is scoped to what is on screen, not a blanket exemption:
+  // #62's threads have no reader to disturb, so they expire with every
+  // other settled result and the next open re-requests them.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  app.apply_pr_threads_fetch_result(61, Ok(one_thread()));
+  app.apply_pr_threads_fetch_result(62, Ok(one_thread()));
+
+  app.refresh().unwrap();
+
+  assert!(
+    matches!(app.pr_threads_fetch_state(61), gwm::tui::GitHubFetchState::Loaded(_)),
+    "the open view's threads must survive"
+  );
+  assert!(
+    matches!(app.pr_threads_fetch_state(62), gwm::tui::GitHubFetchState::Idle),
+    "an unwatched PR's threads must still expire: {:?}",
+    app.pr_threads_fetch_state(62)
+  );
+}
+
+#[test]
 fn the_issue_view_never_grows_a_threads_section() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.apply_issue_fetch_result(Ok(rich_issue_fixture(42)));
