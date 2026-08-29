@@ -18,7 +18,7 @@ use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_command, detect_herdr, detect_tmux, detect_zellij, Multiplexer, SpawnMode, SplitDirection,
 };
-use crate::naming::{BranchSpec, WorktreeName};
+use crate::naming::{sanitise_diagnostic_for_terminal, BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
 use crate::removal;
@@ -184,14 +184,52 @@ pub enum Command {
   /// Create a new worktree (and matching branch).
   Create {
     /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
-    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    #[arg(required_unless_present_any = ["name", "from_issue"], conflicts_with = "name")]
     branch_type: Option<String>,
     /// Issue number (digits only).
-    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    #[arg(required_unless_present_any = ["name", "from_issue"], conflicts_with = "name")]
     issue: Option<String>,
     /// Short description (kebab-case, will be normalized).
-    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    #[arg(required_unless_present_any = ["name", "from_issue"], conflicts_with = "name")]
     desc: Option<String>,
+    /// Derive the triple from an issue that already exists on the forge
+    /// (issue #617), e.g. `gwm create --issue 594`.
+    ///
+    /// `<desc>` comes from the issue title with the type's `title_prefix`
+    /// taken back off, normalised through the same kebab-case path a
+    /// hand-typed `<desc>` goes through and truncated on a word boundary.
+    /// `<type>` comes from the issue's labels via
+    /// `[issue_template.by_type.*].labels`, the map `gwm new` writes with,
+    /// read backwards. Labels that match nothing, or that match two types,
+    /// are not guessed at: `--type` supplies the answer.
+    ///
+    /// Re-running is safe: a worktree that already carries the number is
+    /// printed and the command exits 0. A closed issue is refused unless
+    /// `--force` is passed.
+    ///
+    /// Exclusive with the positional triple and with `--name`: the mode is
+    /// chosen explicitly, never inferred from how many arguments were
+    /// supplied.
+    #[arg(long = "issue", value_name = "N", conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
+    from_issue: Option<u64>,
+    /// Branch type for `--issue <N>` when the issue's labels do not select
+    /// exactly one, or to override the one they do select.
+    ///
+    /// `conflicts_with_all` as well as `requires`: clap drops a `requires`
+    /// target from the required set when it conflicts with an argument that
+    /// *is* present, so `requires` alone lets `gwm create feat 1 x --type
+    /// fix` through as a silent no-op.
+    #[arg(long = "type", value_name = "TYPE", requires = "from_issue",
+          conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
+    type_override: Option<String>,
+    /// With `--issue <N>`, open a worktree for a closed issue instead of
+    /// refusing. A worktree for a closed issue is usually a wrong number,
+    /// so it takes saying so.
+    ///
+    /// Same double declaration as `--type`, for the same clap reason.
+    #[arg(long, requires = "from_issue",
+          conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
+    force: bool,
     /// Name the worktree freely instead of using the <TYPE> <ISSUE> <DESC>
     /// triple (issue #416), e.g. `gwm create --name spike-redis`. The name
     /// becomes the branch verbatim; `branch_pattern` / `path_pattern` do not
@@ -1106,6 +1144,9 @@ pub fn run(cli: Cli) -> Result<()> {
       branch_type,
       issue,
       desc,
+      from_issue,
+      type_override,
+      force,
       name,
       no_bootstrap,
       reuse_branch,
@@ -1117,10 +1158,15 @@ pub fn run(cli: Cli) -> Result<()> {
         None => None,
       };
       cmd_create(
-        branch_type,
-        issue,
-        desc,
-        name,
+        CreateArgs {
+          branch_type,
+          issue,
+          desc,
+          from_issue,
+          type_override,
+          force,
+          name,
+        },
         no_bootstrap,
         reuse_branch,
         skip_hooks,
@@ -2756,17 +2802,97 @@ fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<Pa
     .ok_or(GwmError::WorkspaceRepoNotFound { name, available })
 }
 
-// `cmd_create` mirrors the `Create` subcommand's independent CLI args 1:1
-// (three positionals + three flags + the resolved trust mode), and #36 adds
-// the workspace `start` path. Bundling them into a struct would only add an
-// indirection that obscures the direct subcommand → handler mapping the rest
-// of this dispatcher follows, so the arg count is deliberate here.
-#[allow(clippy::too_many_arguments)]
-fn cmd_create(
+/// The three ways `gwm create` can be told what to name the worktree: the
+/// positional triple, `--name`, or `--issue <N>` plus its two riders.
+///
+/// Grouped because they answer one question between them and clap already
+/// makes them mutually exclusive; the handler's remaining args (bootstrap,
+/// hooks, trust, workspace start) still map 1:1 onto the subcommand's, which
+/// is the property this dispatcher cares about.
+struct CreateArgs {
   branch_type: Option<String>,
   issue: Option<String>,
   desc: Option<String>,
+  from_issue: Option<u64>,
+  type_override: Option<String>,
+  force: bool,
   name: Option<String>,
+}
+
+/// The worktree already carrying `number`, if any (issue #617).
+///
+/// Reads the same link `gwm list` renders, so a worktree linked by hand with
+/// `gwm link --issue` counts as much as one whose branch name carries the
+/// number. Network-free: `worktree::list` resolves links from git config and
+/// the branch name, never from the forge.
+fn worktree_for_issue(repo: &Repository, number: u64) -> Result<Option<PathBuf>> {
+  Ok(
+    worktree::list(repo)?
+      .into_iter()
+      .find(|w| w.link.issue == Some(number))
+      .map(|w| w.path),
+  )
+}
+
+/// Resolve `--issue <N>` into the positional triple (issue #617).
+///
+/// `Ok(None)` means the worktree already exists and has been reported: the
+/// caller returns without touching disk. That check comes **first**, before
+/// the closed-issue refusal, because an issue closes while its worktree is
+/// still alive and re-running must not start failing on a worktree that is
+/// right there.
+fn triple_from_issue(
+  repo: &Repository,
+  config: &Config,
+  number: u64,
+  type_override: Option<String>,
+  force: bool,
+) -> Result<Option<(String, String, String)>> {
+  if let Some(existing) = worktree_for_issue(repo, number)? {
+    println!(
+      "worktree for issue #{} already exists at {}",
+      number,
+      existing.display()
+    );
+    return Ok(None);
+  }
+
+  let forge = forge::resolve(repo, config)?;
+  println!("resolving issue #{} on {} …", number, forge.slug());
+  let status = forge.fetch_issue(number)?;
+  if status.state == IssueState::Closed && !force {
+    return Err(GwmError::Other(format!(
+      "issue #{} is closed. Pass --force to open a worktree for it anyway.",
+      number
+    )));
+  }
+
+  let branch_type = match type_override {
+    Some(t) => t,
+    None => issue_templates::type_from_labels(&config.issue_template, &status.labels)?,
+  };
+  let prefix = issue_templates::title_prefix_for(repo, config, &branch_type);
+  let desc = issue_templates::desc_from_title(&status.title, &prefix)?;
+
+  // The title and the URL are arbitrary text from the forge; the slug is
+  // safe by construction (`kebab` keeps ASCII alphanumerics), the echo is
+  // not.
+  println!(
+    "✓ fetched issue #{} {}",
+    number,
+    sanitise_diagnostic_for_terminal(&status.title)
+  );
+  println!("  {}", sanitise_diagnostic_for_terminal(&status.url));
+  println!(
+    "  labels: {} → type: {}",
+    sanitise_diagnostic_for_terminal(&status.labels.join(", ")),
+    branch_type
+  );
+  Ok(Some((branch_type, number.to_string(), desc)))
+}
+
+fn cmd_create(
+  args: CreateArgs,
   no_bootstrap: bool,
   reuse_branch: bool,
   skip_hooks: Option<String>,
@@ -2776,10 +2902,33 @@ fn cmd_create(
   let RepoContext { repo, workdir, config } = repo_context(start)?;
   let repo_name = worktree::repo_name(&repo);
 
-  // clap guarantees exactly one of the two shapes reaches here:
-  // `--name` conflicts with all three positionals, and each positional is
-  // `required_unless_present = "name"`, so a partial triple is rejected
-  // before dispatch rather than silently read as a free-form request.
+  let CreateArgs {
+    branch_type,
+    issue,
+    desc,
+    from_issue,
+    type_override,
+    force,
+    name,
+  } = args;
+
+  // Issue #617: `--issue <N>` fills the triple from the forge instead of
+  // having it retyped. Everything after this point is the pre-existing
+  // path, including the `#{issue}` in `branch_pattern` that makes the link
+  // resolve on its own.
+  let (branch_type, issue, desc) = match from_issue {
+    None => (branch_type, issue, desc),
+    Some(number) => match triple_from_issue(&repo, &config, number, type_override, force)? {
+      None => return Ok(()),
+      Some((t, i, d)) => (Some(t), Some(i), Some(d)),
+    },
+  };
+
+  // clap guarantees exactly one of the naming shapes reaches here:
+  // `--name` conflicts with all three positionals and with `--issue`, and
+  // each positional is `required_unless_present_any = ["name", "from_issue"]`,
+  // so a partial triple is rejected before dispatch rather than silently read
+  // as a free-form request.
   let wt_name = match name {
     Some(name) => WorktreeName::freeform(&name)?,
     None => {
@@ -2788,7 +2937,7 @@ fn cmd_create(
         (Some(t), Some(i), Some(d)) => (t, i, d),
         _ => {
           return Err(GwmError::Other(
-            "`gwm create` needs <TYPE> <ISSUE> <DESC> or --name".into(),
+            "`gwm create` needs <TYPE> <ISSUE> <DESC>, --name, or --issue <N>".into(),
           ))
         }
       };
@@ -3025,12 +3174,18 @@ fn cmd_new(
   println!("creating linked worktree for {}", branch);
 
   cmd_create(
-    Some(spec.type_),
-    Some(issue),
-    Some(spec.desc),
-    // `gwm new` always produces a structured worktree — it has just created
-    // the issue whose number the branch carries.
-    None,
+    CreateArgs {
+      branch_type: Some(spec.type_),
+      issue: Some(issue),
+      desc: Some(spec.desc),
+      // `gwm new` always produces a structured worktree — it has just
+      // created the issue whose number the branch carries, so neither the
+      // free-form name nor the `--issue` derivation applies.
+      from_issue: None,
+      type_override: None,
+      force: false,
+      name: None,
+    },
     no_bootstrap,
     reuse_branch,
     skip_hooks,

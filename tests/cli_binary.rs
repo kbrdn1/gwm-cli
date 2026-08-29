@@ -3209,6 +3209,344 @@ fn create_subcommand_outside_git_repo_fails() {
     .stderr(predicate::str::contains("not inside a git repository"));
 }
 
+// --- create --issue <N> (issue #617) -------------------------------------
+
+/// `.gwm.toml` for the `--issue` tests: the same `[worktree]` block
+/// `write_test_config` writes, plus the `[issue_template.by_type]` map the
+/// derivation reads backwards. `feat` and `fix` are separable by label;
+/// `hotfix` deliberately shares `bug` with `fix` so the ambiguity arm has a
+/// fixture.
+fn write_issue_template_config(repo_root: &Path, base: &Path) {
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[issue_template.by_type]
+feat   = {{ title_prefix = "[Feature]: ", labels = ["feature"] }}
+fix    = {{ title_prefix = "[Bug]: ", labels = ["bug"] }}
+hotfix = {{ title_prefix = "[Hotfix]: ", labels = ["bug"] }}
+"#,
+    base = toml_basic_string(base),
+  );
+  std::fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+/// Fake `gh` answering `gh issue view <n> …` with `issue_json`.
+///
+/// The payload is written to a file the script cats back, rather than
+/// interpolated into the script body: an issue title is arbitrary text and
+/// `cmd.exe`'s `echo` would eat `<`, `>`, `|` and `&` out of it.
+fn write_issue_gh(root: &Path, issue_json: &str) -> PathBuf {
+  let payload = root.join("issue.json");
+  fs::write(&payload, issue_json).unwrap();
+  #[cfg(unix)]
+  {
+    let script = root.join("gh");
+    fs::write(
+      &script,
+      format!(
+        r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  cat "{payload}"
+fi
+"#,
+        payload = payload.display(),
+      ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+  }
+  #[cfg(windows)]
+  {
+    let script = root.join("gh.cmd");
+    fs::write(
+      &script,
+      format!(
+        "@echo off\r\nif \"%~1\"==\"issue\" if \"%~2\"==\"view\" type \"{payload}\"\r\n",
+        payload = payload.display(),
+      ),
+    )
+    .unwrap();
+    script
+  }
+}
+
+fn issue_json(number: u64, title: &str, state: &str, labels: &[&str]) -> String {
+  let labels = labels
+    .iter()
+    .map(|l| format!(r#"{{"name":"{l}"}}"#))
+    .collect::<Vec<_>>()
+    .join(",");
+  format!(
+    r#"{{"number":{number},"title":"{title}","state":"{state}","url":"https://github.com/kbrdn1/gwm-cli/issues/{number}","labels":[{labels}],"updatedAt":"2026-08-29T00:00:00Z"}}"#
+  )
+}
+
+fn repo_with_origin() -> (tempfile::TempDir, git2::Repository) {
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  (dir, repo)
+}
+
+#[test]
+fn create_from_issue_derives_the_branch_from_the_labels_and_the_title() {
+  // The whole point of #617: nothing about the branch is retyped. `feature`
+  // selects `feat`, `[Feature]: ` comes back off the title, and the rest of
+  // the title becomes the slug through the same kebab path a hand-typed
+  // <desc> goes through.
+  let (dir, repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#594-modals-should-follow-layout"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  assert!(
+    base.path().join("feat-594-modals-should-follow-layout").exists(),
+    "the derived worktree must land on disk"
+  );
+  repo
+    .find_branch("feat/#594-modals-should-follow-layout", git2::BranchType::Local)
+    .expect("the derived branch must exist");
+}
+
+#[test]
+fn create_from_issue_refuses_a_closed_issue_until_forced() {
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(592, "[Feature]: working tree modal", "CLOSED", &["feature"]),
+  );
+
+  let run = |args: &[&str]| {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .env("GWM_GH", &fake_gh)
+      .env("PATH", prepend_path(fake_bin.path()))
+      .args(args);
+    cmd
+  };
+
+  run(&["create", "--issue", "592"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("closed"))
+    .stderr(predicate::str::contains("--force"));
+  assert!(
+    !base.path().join("feat-592-working-tree-modal").exists(),
+    "the refusal must leave no worktree behind"
+  );
+
+  run(&["create", "--issue", "592", "--force"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#592-working-tree-modal"));
+  assert!(base.path().join("feat-592-working-tree-modal").exists());
+}
+
+#[test]
+fn create_from_issue_is_safe_to_re_run() {
+  // "already created" is not an error: the command prints where the worktree
+  // is and exits 0, so re-running it after an interruption is harmless.
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
+  );
+
+  let run = || {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .env("GWM_GH", &fake_gh)
+      .env("PATH", prepend_path(fake_bin.path()))
+      .args(["create", "--issue", "594"]);
+    cmd
+  };
+
+  run().assert().success();
+  run()
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("already exists"))
+    .stdout(predicate::str::contains("feat-594-modals-should-follow-layout"));
+}
+
+#[test]
+fn create_from_issue_re_run_check_precedes_the_closed_refusal() {
+  // An issue closes while its worktree is still alive. If the closed gate
+  // ran first, a command that succeeded yesterday would start failing on a
+  // worktree that is right there on disk.
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+  let fake_bin = tempfile::TempDir::new().unwrap();
+
+  let open = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &open)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594"])
+    .assert()
+    .success();
+
+  // Same fake, now answering CLOSED for the very same number.
+  let closed_bin = tempfile::TempDir::new().unwrap();
+  let closed = write_issue_gh(
+    closed_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "CLOSED", &["feature"]),
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &closed)
+    .env("PATH", prepend_path(closed_bin.path()))
+    .args(["create", "--issue", "594"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn create_from_issue_refuses_labels_that_do_not_separate_two_types() {
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(597, "[Bug]: selection github context", "OPEN", &["bug"]),
+  );
+
+  let run = |args: &[&str]| {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .env("GWM_GH", &fake_gh)
+      .env("PATH", prepend_path(fake_bin.path()))
+      .args(args);
+    cmd
+  };
+
+  run(&["create", "--issue", "597"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("fix"))
+    .stderr(predicate::str::contains("hotfix"))
+    .stderr(predicate::str::contains("--type"));
+
+  // `--type` is the way out the error names, and it must actually work.
+  run(&["create", "--issue", "597", "--type", "fix"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("fix/#597-selection-github-context"));
+}
+
+#[test]
+fn create_issue_flag_is_exclusive_with_the_positional_triple_and_with_name() {
+  // Same contract `--name` already carries: the mode is chosen explicitly,
+  // never inferred from how many arguments were supplied.
+  let (dir, _repo) = repo_with_origin();
+
+  for args in [
+    vec!["create", "--issue", "594", "feat", "594", "x"],
+    vec!["create", "--issue", "594", "--name", "spike"],
+  ] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(&args)
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("cannot be used with"));
+  }
+}
+
+#[test]
+fn create_type_and_force_are_only_meaningful_alongside_issue() {
+  // Both riders are refused on the positional path, and both are named as
+  // missing `--issue` when nothing else is supplied. Without either half,
+  // `gwm create feat 1 x --type fix` would be a silent no-op.
+  let (dir, _repo) = repo_with_origin();
+
+  for args in [
+    vec!["create", "feat", "1", "x", "--type", "fix"],
+    vec!["create", "feat", "1", "x", "--force"],
+  ] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(&args)
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("cannot be used with"));
+  }
+
+  for args in [vec!["create", "--type", "fix"], vec!["create", "--force"]] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(&args)
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("--issue"));
+  }
+}
+
+#[test]
+fn create_help_documents_the_issue_flag() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--issue"))
+    .stdout(predicate::str::contains("--type"))
+    .stdout(predicate::str::contains("--force"));
+}
+
 // --- remove -------------------------------------------------------------
 
 #[test]
