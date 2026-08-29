@@ -230,25 +230,55 @@ ships with the next minor: the note editor takes bullets and checkboxes for
 everyone, and its vim normal mode is on by default, with `[tui] note_vim = false`
 as the opt-out. Beyond it: forms compressing their
 spacing before they scroll ([#559](https://github.com/kbrdn1/gwm-cli/issues/559)),
-polish on the rich PR/Issue view
-([#551](https://github.com/kbrdn1/gwm-cli/issues/551)), the remaining relays
+the remaining relays
 ([#525](https://github.com/kbrdn1/gwm-cli/issues/525)) and the distribution
 channels still open under
-[#383](https://github.com/kbrdn1/gwm-cli/issues/383). A second lot came out of
-living in the TUI for a day: a multiplexer line (herdr as a third backend
+[#383](https://github.com/kbrdn1/gwm-cli/issues/383).
+
+**A second lot came out of living in the TUI for a day, and all of it is now on
+`dev`**, unreleased: a multiplexer line (herdr as a third backend
 [#588](https://github.com/kbrdn1/gwm-cli/issues/588), a pane-direction setting
-[#589](https://github.com/kbrdn1/gwm-cli/issues/589), Issue/PR in a terminal
-browser [#590](https://github.com/kbrdn1/gwm-cli/issues/590), resuming an agent's
-session in a pane from the agents overlay
-[#591](https://github.com/kbrdn1/gwm-cli/issues/591)),
-two full-size listings for the panes the sidebar cannot hold
+[#589](https://github.com/kbrdn1/gwm-cli/issues/589) with its two remaining
+directions [#611](https://github.com/kbrdn1/gwm-cli/issues/611), what a spawn
+opens [#608](https://github.com/kbrdn1/gwm-cli/issues/608), Issue/PR in a
+terminal browser [#590](https://github.com/kbrdn1/gwm-cli/issues/590), resuming
+an agent's session in a pane
+[#591](https://github.com/kbrdn1/gwm-cli/issues/591)), two full-size listings
+for the panes the sidebar cannot hold
 ([#592](https://github.com/kbrdn1/gwm-cli/issues/592),
 [#593](https://github.com/kbrdn1/gwm-cli/issues/593)), modals following
 `[tui] layout` instead of staying bordered
-([#594](https://github.com/kbrdn1/gwm-cli/issues/594)), and three table / context
-defects ([#595](https://github.com/kbrdn1/gwm-cli/issues/595),
+([#594](https://github.com/kbrdn1/gwm-cli/issues/594)), the rich PR/Issue view's
+design pass ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)), and the
+table / context defects it turned up
+([#595](https://github.com/kbrdn1/gwm-cli/issues/595),
 [#596](https://github.com/kbrdn1/gwm-cli/issues/596),
-[#597](https://github.com/kbrdn1/gwm-cli/issues/597)). Translating the docs into
+[#597](https://github.com/kbrdn1/gwm-cli/issues/597),
+[#605](https://github.com/kbrdn1/gwm-cli/issues/605),
+[#613](https://github.com/kbrdn1/gwm-cli/issues/613)).
+
+One item of that line is **blocked upstream** rather than pending here: running
+a `mux_pane` macro inside a herdr pane
+([#599](https://github.com/kbrdn1/gwm-cli/issues/599)) needs a way to open a
+pane that runs a command, and herdr 0.8.2 has none. `pane split` takes only
+`--cwd` and `--env`, and `pane run` types into the pane's shell rather than
+executing, so it races the shell's startup (up to ~60s measured on a worktree
+with direnv and a nix flake). Filed with them as
+[herdrdev/herdr#3345](https://github.com/herdrdev/herdr/discussions/3345).
+
+**The design line queued next** came out of the same daily use, and is about
+density rather than capability: the Working Tree listing gaining a right-aligned
+status column and a collapsed leading path
+([#622](https://github.com/kbrdn1/gwm-cli/issues/622)), the Settings panel
+gaining a value column, named sections and tab glyphs
+([#623](https://github.com/kbrdn1/gwm-cli/issues/623)), and the mouse. That last
+one is a defect wearing a feature's clothes: gwm enables mouse capture in three
+places and reads no mouse event anywhere, so the terminal's own text selection
+is already sacrificed for nothing. #624 reads the events and puts the two
+digit-only panels (Command Logs, Settings) in the header where they can be seen
+and clicked ([#624](https://github.com/kbrdn1/gwm-cli/issues/624)).
+
+Translating the docs into
 German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/522))
 is roughly 155,000 words with no native reviewer lined up, so it stays a
 decision rather than a plan.
