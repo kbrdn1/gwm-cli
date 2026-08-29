@@ -932,6 +932,73 @@ pub struct TuiConfig {
   /// printable is text, no modes, and one `Esc` writes and closes.
   #[serde(default = "default_note_vim")]
   pub note_vim: bool,
+
+  /// Command that renders a URL *inside the terminal* (issue #590).
+  ///
+  /// A shell line taking the `{url}` placeholder: `w3m {url}`, `lynx
+  /// {url}`, `carbonyl {url}`, `browsh {url}`. The placeholder is optional:
+  /// a bare `w3m` gets the URL appended as its last argument, which is what
+  /// every one of those tools takes anyway.
+  ///
+  /// **Only consulted when a multiplexer is detected.** A terminal browser
+  /// with nowhere to put it is worse than the system browser, so `$TMUX` /
+  /// `$ZELLIJ` / `$HERDR_ENV` gate it and the OS opener stays the fallback.
+  /// Unset (the default) is today's behaviour on every platform: every URL
+  /// the TUI opens goes to the external browser.
+  ///
+  /// Same `"" == omitted` convention as `[tui.open]`'s `shell_cmd`, so
+  /// blanking the key in the Settings panel turns the feature back off
+  /// rather than leaving an empty command nobody can spawn.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub terminal_browser: Option<String>,
+
+  /// Who gives the terminal browser its place on screen (issue #590).
+  ///
+  /// Default `overlay`: gwm hosts the command in a pane it opens, or in the
+  /// PTY overlay where the multiplexer cannot carry a command. That assumes
+  /// the browser draws inside whatever TTY it is handed, which is true of
+  /// w3m, lynx and every other text browser.
+  ///
+  /// `detached` is for a browser that places *itself*, which gwm must then
+  /// not host: `terminal-browser open {url} --split right` asks the
+  /// multiplexer for its own pane and exits. Hosting one of those in the PTY
+  /// overlay does not work and cannot be made to: it renders through the
+  /// terminal's image protocol, which positions against the real window and
+  /// so ignores the overlay entirely, drawing over the top-left corner of the
+  /// screen instead.
+  #[serde(default)]
+  pub terminal_browser_open_in: TerminalBrowserHost,
+}
+
+/// Who places the terminal browser (issue #590).
+///
+/// `kebab-case` for the same reason as [`TuiLayout`]: it keeps the serialised
+/// form equal to [`Self::label`], so a Settings-panel write-back produces a
+/// file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalBrowserHost {
+  /// gwm hosts it: a mux pane, or the PTY overlay. The default, and right for
+  /// any browser that draws in the TTY it is given.
+  #[default]
+  Overlay,
+  /// The browser places itself and gwm only launches it. No pane, no overlay,
+  /// which is the point: a browser that splits on its own would otherwise be
+  /// split twice, or hosted somewhere it cannot draw.
+  Detached,
+}
+
+impl TerminalBrowserHost {
+  /// Every variant, default first.
+  pub const ALL: [TerminalBrowserHost; 2] = [TerminalBrowserHost::Overlay, TerminalBrowserHost::Detached];
+
+  /// Settings-panel label, equal to the serialised TOML spelling.
+  pub const fn label(self) -> &'static str {
+    match self {
+      TerminalBrowserHost::Overlay => "overlay",
+      TerminalBrowserHost::Detached => "detached",
+    }
+  }
 }
 
 /// What a mux spawn opens (issue #608): the level of the multiplexer's own
@@ -1044,6 +1111,8 @@ impl Default for TuiConfig {
       mux_open_in: MuxTarget::default(),
       mux_pane_direction: SplitDirection::default(),
       note_vim: default_note_vim(),
+      terminal_browser: None,
+      terminal_browser_open_in: TerminalBrowserHost::default(),
     }
   }
 }
@@ -1500,6 +1569,94 @@ pub fn expand_agent_resume(template: &str, session_id: &str) -> Option<String> {
   }
   out.push_str(rest);
   Some(out)
+}
+
+/// `true` when `url` is a thing gwm will hand to a terminal browser.
+///
+/// Deliberately **not** the shape [`is_shell_safe_session_id`] takes. A
+/// session id is a slug, so an allowlist costs nothing there; a URL carries
+/// `: / ? # % = & +` by construction. `#` shows up in gwm's own branch
+/// names, and `?a=1&b=2` in the `details_url` GitHub hands back for a check
+/// run. An allowlist wide enough for a real URL would admit `&`, so the
+/// quoting is what holds here instead, and this stays the narrow check that
+/// nothing *else* gets through: an absolute `http`/`https` URL, with no
+/// whitespace and no control characters.
+///
+/// [`expand_terminal_browser`] is what makes the quoting sound: it splits
+/// the template **before** substituting, so the URL lands as one argv
+/// element whose quoting gwm owns, rather than as text spliced into a line
+/// the user wrote.
+pub fn is_browsable_url(url: &str) -> bool {
+  (url.starts_with("http://") || url.starts_with("https://"))
+    && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Expand `[tui] terminal_browser` into the argv that renders `url`, or
+/// `None` when the URL is refused or the template does not parse.
+///
+/// **Split first, substitute second.** This is the whole security argument,
+/// and it is the opposite order from [`expand_agent_resume`]. That one
+/// substitutes into the line and cannot control where the user's template
+/// put the placeholder, so it constrains the *value* instead: put
+/// `{session}` inside double quotes and `shell_words::quote` emits single
+/// quotes the shell reads as literal characters, leaving `$(…)` live. Here
+/// the template is tokenised first, so `w3m {url}` and `w3m "{url}"` both
+/// yield the token `{url}` and the URL becomes exactly one argv element.
+/// The template's own quoting is consumed by the split and can no longer
+/// reach the value, which is why a URL's `&` and `?` need no allowlist.
+///
+/// Substitution inside a token is **single pass**, the rule
+/// [`crate::lifecycle`] learned in GHSA-fffq-vg6f-gxqm: an expansion is a
+/// value, not more template, so a URL that itself spelled `{url}` is not
+/// rewritten from the inside.
+///
+/// **A template with no `{url}` gets it appended.** `terminal_browser =
+/// "w3m"` is what people write first, and every one of w3m / lynx /
+/// carbonyl / browsh takes the URL as its last argument. Refusing it would
+/// document a loss for nothing.
+pub fn expand_terminal_browser(template: &str, url: &str) -> Option<Vec<String>> {
+  if !is_browsable_url(url) {
+    return None;
+  }
+  // A template that names an existing file is that file, whole (Codex review
+  // on PR #615). `shell_words::split` is POSIX, so it reads a backslash as an
+  // escape and turns `C:\Tools\w3m.exe` into `C:Toolsw3m.exe`; the probe then
+  // misses and every link on that machine falls back to the system browser
+  // without a word about why. A space does the same thing anywhere.
+  //
+  // The same fast path [`crate::tui::launch_argv`] already runs ahead of its
+  // own split, and deliberately the same: one question asked by two surfaces
+  // deserves one answer, not a second convention. `is_file` rather than
+  // "looks like a path", so `w3m {url}` keeps going through the split.
+  if std::path::Path::new(template).is_file() {
+    return Some(vec![template.to_string(), url.to_string()]);
+  }
+  let tokens = shell_words::split(template).ok()?;
+  if tokens.is_empty() {
+    return None;
+  }
+  let mut used = false;
+  let mut argv: Vec<String> = Vec::with_capacity(tokens.len() + 1);
+  for token in tokens {
+    if !token.contains("{url}") {
+      argv.push(token);
+      continue;
+    }
+    used = true;
+    let mut out = String::with_capacity(token.len() + url.len());
+    let mut rest = token.as_str();
+    while let Some(at) = rest.find("{url}") {
+      out.push_str(&rest[..at]);
+      out.push_str(url);
+      rest = &rest[at + "{url}".len()..];
+    }
+    out.push_str(rest);
+    argv.push(out);
+  }
+  if !used {
+    argv.push(url.to_string());
+  }
+  Some(argv)
 }
 
 impl TuiConfig {

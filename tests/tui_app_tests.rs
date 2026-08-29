@@ -16696,3 +16696,824 @@ fn a_stats_payload_for_another_listing_is_dropped() {
     "a payload read at another page depth is not this listing's"
   );
 }
+
+// ---------------------------------------------------------------------------
+// #590: where a URL opens. Terminal browser in a mux pane, else the OS opener
+// ---------------------------------------------------------------------------
+
+/// `[tui] terminal_browser` set to `w3m {url}`, everything else default.
+fn tui_with_browser(template: &str) -> gwm::config::TuiConfig {
+  gwm::config::TuiConfig {
+    terminal_browser: Some(template.into()),
+    ..Default::default()
+  }
+}
+
+const URL: &str = "https://github.com/kbrdn1/gwm-cli/issues/590";
+
+#[test]
+fn terminal_browser_unset_opens_the_system_browser_without_a_word() {
+  // The default, on every platform, and the compatibility promise of #590:
+  // unset is gwm's behaviour up to 1.9, unchanged. Silent too, because a note on
+  // every link about a feature nobody asked for is noise.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &gwm::config::TuiConfig::default(),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert_eq!(plan, gwm::tui::BrowserPlan::System { why: None });
+}
+
+#[test]
+fn terminal_browser_without_a_multiplexer_falls_back_and_names_the_probes() {
+  // The gate the issue asks for: "a terminal browser with nowhere to put it
+  // is worse than the system browser". The fallback is not silent here,
+  // because the user DID configure one, and an opt-in that quietly does nothing
+  // reads as a broken feature.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("no multiplexer must reach the system browser, with a reason");
+  };
+  assert!(
+    why.contains("$TMUX") && why.contains("$ZELLIJ") && why.contains("$HERDR_ENV"),
+    "the reason must name what gwm probed, got: {why}"
+  );
+}
+
+#[test]
+fn terminal_browser_inside_tmux_opens_a_pane_running_it() {
+  // The point of #590: the page renders beside gwm instead of pulling the
+  // user out of the workspace gwm is sitting in.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, noun } = plan else {
+    panic!("tmux carries its command in the argv that opens the pane");
+  };
+  assert_eq!(argv[0], "tmux");
+  assert!(
+    argv.iter().any(|a| a == "split-window") && argv.iter().any(|a| a == "-h"),
+    "the level and side come from [tui] mux_open_in / mux_pane_direction, got: {argv:?}"
+  );
+  // The browser line is the LAST operand, and the URL is one word in it.
+  assert_eq!(
+    argv.last().map(String::as_str),
+    Some("w3m {url}".replace("{url}", URL).as_str())
+  );
+  assert_eq!(noun, "pane");
+}
+
+#[test]
+fn terminal_browser_inside_herdr_runs_in_the_overlay_and_says_why() {
+  // herdr panes take no command in the argv that opens them, and the resume
+  // path's answer to that (#591 / #599) is a round trip that waited ~60s for
+  // the new shell in the worst measured case. For a browser that is the wrong
+  // trade: the key was pressed, something must appear. The PTY overlay still
+  // renders the page in the terminal; it just covers gwm, which is what the
+  // status line has to say out loud.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Overlay { argv, why } = plan else {
+    panic!("herdr must reach the overlay, not the system browser");
+  };
+  // An argv, not a shell line: `PtyOverlay::spawn` execs it directly, so
+  // joining it and handing the result to `platform_shell()` would add a
+  // re-parse for nothing, and on Windows that shell is `cmd.exe`, which reads
+  // neither POSIX quoting nor `&` as anything but a command separator (Codex
+  // review on PR #615).
+  assert_eq!(argv, vec!["w3m".to_string(), URL.to_string()]);
+  assert!(why.contains("herdr"), "the reason must name the backend, got: {why}");
+}
+
+#[test]
+fn terminal_browser_under_a_level_that_takes_no_command_still_renders_in_the_terminal() {
+  // Two refusals that are not herdr's: a zellij TAB takes no trailing
+  // command, and no backend but herdr has a workspace level at all. Both are
+  // reachable from `[tui] mux_open_in`, which the user sets for `t`, so
+  // neither may silently downgrade to the external browser.
+  for (mux_open_in, zellij, tmux, expect) in [
+    (gwm::config::MuxTarget::Tab, Some("0".to_string()), None, "zellij"),
+    (
+      gwm::config::MuxTarget::Workspace,
+      None,
+      Some("/tmp/sock,1,0".to_string()),
+      "workspace",
+    ),
+  ] {
+    let tui = gwm::config::TuiConfig {
+      mux_open_in,
+      ..tui_with_browser("w3m {url}")
+    };
+    let plan = gwm::tui::plan_terminal_browser(
+      URL,
+      std::path::Path::new("/tmp/gwm-test/wt"),
+      &tui,
+      tmux,
+      zellij,
+      None,
+      None,
+      &|_| true,
+    );
+    let gwm::tui::BrowserPlan::Overlay { why, .. } = plan else {
+      panic!("{mux_open_in:?} must still render in the terminal, via the overlay");
+    };
+    assert!(why.contains(expect), "expected a {expect} refusal, got: {why}");
+  }
+}
+
+#[test]
+fn terminal_browser_that_is_not_installed_is_caught_before_the_spawn() {
+  // "detect if install" from the issue. Probing beats spawning: a failed
+  // spawn inside a fresh mux pane closes the pane before anyone can read the
+  // error, so the user would see a pane flash and no page.
+  //
+  // The REASON is pinned, not just the variant: `System` is also what an
+  // absent multiplexer and a refused URL produce, and a test that only
+  // asserted the variant would stay green if this branch disappeared.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("carbonyl {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin != "carbonyl",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser must fall back rather than open an empty pane");
+  };
+  assert!(
+    why.contains("carbonyl") && why.contains("PATH"),
+    "the reason must name the binary gwm looked for, got: {why}"
+  );
+}
+
+#[test]
+fn terminal_browser_refuses_a_url_it_will_not_hand_to_a_shell() {
+  // The expander's refusal has to survive as a fallback rather than as a
+  // dead key: whatever `is_browsable_url` turns down still opens somewhere.
+  let plan = gwm::tui::plan_terminal_browser(
+    "file:///etc/passwd",
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a refused URL must still reach the OS opener");
+  };
+  assert!(why.contains("terminal_browser"), "got: {why}");
+}
+
+#[test]
+#[cfg(unix)]
+fn the_planned_browser_line_reaches_a_real_shell_as_one_argument() {
+  // tmux is the one backend with no argv form: it takes a single
+  // shell-command operand and hands it to its own `default-shell`. So that
+  // operand is a real shell line, and the whole security claim of #590 is
+  // about what a shell does with it, not about what the Vec looks like.
+  //
+  // The fake browser is `printf %s\n`, so its arguments come back one per
+  // line: a URL that stayed one word prints one line, and a URL that was
+  // re-split or substituted prints something else.
+  let url = "https://example.com/a;id&whoami?q=$(id)`id`&x=1";
+  let plan = gwm::tui::plan_terminal_browser(
+    url,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &gwm::config::TuiConfig {
+      // The quoted form, which is where `expand_agent_resume`'s
+      // substitute-into-the-line order would have leaked.
+      terminal_browser: Some("printf '%s\\n' \"{url}\"".into()),
+      ..Default::default()
+    },
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, .. } = plan else {
+    panic!("tmux carries the browser as a shell-command operand");
+  };
+  let line = argv.last().expect("the operand is the last word").clone();
+  let out = std::process::Command::new("/bin/sh")
+    .arg("-c")
+    .arg(&line)
+    .output()
+    .expect("/bin/sh runs on every unix runner");
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert_eq!(
+    stdout.lines().collect::<Vec<_>>(),
+    vec![url],
+    "the URL must reach the browser as exactly one argument, verbatim; line was {line:?}"
+  );
+  assert!(
+    !stdout.contains("uid=") && !String::from_utf8_lossy(&out.stderr).contains("uid="),
+    "nothing in the URL may be executed by the shell, got {stdout:?}"
+  );
+}
+
+#[test]
+// `/bin/sh` is the child, so this is a unix test, like every other PTY
+// lifecycle test in the suite. Pushed without the gate it took
+// `test (windows-latest)` red: `spawn` cannot find the binary there, and the
+// `expect` fails the whole suite before the assertion runs. Exactly the trap
+// CLAUDE.md names under "pre-validate environment-dependent tests".
+#[cfg(unix)]
+fn the_pty_overlay_returns_to_the_view_it_covered() {
+  // Codex review on PR #615. Before #590 every PTY overlay opened from the
+  // worktree table, so closing it back to `View::List` was always right. A
+  // `terminal_browser` link is the first caller that can open from ON TOP of
+  // a modal: the rich PR/issue view and the CI checks overlay both open URLs.
+  // Landing the reader on the table there loses the modal AND the row they
+  // were on, which the system-browser and mux-pane paths never do.
+  //
+  // Driven through the two state methods rather than through `open_url`,
+  // which needs a live `Terminal` and would spawn a real browser.
+  let (_d, mut app) = make_app();
+  app.view = gwm::tui::View::DetailOverlay;
+  // A PTY the test can own without spawning a browser: `spawn` execs argv[0]
+  // directly, so a shell that reads nothing is the cheapest live child.
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .expect("/bin/sh spawns on every runner this test runs on");
+  app.open_pty_overlay_over_current(pty);
+  assert_eq!(app.view, gwm::tui::View::Pty);
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    gwm::tui::View::DetailOverlay,
+    "closing the browser must land back on the modal it covered, not the table"
+  );
+
+  // And every pre-#590 caller is untouched, which is why this is a separate
+  // entry point. The exec picker spawns its PTY from `View::ExecPicker`, so a
+  // rule that stashed the current view unconditionally would drop the user
+  // back on the picker after every run instead of on the list, contradicting
+  // `close_exec_picker` (Codex review on PR #615).
+  for from in [gwm::tui::View::List, gwm::tui::View::ExecPicker] {
+    app.view = from;
+    let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+      gwm::tui::state::pty_overlay::PtyKind::Exec,
+      &["/bin/sh", "-c", "sleep 30"],
+      std::path::Path::new("."),
+      80,
+      24,
+    )
+    .unwrap();
+    app.open_pty_overlay(pty);
+    app.close_pty_overlay();
+    assert_eq!(app.view, gwm::tui::View::List, "opened from {from:?}");
+  }
+}
+
+#[test]
+fn terminal_browser_probes_the_binary_behind_a_wrapper() {
+  // Codex review on PR #615. `terminal_browser = "env -u NO_COLOR w3m {url}"`
+  // is a valid setting, and probing `argv[0]` there checks that `env` exists,
+  // which it always does. The promise the probe makes is "detect if install",
+  // so on a machine with no `w3m` it has to fall back, not open a pane whose
+  // process dies on the spot.
+  //
+  // `doctor` already walks past `env` and its detached `-u NAME` operand, a
+  // walk that was itself a fix (`env -u NODE_OPTIONS npm ci` resolved to
+  // `NODE_OPTIONS`), so this shares it rather than growing a second copy.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The shape of a real machine with `env` but no browser.
+    &|bin| bin == "env",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser behind a wrapper must still fall back");
+  };
+  assert!(
+    why.contains("w3m") && !why.contains("env"),
+    "the reason must name the browser, not the wrapper, got: {why}"
+  );
+
+  // And the wrapper form still opens a pane when the browser IS there, so the
+  // probe did not become a refusal of wrappers.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::MuxPane { argv, .. } = plan else {
+    panic!("with the browser installed the wrapper form opens a pane");
+  };
+  assert_eq!(
+    argv.last().map(String::as_str),
+    Some(format!("env -u NO_COLOR w3m {URL}").as_str()),
+    "the wrapper stays in the command that runs, got: {argv:?}"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_link_that_moved_under_the_browser_does_not_come_back_as_stale_rows() {
+  // Codex review on PR #615. `a_link_change_closes_the_rich_view` covers the
+  // link moving while the modal is on screen. A `terminal_browser` link opens
+  // the PTY overlay ON TOP of that modal, and two things then hold at once:
+  // `View::Pty` does not suspend the auto refresh, and
+  // `close_forge_overlay_if_link_disagrees` returns early on any view but
+  // `DetailOverlay`. So the move lands with nothing to catch it, and without
+  // re-asking the guard on the way back the reader gets rows nobody
+  // re-checked, with `Enter` opening the old PR's URL.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  // `B` on a row: the browser covers the modal.
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .expect("/bin/sh spawns on every unix runner");
+  app.open_pty_overlay_over_current(pty);
+  assert_eq!(app.view, View::Pty);
+
+  // The refresh lands while the page is up, and the guard cannot see it.
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+  app.refresh_link();
+  assert_eq!(app.view, View::Pty, "the refresh must not disturb the open browser");
+
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a modal whose link moved must not be restored: it would hand `Enter` the old PR's URL"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_modal_whose_link_held_still_is_restored_after_the_browser() {
+  // The other half, and the one that makes the guard above a guard rather
+  // than a blanket close: nothing moved, so the reader comes back to the row
+  // they were on. Without this a "fix" that always closed the modal would
+  // pass the test above and silently undo the restore #590 added.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay_over_current(pty);
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "an unchanged link must come back to the modal the reader left"
+  );
+}
+
+#[test]
+fn a_browser_that_places_itself_is_launched_and_not_hosted() {
+  // #590, after trying `terminal-browser` in a real herdr session. gwm's two
+  // hosting shapes both assume the browser draws inside the TTY it is handed,
+  // which is true of w3m and lynx and false of a graphical one:
+  // `terminal-browser` renders through the terminal's image protocol, which
+  // positions against the real window, so it landed in the screen's top-left
+  // corner and ignored the overlay's rect entirely. No rect gwm passes can fix
+  // that, and the mouse has the same wall.
+  //
+  // `detached` is the answer: `terminal-browser open {url} --split right`
+  // asks the multiplexer for its own pane and exits (~4s, measured), so the
+  // rendering and the clicks are the terminal's business and gwm hosts
+  // nothing.
+  let tui = gwm::config::TuiConfig {
+    terminal_browser: Some("terminal-browser open {url} --split right".into()),
+    terminal_browser_open_in: gwm::config::TerminalBrowserHost::Detached,
+    ..Default::default()
+  };
+  // herdr, where the overlay was the only option before this.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  let gwm::tui::BrowserPlan::Detached { argv } = plan else {
+    panic!("a self-placing browser must not be hosted in the overlay");
+  };
+  assert_eq!(
+    argv,
+    vec![
+      "terminal-browser".to_string(),
+      "open".into(),
+      URL.into(),
+      "--split".into(),
+      "right".into()
+    ]
+  );
+
+  // Same under tmux, which CAN host a pane: hosting one here would split
+  // twice, since the browser splits on its own.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::Detached { .. }),
+    "detached must win over the pane path, or the browser is split twice"
+  );
+}
+
+#[test]
+fn a_self_placing_browser_still_needs_a_multiplexer_and_a_binary() {
+  // The two gates stay in front of `detached`, and the order is the reason
+  // this test exists. Placing itself still means asking a multiplexer for a
+  // pane: with none running, `terminal-browser open` takes over the pane gwm
+  // is drawing in, which is worse than the system browser it would have used.
+  let tui = gwm::config::TuiConfig {
+    terminal_browser: Some("terminal-browser open {url} --split right".into()),
+    terminal_browser_open_in: gwm::config::TerminalBrowserHost::Detached,
+    ..Default::default()
+  };
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    None,
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::System { why: Some(_) }),
+    "no multiplexer means the system browser, detached or not"
+  );
+
+  // And a browser that is not installed falls back rather than being launched
+  // into nothing.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui,
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|bin| bin != "terminal-browser",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing self-placing browser must fall back too");
+  };
+  assert!(why.contains("terminal-browser") && why.contains("PATH"), "got: {why}");
+}
+
+#[test]
+fn the_default_host_is_the_one_that_hosts() {
+  // `overlay` is the default because a text browser is the common case and
+  // gwm placing it beside the worktree list is the point of #590. `detached`
+  // is the opt-in for the browsers that cannot be hosted.
+  assert_eq!(
+    gwm::config::TerminalBrowserHost::default(),
+    gwm::config::TerminalBrowserHost::Overlay
+  );
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("w3m {url}"),
+    None,
+    None,
+    Some("1".into()),
+    None,
+    &|_| true,
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::Overlay { .. }),
+    "an unset host key keeps the hosting behaviour w3m needs"
+  );
+}
+
+#[test]
+fn a_detached_browser_reports_itself_and_never_blames_the_multiplexer() {
+  // #590. The shortcut this pins down is `mux_pane_status(url, "pane", …)`,
+  // which reads naturally at the call site and lies: `detached` asks the
+  // multiplexer for nothing, so "mux-pane refused" names a step that never
+  // ran and sends the user reading their tmux config because a browser
+  // exited non-zero.
+  let ok = gwm::tui::detached_browser_status(URL, true, "", "");
+  assert_eq!(ok, format!("opened {URL} in its own pane"));
+
+  let err = gwm::tui::detached_browser_status(URL, false, "", "terminal-browser: no such split\n");
+  assert!(
+    err.contains("browser refused") && err.contains("no such split"),
+    "the browser is what failed, and the line has to say so: {err}"
+  );
+  assert!(
+    !err.contains("mux-pane"),
+    "gwm asked for no pane here, so nothing may blame one: {err}"
+  );
+
+  // stderr wins over stdout, and a child that said nothing at all still
+  // produces a line rather than a bare "browser refused:".
+  let both = gwm::tui::detached_browser_status(URL, false, "opening...", "cannot reach display");
+  assert!(both.contains("cannot reach display"), "stderr comes first: {both}");
+  assert!(
+    gwm::tui::detached_browser_status(URL, false, "", "").contains("no output"),
+    "a silent failure still explains itself"
+  );
+}
+
+#[test]
+fn a_leading_shell_assignment_is_refused_rather_than_half_honoured() {
+  // Codex review on PR #615, and the defect is the disagreement between two
+  // halves that each look right on their own.
+  //
+  // `terminal_browser = "NO_COLOR=1 w3m {url}"` is shell syntax, and nothing
+  // on this path runs a shell: the template is tokenised precisely so the URL
+  // can never meet one. `doctor::executable_in` walks *past* a leading
+  // `KEY=VAL` to find the real binary, which is right for the surfaces that do
+  // go through a shell, so the probe resolves `w3m`, finds it, and waves the
+  // config through. Every consumer then execs `argv[0]` verbatim, which is the
+  // string `"NO_COLOR=1"`. The overlay and the detached path fail outright,
+  // and zellij is worse: it opens the pane, reports success, and the process
+  // inside is already dead.
+  //
+  // So the probe must not accept what the spawn cannot honour. `env` is the
+  // portable spelling and keeps working, because it is a real binary.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The machine where the shortcut hides: `w3m` really is installed, so
+    // the probe walking past the assignment finds it and says yes.
+    &|bin| bin == "w3m",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a template gwm cannot exec must fall back, not open a dead pane");
+  };
+  assert!(
+    why.contains("NO_COLOR=1") && why.contains("env"),
+    "the refusal must name the assignment and the spelling that works: {why}"
+  );
+
+  // The same variable set the portable way stays supported, argv[0] being a
+  // real binary. This is the line that stops the fix from being a blanket ban
+  // on `=` anywhere in the template.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "`env KEY=VAL tool` is a real argv and must still open a pane"
+  );
+
+  // And a `=` inside an argument is not an assignment: `--url={url}` is the
+  // form the docs give for a browser that wants the URL somewhere else.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("browser --url={url} --no-sandbox"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "browser",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "only a leading assignment is refused, not any token carrying `=`"
+  );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_modal_covered_by_the_browser_comes_back_holding_what_landed_meanwhile() {
+  // Codex review on PR #615, and the other half of the restore #590 added.
+  //
+  // `View::Pty` does not suspend the auto refresh, so a PR, CI or threads
+  // result can land while the browser covers the modal. Every sync that would
+  // absorb it returns early on `view != DetailOverlay`, and the modal keeps
+  // its OWN rows rather than reading the cache at render time. The guard on
+  // the way back only compares the link's *identity*, so an unchanged number
+  // restores the pre-browser rows over a cache that has since moved: the
+  // reader is looking at stale content with nothing saying so, until the next
+  // manual refresh.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(rich_pr_fixture(61)));
+  app.enter_rich_view();
+  assert!(
+    app.detail_overlay.title.contains("rich fixture"),
+    "precondition: the modal opened on the fixture title, got {:?}",
+    app.detail_overlay.title
+  );
+
+  let pty = gwm::tui::state::pty_overlay::PtyOverlay::spawn(
+    gwm::tui::state::pty_overlay::PtyKind::Browser,
+    &["/bin/sh", "-c", "sleep 30"],
+    std::path::Path::new("."),
+    80,
+    24,
+  )
+  .unwrap();
+  app.open_pty_overlay_over_current(pty);
+
+  // The refresh lands while the browser is up. Same PR number, so the
+  // identity guard will be satisfied and the modal restored.
+  let mut moved = rich_pr_fixture(61);
+  moved.title = "retitled while the browser was up".into();
+  app.apply_pr_fetch_result(Ok(moved));
+
+  app.close_pty_overlay();
+  assert_eq!(
+    app.view,
+    View::DetailOverlay,
+    "an unchanged link still comes back to the modal"
+  );
+  assert!(
+    app.detail_overlay.title.contains("retitled while the browser was up"),
+    "the restored modal must hold what landed while it was covered, got {:?}",
+    app.detail_overlay.title
+  );
+}
+
+#[test]
+fn a_wrapper_that_is_itself_missing_is_caught_like_the_browser_behind_it() {
+  // Codex review on PR #615, the mirror image of
+  // `terminal_browser_probes_the_binary_behind_a_wrapper`. That one fixed
+  // probing `argv[0]` and never the real browser; this is the half it left:
+  // probing the real browser and never `argv[0]`.
+  //
+  // `env NO_COLOR=1 w3m {url}` on Windows is the case that bites. `w3m.exe`
+  // can be installed while `env.exe` is not, since `env` is a coreutil rather
+  // than something Windows ships. The probe walks past the wrapper, finds
+  // `w3m`, and accepts; the consumers then exec `argv[0]`, which is `env`, and
+  // it is not there. The overlay and the detached path fail, and zellij opens
+  // a pane reporting success around a process that never started.
+  //
+  // Both have to be on PATH, because both are needed to run the thing.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The Windows shape: the browser is installed, the wrapper is not.
+    &|bin| bin == "w3m",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing wrapper must fall back, not open a pane that cannot run");
+  };
+  assert!(
+    why.contains("env") && why.contains("PATH"),
+    "the refusal must name the wrapper that is missing: {why}"
+  );
+
+  // And the pane still opens when both are there, so this is a second probe
+  // rather than a ban on wrappers.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("env NO_COLOR=1 w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "a wrapper and a browser both on PATH must still open a pane"
+  );
+}
+
+#[test]
+fn a_wrapper_named_by_its_full_path_still_reveals_the_browser_behind_it() {
+  // Codex review on PR #615. `COMMAND_WRAPPERS` matched the exact token, so
+  // `/usr/bin/env -u NO_COLOR w3m {url}` was not recognised as a wrapper at
+  // all: `executable_in` returned `/usr/bin/env`, and the pair of probes then
+  // checked the wrapper twice while never looking for `w3m`. A machine
+  // without the browser was waved through, and under tmux or zellij the pane
+  // opens, reports success, and dies with the process inside it.
+  //
+  // Writing the wrapper by its path is ordinary (a shebang-ish habit, a
+  // pinned coreutils, a nix store path), so the walk compares basenames.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("/usr/bin/env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    // The wrapper is there, the browser is not: the exact shape the probe
+    // exists to catch.
+    &|bin| bin == "/usr/bin/env",
+  );
+  let gwm::tui::BrowserPlan::System { why: Some(why) } = plan else {
+    panic!("a missing browser behind a qualified wrapper must still fall back");
+  };
+  assert!(
+    why.contains("w3m"),
+    "the refusal must name the browser, not the wrapper it hid behind: {why}"
+  );
+
+  // And it still opens when the browser is there too, so recognising the
+  // wrapper did not turn into refusing it.
+  let plan = gwm::tui::plan_terminal_browser(
+    URL,
+    std::path::Path::new("/tmp/gwm-test/wt"),
+    &tui_with_browser("/usr/bin/env -u NO_COLOR w3m {url}"),
+    Some("/tmp/sock,1,0".into()),
+    None,
+    None,
+    None,
+    &|bin| bin == "/usr/bin/env" || bin == "w3m",
+  );
+  assert!(
+    matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
+    "a qualified wrapper with its browser present must open a pane"
+  );
+}

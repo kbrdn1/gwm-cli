@@ -539,6 +539,37 @@ pub fn attach_pane_command(
   Some(argv)
 }
 
+/// [`attach_pane_command`] for a caller that already holds an **argv** rather
+/// than a shell line (issue #590).
+///
+/// The difference is not cosmetic, it is the reason this exists: the line
+/// form has to be re-parsed by *some* shell, and which shell that is depends
+/// on the platform. `[tui] terminal_browser` expands to an argv before it
+/// gets here, so there is no reason to join it and hand the result to
+/// `platform_shell()`, whose Windows answer is `cmd.exe` and cannot read the
+/// POSIX quoting `shell_words::join` writes.
+///
+/// * **zellij** runs its trailing argv directly, so the words go straight in
+///   and no shell is involved at all.
+/// * **tmux** takes one shell-command operand and there is no argv form, so
+///   the words are joined here. That shell is tmux's own `default-shell`, a
+///   POSIX one on every platform tmux runs on, which is what makes
+///   `shell_words::join` the correct quoting rather than a guess.
+/// * **herdr** gets `None`, as in [`attach_pane_command`] and for the same
+///   reason.
+pub fn attach_pane_argv(mux: Multiplexer, argv: &[String], command: &[String]) -> Option<Vec<String>> {
+  let mut argv = argv.to_vec();
+  match mux {
+    Multiplexer::Herdr => return None,
+    Multiplexer::Tmux => argv.push(shell_words::join(command)),
+    Multiplexer::Zellij => {
+      argv.push("--".into());
+      argv.extend(command.iter().cloned());
+    }
+  }
+  Some(argv)
+}
+
 // ---------------------------------------------------------------------------
 // herdr: running a command in a container it just opened (issue #591 / #599)
 // ---------------------------------------------------------------------------

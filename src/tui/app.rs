@@ -659,6 +659,11 @@ pub struct App {
   /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
   pub pty_overlay: Option<PtyOverlay>,
 
+  /// The view the open PTY overlay covers, restored when it closes (#590).
+  /// `None` when no overlay is open, or when it was opened from the table,
+  /// which is where every caller before `terminal_browser` came from.
+  pty_return: Option<View>,
+
   /// Exec profile picker overlay state (issue #325). Populated by
   /// [`Self::enter_exec_picker`] from `[exec.profiles.*]`; on `Enter` the
   /// run loop resolves the highlight to an argv and spawns a PTY overlay
@@ -876,6 +881,7 @@ impl App {
     }
     let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
+      pty_return: None,
       repo,
       display_repo_name: repo_name.clone(),
       repo_name,
@@ -3611,18 +3617,58 @@ impl App {
   /// Open the PTY overlay: store `pty` and switch to [`View::Pty`].
   pub fn open_pty_overlay(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
     self.pty_overlay = Some(pty);
+    self.pty_return = None;
     self.view = View::Pty;
   }
 
+  /// [`Self::open_pty_overlay`], but closing it lands back on the view it
+  /// covered instead of on the worktree table (issue #590).
+  ///
+  /// A separate entry point rather than a rule inside `open_pty_overlay`,
+  /// because "where does closing this land" is the caller's decision and the
+  /// callers genuinely disagree. Stashing the current view unconditionally
+  /// looked harmless and was not: the exec picker spawns its PTY from
+  /// `View::ExecPicker`, so every finished run would have dropped the user
+  /// back on the picker instead of the list, contradicting
+  /// `close_exec_picker`'s contract (Codex review on PR #615).
+  ///
+  /// A `terminal_browser` link is the one caller that opens from on top of a
+  /// modal: the rich PR/issue view and the CI checks overlay both open URLs,
+  /// and landing the reader on the table there loses the modal AND the row
+  /// they were on. Only the view is stashed, because opening a PTY touches no
+  /// other overlay state.
+  pub fn open_pty_overlay_over_current(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
+    let back = self.view;
+    self.open_pty_overlay(pty);
+    if back != View::Pty {
+      self.pty_return = Some(back);
+    }
+  }
+
   /// Close the PTY overlay: kill the child process, drop the state, and
-  /// return to [`View::List`]. Safe to call when no overlay is open.
+  /// return to whatever the overlay covered ([`View::List`] for every caller
+  /// that opened from the table). Safe to call when no overlay is open.
   pub fn close_pty_overlay(&mut self) {
     if let Some(ref mut pty) = self.pty_overlay {
       pty.kill();
     }
     self.pty_overlay = None;
+    let back = self.pty_return.take();
     if self.view == View::Pty {
-      self.view = View::List;
+      self.view = back.unwrap_or(View::List);
+      // A restored forge modal is revalidated before the reader can act on it
+      // (Codex review on PR #615). `View::Pty` does not suspend the auto
+      // refresh, and `close_forge_overlay_if_link_disagrees` returns early on
+      // any view but `DetailOverlay`, so a link that moved while the browser
+      // was up would come back to rows nobody re-checked, with `Enter`
+      // opening the old PR's URL. That is the exact bug class the guard was
+      // written for; it only needed to be asked again on the way back. Self
+      // gated, so it is a no-op for every other restored view.
+      self.close_forge_overlay_if_link_disagrees();
+      // Identity held, so the modal is still up: give it what landed while it
+      // was covered, or the reader comes back to rows the cache has already
+      // replaced (Codex review on PR #615).
+      self.resync_forge_overlay_from_cache();
     }
   }
 
@@ -7346,6 +7392,57 @@ impl App {
     }
   }
 
+  /// Re-run the open forge modal's sync against the fetch cache (Codex
+  /// review on PR #615).
+  ///
+  /// The companion of [`Self::close_forge_overlay_if_link_disagrees`], and
+  /// needed because that guard only answers "is this still the same PR".
+  /// `View::Pty` does not suspend the auto refresh, so a result can land
+  /// while the browser covers the modal; every sync that would absorb it
+  /// returns early on `view != DetailOverlay`, and the modal holds its own
+  /// rows rather than reading the cache at render time. An unchanged number
+  /// therefore restored the pre-browser rows over a cache that had moved,
+  /// and the reader had no way to tell.
+  ///
+  /// Routed through the same two syncs the landing paths use rather than
+  /// touching rows here, for the reason [`Self::land_pr_threads`] gives: the
+  /// view renders the side the link prefers, and that invariant lives in one
+  /// place.
+  ///
+  /// Exhaustive match with no `_` arm, the rule
+  /// [`crate::tui::state::detail_overlay::DetailKind::is_forge_linked`]
+  /// documents: a fourth consumer must not silently inherit "nothing to
+  /// resync".
+  fn resync_forge_overlay_from_cache(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay {
+      return;
+    }
+    match self.detail_overlay.kind {
+      DetailKind::CiChecks => {
+        if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+          let pr = pr.clone();
+          self.refresh_ci_overlay_on_pr_landing(&pr);
+        }
+      }
+      DetailKind::RichIssue => {
+        if let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() {
+          let issue = issue.clone();
+          self.sync_rich_overlay(RichSource::Issue(issue));
+        }
+      }
+      DetailKind::RichPr => {
+        if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+          let pr = pr.clone();
+          self.sync_rich_overlay(RichSource::Pr(pr));
+        }
+      }
+      // Agent rows come from the local session store, which the browser
+      // cannot have changed, and there is no fetch cache to re-read.
+      DetailKind::Agents => {}
+    }
+  }
+
   fn selected_branch_name(&self) -> Option<String> {
     self.selected().and_then(|w| w.branch.clone()).or_else(|| {
       self
@@ -8515,11 +8612,31 @@ pub fn mux_pane_status(name: &str, noun: &str, ok: bool, stdout: &str, stderr: &
   if ok {
     return format!("opened {} in new {}", name, noun);
   }
-  let detail = [stderr, stdout]
+  format!("mux-pane refused: {}", first_detail_line(stdout, stderr))
+}
+
+/// The first non-empty line a failed child said, stderr before stdout, for a
+/// status bar that has one line to explain itself.
+fn first_detail_line<'a>(stdout: &'a str, stderr: &'a str) -> &'a str {
+  [stderr, stdout]
     .iter()
     .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
-    .unwrap_or("no output");
-  format!("mux-pane refused: {}", detail)
+    .unwrap_or("no output")
+}
+
+/// The status line for a browser that places itself (#590), the job
+/// [`mux_pane_status`] does for a pane gwm opened.
+///
+/// Not that function with `noun = "pane"`, which is the shortcut this exists
+/// to refuse: gwm asked for **no** pane here, so "mux-pane refused" would name
+/// a step that never ran and send the user reading their multiplexer config
+/// for a browser that simply exited non-zero. What failed is the browser, and
+/// that is what the one line has to say.
+pub fn detached_browser_status(url: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in its own pane", url);
+  }
+  format!("browser refused: {}", first_detail_line(stdout, stderr))
 }
 
 /// Everything `o` on the agents overlay (#591) decides before a process is
@@ -8665,6 +8782,199 @@ pub fn agent_pane_status(kind: &str, noun: &str, active: bool, ok: bool, stdout:
     format!("{base}; still active elsewhere, the agent may fork or refuse")
   } else {
     base
+  }
+}
+
+/// Where a URL the TUI opens actually goes (issue #590).
+///
+/// Three rungs, in the order of how much of gwm stays on screen:
+///
+/// * [`MuxPane`]: the browser runs *beside* gwm. What the issue asks for,
+///   and the only rung that needs a multiplexer able to carry a command.
+/// * [`Overlay`]: a multiplexer is there but its container takes no command
+///   (herdr in every mode, a zellij tab), so the browser runs *over* gwm in
+///   the PTY overlay that already hosts lazygit and `[tui.macro*]`. Still a
+///   terminal browser, which is the point; the cost is the frame it covers,
+///   and `why` is what the status bar says instead of leaving that unexplained.
+/// * [`System`]: the OS opener, gwm's behaviour up to 1.9 and the default
+///   forever: `why` is `None` when nothing was configured, `Some` when the
+///   feature was asked for and could not be honoured. An opt-in that quietly
+///   does nothing reads as a broken feature.
+///
+/// [`MuxPane`]: BrowserPlan::MuxPane
+/// [`Overlay`]: BrowserPlan::Overlay
+/// [`System`]: BrowserPlan::System
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserPlan {
+  /// One control command that opens the pane/tab and runs the browser in it.
+  MuxPane {
+    argv: Vec<String>,
+    /// What was opened, for the status line: pane / window / tab.
+    noun: &'static str,
+  },
+  /// Run `argv` in the PTY overlay. `why` names the backend that refused a
+  /// pane, so the overlay does not look like a bug.
+  ///
+  /// An argv rather than a shell line: [`PtyOverlay::spawn`] execs
+  /// `argv[0] argv[1..]` directly, so wrapping it in `platform_shell()`
+  /// would add a re-parse for nothing, and on Windows that shell is
+  /// `cmd.exe`, which reads neither the POSIX quoting `shell_words::join`
+  /// writes nor `&` as anything but a command separator (Codex review on
+  /// PR #615).
+  ///
+  /// [`PtyOverlay::spawn`]: crate::tui::state::pty_overlay::PtyOverlay::spawn
+  Overlay { argv: Vec<String>, why: &'static str },
+  /// Launch `argv` and stop there: the browser places itself (issue #590,
+  /// `terminal_browser_open_in = "detached"`).
+  ///
+  /// Not a pane and not the overlay, and that is the whole point.
+  /// `terminal-browser open {url} --split right` asks the multiplexer for its
+  /// own pane and exits ~4s later, so hosting it in one of gwm's would split
+  /// twice. Hosting it in the PTY overlay is worse than wrong, it is
+  /// impossible: it draws through the terminal's image protocol, which
+  /// positions against the real window and lands in the screen's top-left
+  /// corner whatever the overlay's rect says.
+  Detached { argv: Vec<String> },
+  /// Hand the URL to the OS opener. `None` when `terminal_browser` is unset.
+  System { why: Option<String> },
+}
+
+/// Decide where `url` opens (issue #590).
+///
+/// The gate is the issue's own: **a terminal browser with nowhere to put it
+/// is worse than the system browser**, so an unset `terminal_browser` or an
+/// absent multiplexer is today's behaviour, unchanged, on every platform.
+///
+/// The env values are parameters rather than reads, the shape
+/// [`plan_agent_pane`] and [`crate::multiplexer::detect_multiplexer`] already
+/// use: `$TMUX` is also read by the clipboard path, so a test that unset it
+/// would pull every yank test in the same binary under the env lock.
+/// `on_path` is a parameter for the same reason. "The browser is not
+/// installed" is the branch the issue asks for ("detect if install"), and it
+/// cannot be driven on a runner whose `$PATH` nobody controls.
+///
+/// The level comes from `[tui] mux_open_in` / `mux_pane_direction`, the pair
+/// `t` and `o` already read (#589 / #608), so a user does not configure where
+/// panes open twice.
+// Eight parameters, one more than `plan_agent_pane`, and every one of them is
+// a test seam rather than a convenience: the three env values because `$TMUX`
+// is read by the clipboard path too (rewriting it in a test would pull every
+// yank test in the same binary under the env lock), and `on_path` because "the
+// browser is not installed" is a branch no runner's `$PATH` can be made to
+// produce. Bundling them into a struct would hide that and buy nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_terminal_browser(
+  url: &str,
+  cwd: &Path,
+  tui: &crate::config::TuiConfig,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+  on_path: &dyn Fn(&str) -> bool,
+) -> BrowserPlan {
+  use crate::multiplexer as mux_mod;
+  // Not configured: silent. This is the default, and a note on every `B`
+  // would be noise about a feature the user never asked for.
+  let Some(template) = tui.terminal_browser.as_deref() else {
+    return BrowserPlan::System { why: None };
+  };
+  // The gate. Nothing below runs without somewhere to put the browser.
+  let Some(mux) = mux_mod::detect_multiplexer(tmux, zellij, herdr) else {
+    return BrowserPlan::System {
+      why: Some("no multiplexer ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into()),
+    };
+  };
+  let Some(argv) = crate::config::expand_terminal_browser(template, url) else {
+    return BrowserPlan::System {
+      why: Some(format!("terminal_browser cannot render {url:?}")),
+    };
+  };
+  // A leading `KEY=VAL` is shell syntax, and no shell runs on this path: the
+  // template is tokenised precisely so the URL never meets one. Refused here
+  // rather than half-honoured, because the two halves disagree otherwise
+  // (Codex review on PR #615). `doctor::executable_in` deliberately walks
+  // *past* a leading assignment to find the real binary, which is right for
+  // the surfaces that do go through a shell, so the probe below would resolve
+  // `w3m`, find it, and wave the config through. Every consumer then execs
+  // `argv[0]` verbatim, the literal string `"NO_COLOR=1"`: the overlay and the
+  // detached path fail outright, and zellij opens the pane, reports success,
+  // and leaves a dead process inside it.
+  //
+  // `env` is the portable spelling and keeps working, being a real binary, so
+  // the refusal names it instead of just saying no. Only the *first* token is
+  // checked: `--url={url}` is a documented form and carries no assignment.
+  if let Some(assignment) = argv.first().filter(|t| !t.starts_with('=') && t.contains('=')) {
+    return BrowserPlan::System {
+      why: Some(format!(
+        "terminal_browser starts with the shell assignment {assignment:?}; write `env {assignment} ...` instead"
+      )),
+    };
+  }
+  // "detect if install" from the issue: probing beats spawning a missing
+  // file, because a failed spawn inside a mux pane closes the pane before
+  // anyone reads the error.
+  //
+  // The binary behind any wrapper, not `argv[0]`: `terminal_browser = "env -u
+  // NO_COLOR w3m {url}"` is a valid setting, and probing `env` there would
+  // pass on a machine with no `w3m` and open a pane that dies on the spot
+  // (Codex review on PR #615). `doctor` already walks this, `env -u NAME`'s
+  // detached operand included, so the walk is shared rather than re-written.
+  // A command that resolves to nothing keeps `argv[0]`, so the message still
+  // names something the user actually wrote.
+  // Both the wrapper and the binary behind it, because running the browser
+  // needs both (Codex review on PR #615). Probing only the one behind is the
+  // mirror of the bug that walk was written for: `env NO_COLOR=1 w3m {url}`
+  // on Windows finds `w3m.exe` while `env.exe` is absent, `env` being a
+  // coreutil Windows does not ship. The consumers exec `argv[0]`, so a
+  // missing wrapper dies exactly like a missing browser, and under zellij it
+  // dies inside a pane that reported success.
+  //
+  // `argv[0]` first: it is what the spawn reaches for, so when both are
+  // missing the message names the one that fails first.
+  let probe = crate::doctor::executable_in(&argv).unwrap_or_else(|| argv[0].clone());
+  for bin in [argv[0].as_str(), probe.as_str()] {
+    if !on_path(bin) {
+      return BrowserPlan::System {
+        why: Some(format!("{} not on PATH", bin)),
+      };
+    }
+  }
+  // A browser that places itself is launched and nothing else. Checked after
+  // the multiplexer gate rather than before it, because placing itself still
+  // means asking a multiplexer for a pane: with none running,
+  // `terminal-browser open` would take over the pane gwm is drawing in.
+  if tui.terminal_browser_open_in == crate::config::TerminalBrowserHost::Detached {
+    return BrowserPlan::Detached { argv };
+  }
+  let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
+  let noun = mux_mod::spawn_noun(mux, mode);
+  // "Can this backend run a command here" first, then "can it open this
+  // target at all", the order `macro_mux_command` asks in, so a zellij user
+  // hears about the tab rather than about a workspace flag they never set.
+  // Either refusal lands in the overlay: the browser still renders in the
+  // terminal, which is what was asked for.
+  if let Some(why) = mux_mod::macro_refusal(mux, mode) {
+    return BrowserPlan::Overlay { argv, why };
+  }
+  let open = match mux_mod::build_command(mux, &argv[0], cwd, mode, workspace) {
+    Ok(open) => open,
+    Err(why) => return BrowserPlan::Overlay { argv, why },
+  };
+  // `attach_pane_argv`, not `attach_pane_command`: the browser is already an
+  // argv, so no `platform_shell()` re-parse is needed and none happens. tmux
+  // still gets one joined operand because it has no argv form, and the shell
+  // that reads it is tmux's own, which is POSIX wherever tmux runs.
+  match mux_mod::attach_pane_argv(mux, &open, &argv) {
+    Some(spawn) => BrowserPlan::MuxPane { argv: spawn, noun },
+    // Unreachable behind `macro_refusal`, which already answered for every
+    // backend without a trailing-command form. Spelled out rather than
+    // unwrapped: the failure it guards is an empty pane and a dropped
+    // command, and that is worth being unrepresentable.
+    None => BrowserPlan::Overlay {
+      argv,
+      why: "this backend's panes take no command",
+    },
   }
 }
 

@@ -4,10 +4,10 @@
 //! the runner — they assert against the produced argv vectors.
 
 use gwm::multiplexer::{
-  attach_pane_command, build_command, build_herdr_command, build_herdr_process_info_command, build_herdr_run_command,
-  build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer, detect_tmux, detect_zellij,
-  herdr_pane_id, herdr_shell_is_idle, macro_mux_command, macro_refusal, spawn_noun, Multiplexer, SpawnMode,
-  SplitDirection,
+  attach_pane_argv, attach_pane_command, build_command, build_herdr_command, build_herdr_process_info_command,
+  build_herdr_run_command, build_tmux_command, build_zellij_command, detect_herdr, detect_multiplexer, detect_tmux,
+  detect_zellij, herdr_pane_id, herdr_shell_is_idle, macro_mux_command, macro_refusal, spawn_noun, Multiplexer,
+  SpawnMode, SplitDirection,
 };
 use std::path::Path;
 
@@ -970,5 +970,70 @@ fn herdr_run_takes_the_command_as_one_argument() {
   assert_eq!(
     build_herdr_process_info_command("w2K:p2C"),
     vec!["herdr", "pane", "process-info", "--pane", "w2K:p2C"]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// #590: attach_pane_argv, for a command that is already an argv
+// ---------------------------------------------------------------------------
+
+#[test]
+fn attach_pane_argv_puts_the_words_in_without_a_shell_on_zellij() {
+  // The reason this function exists next to `attach_pane_command`: zellij runs
+  // its trailing argv directly, so a caller holding an argv has no reason to
+  // join it and hand the result to `platform_shell()`, whose Windows answer is
+  // `cmd.exe` and cannot read POSIX quoting (Codex review on PR #615).
+  let open = build_zellij_command("w3m", Path::new("/tmp/wt"), SpawnMode::Split(SplitDirection::Right)).unwrap();
+  let url = "https://e.co/a?x=1&y=2";
+  let argv =
+    attach_pane_argv(Multiplexer::Zellij, &open, &["w3m".into(), url.into()]).expect("a zellij pane takes a command");
+
+  // The words go in after `--`, each its own element, so nothing re-parses the
+  // URL and its `&` can never separate two commands.
+  let tail: Vec<&str> = argv.iter().rev().take(3).rev().map(String::as_str).collect();
+  assert_eq!(tail, vec!["--", "w3m", url]);
+  assert!(
+    !argv.iter().any(|a| a.contains("-c") && a.contains("w3m")),
+    "no shell wrapper may appear on the zellij path, got: {argv:?}"
+  );
+}
+
+#[test]
+fn attach_pane_argv_joins_for_tmux_which_has_no_argv_form() {
+  // tmux takes ONE shell-command operand and hands it to its own
+  // `default-shell`, so the words have to be joined. That shell is POSIX
+  // wherever tmux runs, which is what makes `shell_words::join` the right
+  // quoting here rather than a guess about the host platform.
+  let open = build_tmux_command("w3m", Path::new("/tmp/wt"), SpawnMode::Split(SplitDirection::Right)).unwrap();
+  let url = "https://e.co/a;id&whoami?q=$(id)";
+  let argv = attach_pane_argv(Multiplexer::Tmux, &open, &["w3m".into(), url.into()]).expect("tmux takes an operand");
+
+  // One operand, appended whole, with the URL quoted so the shell tmux hands
+  // it to reads it as a single word.
+  assert_eq!(argv.len(), open.len() + 1);
+  let operand = argv.last().unwrap();
+  assert_eq!(operand, &shell_words::join(["w3m", url]));
+  assert_eq!(
+    shell_words::split(operand).unwrap(),
+    vec!["w3m".to_string(), url.to_string()],
+    "the operand must split back into exactly the two words it was built from"
+  );
+}
+
+#[test]
+fn attach_pane_argv_refuses_herdr_like_its_sibling() {
+  // Same refusal as `attach_pane_command`, and spelled out for the same
+  // reason: appending an operand `herdr pane split` ignores would open an
+  // empty pane and drop the command silently.
+  let open = build_herdr_command(
+    "w3m",
+    Path::new("/tmp/wt"),
+    SpawnMode::Split(SplitDirection::Right),
+    None,
+  )
+  .unwrap();
+  assert_eq!(
+    attach_pane_argv(Multiplexer::Herdr, &open, &["w3m".into(), "https://e.co/".into()]),
+    None
   );
 }

@@ -745,3 +745,41 @@ fn the_tui_tab_reaches_the_note_mode_setting() {
     );
   }
 }
+
+#[test]
+fn the_tui_tab_reaches_the_terminal_browser_setting() {
+  // #590 asks for the setting in `.gwm.toml` AND in the Settings pane, for
+  // the same reason as the three fields above: a knob only a TOML editor can
+  // reach is a knob most users never find.
+  //
+  // `Text`, not `Choice`: the value is a command line (`w3m {url}`), so there
+  // is no fixed set to cycle. That also makes the empty string reachable from
+  // the panel, which is how the feature is turned back off. The config reads
+  // `""` as unset (same convention as `[tui.open] shell_cmd`).
+  let fields = SettingsTab::Tui.fields();
+  assert!(
+    fields.contains(&SettingField::TerminalBrowser),
+    "terminal_browser must be reachable from the TUI tab, got {fields:?}"
+  );
+  assert_eq!(SettingField::TerminalBrowser.kind(), FieldKind::Text);
+  assert_eq!(SettingField::TerminalBrowser.key_path(), "tui.terminal_browser");
+  assert!(
+    SettingField::TerminalBrowser.choices().is_empty(),
+    "a command line has no fixed choice set to cycle"
+  );
+
+  // Unset is the default and shows as empty rather than as a fabricated
+  // command the user never set.
+  let cfg = gwm::config::Config::default();
+  assert_eq!(SettingField::TerminalBrowser.current(&cfg), "");
+  let cfg = gwm::config::Config {
+    tui: gwm::config::TuiConfig {
+      terminal_browser: Some("w3m {url}".into()),
+      ..Default::default()
+    },
+    ..Default::default()
+  };
+  assert_eq!(SettingField::TerminalBrowser.current(&cfg), "w3m {url}");
+  // And the row is addressable by lookup, not by a literal index.
+  let _ = tui_idx(SettingField::TerminalBrowser);
+}
