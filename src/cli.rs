@@ -18,7 +18,7 @@ use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_command, detect_herdr, detect_tmux, detect_zellij, Multiplexer, SpawnMode, SplitDirection,
 };
-use crate::naming::{sanitise_diagnostic_for_terminal, BranchSpec, WorktreeName};
+use crate::naming::{sanitise_for_terminal, BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
 use crate::removal;
@@ -2912,19 +2912,26 @@ fn triple_from_issue(
   let prefix = issue_templates::title_prefix_for(repo, config, &branch_type);
   let desc = issue_templates::desc_from_title(&status.title, &prefix)?;
 
-  // The title and the URL are arbitrary text from the forge; the slug is
-  // safe by construction (`kebab` keeps ASCII alphanumerics), the echo is
-  // not.
-  println!(
-    "✓ fetched issue #{} {}",
-    number,
-    sanitise_diagnostic_for_terminal(&status.title)
-  );
-  println!("  {}", sanitise_diagnostic_for_terminal(&status.url));
+  // Every value on these three lines is untrusted, and the slug is the only
+  // one that is safe by construction (`kebab` keeps ASCII alphanumerics and
+  // nothing else). The title, the URL and the labels are arbitrary text from
+  // the forge. The type is too: `--type` is argv, which clap hands through
+  // with its control bytes intact, and a type derived from the labels is a
+  // key of `[issue_template.by_type]`, i.e. a string out of an unvetted
+  // repo's `.gwm.toml` — #473's threat model exactly. It is echoed here
+  // *before* `BranchSpec::new_with_types` gets to reject it, so validation is
+  // not the guard.
+  //
+  // `sanitise_for_terminal` and not the diagnostic variant: these are
+  // single-line field values spliced into a line, and the diagnostic variant
+  // deliberately lets a newline through (re-indented) for the one message
+  // whose job is to point at a broken config line.
+  println!("✓ fetched issue #{} {}", number, sanitise_for_terminal(&status.title));
+  println!("  {}", sanitise_for_terminal(&status.url));
   println!(
     "  labels: {} → type: {}",
-    sanitise_diagnostic_for_terminal(&status.labels.join(", ")),
-    branch_type
+    sanitise_for_terminal(&status.labels.join(", ")),
+    sanitise_for_terminal(&branch_type)
   );
   Ok(Some((branch_type, number.to_string(), desc)))
 }

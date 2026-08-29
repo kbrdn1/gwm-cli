@@ -460,6 +460,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once per refresh interval, taking the reader's place in the comments with
   it. Refreshing the view with `f` still asks for them again.
 
+- **`gwm create --issue` sanitises every value it echoes**
+  ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)). The branch type was
+  printed raw on the summary line, and it reaches that line from two untrusted
+  places: `--type` is argv, which clap hands through with its control bytes
+  intact, and a type derived from the issue's labels is a key of
+  `[issue_template.by_type]`, a string out of an unvetted repo's `.gwm.toml`.
+  The echo happens before `BranchSpec::new_with_types` gets to reject the
+  type, so validation was not the guard. All three values on those lines now
+  go through `sanitise_for_terminal` rather than the diagnostic variant, which
+  deliberately lets a newline through and would break a line these values are
+  spliced into.
+
 - **The CLI no longer runs on the 1 MiB stack Windows gives a process's main
   thread** ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)).
   `Cli::parse` alone was sitting at that ceiling in a debug build: clap's

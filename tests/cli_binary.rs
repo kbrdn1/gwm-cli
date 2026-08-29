@@ -3536,6 +3536,44 @@ fn create_type_and_force_are_only_meaningful_alongside_issue() {
 }
 
 #[test]
+fn create_from_issue_never_echoes_a_control_byte_it_was_handed() {
+  // #473's threat model reaches this echo twice over. `--type` is argv, and
+  // clap hands a value through with its control bytes intact; a type derived
+  // from the labels is a key of `[issue_template.by_type]`, a string out of
+  // an unvetted repo's `.gwm.toml`. Both land in the same slot, and the slot
+  // is printed *before* `BranchSpec::new_with_types` gets to reject the type,
+  // so validation is not what stops the escape.
+  //
+  // The `contains("labels:")` half is what keeps this from passing vacuously:
+  // without it, a command that failed before printing anything would satisfy
+  // "no ESC on stdout" for entirely the wrong reason.
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modal layout", "OPEN", &["feature"]),
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594", "--type", "\u{1b}]0;pwned\u{7}feat"])
+    .assert()
+    // The type is not one of the repo's branch types, so the command fails —
+    // after the echo has already run.
+    .failure()
+    .stdout(predicate::str::contains("labels:"))
+    .stdout(predicate::str::contains("\u{1b}").not())
+    .stdout(predicate::str::contains("\u{7}").not());
+}
+
+#[test]
 fn create_help_documents_the_issue_flag() {
   Command::cargo_bin("gwm")
     .unwrap()
