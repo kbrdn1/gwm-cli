@@ -10,6 +10,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Working Tree listing reads as columns**
+  ([#622](https://github.com/kbrdn1/gwm-cli/issues/622)). The `M` / `A` / `D`
+  / `?` status letter used to lead the file name, so on a 27-file change set
+  it sat at a different offset on every row and the eye had to re-find it. It
+  is now a right-aligned column of its own, in both the sidebar pane and the
+  full-size overlay, and it keeps the per-category colour it always had.
+
+  In the overlay it shares the right edge with the `+N -M` counts from #592,
+  and the two yield in a fixed order: the letter is carved out first, so a
+  narrowing terminal drops the counts and never the letter. `+N -M` says how
+  much a file changed, the letter says what happened to it, and a row that no
+  longer says what it is has lost its subject rather than a detail.
+
+  The overlay title carries the changed-file count, `Working Tree (27)`. It
+  comes from the per-category counts rather than the row count, so it agrees
+  with the footer: the rows also hold directories, the `… N more` overflow
+  notice and the `✓ clean` sentinel, none of which is a changed file. It is
+  withheld while the listing is still being read, since `(0)` there would be a
+  claim rather than a count.
+
+  Directory rows lead with a `▾` disclosure caret instead of the folder glyph
+  they carried since #300. A folder glyph and a file glyph are two icons of
+  the same weight, which left indentation alone to separate the two levels;
+  a caret is a different shape. File rows keep their per-extension glyph.
+
+  The collapsed leading path the issue also asks for was already there:
+  `build_tree` has folded single-child directory chains into one `a/b/c` row
+  since #300.
+
 
 ## Past releases
 
