@@ -62,6 +62,9 @@ struct Fixture {
   /// What the stubbed `vhs` writes as `gwm --version`, or `None` to write
   /// nothing at all (the tape that exits 0 having produced no file).
   stamped_version: Option<&'static str>,
+  /// The path the stubbed `vhs` reports `gwm` resolved to, relative to the
+  /// repo. `None` means the one cargo just built, which is the happy path.
+  resolved_relative: Option<&'static str>,
   /// Leave an untracked file behind, so the trunk is dirty.
   dirty: bool,
   /// What the stubbed `gh` answers: a PR number, or nothing (no open PR).
@@ -73,6 +76,7 @@ impl Default for Fixture {
     Self {
       manifest_version: "9.9.9",
       stamped_version: Some("9.9.9"),
+      resolved_relative: None,
       dirty: false,
       open_pr: Some("42"),
     }
@@ -100,6 +104,11 @@ fn run_preflight(fx: Fixture) -> (TempDir, Output) {
   let built = repo.join("target/release/gwm");
   fs::create_dir_all(built.parent().unwrap()).unwrap();
   write_exec(&built, "echo stub");
+  // A second gwm at the same version, standing in for the one a ~/.bashrc puts
+  // ahead of the build. Only the path tells the two apart.
+  let decoy = repo.join("elsewhere/gwm");
+  fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+  write_exec(&decoy, "echo stub");
 
   // `cargo build --message-format=json` is how the script learns where the
   // binary landed; the plain build is a no-op.
@@ -116,9 +125,10 @@ exit 0"#,
 
   // `vhs` stands in for the version stamp: the one thing the preflight reads
   // out of it is the file the tape leaves behind.
+  let resolved = fx.resolved_relative.unwrap_or("target/release/gwm");
   let vhs = match fx.stamped_version {
     Some(v) => format!(
-      "echo \"$@\" >> \"$PWD/docs/_capture/.tmp/vhs.log\"\nprintf 'gwm {v}\\n' > \"$PWD/docs/_capture/.tmp/version.txt\"\nexit 0"
+      "echo \"$@\" >> \"$PWD/docs/_capture/.tmp/vhs.log\"\nprintf 'gwm {v}\\n' > \"$PWD/docs/_capture/.tmp/version.txt\"\nprintf '%s\\n' \"$PWD/{resolved}\" > \"$PWD/docs/_capture/.tmp/which.txt\"\nexit 0"
     ),
     // vhs exits 0 whether or not it wrote what the tape asked for, which is
     // the failure the `-s` check exists for.
@@ -148,7 +158,7 @@ exit 0"#,
   // `.tmp/` and the build output under `target/` are untracked files, every
   // case reads the trunk as dirty, and the happy path would assert nothing.
   fs::write(repo.join("docs/_capture/.gitignore"), ".tmp/\n").unwrap();
-  fs::write(repo.join(".gitignore"), "/target/\n/stub-bin/\n").unwrap();
+  fs::write(repo.join(".gitignore"), "/target/\n/stub-bin/\n/elsewhere/\n").unwrap();
 
   git(repo, &["init", "-q", "."]);
   git(repo, &["config", "user.email", "gwm@test"]);
@@ -192,8 +202,8 @@ fn a_clean_trunk_with_an_open_pr_captures_github_linking() {
     String::from_utf8_lossy(&out.stderr)
   );
   assert!(
-    text.contains("captured by gwm 9.9.9"),
-    "the stamp should be reported: {text}"
+    text.contains("captured by gwm 9.9.9") && text.contains("target/release/gwm"),
+    "the stamp should report the version and the file it came from: {text}"
   );
   assert!(
     text.contains("PR #42"),
@@ -237,6 +247,25 @@ fn a_stamp_that_was_never_written_stops_the_run() {
   assert!(
     text.contains("version-stamp.tape produced nothing"),
     "the run should say the tape produced nothing: {text}"
+  );
+}
+
+/// The same version out of a different binary is still the wrong binary.
+///
+/// This is the shape the v1.10.0 near miss had: a build 175 commits behind
+/// carrying the manifest's version number, which answers the version check
+/// perfectly and paints a UI the tree never had. Only the path separates them.
+#[test]
+fn a_gwm_that_is_not_the_build_stops_the_run() {
+  let (_dir, out) = run_preflight(Fixture {
+    resolved_relative: Some("elsewhere/gwm"),
+    ..Default::default()
+  });
+  let text = stdout(&out);
+  assert!(!out.status.success(), "a shadowed build must fail the run: {text}");
+  assert!(
+    text.contains("elsewhere/gwm") && text.contains("Same version is not the same binary"),
+    "the run should name both files: {text}"
   );
 }
 

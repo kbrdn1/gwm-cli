@@ -49,10 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/_capture/captured-version.txt` once the run completes. The new
   `docs_assets_tests::captures_were_generated_at_the_manifest_version` compares
   the two, so the release PR goes red rather than the docs going stale, and the
-  tag cannot be cut from a set that documents another version. What it proves
-  is that the build above won the `PATH`, not that the binary was fresh: two
-  builds of the same version are the same answer to it, and a companion guard
-  pins the phase order rather than leaving it to the prose.
+  tag cannot be cut from a set that documents another version. The tape reports
+  the path as well as the version, and the run refuses to continue unless it is
+  the file cargo just built: a stale binary carrying the same version number
+  answers a version check perfectly, which is the shape the v1.10.0 near miss
+  had. `tests/capture_pipeline_tests.rs` drives all of that against a throwaway
+  repo with stubbed tools, and a companion guard pins the phase order rather
+  than leaving it to the prose.
 
 ### Docs
 

@@ -372,13 +372,14 @@ fn every_tape_renders_at_retina_density() {
 /// answer to the manifest: the two part company exactly when a bump landed
 /// with no regeneration behind it.
 ///
-/// What it does **not** cover: two builds of the same version are the same
-/// answer to it. A capture taken by a binary that is stale without being
-/// older-versioned reads as current here, which is the v1.10.0 near miss (175
-/// commits behind, same version number). That trap is closed upstream instead,
-/// by `generate.sh` building the binary it drives out of the tree rather than
-/// resolving one on `PATH`; what the stamp adds is proof that the build won
-/// the `PATH`, which a shell startup file can still take back.
+/// The division of labour, since two builds of the same version answer the
+/// version identically (the v1.10.0 near miss was 175 commits behind at the
+/// same number): the *run* separates them, because the tape also reports the
+/// path `gwm` resolved to and `generate.sh` refuses to continue unless it is
+/// the file cargo just built. What reaches this guard is the version alone,
+/// because the committed stamp is one line and holds no machine path. So this
+/// asserts the bump, and `tests/capture_pipeline_tests.rs` asserts the
+/// binary.
 #[test]
 fn captures_were_generated_at_the_manifest_version() {
   let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

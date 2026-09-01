@@ -126,7 +126,8 @@ FAILED=()
 # whose startup files can prepend a directory of their own, and only vhs's own
 # resolution answers the question the captures answer.
 STAMP="$CAP/.tmp/version.txt"
-rm -f "$STAMP"
+WHICH="$CAP/.tmp/which.txt"
+rm -f "$STAMP" "$WHICH"
 echo "▸ version-stamp.tape"
 vhs "$CAP/version-stamp.tape" >/dev/null 2>&1 || true
 if [[ ! -s "$STAMP" ]]; then
@@ -141,7 +142,20 @@ if [[ "$CAPTURED" != "gwm $VERSION" ]]; then
   echo "    prepending ~/.cargo/bin, typically) is getting in front of it."
   exit 1
 fi
-echo "  ✓ captured by $CAPTURED"
+# The version is not enough on its own: a stale build carrying the same number
+# answers it identically, which is the shape the v1.10.0 near miss had (175
+# commits behind, same version). So compare the file. `-ef` is same device and
+# inode, so a symlink or a /private prefix does not read as a difference.
+RESOLVED=$(tr -d '\r' < "$WHICH" | head -n 1)
+if [[ -z "$RESOLVED" || ! "$RESOLVED" -ef "$BIN" ]]; then
+  echo "  ✗ vhs resolves gwm at '${RESOLVED:-nothing}', not the build at '$BIN'."
+  echo "    Same version is not the same binary: a build from another worktree answers"
+  echo "    the version check and paints a UI this tree never had. Something in the vhs"
+  echo "    shell's startup (a ~/.bashrc prepending ~/.cargo/bin, typically) is ahead of"
+  echo "    $BIN_DIR on PATH."
+  exit 1
+fi
+echo "  ✓ captured by $CAPTURED at $RESOLVED"
 
 # ── github-linking: the one capture taken off the demo fixture ────────────
 # It opens the TUI on a real repo, because the Issue·PR pane needs a remote
