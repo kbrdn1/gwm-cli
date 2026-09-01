@@ -8,43 +8,45 @@ set can be regenerated after a UI change with one command.
 ## regenerate everything
 
 ```bash
-# from the repo root — rebuilds the demo fixture, then runs every tape
+# from anywhere in the checkout: rebuilds the demo fixture, then runs every tape
 ./docs/_capture/generate.sh
 
 # reuse the existing demo fixture (faster; skips the rebuild)
 GWM_KEEP_DEMO=1 ./docs/_capture/generate.sh
 ```
 
-⚠️ **"every tape" is two tapes short**, and neither is announced by the script,
-so a regeneration run finishes with a tick over a set that still holds two stale
-assets (#575):
+One entry point, and since [#631](https://github.com/kbrdn1/gwm-cli/issues/631)
+it covers the whole set. `demo.tape` and `github-linking.tape` used to be run by
+hand, which is how a run could finish on a tick over two assets it had left
+stale (#575).
 
-| Tape | Why it is out of the loop | How to run it |
-|---|---|---|
-| `demo.tape` | the one long-form recording, and it mutates the fixture | see below |
-| `github-linking.tape` | needs a repo with a **remote and an open PR**, which the demo fixture does not have, so it `cd`s to the real `gwm-cli` checkout | see below |
+Requirements: `vhs`, `cargo`, a Nerd Font (`CaskaydiaCove Nerd Font Mono`, as
+set in each tape's `Set FontFamily`), and `gh` for the one capture taken off the
+demo repo. The run opens with a release build, so a cold tree pays a few minutes
+before the first tape; a warm one pays seconds.
 
-`github-linking.tape` is the one capture in the set that is not deterministic
-and not reproducible by anyone else: it hardcodes the maintainer's checkout
-path and photographs whatever that repo happens to be doing. The published
-`github-linking.png` was taken during the v1.9.0 release, so it shows a dirty
-`chore/release-1.9.0` branch, the real commit history, and a live `CI running
-11/12`. Regenerating it means being on a branch whose PR is open, or it captures
-an empty pane. Tracked separately rather than papered over here.
+### the order is three constraints, not a preference
 
-The Working Tree pane photographs whatever is uncommitted at that moment, so
-check `git status` before the shot: an untracked scratch directory left by some
-other tool lands in the published image and reads as part of the project.
+| Step | Why it cannot move |
+|---|---|
+| build `gwm` from this tree, `target/release` first on `PATH` | the TUI header paints a `gwm X.Y.Z` chip out of `CARGO_PKG_VERSION`, so the binary vhs resolves is what the docs end up claiming. A build from an unrelated worktree renders a capture that exists, sizes correctly and shows the wrong UI: v1.10.0 came within a commit of publishing a set 175 commits stale. |
+| `version-stamp.tape` | asks vhs what it actually resolved and writes the answer as text. The run stops when it is not the version in `Cargo.toml`, because a shell startup file can still put another `gwm` in front of the build above. |
+| `github-linking.tape`, first | it opens the TUI on **this** repo, so its Working Tree pane photographs whatever is uncommitted. It runs before anything else writes under `docs/`, and only on a clean tree whose branch has an open PR; otherwise the script skips it and says so. |
+| the demo-driven tapes | the bulk of the set, against the fixture `setup-demo.sh` builds. |
+| `demo.tape`, last | it creates and deletes a worktree and `rm -rf`s `.git/gwm/notes` in the fixture, so nothing else may run after it. |
 
-Requirements: `vhs`, an installed `gwm` on `PATH`, and a Nerd Font
-(`CaskaydiaCove Nerd Font Mono`, as set in each tape's `Set FontFamily`).
+The first constraint is why a release regenerates **after** the version bump is
+committed, never before: v1.8.0 shipped captures advertising the previous
+version, and v1.10.0 repeated it. `generate.sh` writes the version it captured
+with to `captured-version.txt`, and
+`docs_assets_tests::captures_were_generated_at_the_manifest_version` fails as
+soon as that stops matching `Cargo.toml`. The full release sequence is in
+[CONTRIBUTING.md § Releases](../../CONTRIBUTING.md#releases).
 
-`demo.tape` is **not** in `generate.sh`'s loop — it is the one long-form
-recording and is run on its own, from the repo root, after the fixture exists:
-
-```bash
-bash docs/_capture/setup-demo.sh && vhs docs/_capture/demo.tape
-```
+`github-linking.png` is still the one capture in the set that is not
+deterministic: it photographs a live repo, so it shows the branch, history and
+CI state of whatever was open at the time. The published shot was taken during
+a release, which is what it is meant to document.
 
 ⚠️ **`demo.tape` degrades silently without the agent store.** vhs does not
 check exit codes, so if `setup-demo.sh` has not run, the tape still records a
@@ -125,9 +127,10 @@ with one value, and the palette above it is unchanged.
 
 - `github-linking.tape` runs against the **real gwm-cli repo**, not the
   acme-api demo: the Issue·PR pane needs a live, `gh`-detectable PR, and the
-  demo has no remote. It is not part of `generate.sh`'s demo-driven loop; run it
-  directly (`vhs docs/_capture/github-linking.tape`) from a checkout whose
-  current branch has an open PR, adjusting the `/206` filter to that PR.
+  demo has no remote. `generate.sh` runs it first and points it at the checkout
+  being captured through `GWM_CAPTURE_REPO`; run on its own
+  (`vhs docs/_capture/github-linking.tape`) it falls back to the maintainer's
+  trunk. Either way it wants a clean tree whose current branch has an open PR.
 
 ## not covered here
 
