@@ -514,6 +514,58 @@ fn commits_modal_advertises_load_more_only_when_a_page_is_full() {
 }
 
 #[test]
+fn commits_modal_pins_its_branch_above_the_scrolling_body() {
+  use ratatui::text::Line;
+
+  // Issue #629: the listing said nothing about the worktree it was walked
+  // on, and the title cannot carry it — a centred overlay title is clipped
+  // from the LEFT, so a branch name is exactly the wrong payload for it,
+  // and it already spends itself on the row count. A fixed row above the
+  // body carries it instead.
+  //
+  // Asserted by POSITION, not by presence: a `buffer_contains` scan over
+  // the whole buffer passes just as well when the branch is the first line
+  // of the *body* and scrolls away with it, which is the bug this pins.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  let branch = app.worktrees[0]
+    .branch
+    .clone()
+    .expect("the fixture worktree is on a branch");
+  // Enough rows that the body overflows a short terminal. Injected rather
+  // than committed 40 times: this pins the header, not the revwalk.
+  app.commits.lines = (0..40).map(|i| Line::from(format!("commit row {i}"))).collect();
+
+  let top = modal_rows(&render_at(&mut app, 100, 18));
+  let row = top
+    .iter()
+    .position(|r| r.contains(&branch))
+    .unwrap_or_else(|| panic!("no branch row — modal rows:\n{}", top.join("\n")));
+  assert!(
+    top[row + 1].contains("commit row 0"),
+    "the listing starts on the row right below it — got {:?}",
+    top[row + 1]
+  );
+
+  // Drive the cursor past the end; the renderer clamps it to the body's
+  // max-scroll, i.e. "scrolled to the bottom".
+  app.commits.scroll = u16::MAX;
+  let bottom = modal_rows(&render_at(&mut app, 100, 18));
+  assert!(
+    bottom[row].contains(&branch),
+    "the branch row is FIXED: same line at max scroll — got {:?}, modal rows:\n{}",
+    bottom[row],
+    bottom.join("\n")
+  );
+  assert!(
+    !bottom[row + 1].contains("commit row 0"),
+    "and it is the body that moved under it — got {:?}",
+    bottom[row + 1]
+  );
+}
+
+#[test]
 fn command_logs_modal_renders_empty_placeholder() {
   let (_dir, mut app) = make_app();
   app.command_logs.entries.clear();
@@ -2839,6 +2891,98 @@ fn working_tree_modal_renders_a_loader_while_the_worker_is_out() {
   assert_present(&buf, "loading", "the loader, not a blank canvas");
   // The exit is still advertised while it waits.
   assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
+fn working_tree_modal_pins_its_worktree_and_path_above_the_scrolling_body() {
+  use ratatui::text::Line;
+
+  // Issue #629, the other half: the listing is a set of file names with no
+  // statement of which worktree they were read from, and the auto-refresh
+  // can move the list selection while the overlay is up. The row resolves
+  // from the path pinned in `WorkingTreeModal` rather than from the live
+  // selection, so it describes the same worktree the rows describe.
+  //
+  // Asserted by POSITION for the same reason the commits case is: presence
+  // alone passes on a row that scrolls away.
+  let (_dir, mut app) = make_app();
+  let wt = deletable_worktree("payment-webhooks");
+  app.worktrees = vec![wt.clone()];
+  app.working_tree.begin(Some(&wt.path));
+  app.working_tree.loading = false;
+  app.working_tree.lines = (0..40).map(|i| Line::from(format!("file-{i}.rs"))).collect();
+  app.view = View::WorkingTree;
+
+  let top = modal_rows(&render_at(&mut app, 100, 18));
+  let row = top
+    .iter()
+    .position(|r| r.contains("/tmp/gwm-test/payment-webhooks"))
+    .unwrap_or_else(|| panic!("no context row — modal rows:\n{}", top.join("\n")));
+  assert!(
+    top[row].contains("payment-webhooks"),
+    "the row carries the worktree name beside its path — got {:?}",
+    top[row]
+  );
+  assert!(
+    top[row + 1].contains("file-0.rs"),
+    "the listing starts on the row right below it — got {:?}",
+    top[row + 1]
+  );
+
+  app.working_tree.scroll = u16::MAX;
+  let bottom = modal_rows(&render_at(&mut app, 100, 18));
+  assert!(
+    bottom[row].contains("/tmp/gwm-test/payment-webhooks"),
+    "the context row is FIXED: same line at max scroll — got {:?}, modal rows:\n{}",
+    bottom[row],
+    bottom.join("\n")
+  );
+  assert!(
+    !bottom[row + 1].contains("file-0.rs"),
+    "and it is the body that moved under it — got {:?}",
+    bottom[row + 1]
+  );
+}
+
+#[test]
+fn working_tree_modal_keeps_its_context_row_while_the_worker_is_out() {
+  use ratatui::text::Line;
+
+  // The loader arm returns early (PR #612), so it is a second renderer with
+  // its own layout. Without the row there, the loader and the first loaded
+  // row land on different lines and the content visibly jumps when the
+  // worker returns.
+  let (_dir, mut app) = make_app();
+  let wt = deletable_worktree("payment-webhooks");
+  app.worktrees = vec![wt.clone()];
+  app.working_tree.begin(Some(&wt.path));
+  app.view = View::WorkingTree;
+  assert!(app.is_working_tree_loading(), "the overlay opens on its loader");
+
+  let waiting = modal_rows(&render(&mut app));
+  let row = waiting
+    .iter()
+    .position(|r| r.contains("/tmp/gwm-test/payment-webhooks"))
+    .unwrap_or_else(|| panic!("no context row while loading — modal rows:\n{}", waiting.join("\n")));
+  assert!(
+    waiting[row + 1].contains("loading"),
+    "the loader sits under it — got {:?}",
+    waiting[row + 1]
+  );
+
+  // The same line in the loaded arm: the two renderers are separate, so a
+  // row present in only one of them makes the content jump when the worker
+  // lands.
+  app.working_tree.loading = false;
+  app.working_tree.lines = vec![Line::from("src/tui/ui.rs")];
+  let loaded = modal_rows(&render(&mut app));
+  assert!(
+    loaded[row].contains("/tmp/gwm-test/payment-webhooks") && loaded[row + 1].contains("src/tui/ui.rs"),
+    "the listing lands exactly where the loader was — rows {:?} / {:?}, modal rows:\n{}",
+    loaded[row],
+    loaded[row + 1],
+    loaded.join("\n")
+  );
 }
 
 #[test]
