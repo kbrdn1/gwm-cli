@@ -47,6 +47,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "new worktree (form opens)",
     },
     PaletteEntry {
+      action: Action::CreateFromIssue,
+      name: "create-from-issue",
+      description: "new worktree from an issue that already exists (derives type + slug)",
+    },
+    PaletteEntry {
       action: Action::DeleteConfirm,
       name: "delete",
       description: "delete the selected worktree(s) (with confirm)",

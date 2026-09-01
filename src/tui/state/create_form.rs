@@ -37,6 +37,15 @@ pub enum Mode {
   #[default]
   Structured,
   Freeform,
+  /// Collecting the number of an issue that already exists on the forge
+  /// (issue #625), to derive the triple from it the way `gwm create --issue`
+  /// does. One field, [`Field::Issue`], and no type selector: the type is
+  /// what is being derived.
+  ///
+  /// Transient by design. The fetch's result switches the form to
+  /// [`Mode::Structured`] with the derived values in place, so what the user
+  /// confirms is the ordinary create form showing the branch it will write.
+  FromIssue,
 }
 
 /// Which input is currently focused inside the create overlay. Selected
@@ -100,6 +109,17 @@ pub struct CreateForm {
   pub issue: String,
   pub desc: String,
   pub name: String,
+  /// The issue number a [`Mode::FromIssue`] submit is waiting a forge answer
+  /// for (issue #625).
+  ///
+  /// The orchestrator is a *second* consumer of `TaskMsg::GithubIssue`, which
+  /// also fires for issues nothing asked this form about (the sidebar
+  /// prefetch, a selection change, an explicit refresh), and the spine's
+  /// generation guard is consumed before the form sees the message. So the
+  /// number is stored and compared: a result for anything else is not this
+  /// form's answer, and prefilling from it would fill the form from an issue
+  /// the user never named.
+  pub awaiting_issue: Option<u64>,
   /// The structured fields the repo's patterns ask for, in pattern order
   /// (issue #418). Private, because the form's invariant is that [`Self::field`]
   /// is always one of these (or `Name` in free-form mode) — a focused field the
@@ -116,6 +136,7 @@ impl Default for CreateForm {
       issue: String::new(),
       desc: String::new(),
       name: String::new(),
+      awaiting_issue: None,
       fields: DEFAULT_FIELDS.to_vec(),
     }
   }
@@ -176,6 +197,21 @@ impl CreateForm {
     self.issue.clear();
     self.desc.clear();
     self.name.clear();
+    self.awaiting_issue = None;
+  }
+
+  /// Open on the issue number, to derive the triple from an issue that
+  /// already exists (issue #625).
+  ///
+  /// Focus is `Field::Issue` whatever the repo's patterns carry, and
+  /// deliberately so: this mode presents that one input regardless, because
+  /// the number is what gets *fetched* rather than what gets written. A
+  /// `{type}/{desc}` repo discards it from the branch name and still has an
+  /// issue to read the title and labels off.
+  pub fn enter_from_issue(&mut self) {
+    self.reset();
+    self.mode = Mode::FromIssue;
+    self.field = Field::Issue;
   }
 
   /// Flip between the structured triple and a free-form name (issue #416),
@@ -192,6 +228,15 @@ impl CreateForm {
         self.mode = Mode::Structured;
         self.field = self.entry_field();
       }
+      // `FromIssue` has no toggle. It is a two-step mode — ask, then confirm
+      // the prefilled structured form — so the way out is answering it or
+      // cancelling, and the toggle is left as the one verb that swaps between
+      // the two modes that are alternative ways of typing the same worktree.
+      // Guarded here rather than at the key handler: every path in flips the
+      // mode through this function, and the handler's arm has to keep
+      // matching so the key is swallowed rather than falling through to the
+      // literal-input fallback, which would type `t` into the number.
+      Mode::FromIssue => {}
     }
   }
 
@@ -213,7 +258,9 @@ impl CreateForm {
   /// point of #418: a pattern that writes no issue number must not be able to
   /// put focus on an Issue field the renderer never draws.
   fn rotate(&mut self, step: isize) {
-    if self.mode == Mode::Freeform || self.fields.is_empty() {
+    // Both single-field modes stay put rather than walking focus onto inputs
+    // they do not present.
+    if matches!(self.mode, Mode::Freeform | Mode::FromIssue) || self.fields.is_empty() {
       return;
     }
     let at = self.fields.iter().position(|f| *f == self.field).unwrap_or(0) as isize;
@@ -272,6 +319,9 @@ impl CreateForm {
   fn accepts_input(&self) -> bool {
     match self.mode {
       Mode::Freeform => self.field == Field::Name,
+      // The number is what gets fetched, not what gets written, so this mode
+      // accepts it whether or not the repo's patterns carry `{issue}`.
+      Mode::FromIssue => self.field == Field::Issue,
       Mode::Structured => self.fields.contains(&self.field),
     }
   }

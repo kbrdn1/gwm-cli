@@ -1096,6 +1096,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
       }
     }
     Action::Create if !app.picker_mode => app.enter_create(),
+    Action::CreateFromIssue if !app.picker_mode => app.enter_create_from_issue(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
     // #484: `Space` marks the cursor row. Picker-gated — `gwm switch` picks
     // exactly one path, so a mark set has nothing to act on there.

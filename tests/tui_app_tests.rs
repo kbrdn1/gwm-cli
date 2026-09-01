@@ -2981,6 +2981,7 @@ fn filled_cells_floors_partial_progress() {
 // ---- Issue / PR linking (issue #67) -------------------------------------
 
 use gwm::github::{CiState, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use gwm::tui::state::create_form::Mode;
 use gwm::tui::{GitHubFetchState, LinkPromptStage, LinkTarget};
 
 fn make_app_on_branch(name: &str) -> (tempfile::TempDir, git2::Repository, App) {
@@ -17516,4 +17517,151 @@ fn a_wrapper_named_by_its_full_path_still_reveals_the_browser_behind_it() {
     matches!(plan, gwm::tui::BrowserPlan::MuxPane { .. }),
     "a qualified wrapper with its browser present must open a pane"
   );
+}
+
+// ---- create-from-issue (issue #625) --------------------------------------
+
+fn issue_fixture(number: u64, title: &str, labels: &[&str], state: IssueState) -> IssueStatus {
+  IssueStatus {
+    number,
+    title: title.into(),
+    state,
+    url: format!("https://example.test/issues/{number}"),
+    labels: labels.iter().map(|l| (*l).to_string()).collect(),
+    updated_at: "2026-08-29T00:00:00Z".into(),
+    detail: Default::default(),
+  }
+}
+
+#[test]
+fn a_result_for_another_issue_leaves_the_create_form_alone() {
+  // The form is a *second* consumer of `TaskMsg::GithubIssue`, which also
+  // fires for the sidebar prefetch and for an explicit refresh, and the
+  // spine's generation guard is consumed before the form sees the message.
+  // Without the number comparison, the form would fill from an issue the
+  // user never named.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.issue.push_str("594");
+  app.create_form.awaiting_issue = Some(594);
+
+  let claimed = app.apply_awaited_issue(597, &Ok(issue_fixture(597, "other", &["bug"], IssueState::Open)));
+
+  assert!(!claimed, "a result for another issue is not this form's answer");
+  assert_eq!(app.create_form.mode, Mode::FromIssue, "the mode must not flip");
+  assert_eq!(app.create_form.issue, "594", "the typed number must survive");
+  assert!(app.create_form.desc.is_empty(), "nothing may be derived from it");
+  assert_eq!(app.create_form.awaiting_issue, Some(594), "the form is still waiting");
+}
+
+#[test]
+fn a_result_that_lands_after_the_form_closed_is_ignored() {
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.awaiting_issue = Some(594);
+  app.view = View::List;
+
+  let claimed = app.apply_awaited_issue(594, &Ok(issue_fixture(594, "late", &["feature"], IssueState::Open)));
+
+  assert!(!claimed, "the form is gone; the message is nobody's answer");
+  assert!(app.create_form.desc.is_empty());
+}
+
+#[test]
+fn the_awaited_result_prefills_the_structured_form_rather_than_creating() {
+  // Prefill, not create: the derivation is a guess about a title, and this
+  // is the one surface that can show the guess before committing to it.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.issue.push_str("594");
+  app.create_form.awaiting_issue = Some(594);
+
+  let claimed = app.apply_awaited_issue(
+    594,
+    &Ok(issue_fixture(
+      594,
+      "modals should follow layout",
+      &["feature"],
+      IssueState::Open,
+    )),
+  );
+
+  assert!(claimed);
+  assert_eq!(
+    app.create_form.mode,
+    Mode::Structured,
+    "the user confirms the ordinary form"
+  );
+  assert_eq!(app.create_form.issue, "594");
+  assert_eq!(app.create_form.desc, "modals-should-follow-layout");
+  assert_eq!(app.create_form.awaiting_issue, None);
+  assert_eq!(app.view, View::Create, "nothing is created yet");
+}
+
+#[test]
+fn labels_that_name_no_type_land_focus_on_the_type_selector() {
+  // Where `gwm create --issue` has to refuse (a non-interactive command has
+  // nowhere to ask, hence `--type`), the form asks: everything else is
+  // filled and the one unsettled thing is under the cursor.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.awaiting_issue = Some(594);
+
+  app.apply_awaited_issue(
+    594,
+    &Ok(issue_fixture(594, "modal layout", &["question"], IssueState::Open)),
+  );
+
+  assert_eq!(app.create_form.field, Field::Type, "the unsettled field takes focus");
+  assert_eq!(app.create_form.desc, "modal-layout", "the rest is still derived");
+}
+
+#[test]
+fn a_failed_lookup_keeps_the_number_so_a_retry_is_one_keystroke() {
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.issue.push_str("594");
+  app.create_form.awaiting_issue = Some(594);
+
+  let claimed = app.apply_awaited_issue(594, &Err("could not resolve host".into()));
+
+  assert!(claimed, "the form asked for it, so the answer is its own");
+  assert_eq!(app.create_form.mode, Mode::FromIssue, "stay where the retry happens");
+  assert_eq!(app.create_form.issue, "594");
+  assert_eq!(app.create_form.awaiting_issue, None, "no longer waiting");
+  assert!(
+    app.status.contains("594"),
+    "the failure names the number: {}",
+    app.status
+  );
+}
+
+#[test]
+fn a_cached_issue_prefills_without_waiting_for_a_message() {
+  // `spawn_github_issue` coalesces on a cache hit and no `TaskMsg::GithubIssue`
+  // ever arrives, so a submit that only marked the form as waiting would sit
+  // on a loader forever for any issue the TUI had already fetched.
+  //
+  // `submit_create` can read the environment (the TOFU trust gate consults
+  // `GWM_ALLOW_BOOTSTRAP` / `GWM_TRUST_LEDGER`), so the binary's env lock is
+  // held across it — `env_guard_invariant_tests` enforces that for every
+  // caller, not only the ones that actually reach the gate.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let (_dir, mut app) = make_app();
+  app.github.complete_issue(
+    594,
+    Ok(issue_fixture(594, "modal layout", &["feature"], IssueState::Open)),
+  );
+
+  app.enter_create_from_issue();
+  app.create_form.issue.push_str("594");
+  app.submit_create().unwrap();
+
+  assert_eq!(
+    app.create_form.mode,
+    Mode::Structured,
+    "the cache hit prefills straight away"
+  );
+  assert_eq!(app.create_form.desc, "modal-layout");
+  assert_eq!(app.create_form.awaiting_issue, None, "nothing is being waited for");
 }

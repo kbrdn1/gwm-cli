@@ -121,6 +121,9 @@ define_actions! {
   Refresh           => "refresh",
   Sync              => "sync",
   Create            => "create",
+  // #625: the create form opened on an issue number, to derive the triple
+  // from an issue that already exists on the forge.
+  CreateFromIssue   => "create_from_issue",
   DeleteConfirm     => "delete",
   Bootstrap         => "bootstrap",
   ToggleDeleteBranch => "delete_branch",
@@ -194,6 +197,11 @@ impl Action {
     matches!(
       self,
       Action::Create
+        // #625: same repo context as `Create` — it composes the branch from
+        // the active repo's patterns and queries the active repo's forge, so
+        // a stale workspace selection would target the previous repo twice
+        // over.
+        | Action::CreateFromIssue
         | Action::DeleteConfirm
         | Action::Bootstrap
         | Action::Sync
@@ -554,6 +562,10 @@ impl Keymap {
       // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
       def(Action::Sync, &["s"]),
       def(Action::Create, &["n"]),
+      // #625: `Ctrl+n` reads as the sibling of `n`, and the single-letter
+      // space is full — `n` being a single key confiscates its own prefix,
+      // so `n i` is not available either (#484).
+      def(Action::CreateFromIssue, &["Ctrl+n"]),
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),
       // #290: `D` (uppercase) is now ToggleDeleteBranch — `p` repurposed as Pull.

@@ -28,7 +28,7 @@ use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::lifecycle::{self, HookPhase, HookSkips};
-use crate::naming::{BranchSpec, WorktreeName};
+use crate::naming::{sanitise_for_terminal, BranchSpec, WorktreeName};
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
@@ -2054,6 +2054,10 @@ impl App {
             self.persist_loaded_issue_title(status);
             self.sync_rich_overlay(RichSource::Issue(status.clone()));
           }
+          // #625: the create form is a second consumer of this message when
+          // it is waiting on this very number. Before `complete_issue` so the
+          // status line it sets is not overwritten by the refresh report.
+          self.apply_awaited_issue(number, &result);
           self.github.complete_issue(number, result);
           applied = true;
           github_applied = true;
@@ -2940,6 +2944,7 @@ impl App {
     use super::ui::HintContext;
     match self.create_form.mode {
       Mode::Freeform => HintContext::CreateFreeform,
+      Mode::FromIssue => HintContext::CreateFromIssue,
       Mode::Structured => HintContext::Create,
     }
   }
@@ -2954,7 +2959,11 @@ impl App {
     use super::ui::HintContext;
     match self.create_form.mode {
       Mode::Freeform => HintContext::RenameFreeform,
-      Mode::Structured => HintContext::Rename,
+      // The rename modal never opens in `FromIssue`: nothing routes there,
+      // and deriving a name for a worktree that already exists is what
+      // `gwm link` is for. It shares the structured row rather than growing
+      // a context no surface can reach.
+      Mode::FromIssue | Mode::Structured => HintContext::Rename,
     }
   }
 
@@ -5955,6 +5964,11 @@ impl App {
   fn worktree_name_from_form(&self) -> std::result::Result<WorktreeName, String> {
     match self.create_form.mode {
       Mode::Freeform => WorktreeName::freeform(&self.create_form.name).map_err(|e| e.to_string()),
+      // `FromIssue` has no name to compose yet — that is the point of the
+      // round trip. `submit_create` branches before reaching here; the live
+      // preview reaches here and gets a reason rather than a half-built
+      // branch built from an empty type.
+      Mode::FromIssue => Err("waiting for the issue".into()),
       Mode::Structured => {
         let type_ = self
           .branch_types
@@ -6436,6 +6450,22 @@ impl App {
     self.status = format!("{} · esc: cancel", self.structured_form_instruction());
   }
 
+  /// Open the create form on an issue number, to derive the triple from an
+  /// issue that already exists (issue #625).
+  ///
+  /// The counterpart of `gwm create --issue <N>`, and deliberately not its
+  /// mirror image: the CLI has to *refuse* labels that select no branch type
+  /// or two, because a non-interactive command has nowhere to ask and
+  /// `--type` is the escape hatch. A form does have somewhere to ask, so
+  /// those cases land the user on the type selector with everything else
+  /// filled in.
+  pub fn enter_create_from_issue(&mut self) {
+    self.view = View::Create;
+    self.create_form.enter_from_issue();
+    self.create_failure = None;
+    self.status = "issue number, then enter: derive the branch from it · esc: cancel".into();
+  }
+
   pub fn create_next_field(&mut self) {
     self.create_form.next_field();
   }
@@ -6538,6 +6568,11 @@ impl App {
           // The submit field is named from the patterns, not hardcoded to
           // `desc` (#418): a pattern without one told the user to press enter
           // on a field the form does not present.
+          // #625: unreachable through this arm — the toggle is a no-op in
+          // this mode — but the match is over the mode, so it is written out
+          // rather than folded into a catch-all that would hide a future
+          // path in.
+          Mode::FromIssue => "issue number, then enter: derive the branch from it".into(),
           Mode::Structured if back.is_empty() => self.structured_form_instruction(),
           Mode::Structured => format!("{}{back}free-form", self.structured_form_instruction()),
         };
@@ -6550,6 +6585,10 @@ impl App {
         // all, since Enter then only ever rotated.
         let submit_field = match self.create_form.mode {
           Mode::Freeform => Field::Name,
+          // `FromIssue` presents `Issue` alone whatever the patterns carry,
+          // so `last_field()` (which reads the patterns) would name an input
+          // this mode does not draw and Enter would only ever rotate.
+          Mode::FromIssue => Field::Issue,
           Mode::Structured => self.create_form.last_field(),
         };
         if self.create_form.field == submit_field {
@@ -6571,6 +6610,144 @@ impl App {
     CreateKey::Handled
   }
 
+  /// Resolve the number typed in [`Mode::FromIssue`] into a prefilled
+  /// structured form (issue #625).
+  ///
+  /// Two entry points into one prefill. A number the TUI has already fetched
+  /// (a linked row, the sidebar prefetch, a second attempt after `Esc`) is
+  /// read straight out of the cache, because `spawn_github_issue` coalesces
+  /// on a cache hit and no `TaskMsg::GithubIssue` would ever arrive — the
+  /// form would sit on a loader forever. Anything else marks the number as
+  /// awaited and spawns the worker, and
+  /// [`Self::apply_awaited_issue`] finishes the job when the result lands.
+  fn derive_from_issue(&mut self) -> Result<()> {
+    let typed = self.create_form.issue.trim();
+    let Some(number) = typed.parse::<u64>().ok().filter(|n| *n > 0) else {
+      self.status = "type the number of an issue that already exists, then enter".into();
+      return Ok(());
+    };
+
+    // Same refusal as `gwm create --issue`, and for the same reason: this is
+    // usually a wrong number. Checked before anything is fetched, and it
+    // reads the link `gwm list` renders, so a worktree attached by hand with
+    // `gwm link` counts too.
+    if let Some(existing) = self.worktrees.iter().find(|w| w.link.issue == Some(number)) {
+      self.status = format!("#{} already has a worktree: {}", number, existing.name);
+      self.view = View::List;
+      self.create_form.reset();
+      return Ok(());
+    }
+
+    if let GitHubFetchState::Loaded(status) = self.github.issue_fetch_state(number) {
+      let status = status.clone();
+      self.prefill_from_issue(&status);
+      return Ok(());
+    }
+
+    let Some(slug) = self.github.link_slug.clone() else {
+      self.status = "no forge remote: cannot look the issue up".into();
+      return Ok(());
+    };
+    self.create_form.awaiting_issue = Some(number);
+    if !self.spawn_github_issue(number, &slug) {
+      // Not a cache hit (that branch returned above), so the spine
+      // coalesced onto a worker already in flight for this number. Its
+      // result reaches `apply_awaited_issue` like any other.
+      self.status = format!("looking up #{} …", number);
+      return Ok(());
+    }
+    self.spinner.reset();
+    self.status = format!("looking up #{} …", number);
+    Ok(())
+  }
+
+  /// Apply a `TaskMsg::GithubIssue` result to a form that asked for it
+  /// (issue #625).
+  ///
+  /// Returns `true` when the message was this form's answer, so the caller
+  /// knows the status line has been claimed.
+  ///
+  /// The number comparison is the whole guard. This is a *second* consumer of
+  /// a message that also fires for the sidebar prefetch and for an explicit
+  /// refresh, and the spine's generation check is consumed before the form
+  /// sees it, so a result for any other issue must leave the form alone.
+  /// `pub` for `tests/tui_app_tests.rs`: the staleness guard is the whole
+  /// point of this function and it is not reachable through the event loop
+  /// from an integration test.
+  pub fn apply_awaited_issue(&mut self, number: u64, result: &std::result::Result<IssueStatus, String>) -> bool {
+    if self.create_form.awaiting_issue != Some(number) || self.view != View::Create {
+      return false;
+    }
+    self.create_form.awaiting_issue = None;
+    match result {
+      Ok(status) => {
+        let status = status.clone();
+        self.prefill_from_issue(&status);
+      }
+      Err(e) => {
+        // Stay in `FromIssue` with the number still typed: the forge said no
+        // (wrong number, no network), and retrying is one keystroke.
+        self.status = format!("#{}: {}", number, sanitise_for_terminal(e));
+      }
+    }
+    true
+  }
+
+  /// Fill the structured form from a fetched issue and hand it back to the
+  /// user (issue #625).
+  ///
+  /// Derived through the very functions `gwm create --issue` uses, so the two
+  /// surfaces cannot produce different slugs for the same title.
+  ///
+  /// It prefills rather than creating. The derivation is a guess about a
+  /// title, and this is the one surface that can show the guess before
+  /// committing to it: the user sees the branch the form will write, adjusts
+  /// the type or the slug, and confirms with a second Enter through the
+  /// ordinary, already-tested submit path.
+  fn prefill_from_issue(&mut self, status: &IssueStatus) {
+    let derived_type = crate::issue_templates::type_from_labels(&self.config.issue_template, &status.labels).ok();
+    if let Some(index) = derived_type
+      .as_deref()
+      .and_then(|name| self.branch_types.iter().position(|t| t.name == name))
+    {
+      self.create_form.type_index = index;
+    }
+    let prefix = derived_type
+      .as_deref()
+      .map(|name| crate::issue_templates::title_prefix_for(&self.repo, &self.config, name))
+      .unwrap_or_default();
+    let desc = crate::issue_templates::desc_from_title(&status.title, &prefix).unwrap_or_default();
+
+    // Set, not toggled: `toggle_mode` is a no-op in this mode, and the prefill
+    // is not the user asking to switch — it is this mode finishing.
+    self.create_form.mode = Mode::Structured;
+    self.create_form.field = self.create_form.entry_field();
+    self.create_form.issue = status.number.to_string();
+    self.create_form.desc = desc;
+    self.create_form.awaiting_issue = None;
+
+    // Where the CLI refuses, the form asks: land focus on the type selector
+    // so the one thing the labels could not settle is the one thing under
+    // the cursor.
+    let mut notes: Vec<String> = Vec::new();
+    match derived_type {
+      Some(name) => notes.push(format!("type: {}", sanitise_for_terminal(&name))),
+      None => {
+        self.create_form.field = Field::Type;
+        notes.push("labels do not name one type: pick it".into());
+      }
+    }
+    if status.state == IssueState::Closed {
+      notes.push("issue is closed".into());
+    }
+    self.status = format!(
+      "#{} {} · {} · enter: create",
+      status.number,
+      sanitise_for_terminal(&status.title),
+      notes.join(" · ")
+    );
+  }
+
   pub fn submit_create(&mut self) -> Result<()> {
     // Issue #416: free-form validation lands here rather than per keystroke,
     // so the user can type through an intermediate state. A rejected name
@@ -6584,6 +6761,13 @@ impl App {
     // other still demanding a value it would discard — two composers of one
     // value drift, and this is the second time on this form (the previews did
     // it in #476).
+    // Issue #625: this mode has no branch to compose yet. Enter asks the
+    // forge, and the answer prefills the structured form; the create itself
+    // is the second Enter, through this same function.
+    if self.create_form.mode == Mode::FromIssue {
+      return self.derive_from_issue();
+    }
+
     let wt_name = match self.worktree_name_from_form() {
       Ok(n) => n,
       Err(e) => {

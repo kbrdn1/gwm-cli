@@ -218,6 +218,64 @@ fn create_modal_renders_title_fields_and_buttons() {
 }
 
 #[test]
+fn create_from_issue_modal_shows_one_field_and_no_empty_preview() {
+  // #625: the triple is empty until the forge answers, so expanding the
+  // patterns over it renders the literal `/#-` — a branch this form is not
+  // about to write. The preview is replaced rather than shown empty, and the
+  // type selector and slug field are not drawn at all: this mode has one
+  // input.
+  //
+  // Asserted against the rendered buffer, not against the mode: a guard that
+  // matched by name would pass while the modal drew the structured form.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  assert_eq!(app.view, View::Create);
+  let buf = render(&mut app);
+
+  assert_present(&buf, "from issue", "the title says which mode this is");
+  assert_present(&buf, "Issue", "the one field it collects");
+  assert_present(&buf, "read off the issue", "what the missing preview is replaced by");
+  assert_absent(
+    &buf,
+    "structured",
+    "the toggle is inert here, so the hint row does not offer it",
+  );
+  assert_absent(&buf, "Branch :", "no preview of a triple that does not exist yet");
+  assert_absent(&buf, "Dir    :", "same for the directory row");
+  assert_absent(&buf, "Desc", "the slug is derived, not typed here");
+}
+
+#[test]
+fn create_from_issue_modal_becomes_the_structured_form_once_the_issue_lands() {
+  // The prefill is the point: what the user confirms is the ordinary create
+  // form, showing the branch it will write.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.awaiting_issue = Some(594);
+  app.apply_awaited_issue(
+    594,
+    &Ok(gwm::github::IssueStatus {
+      number: 594,
+      title: "modals should follow layout".into(),
+      state: gwm::github::IssueState::Open,
+      url: "https://example.test/issues/594".into(),
+      labels: vec!["feature".into()],
+      updated_at: "2026-08-29T00:00:00Z".into(),
+      detail: Default::default(),
+    }),
+  );
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Branch", "the preview is back");
+  assert_present(&buf, "Desc", "and so is the slug field");
+  assert_present(
+    &buf,
+    "modals-should-follow-layout",
+    "the derived slug is in the form, visible before it is committed to",
+  );
+}
+
+#[test]
 fn create_modal_renders_loader_while_create_is_in_flight() {
   let (_dir, mut app) = make_app();
   app.enter_create();
