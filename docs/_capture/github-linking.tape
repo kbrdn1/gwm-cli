@@ -4,6 +4,14 @@
 # wants to run from a branch whose PR is open; `F` fetches, then screenshot.
 # No filter: the pane follows the selected row, and the default selection is the
 # checkout the tape cds into.
+#
+# That checkout comes from GWM_CAPTURE_REPO, which generate.sh sets to the tree
+# it is capturing; the fallback keeps a bare `vhs docs/_capture/github-linking.tape`
+# working. Hardcoded, the path pointed at the maintainer's trunk whatever
+# checkout the run was launched from, which is the wrong tree as soon as a
+# release is cut in a worktree. The Working Tree pane photographs whatever is
+# uncommitted there, which is why generate.sh refuses to run this against a
+# dirty tree (#631).
 Output docs/_capture/.tmp/github-linking.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
@@ -16,7 +24,7 @@ Set Theme { "name": "gwm-grey", "background": "#141414", "foreground": "#d6d6d6"
 Hide
 Type `export PS1="$ "`
 Enter
-Type "cd /Users/kbrdn1/Projects/Perso/gwm-cli"
+Type "cd ${GWM_CAPTURE_REPO:-/Users/kbrdn1/Projects/Perso/gwm-cli}"
 Enter
 Type "clear"
 Enter
