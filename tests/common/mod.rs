@@ -7,6 +7,7 @@ use tempfile::TempDir;
 
 /// Initialize a tempdir with a fresh git repo on `main` carrying one empty
 /// commit. Returns the tempdir (kept alive by the caller) and the repo handle.
+#[allow(dead_code)] // unused by capture_pipeline_tests; cargo compiles common per-test crate.
 pub fn init_repo() -> (TempDir, Repository) {
   let dir = TempDir::new().unwrap();
   let repo = Repository::init(dir.path()).unwrap();
