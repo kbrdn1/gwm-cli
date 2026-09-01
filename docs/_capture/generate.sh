@@ -17,9 +17,11 @@
 #      whichever `gwm` a shell resolves decides what the docs claim.
 #      version-stamp.tape asks vhs itself, and the run stops when the answer is
 #      not the version in Cargo.toml.
-#   2. github-linking.tape runs *first*, and only against a clean tree: it
+#   2. github-linking.tape runs *first*, and only against a clean trunk: it
 #      opens the TUI on this repo, so its Working Tree pane photographs
-#      whatever is uncommitted, starting with the captures this run rewrites.
+#      whatever is uncommitted there, starting with the captures this run
+#      rewrites. The trunk, not the current worktree: the pane follows the
+#      selected row, and that is row 1 wherever the tape was launched.
 #   3. demo.tape runs *last*: it creates and deletes a worktree and drops
 #      `.git/gwm/notes` in the demo fixture.
 #
@@ -47,9 +49,15 @@ VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 echo "▸ building gwm $VERSION from this tree"
 cargo build --release >/dev/null
 export PATH="$ROOT/target/release:$PATH"
-# Read by github-linking.tape, the one tape that opens the TUI on a real repo:
-# it has to be *this* checkout, not whichever one the tape was written against.
-export GWM_CAPTURE_REPO="$ROOT"
+# The one tape that opens the TUI on a real repo photographs the *selected
+# row*, and that row is the repo's main checkout whatever directory the tape
+# was launched from: gwm discovers the repo, not the worktree, and the default
+# selection is row 1. Measured rather than assumed. Run from a clean worktree,
+# the capture came back showing the trunk's branch, the trunk's PR and the
+# trunk's uncommitted `.gwm.toml`. So the tape is pointed at the trunk, and the
+# trunk is the tree the gate below reads.
+TRUNK=$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
+export GWM_CAPTURE_REPO="$TRUNK"
 
 # vhs exits 0 whether or not it wrote what the tape asked for, so a run has to
 # be checked against the files on disk rather than against its status. Two
@@ -117,20 +125,24 @@ fi
 echo "  ✓ captured by $CAPTURED"
 
 # ── github-linking: the one capture taken off the demo fixture ────────────
-# It opens the TUI on this repo, because the Issue·PR pane needs a remote with
-# a live PR and the demo has neither. Both of its preconditions are invisible
-# at capture time (vhs exits 0 over a dirty Working Tree pane and over an
-# empty Issue·PR pane alike), so they are checked here and the tape is skipped
-# out loud rather than publishing a photograph of a release in progress (#631).
+# It opens the TUI on a real repo, because the Issue·PR pane needs a remote
+# with a live PR and the demo has neither. Both of its preconditions live in
+# the trunk (see above) and both are invisible at capture time, since vhs exits
+# 0 over a dirty Working Tree pane and over an empty Issue·PR pane alike. So
+# they are checked here and the tape is skipped out loud rather than publishing
+# a photograph of a release in progress (#631).
+#
+# The corollary is that the capture documents the trunk, so a release wants to
+# be cut there: from a worktree, the shot shows whatever the trunk is on.
 GITHUB_LINKING=""
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [[ -n "$(git status --porcelain)" ]]; then
-  GITHUB_LINKING="the working tree is not clean, and it would be in the shot"
-elif ! PR=$(gh pr view --json number,state -q 'select(.state == "OPEN") | .number' 2>/dev/null) ||
+BRANCH=$(git -C "$TRUNK" rev-parse --abbrev-ref HEAD)
+if [[ -n "$(git -C "$TRUNK" status --porcelain)" ]]; then
+  GITHUB_LINKING="$TRUNK is not clean, and its Working Tree pane is the shot"
+elif ! PR=$(cd "$TRUNK" && gh pr view --json number,state -q 'select(.state == "OPEN") | .number' 2>/dev/null) ||
   [[ -z "$PR" ]]; then
   # `state`, not merely a hit: `gh pr view` answers with a merged or closed PR
   # just as readily, and the pane only has something to show for an open one.
-  GITHUB_LINKING="no open PR on $BRANCH, so the Issue·PR pane would be empty"
+  GITHUB_LINKING="no open PR on $BRANCH in $TRUNK, so the Issue·PR pane would be empty"
 else
   echo "▸ github-linking: $BRANCH → PR #$PR"
   run_checked github-linking.tape || FAILED+=("github-linking.tape")

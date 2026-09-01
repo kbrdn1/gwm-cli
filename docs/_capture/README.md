@@ -31,7 +31,7 @@ before the first tape; a warm one pays seconds.
 |---|---|
 | build `gwm` from this tree, `target/release` first on `PATH` | the TUI header paints a `gwm X.Y.Z` chip out of `CARGO_PKG_VERSION`, so the binary vhs resolves is what the docs end up claiming. A build from an unrelated worktree renders a capture that exists, sizes correctly and shows the wrong UI: v1.10.0 came within a commit of publishing a set 175 commits stale. |
 | `version-stamp.tape` | asks vhs what it actually resolved and writes the answer as text. The run stops when it is not the version in `Cargo.toml`, because a shell startup file can still put another `gwm` in front of the build above. |
-| `github-linking.tape`, first | it opens the TUI on **this** repo, so its Working Tree pane photographs whatever is uncommitted. It runs before anything else writes under `docs/`, and only on a clean tree whose branch has an open PR; otherwise the script skips it and says so. |
+| `github-linking.tape`, first | it opens the TUI on a real checkout of this repo, and the pane follows the selected row, which is the **main checkout** wherever the tape was launched from. So it photographs the trunk's branch, PR and uncommitted files. It runs before anything else writes under `docs/`, and only when the trunk is clean and its branch has an open PR; otherwise the script skips it and says so. |
 | the demo-driven tapes | the bulk of the set, against the fixture `setup-demo.sh` builds. |
 | `demo.tape`, last | it creates and deletes a worktree and `rm -rf`s `.git/gwm/notes` in the fixture, so nothing else may run after it. |
 
@@ -46,7 +46,9 @@ soon as that stops matching `Cargo.toml`. The full release sequence is in
 `github-linking.png` is still the one capture in the set that is not
 deterministic: it photographs a live repo, so it shows the branch, history and
 CI state of whatever was open at the time. The published shot was taken during
-a release, which is what it is meant to document.
+a release, which is what it is meant to document. Since it is always the trunk
+in the frame, a release cut in a worktree gets a capture of `dev` rather than of
+the release branch, which is a reason to cut it in the trunk.
 
 ⚠️ **`demo.tape` degrades silently without the agent store.** vhs does not
 check exit codes, so if `setup-demo.sh` has not run, the tape still records a

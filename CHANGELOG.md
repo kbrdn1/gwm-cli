@@ -25,10 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `PATH`, instead of documenting whichever build a shell happens to resolve;
   v1.10.0 came within a commit of publishing captures 175 commits stale that
   way, correctly sized and green. `github-linking.tape` runs first, before
-  anything else writes under `docs/`, and only against a clean tree whose
-  branch has an open PR, so the release commit cannot leak into the Working
-  Tree pane it photographs; it now follows the checkout being captured rather
-  than a hardcoded path. `demo.tape` runs last, because it is the one tape that
+  anything else writes under `docs/`, and only when the repo's main checkout is
+  clean and its branch has an open PR, so the release commit cannot leak into
+  the Working Tree pane it photographs. The main checkout, not the current
+  directory: the pane follows the selected row, which is row 1 wherever the
+  tape ran, and the tape now takes that path from the script rather than
+  hardcoding one. `demo.tape` runs last, because it is the one tape that
   changes the fixture for the others. Both were previously outside the loop and
   unreported, so a run finished on a tick over two assets it had left stale.
 

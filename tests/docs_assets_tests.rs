@@ -452,7 +452,7 @@ fn the_capture_run_keeps_its_order() {
   let build = at("cargo build --release");
   let path = at("export PATH=\"$ROOT/target/release:");
   let stamp = at("vhs \"$CAP/version-stamp.tape\"");
-  let clean = at("git status --porcelain");
+  let clean = at("status --porcelain");
   let linking = at("run_checked github-linking.tape");
   // `\nfor t in `, not the first tape in the list: reordering the list is
   // allowed, dropping the loop is not, and an anchor that moves with an
