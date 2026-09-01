@@ -1584,11 +1584,8 @@ fn render_section_body(
       width: area.width.saturating_sub(scrollbar_reserve(area, lines.len())),
       ..area
     };
-    // Afford it against the rect the terminal gave, then place it against
-    // the rows: the pane is routinely far wider than its listing.
     let picked = meta_pick(usable.width as usize, &[m.width], WT_BADGE_FLOOR)?;
-    let placed = meta_ceiling(usable, &lines, picked + META_GAP);
-    let (left, right) = carve_right(placed, picked);
+    let (left, right) = carve_right(usable, picked);
     Some((left, right, m))
   });
   match split {
@@ -1606,38 +1603,14 @@ fn render_section_body(
   }
 }
 
-/// Narrow `area` to what its rows actually occupy plus `columns_w`, so a
-/// right-hand column lands just past the longest row instead of at the far
-/// edge of a much wider rect.
-///
-/// Without this the letters of a Working Tree listing end up a hundred cells
-/// from the names they describe whenever the pane is wide (the sidebar is
-/// stacked by default, so on a wide terminal that is the nominal case), and
-/// a column that far away breaks the row-to-letter link harder than the
-/// inline badge it replaced ever did. "A fixed column" is what the listing
-/// needed, not "flush against the border".
-///
-/// The offset moves between two worktrees because their content differs.
-/// That is not the jump the measured [`MetaColumn::width`] exists to
-/// prevent: that one is about a column shifting **while the listing
-/// scrolls**, and this ceiling is computed once per frame over every row.
-fn meta_ceiling(area: Rect, lines: &[Line<'_>], columns_w: usize) -> Rect {
-  let content = lines.iter().map(Line::width).max().unwrap_or(0);
-  Rect {
-    width: area.width.min(content.saturating_add(columns_w) as u16),
-    ..area
-  }
-}
-
 /// Take `width` cells plus a [`META_GAP`] off the right of `area`, returning
 /// the content rect and the column rect.
 ///
-/// The placement half of the pair whose decision half is [`meta_pick`]. They
-/// are separate because they answer against different widths: whether a
-/// column is affordable is a question about the rect the terminal gave,
-/// while where it goes is a question about the rows actually in it. Deciding
-/// against the narrowed rect would drop a column the terminal had room for,
-/// merely because the listing was short.
+/// The placement half of the pair whose decision half is [`meta_pick`], kept
+/// apart from it so the cascade of two columns can afford them both against
+/// the same untouched width before carving either: pricing the second one
+/// against a rect the first has already narrowed would drop it for the wrong
+/// reason.
 fn carve_right(area: Rect, width: usize) -> (Rect, Rect) {
   let [left, _gap, right] = Layout::horizontal([
     Constraint::Min(0),
@@ -5243,21 +5216,15 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   // letter says what. A row that no longer says what it is has lost
   // its subject, not its detail.
   //
-  // Both are afforded against the rect the terminal gave, at their own
-  // floors, and only then placed against the rows: the overlay is 90% of the
-  // screen, so a column pinned to its border would sit a hundred cells from
-  // the name it describes on any listing of ordinary paths.
+  // Each column is afforded at its OWN floor, and the letter's is far lower
+  // than the counts': see [`WT_BADGE_FLOOR`].
   let avail = text_area.width as usize;
   let badge_w = meta_pick(avail, &[app.working_tree.badges.width], WT_BADGE_FLOOR);
-  let badge_cost = badge_w.map_or(0, |w| w + META_GAP);
   let stats_w = meta_pick(
-    avail.saturating_sub(badge_cost),
+    avail.saturating_sub(badge_w.map_or(0, |w| w + META_GAP)),
     &[app.working_tree.meta.width],
     WT_NAME_FLOOR,
   );
-  let stats_cost = stats_w.map_or(0, |w| w + META_GAP);
-  let text_area = meta_ceiling(text_area, &padded, badge_cost + stats_cost);
-
   let (rest, badge_rect) = match badge_w {
     Some(w) => {
       let (left, right) = carve_right(text_area, w);

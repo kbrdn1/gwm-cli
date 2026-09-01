@@ -2839,27 +2839,23 @@ fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
   };
   app.view = View::WorkingTree;
 
-  // Wide: the counts are drawn, one gap past the longest row rather than out
-  // at the modal's border. Border-flush was this guard's original wording
-  // (#592); #622 replaced it, because the overlay is 90% of the screen and a
-  // column 140 cells from the name it describes cannot be read as its column.
-  // The invariant that survives is stronger: the position is a property of
-  // the CONTENT, so widening the terminal must not move it.
-  let counts_column = |app: &mut App, width: u16| -> usize {
-    let rows = modal_rows(&render_at(app, width, 40));
-    let row = rows
-      .iter()
-      .find(|r| r.contains("ui.rs"))
-      .unwrap_or_else(|| panic!("no row for the file at {width}. modal was:\n{}", rows.join("\n")))
-      .clone();
-    row
-      .find("+120 -34")
-      .unwrap_or_else(|| panic!("the counts ride the row they describe: got {row:?}"))
-  };
-  assert_eq!(
-    counts_column(&mut app, 120),
-    counts_column(&mut app, 180),
-    "the counts follow the listing, not the modal's right border"
+  // Wide: the counts are drawn, and nothing but the border follows them.
+  // #622 adds the status letter to their right, so what trails the counts is
+  // asserted up to that letter rather than to the border directly.
+  let wide = render_at(&mut app, 180, 40);
+  let rows = modal_rows(&wide);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("no row for the file. modal was:\n{}", rows.join("\n")));
+  assert!(
+    row.contains("+120 -34"),
+    "the counts ride the row they describe: got {row:?}"
+  );
+  let after = row.find("+120 -34").unwrap() + "+120 -34".len();
+  assert!(
+    row[after..].chars().all(|c| c == ' ' || c == '│' || c == '║'),
+    "and they are pinned right: only padding and the border follow, got {row:?}"
   );
 
   // Narrow: the name survives whole, the column is what goes. The modal takes
@@ -2936,7 +2932,7 @@ fn the_status_letter_rides_the_right_edge_and_outlives_the_counts() {
   // Issue #622: two right-hand columns, and they yield in a fixed order.
   // `+120 -34` says how much changed, the letter says what changed. A row
   // that no longer says what it is has lost its subject, not its detail, so
-  // the letter is carved out first and is the one that survives a squeeze.
+  // the letter takes the outer slot and is the one that survives a squeeze.
   let (_dir, mut app) = make_app();
   app.working_tree.lines = vec![Line::from("├─ src/tui/"), Line::from("└─ ui.rs")];
   app.working_tree.meta = MetaColumn {
@@ -2949,46 +2945,32 @@ fn the_status_letter_rides_the_right_edge_and_outlives_the_counts() {
   };
   app.view = View::WorkingTree;
 
-  let positions = |app: &mut App, width: u16| -> (usize, usize) {
-    let rows = modal_rows(&render_at(app, width, 40));
-    let row = rows
-      .iter()
-      .find(|r| r.contains("ui.rs"))
-      .unwrap_or_else(|| panic!("no row for the file at {width}. modal was:\n{}", rows.join("\n")))
-      .clone();
-    let counts = row
-      .find("+120 -34")
-      .unwrap_or_else(|| panic!("the counts are drawn: got {row:?}"));
-    let letter = row
-      .rfind('M')
-      .unwrap_or_else(|| panic!("the status letter is drawn: got {row:?}"));
-    assert!(letter > counts, "the letter sits outside the counts: got {row:?}");
-    (counts, letter)
-  };
-
-  // Wide: both columns are drawn, the letter outermost, and both sit beside
-  // the listing. Widening the terminal by 60 cells must not move either, or
-  // they are tracking the border instead of the content.
-  assert_eq!(
-    positions(&mut app, 120),
-    positions(&mut app, 180),
-    "both columns follow the listing, not the modal's right border"
-  );
-  let (_, letter_at) = positions(&mut app, 180);
+  // Wide: both are drawn, the letter outermost and flush against the border.
+  let rows = modal_rows(&render_at(&mut app, 180, 40));
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("no row for the file. modal was:\n{}", rows.join("\n")));
+  let counts_at = row
+    .find("+120 -34")
+    .unwrap_or_else(|| panic!("the counts are drawn: got {row:?}"));
+  let letter_at = row
+    .rfind('M')
+    .unwrap_or_else(|| panic!("the status letter is drawn: got {row:?}"));
+  assert!(letter_at > counts_at, "the letter sits outside the counts: got {row:?}");
   assert!(
-    letter_at < 40,
-    "the letter sits beside a 12-cell listing, not out at 180: got {letter_at}"
+    row[letter_at + 1..].chars().all(|c| c == ' ' || c == '│' || c == '║'),
+    "and nothing but padding and the border follows it: got {row:?}"
   );
 
   // Narrow enough to drop the counts, wide enough to keep the letter. The
   // modal takes 90% of the terminal and spends two cells on its border, so
-  // 20 columns leave a 16-cell body: past the `1 + META_GAP + WT_BADGE_FLOOR`
-  // (11) the letter needs, and the 13 cells it leaves are under the
-  // `8 + META_GAP + WT_BADGE_FLOOR` (18) the counts would need. 26 would NOT
-  // do: it leaves 21, which seats both, and the assertion would pass for the
+  // 38 columns leave a 32-cell body: past the `1 + META_GAP + WT_BADGE_FLOOR`
+  // (11) the letter needs, and the 29 cells it leaves are under the
+  // `8 + META_GAP + WT_NAME_FLOOR` (34) the counts would need. 48 would NOT
+  // do: it leaves 40, which seats both, and the assertion would pass for the
   // wrong reason.
-  let mid = render_at(&mut app, 20, 40);
-  let rows = modal_rows(&mid);
+  let rows = modal_rows(&render_at(&mut app, 38, 40));
   let row = rows
     .iter()
     .find(|r| r.contains("ui.rs"))
@@ -2999,7 +2981,20 @@ fn the_status_letter_rides_the_right_edge_and_outlives_the_counts() {
   );
   assert!(
     row.trim_end_matches([' ', '│', '║']).ends_with('M'),
-    "the letter survives the squeeze, still trailing its row: got {row:?}"
+    "the letter survives the squeeze, still pinned right: got {row:?}"
+  );
+
+  // Narrower still: on a 22-column terminal the body is 17 cells, under the
+  // 11 + 8 both columns would need together but past what the letter alone
+  // costs. It is the last thing standing beside the name.
+  let rows = modal_rows(&render_at(&mut app, 22, 40));
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("the name survives whatever else goes. modal was:\n{}", rows.join("\n")));
+  assert!(
+    row.trim_end_matches([' ', '│', '║']).ends_with('M'),
+    "the letter is what a narrow overlay keeps: got {row:?}"
   );
 }
 

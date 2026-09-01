@@ -19,12 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now a right-aligned column of its own, in both the sidebar pane and the
   full-size overlay, and it keeps the per-category colour it always had.
 
-  Both surfaces place the column one gap past the longest row rather than
-  against their border. The sidebar is stacked by default, so on a wide
-  terminal a border-flush letter lands a hundred cells from the name it
-  describes, which is the opposite of the fixed column the issue asked for.
-  The `+N -M` counts from #592 move with it, since they had the same problem
-  on a 90%-of-the-screen overlay.
+  The column is pinned to the right edge of its surface at every width, and
+  the letter is priced far below what the `+N -M` column costs: a pane or an
+  overlay too narrow to seat the counts still seats the letter. Before this
+  the letter was an inline badge two cells wide that no width ever dropped,
+  so charging it the counts' floor would have lost a capability rather than
+  yielded a column.
 
   In the overlay the letter shares the right end of the row with those counts,
   and the two yield in a fixed order: the letter is carved out first, so a

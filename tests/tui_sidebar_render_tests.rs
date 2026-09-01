@@ -359,49 +359,40 @@ fn working_tree_section_pins_the_status_letter_to_its_right_edge() {
 }
 
 #[test]
-fn the_status_column_sits_beside_the_listing_not_at_the_far_border() {
-  // The defect the first cut of #622 shipped, caught by eye: the sidebar is
-  // STACKED by default, so on a wide terminal the Working Tree pane spans the
-  // whole screen and a border-flush column put the letter ~115 cells from the
-  // name. That breaks the row-to-letter link harder than the inline badge it
-  // replaced, which is the opposite of what the issue asked for.
+fn the_status_column_hugs_the_right_edge_at_every_width() {
+  // Issue #622, validated on the rendered pane: the letter is pinned to the
+  // pane's right edge, and it stays there as the terminal narrows. The
+  // responsive half is the point of asserting a range rather than one width,
+  // since the pane's own width is a fraction of a fraction: the sidebar
+  // split, then the section split, then whatever the scrollbar claims.
   //
-  // The invariant, asserted without a magic distance: the column places
-  // against the CONTENT's extent, so widening the terminal by 80 cells must
-  // not move the letter at all. A border-flush column moves by 80.
+  // 24 is the narrowest of these that still renders a Working Tree row at
+  // all; below it the section collapses and there is nothing to assert on.
   let dir = repo_with_commits(1);
   std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
   std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
 
-  let letter_column = |width: u16| -> usize {
+  for width in [150u16, 100, 70, 46, 30, 24] {
     let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
     let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
     warm_sidebar(&mut app);
     terminal.draw(|f| draw(f, &mut app)).unwrap();
     terminal.draw(|f| draw(f, &mut app)).unwrap();
+
     let lines = buffer_lines(&terminal);
     let row = lines
       .iter()
       .find(|l| l.contains("mod.rs"))
-      .unwrap_or_else(|| panic!("no row for the file at {width}: screen was:\n{}", lines.join("\n")));
-    row
-      .rfind('?')
-      .unwrap_or_else(|| panic!("the letter is drawn at {width}: got {row:?}"))
-  };
-
-  let narrow = letter_column(120);
-  let wide = letter_column(200);
-  assert_eq!(
-    narrow, wide,
-    "the letter follows the listing, not the pane's right border: it moved from {narrow} to \
-     {wide} when the terminal grew by 80 cells"
-  );
-  // And it is genuinely near the content rather than merely stable: the
-  // longest row of this two-row listing is the collapsed `src/app` directory.
-  assert!(
-    wide < 40,
-    "the column sits beside a listing under 20 cells wide, not out at 200: got {wide}"
-  );
+      .unwrap_or_else(|| panic!("{width}: no row for the file. screen was:\n{}", lines.join("\n")));
+    assert!(
+      row.trim_end_matches([' ', '│']).ends_with('?'),
+      "{width}: the letter is the last thing on its row, inside the pane's edge: got {row:?}"
+    );
+    assert!(
+      row.rfind('?').unwrap() > row.find("mod.rs").unwrap() + "mod.rs".len() + 1,
+      "{width}: and it is a column rather than a suffix glued to the name: got {row:?}"
+    );
+  }
 }
 
 #[test]
