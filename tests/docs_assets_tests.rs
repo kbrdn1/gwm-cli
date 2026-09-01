@@ -450,7 +450,7 @@ fn the_capture_run_keeps_its_order() {
   };
 
   let build = at("cargo build --release");
-  let path = at("export PATH=\"$ROOT/target/release:");
+  let path = at("export PATH=\"$BIN_DIR:");
   let stamp = at("vhs \"$CAP/version-stamp.tape\"");
   let clean = at("status --porcelain");
   let linking = at("run_checked github-linking.tape");

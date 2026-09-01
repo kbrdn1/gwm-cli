@@ -23,7 +23,7 @@ Set Theme { "name": "gwm-grey", "background": "#141414", "foreground": "#d6d6d6"
 Hide
 Type `export PS1="$ "`
 Enter
-Type "cd ${GWM_CAPTURE_REPO:-/Users/kbrdn1/Projects/Perso/gwm-cli}"
+Type `cd "${GWM_CAPTURE_REPO:-/Users/kbrdn1/Projects/Perso/gwm-cli}"`
 Enter
 Type "clear"
 Enter

@@ -48,7 +48,17 @@ ROOT=$PWD
 VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 echo "▸ building gwm $VERSION from this tree"
 cargo build --release >/dev/null
-export PATH="$ROOT/target/release:$PATH"
+# Where cargo actually put it, asked rather than assumed: CARGO_TARGET_DIR and
+# `build.target-dir` both move the artefacts, and prefixing a directory that
+# holds nothing leaves PATH resolving to whatever comes next. The stamp below
+# only catches that when the versions differ, so the binary is checked here.
+BIN_DIR="$(cargo metadata --format-version 1 --no-deps |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release"
+if [[ ! -x "$BIN_DIR/gwm" ]]; then
+  echo "  ✗ cargo build --release left no executable at $BIN_DIR/gwm"
+  exit 1
+fi
+export PATH="$BIN_DIR:$PATH"
 # The one tape that opens the TUI on a real repo photographs the *selected
 # row*, and that row is the repo's main checkout whatever directory the tape
 # was launched from: gwm discovers the repo, not the worktree, and the default
@@ -118,8 +128,8 @@ CAPTURED=$(tr -d '\r' < "$STAMP" | head -n 1)
 if [[ "$CAPTURED" != "gwm $VERSION" ]]; then
   echo "  ✗ vhs resolves '$CAPTURED' but this tree is gwm $VERSION."
   echo "    Every TUI capture would paint the wrong version chip. The build above put"
-  echo "    $ROOT/target/release first on PATH, so something in the vhs shell's startup"
-  echo "    (a ~/.bashrc prepending ~/.cargo/bin, typically) is getting in front of it."
+  echo "    $BIN_DIR first on PATH, so something in the vhs shell's startup (a ~/.bashrc"
+  echo "    prepending ~/.cargo/bin, typically) is getting in front of it."
   exit 1
 fi
 echo "  ✓ captured by $CAPTURED"
