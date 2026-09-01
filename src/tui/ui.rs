@@ -18,7 +18,7 @@ use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
-use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_OPEN_ICON};
+use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_CARET};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
 use crate::config::ConfigSource;
@@ -2212,6 +2212,10 @@ pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span
 /// - **Connector lines**: each row is prefixed with box-drawing branches
 ///   (`├─ ` / `└─ ` with `│  ` / `   ` carried down from ancestors) in the
 ///   muted role, so the hierarchy reads like `tree(1)`.
+/// - **Directories** lead with the [`WT_DIR_CARET`] disclosure marker and no
+///   file glyph (issue #622), so a directory row and a file row are told
+///   apart by shape rather than by indentation alone. One space after it,
+///   not the two a nerd-font glyph needs: the caret is a single cell.
 /// - **Directory colour is retroactive**: a folder is painted by the
 ///   aggregate git category of its subtree — only-modified → yellow,
 ///   only-new → green, only-deleted → red, mixed (or none) → neutral
@@ -2221,9 +2225,9 @@ pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span
 ///   count it belongs to (the #287 invariant, preserved). The status letter
 ///   itself left the row in #622: it is returned as a parallel column so the
 ///   renderer can pin it to a fixed offset.
-/// - An **extra space** follows each nerd-font glyph: most glyphs render
-///   double-width but occupy a single terminal cell, so the pad keeps the
-///   following text from being clipped.
+/// - An **extra space** follows each nerd-font FILE glyph: most glyphs
+///   render double-width but occupy a single terminal cell, so the pad keeps
+///   the following text from being clipped.
 type WtTreeLines = (Vec<Line<'static>>, Vec<Option<String>>, Vec<Line<'static>>);
 
 fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> WtTreeLines {
@@ -2291,7 +2295,7 @@ fn push_wt_nodes(
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
           Span::styled(
-            format!("{}  {}", WT_DIR_OPEN_ICON, wt_tree::sanitize_name(name)),
+            format!("{} {}", WT_DIR_CARET, wt_tree::sanitize_name(name)),
             Style::default().fg(color),
           ),
         ]));

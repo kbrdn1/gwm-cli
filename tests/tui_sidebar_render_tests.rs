@@ -260,17 +260,50 @@ fn working_tree_section_renders_file_tree_with_icons() {
   );
   assert!(text.contains("mod.rs"), "the leaf file name renders: {text}");
   assert!(
-    text.contains(gwm::tui::wt_tree::WT_DIR_OPEN_ICON),
-    "directory row carries a folder glyph: {text}"
-  );
-  assert!(
     text.contains(gwm::tui::wt_tree::WT_RUST_ICON),
     "the .rs leaf carries the Rust file-type glyph: {text}"
+  );
+  // Issue #622: the two levels are told apart by SHAPE, so the directory row
+  // leads with the disclosure marker and carries NO nerd-font glyph at all.
+  // Enumerated by construction, since every nerd-font codepoint lives in a
+  // Private Use Area, rather than by naming the two constants that happen to
+  // exist today, which a third one would walk straight past.
+  let dir_row = buffer_lines(&terminal)
+    .into_iter()
+    .find(|l| l.contains("src/app"))
+    .unwrap_or_else(|| panic!("no directory row: {text}"));
+  let marker_at = dir_row
+    .find(gwm::tui::wt_tree::WT_DIR_CARET)
+    .unwrap_or_else(|| panic!("the directory row leads with the disclosure marker: got {dir_row:?}"));
+  assert!(
+    marker_at < dir_row.find("src/app").unwrap(),
+    "the marker leads the name rather than trailing it: got {dir_row:?}"
+  );
+  assert!(
+    !dir_row.chars().any(is_private_use),
+    "and the row drops every nerd-font glyph: got {dir_row:?}"
+  );
+  // The counterpart: a FILE row still carries one, or the shape distinction
+  // would be a plain removal rather than a contrast.
+  let file_row = buffer_lines(&terminal)
+    .into_iter()
+    .find(|l| l.contains("mod.rs"))
+    .unwrap_or_else(|| panic!("no file row: {text}"));
+  assert!(
+    file_row.chars().any(is_private_use),
+    "the file row keeps its type glyph: got {file_row:?}"
   );
   assert!(
     text.contains('└') || text.contains('├'),
     "rows are drawn with tree connector lines: {text}"
   );
+}
+
+/// True for a codepoint in one of Unicode's Private Use Areas, where every
+/// nerd-font glyph lives. Lets a test say "no icon here" by construction
+/// instead of by listing the constants that exist today.
+fn is_private_use(c: char) -> bool {
+  matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
 }
 
 /// The buffer as one string per terminal row, so an assertion can look at
