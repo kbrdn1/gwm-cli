@@ -375,6 +375,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command and a URL's `?`, `&` and `#` cannot become shell syntax. Only
   absolute `http`/`https` URLs are passed on.
 
+- **The Commits and Working Tree overlays say which worktree they are showing**
+  ([#629](https://github.com/kbrdn1/gwm-cli/issues/629)). Both full-size
+  listings painted their snapshot and nothing else: a commit graph that could
+  be any branch's, a file tree that could be any worktree's. The modal title
+  could not carry it either, being centred and therefore clipped from the
+  left, and the commit overlay already spends its title on the row count.
+
+  Each now carries a fixed row above its body: the branch for the commit
+  listing, the worktree name and its path for the working tree. It is its own
+  rect above the scroll region, not the first line of the listing, so it stays
+  put while the body scrolls, and the Working Tree overlay renders it in its
+  loading arm too, so the listing lands exactly where the loader was instead
+  of jumping a line when the worker returns.
+
+  The row resolves from the path the overlay pinned when it opened, not from
+  the live selection: the auto-refresh moves the selection while an overlay is
+  up, so the cursor can point at a different worktree than the rows on screen.
+  It is an in-memory lookup, so the render path still shells out to nothing.
+
 ### Changed
 
 - **Modals follow `[tui] layout` instead of always being bordered**
