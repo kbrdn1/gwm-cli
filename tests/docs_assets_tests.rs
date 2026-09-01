@@ -331,9 +331,39 @@ fn every_tape_renders_at_retina_density() {
 ///
 /// Not restricted to `_assets/`: `demo.gif` lives in `docs/_capture/` and is
 /// the capture the README shows first.
+/// Every capture git actually publishes, read from the index rather than the
+/// disk.
+///
+/// Walking `docs/` would also sweep up `docs/_capture/.tmp/`, the throwaway
+/// output the still tapes write and that `docs/_capture/.gitignore` excludes.
+/// A 1x or half-written GIF left there by an interrupted run would fail this
+/// suite on the machine that ran it, while CI, whose tree is clean, stayed
+/// green: a red nobody else can reproduce. `git ls-files` answers the question
+/// the guard is actually asking, which is what ships, not what happens to sit
+/// in the tree.
 fn capture_files() -> Vec<PathBuf> {
-  let mut out = Vec::new();
-  collect_by_extension(&docs_root(), &["png", "gif"], &mut out);
+  let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  let listed = std::process::Command::new("git")
+    .current_dir(&root)
+    .args(["ls-files", "-z", "--", "docs"])
+    .output()
+    .unwrap_or_else(|err| panic!("git ls-files must run to list the published captures: {err}"));
+  assert!(
+    listed.status.success(),
+    "git ls-files -- docs failed: {}",
+    String::from_utf8_lossy(&listed.stderr).trim()
+  );
+
+  // `-z` because a path is bytes, not a line: the NUL separator is the only
+  // one a filename cannot contain.
+  let mut out: Vec<PathBuf> = String::from_utf8_lossy(&listed.stdout)
+    .split('\0')
+    .filter(|rel| {
+      let lower = rel.to_ascii_lowercase();
+      lower.ends_with(".png") || lower.ends_with(".gif")
+    })
+    .map(|rel| root.join(rel))
+    .collect();
   out.sort();
   out
 }
