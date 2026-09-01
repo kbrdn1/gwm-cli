@@ -19,7 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now a right-aligned column of its own, in both the sidebar pane and the
   full-size overlay, and it keeps the per-category colour it always had.
 
-  In the overlay it shares the right edge with the `+N -M` counts from #592,
+  Both surfaces place the column one gap past the longest row rather than
+  against their border. The sidebar is stacked by default, so on a wide
+  terminal a border-flush letter lands a hundred cells from the name it
+  describes, which is the opposite of the fixed column the issue asked for.
+  The `+N -M` counts from #592 move with it, since they had the same problem
+  on a 90%-of-the-screen overlay.
+
+  In the overlay the letter shares the right end of the row with those counts,
   and the two yield in a fixed order: the letter is carved out first, so a
   narrowing terminal drops the counts and never the letter. `+N -M` says how
   much a file changed, the letter says what happened to it, and a row that no
