@@ -273,6 +273,58 @@ fn working_tree_section_renders_file_tree_with_icons() {
   );
 }
 
+/// The buffer as one string per terminal row, so an assertion can look at
+/// where a needle sits on its line rather than only whether it exists.
+fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+  let buffer = terminal.backend().buffer();
+  let area = *buffer.area();
+  (0..area.height)
+    .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+    .collect()
+}
+
+#[test]
+fn working_tree_section_pins_the_status_letter_to_its_right_edge() {
+  // Issue #622: the sidebar pane reads the same way the full-size overlay
+  // does. The letter used to lead the name, so it sat at a different offset
+  // on every row; it now rides its own right-aligned column, inside the
+  // pane's border.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("mod.rs"))
+    .unwrap_or_else(|| panic!("no row for the untracked file: screen was:\n{}", lines.join("\n")));
+  let name_at = row.find("mod.rs").unwrap();
+  let letter_at = row
+    .rfind('?')
+    .unwrap_or_else(|| panic!("the untracked letter is drawn: got {row:?}"));
+  assert!(
+    letter_at > name_at,
+    "the letter trails the whole name instead of leading it: got {row:?}"
+  );
+  assert!(
+    row[letter_at + 1..].chars().all(|c| c == ' ' || c == '│'),
+    "and nothing but padding and the pane border follows it: got {row:?}"
+  );
+  // The gap between the two is what makes it a column rather than a suffix:
+  // a shorter name on another row must reach the same offset.
+  assert!(
+    letter_at > name_at + "mod.rs".len() + 1,
+    "the letter is right-aligned, not glued to the name: got {row:?}"
+  );
+}
+
 #[test]
 fn working_tree_section_shows_a_scrollbar_when_the_tree_overflows() {
   // User feedback on PR #454: the Working Tree pane scrolls (#437) and gets

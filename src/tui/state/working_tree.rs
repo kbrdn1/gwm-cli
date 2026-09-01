@@ -41,6 +41,7 @@ pub struct WorkingTreeSnapshot {
   pub lines: Vec<Line<'static>>,
   pub counts: WorkingTreeCounts,
   pub meta: MetaColumn,
+  pub badges: MetaColumn,
 }
 
 /// Owned state for the full-size Working Tree overlay: the snapshotted
@@ -58,6 +59,15 @@ pub struct WorkingTreeModal {
   /// The right-hand `+N -M` column, one entry per row so it scrolls at the
   /// same offset as [`Self::lines`]. Empty on a row with no counts.
   pub meta: MetaColumn,
+  /// The `M` / `A` / `D` / `?` status letter, one entry per row (issue
+  /// #622). Its own column rather than a span inside the row: a letter that
+  /// trails a name sits at a different offset on every line, and the eye
+  /// has to re-find it. Empty on a directory row and on the sentinels.
+  ///
+  /// Separate from [`Self::meta`] and not merged with it, because the two
+  /// yield differently under pressure: the counts are droppable on a narrow
+  /// terminal, the letter is the subject of the row and never is.
+  pub badges: MetaColumn,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
   /// Maximum vertical scroll offset, republished by the renderer each
@@ -89,6 +99,7 @@ impl WorkingTreeModal {
     self.lines.clear();
     self.counts = WorkingTreeCounts::default();
     self.meta = MetaColumn::default();
+    self.badges = MetaColumn::default();
     self.scroll = 0;
     self.max_scroll = 0;
     self.path = path.map(Path::to_path_buf);
@@ -101,6 +112,7 @@ impl WorkingTreeModal {
     self.lines = snap.lines;
     self.counts = snap.counts;
     self.meta = snap.meta;
+    self.badges = snap.badges;
     self.scroll = 0;
     self.loading = false;
   }

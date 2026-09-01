@@ -15577,6 +15577,78 @@ fn a_row_with_nothing_to_count_still_takes_a_slot_in_the_column() {
 }
 
 #[test]
+fn the_status_letter_leaves_the_row_for_a_column_of_its_own() {
+  // Issue #622. The letter used to lead the name (`M  ui.rs`), so on a
+  // 27-file listing it sat at a different offset on every row and the eye
+  // had to re-find it. It is now a parallel column the renderer pins to a
+  // fixed offset, which is only possible if the row itself no longer holds
+  // it.
+  let (dir, mut app) = make_app();
+  commit_file(dir.path(), "tracked.md", "one\n");
+  std::fs::write(dir.path().join("tracked.md"), "one\ntwo\n").unwrap();
+  std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+  std::fs::write(dir.path().join("nested/fresh.md"), "new\n").unwrap();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let rows: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  let badges: Vec<String> = app.working_tree.badges.lines.iter().map(line_text).collect();
+  assert_eq!(
+    badges.len(),
+    rows.len(),
+    "one entry per row or the letters scroll out of step: {badges:?} vs {rows:?}"
+  );
+
+  let tracked = rows
+    .iter()
+    .position(|l| l.contains("tracked.md"))
+    .unwrap_or_else(|| panic!("no row for the modified file: got {rows:?}"));
+  assert_eq!(badges[tracked].trim(), "M", "the modified file letters M: {badges:?}");
+  assert!(
+    !rows[tracked].contains('M'),
+    "and the row itself no longer carries it: got {:?}",
+    rows[tracked]
+  );
+
+  let untracked = rows.iter().position(|l| l.contains("fresh.md")).unwrap();
+  assert_eq!(badges[untracked].trim(), "?", "an untracked file letters ?: {badges:?}");
+
+  let dir_row = rows.iter().position(|l| l.contains("nested")).unwrap();
+  assert_eq!(
+    badges[dir_row].trim(),
+    "",
+    "a directory has no status of its own, but still takes its slot"
+  );
+  assert_eq!(
+    app.working_tree.badges.width, 1,
+    "the width is measured once so the column cannot jump while scrolling"
+  );
+}
+
+#[test]
+fn the_status_column_keeps_its_slot_on_a_clean_worktree() {
+  // The three sentinels (`✓ clean`, `… N more`, a load error) are rows with
+  // no status of their own. An empty `badges` vec next to a one-row listing
+  // would break the lockstep the renderer scrolls both columns on.
+  let (_dir, mut app) = make_app();
+
+  app.enter_working_tree();
+  settle_working_tree(&mut app);
+
+  let rows: Vec<String> = app.working_tree.lines.iter().map(line_text).collect();
+  assert!(
+    rows.iter().any(|l| l.contains("clean")),
+    "a fresh worktree is clean: got {rows:?}"
+  );
+  assert_eq!(
+    app.working_tree.badges.lines.len(),
+    rows.len(),
+    "the sentinel takes its slot in the column too"
+  );
+}
+
+#[test]
 fn the_working_tree_half_page_moves_by_the_viewport_the_reader_sees() {
   // `D` / `U`, the pair the commit listing carries. Half of what the BODY
   // last showed, not half the content: the renderer publishes the viewport

@@ -2875,6 +2875,70 @@ fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
 }
 
 #[test]
+fn the_status_letter_rides_the_right_edge_and_outlives_the_counts() {
+  use gwm::tui::MetaColumn;
+  use ratatui::text::Line;
+
+  // Issue #622: two right-hand columns, and they yield in a fixed order.
+  // `+120 -34` says how much changed, the letter says what changed. A row
+  // that no longer says what it is has lost its subject, not its detail, so
+  // the letter is carved out first and sits at the right edge.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("├─ src/tui/"), Line::from("└─ ui.rs")];
+  app.working_tree.meta = MetaColumn {
+    lines: vec![Line::from(""), Line::from("+120 -34")],
+    width: 8,
+  };
+  app.working_tree.badges = MetaColumn {
+    lines: vec![Line::from(""), Line::from("M")],
+    width: 1,
+  };
+  app.view = View::WorkingTree;
+
+  // Wide: both columns are drawn, the letter outermost.
+  let wide = render_at(&mut app, 180, 40);
+  let rows = modal_rows(&wide);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("no row for the file. modal was:\n{}", rows.join("\n")));
+  let counts_at = row
+    .find("+120 -34")
+    .unwrap_or_else(|| panic!("the counts are drawn: got {row:?}"));
+  let letter_at = row
+    .rfind('M')
+    .unwrap_or_else(|| panic!("the status letter is drawn: got {row:?}"));
+  assert!(
+    letter_at > counts_at,
+    "the letter sits outside the counts, at the right edge: got {row:?}"
+  );
+  assert!(
+    row[letter_at + 1..].chars().all(|c| c == ' ' || c == '│' || c == '║'),
+    "and nothing but padding and the border follows it: got {row:?}"
+  );
+
+  // Narrow enough to drop the counts, wide enough to keep the letter. The
+  // modal takes 90% of the terminal and spends two cells on its border, so
+  // 38 columns leave a 32-cell body: past `1 + META_GAP + WT_NAME_FLOOR`
+  // (27) so the letter is paid for, and the 29 cells it leaves are under
+  // the `8 + META_GAP + WT_NAME_FLOOR` (34) the counts would need.
+  let mid = render_at(&mut app, 38, 40);
+  let rows = modal_rows(&mid);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("the name is never what is dropped. modal was:\n{}", rows.join("\n")));
+  assert!(
+    !row.contains("+120"),
+    "the counts are the column that yields first: got {row:?}"
+  );
+  assert!(
+    row.trim_end_matches([' ', '│', '║']).ends_with('M'),
+    "the letter survives the squeeze, still pinned right: got {row:?}"
+  );
+}
+
+#[test]
 fn working_tree_modal_renders_a_loader_while_the_worker_is_out() {
   // The read moved to a worker (Copilot review, PR #612), so there is a
   // frame with no rows yet. It must say so: an empty canvas reads as "no
