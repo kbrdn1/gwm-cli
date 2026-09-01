@@ -47,17 +47,26 @@ mkdir -p docs/2.tui/_assets docs/3.cli/_assets docs/4.configuration/_assets
 ROOT=$PWD
 VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 echo "▸ building gwm $VERSION from this tree"
-cargo build --release >/dev/null
-# Where cargo actually put it, asked rather than assumed: CARGO_TARGET_DIR and
-# `build.target-dir` both move the artefacts, and prefixing a directory that
-# holds nothing leaves PATH resolving to whatever comes next. The stamp below
-# only catches that when the versions differ, so the binary is checked here.
-BIN_DIR="$(cargo metadata --format-version 1 --no-deps |
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release"
-if [[ ! -x "$BIN_DIR/gwm" ]]; then
-  echo "  ✗ cargo build --release left no executable at $BIN_DIR/gwm"
+# `--locked`: after a version bump whose lock has not been regenerated, a plain
+# build rewrites Cargo.lock, which dirties the tree (so github-linking is
+# skipped) and captures from a resolution nobody committed, while release.yml
+# rebuilds with --locked and can fail. Better to stop here and say so.
+cargo build --release --locked >/dev/null
+# Where cargo actually put it, asked rather than derived. `CARGO_TARGET_DIR`
+# and `build.target-dir` move the tree; `CARGO_BUILD_TARGET` and `[build]
+# target` additionally insert a triple directory that `cargo metadata` does not
+# report. Cargo names the file itself in its artefact messages, so ask it: this
+# second build is fresh and costs nothing, and it keeps the first one's errors
+# human-readable instead of buried in JSON. `sed` rather than a JSON parser
+# because python3 is not a documented requirement of this script (and on a
+# stock recent macOS it is a stub that installs the command line tools).
+BIN=$(cargo build --release --locked --message-format=json |
+  sed -n 's/.*"executable":"\([^"]*\/gwm\)".*/\1/p' | tail -1)
+if [[ -z "$BIN" || ! -x "$BIN" ]]; then
+  echo "  ✗ cargo build --release reported no gwm executable (got '${BIN:-nothing}')"
   exit 1
 fi
+BIN_DIR=$(dirname "$BIN")
 export PATH="$BIN_DIR:$PATH"
 # The one tape that opens the TUI on a real repo photographs the *selected
 # row*, and that row is the repo's main checkout whatever directory the tape
@@ -156,6 +165,23 @@ elif ! PR=$(cd "$TRUNK" && gh pr view --json number,state -q 'select(.state == "
 else
   echo "▸ github-linking: $BRANCH → PR #$PR"
   run_checked github-linking.tape || FAILED+=("github-linking.tape")
+fi
+# Said here as well as in the closing summary: the decision is taken in the
+# first seconds and the summary lands twenty minutes of tapes later, which is
+# too late to fix the tree and rerun.
+if [[ -n "$GITHUB_LINKING" ]]; then
+  echo "! github-linking skipped: $GITHUB_LINKING"
+fi
+
+# Everything above is the release-critical half: the binary, the version it
+# stamps, and the one capture whose preconditions live outside the fixture.
+# `tests/capture_pipeline_tests.rs` drives exactly that half against a
+# throwaway repo with stubbed cargo/vhs/gh, and stops here. The tapes below
+# need a real terminal, a Nerd Font and the demo fixture, so they stay out of
+# the suite and are checked by looking at the pixels.
+if [[ "${GWM_CAPTURE_PREFLIGHT_ONLY:-}" == "1" ]]; then
+  echo "✓ preflight only (GWM_CAPTURE_PREFLIGHT_ONLY=1)"
+  exit 0
 fi
 
 if [[ "${GWM_KEEP_DEMO:-}" != "1" ]]; then
