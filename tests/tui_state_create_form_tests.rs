@@ -540,16 +540,31 @@ fn from_issue_has_one_field_so_rotation_stays_put() {
 }
 
 #[test]
-fn from_issue_toggles_back_to_the_structured_triple() {
-  // One key out of a mode the user opened by name, rather than a three-way
-  // cycle that would make the toggle unpredictable.
+fn from_issue_has_no_toggle() {
+  // The toggle swaps between the two modes that are alternative ways of
+  // typing the same worktree. This one is a two-step mode — ask, then confirm
+  // the prefilled structured form — so it is left by answering it, and the
+  // key is inert rather than a third stop on a cycle.
   let mut form = CreateForm::new();
+  form.issue.push_str("594");
   form.enter_from_issue();
 
   form.toggle_mode();
 
+  assert_eq!(form.mode, Mode::FromIssue);
+  assert_eq!(form.field, Field::Issue);
+}
+
+#[test]
+fn the_toggle_still_swaps_the_other_two_modes() {
+  // Disabling it in one mode must not disable it: `Ctrl+t` is how free-form
+  // is reached at all.
+  let mut form = CreateForm::new();
+
+  form.toggle_mode();
+  assert_eq!(form.mode, Mode::Freeform);
+  form.toggle_mode();
   assert_eq!(form.mode, Mode::Structured);
-  assert_eq!(form.field, form.entry_field());
 }
 
 #[test]

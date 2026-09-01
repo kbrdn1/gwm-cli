@@ -6568,13 +6568,11 @@ impl App {
           // The submit field is named from the patterns, not hardcoded to
           // `desc` (#418): a pattern without one told the user to press enter
           // on a field the form does not present.
-          // #625: the mode is left by answering it, so the toggle is
-          // advertised as the way back rather than as a mode cycle.
-          Mode::FromIssue if back.is_empty() => "issue number, then enter: derive the branch from it".into(),
-          Mode::FromIssue => format!(
-            "issue number, then enter: derive the branch from it{back}{}",
-            self.structured_mode_label()
-          ),
+          // #625: unreachable through this arm — the toggle is a no-op in
+          // this mode — but the match is over the mode, so it is written out
+          // rather than folded into a catch-all that would hide a future
+          // path in.
+          Mode::FromIssue => "issue number, then enter: derive the branch from it".into(),
           Mode::Structured if back.is_empty() => self.structured_form_instruction(),
           Mode::Structured => format!("{}{back}free-form", self.structured_form_instruction()),
         };
@@ -6720,8 +6718,10 @@ impl App {
       .unwrap_or_default();
     let desc = crate::issue_templates::desc_from_title(&status.title, &prefix).unwrap_or_default();
 
-    self.create_form.mode = Mode::FromIssue;
-    self.create_form.toggle_mode(); // back to Structured, focus on the entry field
+    // Set, not toggled: `toggle_mode` is a no-op in this mode, and the prefill
+    // is not the user asking to switch — it is this mode finishing.
+    self.create_form.mode = Mode::Structured;
+    self.create_form.field = self.create_form.entry_field();
     self.create_form.issue = status.number.to_string();
     self.create_form.desc = desc;
     self.create_form.awaiting_issue = None;

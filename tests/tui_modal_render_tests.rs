@@ -235,6 +235,11 @@ fn create_from_issue_modal_shows_one_field_and_no_empty_preview() {
   assert_present(&buf, "from issue", "the title says which mode this is");
   assert_present(&buf, "Issue", "the one field it collects");
   assert_present(&buf, "read off the issue", "what the missing preview is replaced by");
+  assert_absent(
+    &buf,
+    "structured",
+    "the toggle is inert here, so the hint row does not offer it",
+  );
   assert_absent(&buf, "Branch :", "no preview of a triple that does not exist yet");
   assert_absent(&buf, "Dir    :", "same for the directory row");
   assert_absent(&buf, "Desc", "the slug is derived, not typed here");

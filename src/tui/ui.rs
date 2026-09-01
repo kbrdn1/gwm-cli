@@ -3299,12 +3299,13 @@ impl HintContext {
         Hint::Modal(ModalAction::CreateSubmit, "submit"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
-      // #625: one field and no type selector, so `field` / `type` are out.
-      // `submit` reads as "look it up" here because that is what Enter does
-      // in this mode; the create is the Enter after the prefill.
+      // #625: one field and no type selector, so `field` / `type` are out,
+      // and `toggle_mode` with them — it is a no-op here, and the rule this
+      // row already follows is to never advertise a key that does nothing.
+      // `submit` reads as "look it up" because that is what Enter does in
+      // this mode; the create is the Enter after the prefill.
       HintContext::CreateFromIssue => &[
         Hint::Modal(ModalAction::CreateSubmit, "look up"),
-        Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
       HintContext::Confirm => &[

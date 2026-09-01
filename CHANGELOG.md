@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than waiting for a message that would never arrive, since the fetch
   coalesces on a cache hit.
 
+  `Ctrl+t` is inert in this mode and the hint row does not offer it. The
+  toggle swaps between the structured triple and the free-form name, which
+  are two ways of typing the same worktree; this one is a two-step mode, left
+  by answering it or by cancelling, so a third stop on the cycle would only
+  make the key unpredictable.
+
 - **`gwm create --issue <N>` opens a worktree for an issue that already
   exists** ([#617](https://github.com/kbrdn1/gwm-cli/issues/617)). `gwm new`
   covered the issue that does not exist yet: it renders the issue from

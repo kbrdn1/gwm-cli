@@ -224,13 +224,19 @@ impl CreateForm {
         self.mode = Mode::Freeform;
         self.field = Field::Name;
       }
-      // `FromIssue` toggles back to the structured triple like free-form
-      // does: one key out of a mode the user opened by name, rather than a
-      // three-way cycle that makes `Ctrl+t` unpredictable.
-      Mode::Freeform | Mode::FromIssue => {
+      Mode::Freeform => {
         self.mode = Mode::Structured;
         self.field = self.entry_field();
       }
+      // `FromIssue` has no toggle. It is a two-step mode — ask, then confirm
+      // the prefilled structured form — so the way out is answering it or
+      // cancelling, and the toggle is left as the one verb that swaps between
+      // the two modes that are alternative ways of typing the same worktree.
+      // Guarded here rather than at the key handler: every path in flips the
+      // mode through this function, and the handler's arm has to keep
+      // matching so the key is swallowed rather than falling through to the
+      // literal-input fallback, which would type `t` into the number.
+      Mode::FromIssue => {}
     }
   }
 
