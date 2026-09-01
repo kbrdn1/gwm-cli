@@ -4,7 +4,7 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.9.0"
+version = "1.10.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the newest
 # one introduced here. Our own std usage sits far lower: `std::sync::LazyLock`
