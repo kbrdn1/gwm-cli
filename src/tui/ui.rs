@@ -2349,6 +2349,18 @@ impl WorkingTreeCounts {
   pub fn is_empty(&self) -> bool {
     self.created == 0 && self.modified == 0 && self.deleted == 0
   }
+
+  /// Changed files across every category, for the Working Tree overlay's
+  /// header count (issue #622).
+  ///
+  /// Derived from the counts rather than from the row vector on purpose:
+  /// the rows also hold directories, the `… N more` overflow notice and the
+  /// `✓ clean` sentinel, none of which is a changed file. Each file is
+  /// counted once, in the single category its porcelain `XY` pair falls
+  /// into, so this is the same population the footer segments add up to.
+  pub fn total(&self) -> usize {
+    self.created + self.modified + self.deleted
+  }
 }
 
 /// Nerdfont codicon glyphs for the Working Tree footer counts (issue #287):
@@ -5081,9 +5093,9 @@ fn working_tree_context_line(w: Option<&WorktreeInfo>, path: Option<&std::path::
 /// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
 /// given the whole modal area.
 ///
-/// Same shell as the Command Logs overlay: a fixed title on the top rule,
-/// a scrollable body with a scrollbar when it overflows, and a fixed footer
-/// hint line. The pane's change-count line (issue #287) rides the bottom
+/// Same shell as the Command Logs overlay: a title on the top rule carrying
+/// the changed-file count (issue #622), a scrollable body with a scrollbar
+/// when it overflows, and a fixed footer hint line. The pane's change-count line (issue #287) rides the bottom
 /// rule right-aligned, exactly where the bordered sidebar pane puts it, so
 /// the two surfaces read as the same block at two sizes.
 ///
@@ -5094,10 +5106,20 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let theme = app.theme;
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), theme.accent, &theme);
+  // The changed-file count rides the title (issue #622) the way the commit
+  // listing's does (#593), and for the same reason: the top rule is clipped
+  // from the LEFT when centred, so the count sits last. It is withheld while
+  // the worker is out: the counts are zero then, and `(0)` over a listing
+  // that has not been read yet is a claim rather than a count.
+  let title = if app.working_tree.loading {
+    "Working Tree".to_string()
+  } else {
+    format!("Working Tree ({})", app.working_tree.counts.total())
+  };
   let inner = frame.render(
     f,
     area,
-    "Working Tree",
+    &title,
     working_tree_counts_footer(&app.working_tree.counts, &theme),
   );
 

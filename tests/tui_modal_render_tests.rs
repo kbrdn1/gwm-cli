@@ -2875,6 +2875,54 @@ fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
 }
 
 #[test]
+fn the_working_tree_title_counts_the_changed_files_not_the_rows() {
+  use gwm::tui::WorkingTreeCounts;
+  use ratatui::text::Line;
+
+  // Issue #622: the reference layout puts a progress counter in the header.
+  // The honest gwm equivalent is the changed-file count, and it comes from
+  // the counts rather than `lines.len()`: the rows also hold directories
+  // and the sentinels, none of which is a changed file.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![
+    Line::from("├─ src/tui/"),
+    Line::from("│  └─ ui.rs"),
+    Line::from("└─ README.md"),
+    Line::from("… 4 more"),
+  ];
+  app.working_tree.counts = WorkingTreeCounts {
+    created: 1,
+    modified: 5,
+    deleted: 1,
+  };
+  app.view = View::WorkingTree;
+
+  let rows = modal_rows(&render_at(&mut app, 180, 40));
+  let title = rows
+    .iter()
+    .find(|r| r.contains("Working Tree"))
+    .unwrap_or_else(|| panic!("no title row: modal was:\n{}", rows.join("\n")));
+  assert!(
+    title.contains("Working Tree (7)"),
+    "the title counts the changed files, not the four rendered rows: got {title:?}"
+  );
+
+  // While the worker is out the counts are zero, and `(0)` over a listing
+  // nobody has read yet is a claim rather than a count.
+  app.working_tree.begin(Some(std::path::Path::new("/tmp/whatever")));
+  assert!(app.working_tree.loading, "begin arms the loader");
+  let rows = modal_rows(&render_at(&mut app, 180, 40));
+  let title = rows
+    .iter()
+    .find(|r| r.contains("Working Tree"))
+    .unwrap_or_else(|| panic!("no title row: modal was:\n{}", rows.join("\n")));
+  assert!(
+    !title.contains('('),
+    "the loader frame withholds the count rather than claiming zero: got {title:?}"
+  );
+}
+
+#[test]
 fn the_status_letter_rides_the_right_edge_and_outlives_the_counts() {
   use gwm::tui::MetaColumn;
   use ratatui::text::Line;
