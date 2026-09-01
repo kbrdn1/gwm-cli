@@ -4838,6 +4838,81 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   );
 }
 
+/// The worktree a full-size overlay's snapshot was taken on, resolved from
+/// the path the modal state pinned when it opened (issue #629).
+///
+/// Deliberately not [`App::selected`]: the auto-refresh moves the selection
+/// while an overlay is up (the lesson `commits_target` carries), so the live
+/// cursor can point at a different worktree than the rows on screen. An
+/// in-memory scan, so the context row costs the render path no I/O (#343).
+///
+/// `None` once another process removes the worktree and the refresh drops it
+/// from the list. The row degrades rather than lying.
+fn overlay_worktree<'a>(app: &'a App, path: Option<&std::path::Path>) -> Option<&'a WorktreeInfo> {
+  let path = path?;
+  app.worktrees.iter().find(|w| w.path == path)
+}
+
+/// The fixed context row above the Commits listing (issue #629): the branch
+/// the log was walked on.
+///
+/// Both full-size overlays paint a snapshot with no statement of what it is a
+/// snapshot *of* — a commit graph could be any branch's. The modal title
+/// cannot carry it: it is centred, so it is clipped from the LEFT, and this
+/// one already spends itself on the row count.
+///
+/// The branch wears the same worst-state colour it wears in the table and the
+/// identity card (PR #73), so the overlay reads as the same block at a
+/// different size. `-` on a detached HEAD, and on a worktree the refresh
+/// dropped from the list.
+fn commits_context_line(w: Option<&WorktreeInfo>, theme: &Theme) -> Line<'static> {
+  let muted = Style::default().fg(theme.muted);
+  let mut value = Span::styled("-".to_string(), muted);
+  if let Some(w) = w {
+    if let Some(b) = w.branch.as_deref() {
+      value = Span::styled(
+        crate::naming::sanitise_for_terminal(b),
+        Style::default().fg(branch_name_color(&w.status, theme)),
+      );
+    }
+  }
+  Line::from(vec![Span::styled("Branch  ".to_string(), muted), value])
+}
+
+/// The fixed context row above the Working Tree listing (issue #629): the
+/// worktree the files were read from, and where it lives on disk.
+///
+/// One leading space, as the listing pads its own rows, so the caption lines
+/// up with the tree under it.
+///
+/// **Order is the width policy**, the rule [`folded_status_line`] states: the
+/// row is hard-clipped on the right with no ellipsis, so the name leads (it is
+/// what the user scans for) and the path trails (it is the reference, and the
+/// half the row can most afford to lose).
+///
+/// With the row gone from the list, the pinned path is still the truthful
+/// half and is rendered alone rather than dropping the row and moving the
+/// listing up a line.
+fn working_tree_context_line(w: Option<&WorktreeInfo>, path: Option<&std::path::Path>, theme: &Theme) -> Line<'static> {
+  let muted = Style::default().fg(theme.muted);
+  let mut spans = vec![Span::styled(" Worktree  ".to_string(), muted)];
+  match (w, path) {
+    (Some(w), _) => {
+      spans.push(Span::styled(
+        crate::naming::sanitise_for_terminal(&w.name),
+        worktree_name_style(theme),
+      ));
+      spans.push(Span::styled("  ·  ".to_string(), muted));
+      // The same sink the identity card's `Path` row and the table's `PATH`
+      // cell owe the terminal (issue #568): tilde-compressed, sanitised.
+      spans.push(Span::styled(display_path(&w.path.display().to_string()), muted));
+    }
+    (None, Some(p)) => spans.push(Span::styled(display_path(&p.display().to_string()), muted)),
+    (None, None) => spans.push(Span::styled("-".to_string(), muted)),
+  }
+  Line::from(spans)
+}
+
 /// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
 /// given the whole modal area.
 ///
@@ -4861,10 +4936,27 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
     working_tree_counts_footer(&app.working_tree.counts, &theme),
   );
 
+  // The context row is its own rect ABOVE the scroll region (issue #629) —
+  // as the first line of the body it would scroll away, which is the whole
+  // thing it exists not to do. Built before the mutable borrows below.
+  let context = working_tree_context_line(
+    overlay_worktree(app, app.working_tree.path.as_deref()),
+    app.working_tree.path.as_deref(),
+    &theme,
+  );
+
   // A blank row between the listing and the hints, the gap every other
   // modal already leaves: content never sits flush against the footer.
-  let [body_area, _gap, footer_area] =
-    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+  let [context_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(1),
+    Constraint::Min(1),
+    Constraint::Length(1),
+    Constraint::Length(1),
+  ])
+  .areas(inner);
+  // Rendered before the loading arm returns: a row present in only one of
+  // the two arms makes the listing jump a line when the worker lands.
+  f.render_widget(Paragraph::new(context), context_area);
 
   // While the worker is out, a muted loader rather than an empty canvas:
   // blank reads as "nothing changed", which is the one answer this overlay
@@ -4973,10 +5065,20 @@ fn draw_commits(f: &mut Frame, app: &mut App) {
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
   let inner = frame.render(f, area, &title, None);
 
+  // The branch this log was walked on, pinned above the scroll region
+  // (issue #629). Built before the mutable borrows below.
+  let context = commits_context_line(overlay_worktree(app, app.commits.path.as_deref()), &app.theme);
+
   // A blank row between the listing and the hints, the gap every other
   // modal already leaves: content never sits flush against the footer.
-  let [body_area, _gap, footer_area] =
-    Layout::vertical([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+  let [context_area, body_area, _gap, footer_area] = Layout::vertical([
+    Constraint::Length(1),
+    Constraint::Min(1),
+    Constraint::Length(1),
+    Constraint::Length(1),
+  ])
+  .areas(inner);
+  f.render_widget(Paragraph::new(context), context_area);
 
   // A muted loader rather than an empty canvas while the first page is
   // being walked: blank reads as "no commits", which is the one answer this
