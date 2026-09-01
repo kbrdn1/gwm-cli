@@ -4,10 +4,35 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there. This file is the map, not the spec.
 
-## Current state: v1.9.0 stable
+## Current state: v1.10.0 stable
 
-The current **stable** line is **v1.9.0** (2026-08-16), the licensing line: gwm
-is **dual-licensed MIT OR Apache-2.0**. Nothing is taken away, MIT stays in full
+The current **stable** line is **v1.10.0** (2026-09-01), the line that keeps the
+whole cycle inside the TUI. A worktree can now be created from an issue that
+already exists (`Ctrl+n` prefills the form from its number), and the PR that
+comes out of it can be merged without leaving (`m`), so the round trip that used
+to mean two context switches to the browser is one screen. `o` on the agents
+overlay resumes an AI session straight in tmux, zellij or **herdr**, which joins
+as a third multiplexer backend, and a link can open in a terminal browser rather
+than throwing you into a GUI. Two settings say what a mux spawn opens and where,
+and a split goes to the right by default, because the flag of a multiplexer names
+the axis rather than the direction.
+
+The overlays grew up alongside: Working Tree (`W`) and Commits (`c`) open at full
+size, the latter with load-more, and both say which worktree they are showing,
+since an overlay that outlives the selection under it is an overlay that lies.
+Notes gained a checklist and a vim normal mode, the note column captions itself,
+and the rich Issue/PR view had its design pass and stopped dropping its inline
+comments through a relist. Modals follow `[tui] layout` instead of always being
+bordered, so `compact` finally reaches them.
+
+The docs got the same treatment: every capture is **rendered at 2x** so the site
+stops upscaling them, `demo.gif` records the demo again after a tape that had
+been silently broken since the note editor gained vim mode, and the published
+crate drops the capture binaries to stay under the crates.io size limit while
+keeping its test suites runnable.
+
+**v1.9.0** (2026-08-16) was the licensing line: gwm
+became **dual-licensed MIT OR Apache-2.0**. Nothing is taken away, MIT stays in full
 under its own file; what is added is Apache-2.0's §3, an express patent grant
 from every contributor, which MIT has no clause for at all and which is the one
 gap a corporate legal review reliably stops on. It is also the ecosystem's
@@ -216,7 +241,7 @@ follow-ups, and multi-forge support
 deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both.
 
-**What is actually queued now**, after the v1.9.0 cut, is smaller than a feature
+**What is actually queued now**, after the v1.10.0 cut, is smaller than a feature
 line and mostly came out of one source: unsolicited design feedback from
 ratatui's maintainer on the awesome-ratatui listing
 ([#544](https://github.com/kbrdn1/gwm-cli/issues/544)). Three of its four axes
