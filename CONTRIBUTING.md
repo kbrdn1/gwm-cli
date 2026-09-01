@@ -453,7 +453,13 @@ When `dev` is ready to be exercised by early adopters before promotion:
 Once the rc is validated and promoted to `main`:
 
 1. **Step 0 first** — see above.
-2. Update `Cargo.toml` `version`.
+2. Update `Cargo.toml` `version`, then regenerate the lock, which carries the root package's version too:
+
+   ```bash
+   cargo update --workspace --offline   # rewrites only the workspace entry
+   ```
+
+   Skipping it costs the next two steps: `git add Cargo.lock` adds nothing, and the capture run's `cargo build --release --locked` refuses to start (`cannot update the lock file ... because --locked was passed`).
 3. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
 4. **Commit the bump, then open the PR.** Name the files: `git commit -am` will not pick up `changelogs/<version>.md`, which step 3 has just created and git does not track yet, and `release.yml` hard-fails at tag time without it (see the release-notes rule above). The PR comes before the captures because the capture run needs it open, see step 5.
 

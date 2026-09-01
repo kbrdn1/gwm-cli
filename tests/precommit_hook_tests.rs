@@ -12,12 +12,11 @@
 
 mod common;
 
-use common::init_repo;
+use common::{git_only_bin, init_repo};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 
 fn hook_path() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join(".githooks/pre-commit")
@@ -41,49 +40,6 @@ fn stage(repo: &Path, relative_path: &str, content: &str) {
     .status()
     .expect("git add ran");
   assert!(status.success(), "git add failed for {relative_path}");
-}
-
-/// A directory holding nothing but a `git`, for the hook's `PATH`.
-///
-/// The hook opens on `git diff --cached`, so it needs a working git, and
-/// `/usr/bin:/bin` assumed one lives in `/usr/bin`. That is not a property of a
-/// POSIX system: on a macOS box whose git comes from nix or Homebrew,
-/// `/usr/bin/git` is the Xcode shim, and with no command line tools installed
-/// it prints an install prompt, writes nothing and **exits 0**. The hook then
-/// reads an empty staged set, short-circuits, and all twelve gate tests fail
-/// with an empty stderr, while CI stays green because its runners do ship a
-/// real `/usr/bin/git`. Locate git the way the hook itself locates cargo,
-/// rather than assuming where it lives.
-///
-/// A directory of its own rather than git's: the hook's two other tools are
-/// meant to be a stub or absent, and git's neighbours on a Homebrew prefix or a
-/// nix profile can include a real `gwm`, which would silently defeat
-/// [`gate2_skips_with_message_when_gwm_absent`].
-fn git_only_bin() -> &'static Path {
-  static DIR: OnceLock<PathBuf> = OnceLock::new();
-  DIR
-    .get_or_init(|| {
-      let git = Command::new("sh")
-        .arg("-c")
-        .arg("command -v git")
-        .output()
-        .expect("locating git ran");
-      let git = String::from_utf8_lossy(&git.stdout).trim().to_string();
-      assert!(
-        !git.is_empty(),
-        "git must be on PATH: these tests hand the hook a minimal PATH and the hook opens on \
-       `git diff --cached`"
-      );
-      let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("precommit-hook-git-bin");
-      fs::create_dir_all(&dir).expect("the git shim directory is creatable");
-      let link = dir.join("git");
-      // Recreated rather than reused: the toolchain moves between runs, and a
-      // symlink to a garbage-collected nix store path resolves to nothing.
-      let _ = fs::remove_file(&link);
-      std::os::unix::fs::symlink(&git, &link).expect("git symlinks into the shim directory");
-      dir
-    })
-    .as_path()
 }
 
 fn run_hook(repo: &Path, stub_dir: Option<&Path>, extra_env: &[(&str, &str)]) -> Output {

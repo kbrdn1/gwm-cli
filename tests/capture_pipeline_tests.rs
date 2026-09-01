@@ -20,6 +20,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::git_only_bin;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -35,10 +38,18 @@ fn write_exec(path: &Path, body: &str) {
   fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The fixture's own git calls, run in isolation from the machine's config.
+///
+/// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_NOSYSTEM`: a `commit.gpgsign = true` or a
+/// global `core.hooksPath` would otherwise reach into this repo and ask for a
+/// signature, or run somebody's hook, before the case under test starts.
+/// Setting the identity locally covers neither.
 fn git(repo: &Path, args: &[&str]) {
-  let status = Command::new("git")
+  let status = Command::new(git_only_bin().join("git"))
     .args(args)
     .current_dir(repo)
+    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+    .env("GIT_CONFIG_NOSYSTEM", "1")
     .status()
     .expect("git ran");
   assert!(status.success(), "git {args:?} failed");
@@ -148,15 +159,18 @@ exit 0"#,
     fs::write(repo.join("uncommitted.txt"), "in the shot\n").unwrap();
   }
 
-  let path = format!(
-    "{}:{}",
-    bin.display(),
-    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
-  );
+  // The stubs first, then a git that has been checked to work, then the system
+  // pair: the script resolves `cargo`, `vhs`, `gh` and `git` through this and
+  // nothing else, so no case can be decided by what happens to be installed.
+  let path = format!("{}:{}:/usr/bin:/bin", bin.display(), git_only_bin().display());
   let out = Command::new("bash")
     .arg("docs/_capture/generate.sh")
     .current_dir(repo)
+    .env_clear()
     .env("PATH", path)
+    .env("HOME", repo)
+    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+    .env("GIT_CONFIG_NOSYSTEM", "1")
     .env("GWM_CAPTURE_PREFLIGHT_ONLY", "1")
     .output()
     .expect("generate.sh ran");
