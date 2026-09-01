@@ -40,7 +40,13 @@ categories = ["command-line-utilities", "development-tools"]
 # `cargo publish` over it at the next release. crates.io rewrites relative
 # image links in the README against `repository`, so the published page still
 # shows `docs/_capture/demo.gif`. Pinned by `tests/docs_assets_tests.rs`.
-exclude = ["docs/"]
+# Only the capture binaries leave the crate, not the whole doc tree: the
+# images are 18.1 MiB of `docs/`, the markdown and `docs/schema` together are
+# 1.3 MiB. Dropping `docs/` wholesale also broke `cargo test` from a
+# downloaded crate, because `contract_tests.rs` reads `docs/schema` and
+# `docs_frontmatter_tests.rs` reads the pages. `docs_assets_tests.rs` is the
+# one suite whose subject is the images themselves, so it goes with them.
+exclude = ["docs/**/*.png", "docs/**/*.gif", "tests/docs_assets_tests.rs"]
 
 # cargo-binstall (#27): pull the prebuilt binary from the GitHub
 # Release instead of compiling git2/vendored-libgit2 from source.

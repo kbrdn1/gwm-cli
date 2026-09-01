@@ -219,7 +219,7 @@ fn capture_basenames_are_unique_across_sections() {
   );
 }
 
-/// The captures stay out of the published crate.
+/// The capture binaries stay out of the published crate, and nothing else does.
 ///
 /// `cargo package` on 1.8.0 measured **9.8 MiB compressed of the 10 MiB
 /// crates.io limit** (442 files, 14.7 MiB uncompressed), and `docs/` was
@@ -227,10 +227,16 @@ fn capture_basenames_are_unique_across_sections() {
 /// pushes the tarball past the limit, so the release fails at `cargo publish`,
 /// long after this PR merged and with nothing in the diff pointing at it.
 ///
+/// Excluding `docs/` wholesale was the first answer and it was too wide: it
+/// left `contract_tests.rs` and `docs_frontmatter_tests.rs` in the package
+/// reading a tree that was no longer there, so `cargo test` from a downloaded
+/// crate failed. The weight is all in the images (18.1 MiB against 1.3 MiB for
+/// the markdown and `docs/schema`), so only the images leave.
+///
 /// crates.io rewrites relative image links in a README against `repository`,
-/// so dropping `docs/` costs the published page nothing.
+/// so dropping the captures costs the published page nothing.
 #[test]
-fn the_published_crate_excludes_the_docs_tree() {
+fn the_published_crate_excludes_the_capture_binaries() {
   let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
   let raw = fs::read_to_string(&path).unwrap_or_else(|err| panic!("{} must be readable: {err}", path.display()));
   let manifest: toml::Value = toml::from_str(&raw).expect("Cargo.toml is valid TOML");
@@ -240,12 +246,27 @@ fn the_published_crate_excludes_the_docs_tree() {
     .and_then(|e| e.as_array())
     .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
     .unwrap_or_default();
+
+  for ext in ["png", "gif"] {
+    let pattern = format!("docs/**/*.{ext}");
+    assert!(
+      excluded.contains(&pattern),
+      "[package] exclude must carry `{pattern}`, or the 2x captures take the tarball over the \
+       crates.io size limit; found {excluded:?}"
+    );
+  }
+
+  // The other half of the rule: the pages and the schema must survive, or the
+  // suites that read them fail from a downloaded crate. A guard that only
+  // checked the images would pass just as happily on `exclude = ["docs/"]`,
+  // which is the mistake this test exists to catch.
   assert!(
-    excluded
+    !excluded
       .iter()
-      .any(|pattern| pattern == "docs/" || pattern == "/docs/" || pattern == "docs"),
-    "[package] exclude must drop `docs/` from the published crate, or the 2x captures take the \
-     tarball over the crates.io size limit; found {excluded:?}"
+      .any(|p| p == "docs/" || p == "/docs/" || p == "docs" || p == "docs/**"),
+    "[package] exclude must not drop the whole doc tree: `contract_tests.rs` reads `docs/schema` \
+     and `docs_frontmatter_tests.rs` reads the pages, so a downloaded crate would fail \
+     `cargo test`; found {excluded:?}"
   );
 }
 
