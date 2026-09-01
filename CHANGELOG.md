@@ -396,6 +396,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The published crate no longer carries the doc tree**
+  ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)). `cargo package` on
+  1.8.0 measured 9.8 MiB compressed against the 10 MiB crates.io limit, and
+  `docs/` was 9.2 MiB of the 14.7 MiB it packaged, nearly all of it captures
+  that build nothing. `exclude = ["docs/"]` brings the same manifest to 5.7 MiB
+  and 1.6 MiB compressed, which is what leaves room for rendering those
+  captures at 2x. crates.io rewrites relative image links in a README against
+  `repository`, so the crate page still shows `demo.gif`.
+
+
 - **Modals follow `[tui] layout` instead of always being bordered**
   ([#594](https://github.com/kbrdn1/gwm-cli/issues/594)). `compact` has been
   the default layout since
@@ -499,6 +509,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tmux behaviour back.
 
 ### Fixed
+
+- **`demo.gif` records the demo again, and shows the note marker**
+  ([#601](https://github.com/kbrdn1/gwm-cli/issues/601)). The recording was
+  meant to be reshot for one reason, the note column's marker moving to the
+  `nf-oct-markdown` glyph in
+  [#595](https://github.com/kbrdn1/gwm-cli/issues/595). Watching the reshoot
+  frame by frame turned up a bigger one: the tape had been broken since
+  [#557](https://github.com/kbrdn1/gwm-cli/issues/557) shipped vim normal mode
+  on by default. `N` opens the note in NORMAL, so the prose the tape types was
+  read as normal-mode verbs (`R` opened replace and ate the first characters),
+  and closing takes **two** `Esc` where the tape had one. The modal therefore
+  never closed, and every later keystroke, the worktree it creates, the filter,
+  the delete, landed in the note instead of the list: roughly the last two
+  thirds of the recording showed something other than what it claims. The tape
+  now enters insert first and closes with both presses, with the reason written
+  above the sequence so the next reader does not rediscover it.
+
+- **The doc captures are rendered at 2x and stop blurring on the site**
+  ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)). Every capture was
+  generated at terminal scale, so the PNG that shipped was exactly as wide as
+  the terminal it photographed. The docs site paints a capture wider than that
+  (`hero.png` is 1000px and measured 1230 CSS px in a 2560px viewport) and a
+  HiDPI display doubles the demand again, so the browser was upscaling text
+  before anyone read it. Nothing could catch it: the reference resolved, the
+  build was green, the text was simply soft.
+
+  vhs 0.11 has no `Set Scale`, so density comes from doubling `Set FontSize`
+  with the geometry: 30 instead of 15, and twice every `Set Width`,
+  `Set Height` and `Set Padding`. The framing is unchanged because the grid is,
+  give or take the residue of a division: `hero` was 103 columns and is 104,
+  `narrow` 81 and now 82, which keeps it under the 120 that would flip it to
+  the side-by-side layout it exists to contrast.
+
+  All 29 captures were regenerated, the two that `generate.sh` skips
+  (`demo.tape`, `github-linking.tape`) by hand. Two guards in
+  `tests/docs_assets_tests.rs` hold the line: a 1600px floor on every shipped
+  `.png` / `.gif`, and `Set FontSize 30` on every tape, since a new tape copied
+  from an old one is how 1x comes back.
+
+  Half of the symptom is not fixable here. The site sets `width: 100%` on
+  content images, which stretches a capture past its own pixels whatever its
+  density; that is tracked as
+  [kbrdn-docs#76](https://github.com/kbrdn1/kbrdn-docs/issues/76).
+
 
 - **The rich Issue/PR view keeps its inline comments through a relist**
   ([#619](https://github.com/kbrdn1/gwm-cli/issues/619)). With the rich PR

@@ -9,10 +9,10 @@
 Output docs/_capture/demo.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
-Set FontSize 15
-Set Width 1000
-Set Height 680
-Set Padding 20
+Set FontSize 30
+Set Width 1960
+Set Height 1320
+Set Padding 40
 Set Framerate 14
 Set Theme { "name": "gwm-grey", "background": "#141414", "foreground": "#d6d6d6", "cursor": "#d6d6d6", "selection": "#3d3d3d", "black": "#3a3a3a", "red": "#e06c75", "green": "#98c379", "yellow": "#e5c07b", "blue": "#61afef", "magenta": "#c678dd", "cyan": "#56b6c2", "white": "#d6d6d6", "brightBlack": "#6a6a6a", "brightRed": "#e06c75", "brightGreen": "#98c379", "brightYellow": "#e5c07b", "brightBlue": "#61afef", "brightMagenta": "#c678dd", "brightCyan": "#56b6c2", "brightWhite": "#ffffff" }
 
@@ -52,14 +52,26 @@ Sleep 2200ms
 Escape
 Sleep 1000ms
 
-# The note: `N` opens it in a modal, `Esc` saves and closes (#515).
+# The note: `N` opens it in a modal (#515), and since #557 that modal opens in
+# vim NORMAL mode, because `[tui] note_vim` defaults to true. Two consequences
+# the tape has to spell out, both learned by watching this recording break:
+#
+#   - typing prose straight away feeds it to the normal-mode verbs (`R` opened
+#     replace and ate the first characters), so `i` comes first.
+#   - closing takes TWO `Esc`: the first leaves insert, the second saves and
+#     closes. With one, the modal stayed up and every later keystroke of this
+#     tape landed in the note instead of the list.
 Type "N"
 Sleep 900ms
+Type "i"
+Sleep 300ms
 Type@55ms "Rate limiter drops the burst allowance under load."
 Sleep 400ms
 Enter
 Type@55ms "Check the 429 headers before opening the PR."
 Sleep 1500ms
+Escape
+Sleep 400ms
 Escape
 Sleep 1200ms
 
