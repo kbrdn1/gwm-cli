@@ -35,6 +35,7 @@ mod common;
 
 use common::init_repo;
 use gwm::bootstrap::{BootstrapReport, StepResult};
+use gwm::config::TuiLayout;
 use gwm::tui::{draw, App, Field, LinkTarget, TaskKind, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
@@ -56,7 +57,23 @@ fn make_app() -> (tempfile::TempDir, App) {
   // `Stacked` orientation, which renders even at < 120 cols — terminal
   // width alone does NOT hide the sidebar; only `open = false` does.
   app.sidebar.open = false;
+  // Modals follow `[tui] layout` since #594, and the shipped default is
+  // `Compact`. Every case built on this helper pins the BORDERED contract:
+  // the `sizing_matrix` numbers, and a `modal_rect` that locates the frame by
+  // its `╭`. The layout is pinned here rather than inherited, because without it
+  // the whole file would silently re-measure the compact frame under names
+  // that promise the boxed one, and `modal_rect` would find no corner at all.
+  // Compact coverage flips it back through [`compact_app`], so both halves
+  // of the layout are exercised by the same setups.
+  pin_bordered(&mut app);
   (dir, app)
+}
+
+/// Pin the boxed layout on an app this file builds outside [`make_app`].
+/// Same reason, and the same contract: the assertions below describe the
+/// bordered frame.
+fn pin_bordered(app: &mut App) {
+  app.config.tui.layout = TuiLayout::Bordered;
 }
 
 /// A synthetic, deletable (non-main) worktree row so the Confirm modal
@@ -198,6 +215,64 @@ fn create_modal_renders_title_fields_and_buttons() {
   // unpadded label so the test is robust to chip padding).
   assert_present(&buf, "Create", "create button");
   assert_present(&buf, "Cancel", "cancel button");
+}
+
+#[test]
+fn create_from_issue_modal_shows_one_field_and_no_empty_preview() {
+  // #625: the triple is empty until the forge answers, so expanding the
+  // patterns over it renders the literal `/#-` — a branch this form is not
+  // about to write. The preview is replaced rather than shown empty, and the
+  // type selector and slug field are not drawn at all: this mode has one
+  // input.
+  //
+  // Asserted against the rendered buffer, not against the mode: a guard that
+  // matched by name would pass while the modal drew the structured form.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  assert_eq!(app.view, View::Create);
+  let buf = render(&mut app);
+
+  assert_present(&buf, "from issue", "the title says which mode this is");
+  assert_present(&buf, "Issue", "the one field it collects");
+  assert_present(&buf, "read off the issue", "what the missing preview is replaced by");
+  assert_absent(
+    &buf,
+    "structured",
+    "the toggle is inert here, so the hint row does not offer it",
+  );
+  assert_absent(&buf, "Branch :", "no preview of a triple that does not exist yet");
+  assert_absent(&buf, "Dir    :", "same for the directory row");
+  assert_absent(&buf, "Desc", "the slug is derived, not typed here");
+}
+
+#[test]
+fn create_from_issue_modal_becomes_the_structured_form_once_the_issue_lands() {
+  // The prefill is the point: what the user confirms is the ordinary create
+  // form, showing the branch it will write.
+  let (_dir, mut app) = make_app();
+  app.enter_create_from_issue();
+  app.create_form.awaiting_issue = Some(594);
+  app.apply_awaited_issue(
+    594,
+    &Ok(gwm::github::IssueStatus {
+      number: 594,
+      title: "modals should follow layout".into(),
+      state: gwm::github::IssueState::Open,
+      url: "https://example.test/issues/594".into(),
+      labels: vec!["feature".into()],
+      updated_at: "2026-08-29T00:00:00Z".into(),
+      detail: Default::default(),
+    }),
+  );
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Branch", "the preview is back");
+  assert_present(&buf, "Desc", "and so is the slug field");
+  assert_present(
+    &buf,
+    "modals-should-follow-layout",
+    "the derived slug is in the form, visible before it is committed to",
+  );
 }
 
 #[test]
@@ -367,6 +442,127 @@ fn command_logs_modal_renders_title_and_entry_argv() {
   assert_present(&buf, "gh issue view 226", "logged command argv");
   // The footer advertises the `y` copy bind (issue #279).
   assert_present(&buf, "copy", "command logs copy hint");
+}
+
+/// Drain until the commit-listing worker lands, or fail loudly.
+fn settle_commits(app: &mut gwm::tui::App) {
+  use std::time::{Duration, Instant};
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while app.is_commits_loading() && Instant::now() < deadline {
+    app.drain_task_results();
+    std::thread::sleep(Duration::from_millis(5));
+  }
+  assert!(
+    !app.is_commits_loading(),
+    "the commit-listing worker never landed within 10s"
+  );
+}
+
+#[test]
+fn commits_modal_paints_a_loader_before_the_walk_lands() {
+  // The revwalk is on a worker, so the first frame has no rows. A blank
+  // canvas there reads as "no commits", which is the one answer this
+  // overlay must not give by accident.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  let buf = render(&mut app);
+  assert_present(&buf, "loading", "loader while the walk is out");
+  assert_absent(&buf, "No commits", "empty-state placeholder during a load");
+  settle_commits(&mut app);
+}
+
+#[test]
+fn commits_modal_renders_the_graph_and_counts_its_rows() {
+  // Issue #593: `6` paints the sidebar's commit graph on the full canvas.
+  // The count rides the title so `load more` has visible feedback; the
+  // fixture repo has one commit, so there is no deeper page and no `+`.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  let buf = render(&mut app);
+  assert_present(&buf, "Commits (1)", "commits title with its row count");
+  assert_present(&buf, "init", "the commit subject");
+  assert_absent(&buf, "load more", "load-more hint on an exhausted history");
+  assert_absent(&buf, "loading", "loader after the walk landed");
+}
+
+#[test]
+fn commits_modal_drops_load_more_when_the_worktree_is_gone() {
+  // The render-side half of the same rule: a full page whose worktree left
+  // the list must not paint the hint, nor the title's `+`.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  app.worktrees.clear();
+  let buf = render(&mut app);
+  assert_absent(&buf, "load more", "load-more hint for a vanished worktree");
+}
+
+#[test]
+fn commits_modal_advertises_load_more_only_when_a_page_is_full() {
+  // The footer hint and `App::load_more_commits` read the same predicate,
+  // so a key that does nothing is never advertised. Forced rather than
+  // committed 300 times: this pins the footer, not the revwalk.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.loaded = app.commits.limit;
+  let buf = render(&mut app);
+  assert_present(&buf, "load more", "load-more hint on a full page");
+  assert_present(&buf, "+", "the title flags that a deeper page exists");
+}
+
+#[test]
+fn commits_modal_pins_its_branch_above_the_scrolling_body() {
+  use ratatui::text::Line;
+
+  // Issue #629: the listing said nothing about the worktree it was walked
+  // on, and the title cannot carry it — a centred overlay title is clipped
+  // from the LEFT, so a branch name is exactly the wrong payload for it,
+  // and it already spends itself on the row count. A fixed row above the
+  // body carries it instead.
+  //
+  // Asserted by POSITION, not by presence: a `buffer_contains` scan over
+  // the whole buffer passes just as well when the branch is the first line
+  // of the *body* and scrolls away with it, which is the bug this pins.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  let branch = app.worktrees[0]
+    .branch
+    .clone()
+    .expect("the fixture worktree is on a branch");
+  // Enough rows that the body overflows a short terminal. Injected rather
+  // than committed 40 times: this pins the header, not the revwalk.
+  app.commits.lines = (0..40).map(|i| Line::from(format!("commit row {i}"))).collect();
+
+  let top = modal_rows(&render_at(&mut app, 100, 18));
+  let row = top
+    .iter()
+    .position(|r| r.contains(&branch))
+    .unwrap_or_else(|| panic!("no branch row — modal rows:\n{}", top.join("\n")));
+  assert!(
+    top[row + 1].contains("commit row 0"),
+    "the listing starts on the row right below it — got {:?}",
+    top[row + 1]
+  );
+
+  // Drive the cursor past the end; the renderer clamps it to the body's
+  // max-scroll, i.e. "scrolled to the bottom".
+  app.commits.scroll = u16::MAX;
+  let bottom = modal_rows(&render_at(&mut app, 100, 18));
+  assert!(
+    bottom[row].contains(&branch),
+    "the branch row is FIXED: same line at max scroll — got {:?}, modal rows:\n{}",
+    bottom[row],
+    bottom.join("\n")
+  );
+  assert!(
+    !bottom[row + 1].contains("commit row 0"),
+    "and it is the body that moved under it — got {:?}",
+    bottom[row + 1]
+  );
 }
 
 #[test]
@@ -649,6 +845,7 @@ fn exec_picker_modal_renders_title_profiles_and_hints() {
   )
   .unwrap();
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.sidebar.open = false;
   app.enter_exec_picker();
   assert_eq!(app.view, View::ExecPicker);
@@ -668,6 +865,7 @@ fn clean_modal_renders_title_report_and_hints() {
   std::fs::create_dir(dir.path().join("target")).unwrap();
   std::fs::write(dir.path().join("target").join("blob"), vec![0u8; 4096]).unwrap();
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
   app.sidebar.open = false;
   app.enter_clean_overlay();
   assert_eq!(app.view, View::CleanReport);
@@ -1345,8 +1543,13 @@ fn modal_frames_are_not_taller_than_their_content() {
 fn modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
   let area = *buf.area();
   let mut top_left = None;
+  // From column 1: a modal is centred, so its left rule never sits flush
+  // with the terminal edge, while a background pane's always does. Under
+  // `[tui] layout = "bordered"` the sidebar's sections are rounded too
+  // (#594), and scanning from column 0 would return one of those instead:
+  // the whole matrix would then measure the pane behind the modal.
   'outer: for y in 0..area.height {
-    for x in 0..area.width {
+    for x in 1..area.width {
       if buf[(x, y)].symbol() == "╭" {
         top_left = Some((x, y));
         break 'outer;
@@ -1377,6 +1580,12 @@ fn modal_rows(buf: &Buffer) -> Vec<String> {
         .collect()
     })
     .collect()
+}
+
+/// Byte offset of `needle` in `row`, for slicing what precedes it. Panics
+/// when absent, which the caller has already asserted against.
+fn tail_of(row: &str, needle: &str) -> usize {
+  row.find(needle).expect("needle present in row")
 }
 
 fn modal_width_at(setup: &dyn Fn() -> (tempfile::TempDir, App), w: u16, h: u16) -> u16 {
@@ -1488,6 +1697,7 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
         )
         .unwrap();
         let mut a = App::new_at_layered(Some(d.path()), None).unwrap();
+        pin_bordered(&mut a);
         a.sidebar.open = false;
         a.enter_exec_picker();
         (d, a)
@@ -1538,6 +1748,27 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
       180,
     ),
     (
+      "working-tree",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.view = View::WorkingTree;
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
+      "commits",
+      Box::new(|| {
+        let (d, mut a) = make_app();
+        a.enter_commits();
+        settle_commits(&mut a);
+        (d, a)
+      }),
+      72,
+      180,
+    ),
+    (
       "note-editor",
       Box::new(|| {
         let (d, mut a) = make_app();
@@ -1553,23 +1784,27 @@ fn sizing_matrix() -> Vec<(&'static str, ModalSetup, u16, u16)> {
 }
 
 #[test]
-fn the_background_paints_no_rounded_corner() {
-  // The matrix below finds each modal by its rounded top-left corner. That
-  // only works while nothing behind the modal draws one — if the worktree
-  // table or the sidebar ever grows a rounded frame, every measurement below
-  // silently starts describing the wrong rect. Prove the oracle, then use it.
+fn the_background_paints_no_rounded_corner_a_modal_could_be_mistaken_for() {
+  // The matrix below finds each modal by its rounded top-left corner, from
+  // column 1 (see `modal_rect`). That only works while nothing behind the
+  // modal draws one there. If the worktree table or the sidebar ever grows
+  // a rounded frame off the left edge, every measurement below silently
+  // starts describing the wrong rect. Prove the oracle, then use it.
+  //
+  // The sidebar's own sections ARE rounded in the boxed layout, which is
+  // exactly why the claim is about column 1 onwards and not about the
+  // buffer: they sit flush at column 0, and a centred modal never can.
   for sidebar_open in [false, true] {
     let (_dir, mut app) = make_app();
     app.sidebar.open = sidebar_open;
     let buf = render_at(&mut app, 120, 40);
-    let corners = (0..buf.area().height)
-      .flat_map(|y| (0..buf.area().width).map(move |x| (x, y)))
+    let corners: Vec<(u16, u16)> = (0..buf.area().height)
+      .flat_map(|y| (1..buf.area().width).map(move |x| (x, y)))
       .filter(|&(x, y)| buf[(x, y)].symbol() == "╭")
-      .count();
-    assert_eq!(
-      corners,
-      0,
-      "View::List (sidebar open = {sidebar_open}) must paint no rounded corner, found {corners} — rows:\n{}",
+      .collect();
+    assert!(
+      corners.is_empty(),
+      "View::List (sidebar open = {sidebar_open}) must paint no rounded corner past column 0, found {corners:?}. rows:\n{}",
       row_strings(&buf).join("\n")
     );
   }
@@ -1906,4 +2141,1448 @@ fn a_form_that_had_to_scroll_says_so() {
     "a form that fits must not show a scrollbar — modal rows:\n{}",
     rows.join("\n")
   );
+}
+
+/// A PR whose description is one long paragraph, linked and fetched onto a
+/// freshly-initialised repo, with the rich view open (issue #551).
+fn app_with_the_rich_view_open(body: &str) -> (tempfile::TempDir, App) {
+  let (dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
+  app.sidebar.open = false;
+  gwm::github::link_pr(&repo, &branch, 551).unwrap();
+  app.refresh_link();
+  let mut pr = gwm::github::PrStatus {
+    number: 551,
+    title: "polish the rich PR / issue view".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pull/551".into(),
+    updated_at: "2026-08-24T10:00:00Z".into(),
+    checks_passed: 13,
+    checks_total: 13,
+    ci: gwm::github::CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: String::new(),
+      author: "kbrdn1".into(),
+      additions: 1,
+      deletions: 0,
+      base_ref: "dev".into(),
+      head_ref: branch,
+      reviews: vec![],
+      comments: vec![],
+    },
+  };
+  pr.detail.body = body.to_string();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_rich_view();
+  (dir, app)
+}
+
+/// The horizontal span of the modal's frame, read off its top rule.
+fn frame_width(buf: &Buffer) -> usize {
+  let rows = row_strings(buf);
+  let rule = rows
+    .iter()
+    .find(|r| r.contains('╭') && r.contains('╮'))
+    .unwrap_or_else(|| panic!("no modal frame — rows:\n{}", rows.join("\n")));
+  let start = rule.chars().position(|c| c == '╭').unwrap();
+  let end = rule.chars().position(|c| c == '╮').unwrap();
+  end - start + 1
+}
+
+#[test]
+fn the_rich_view_is_painted_at_its_own_width_not_the_shared_overlays() {
+  // Issue #551. The width is decided TWICE: `App::rich_view_width` wraps the
+  // rows against it, `draw_detail_overlay` paints the frame at it. Nothing
+  // ties the two together but this pair of assertions — and the failure is
+  // silent in both directions. Painting narrower than the wrap ellipsises
+  // the tail of every line of prose; painting wider leaves a column of dead
+  // space the wrap already refused to use.
+  let (_dir, mut app) = app_with_the_rich_view_open("A description worth reading.");
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  assert_eq!(
+    frame_width(&buf),
+    gwm::tui::rich_view_modal_width(200) as usize,
+    "the frame must be painted at the rich view's own policy — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn a_wrapped_body_line_is_never_ellipsised_by_the_renderer() {
+  // The other half of the pair above, and the one that reads as the bug:
+  // the wrap already fitted every line to the inner width, so an ellipsis on
+  // a body row can only mean the paint budget was smaller than the wrap
+  // budget. Asserted on a body long enough to wrap several times at any
+  // plausible width.
+  let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+  // The negative assertion below is vacuous unless the body is on screen at
+  // all: an overlay that failed to open has no `lorem` row to ellipsise.
+  assert!(
+    rows.iter().any(|r| r.contains("lorem")),
+    "the body must be rendered before its ellipsis means anything — rows:\n{}",
+    rows.join("\n")
+  );
+  let culprit = rows.iter().find(|r| {
+    // A body row: inside the frame, carrying prose, cut with an ellipsis.
+    r.contains("lorem") && r.contains('…')
+  });
+  assert!(
+    culprit.is_none(),
+    "a body row was ellipsised, so the paint width is under the wrap width: {:?}\nrows:\n{}",
+    culprit,
+    rows.join("\n")
+  );
+}
+
+#[test]
+fn a_body_row_starts_at_the_frame_edge_not_behind_an_empty_label_column() {
+  // Issue #551, question 2 of the issue body: does the label column earn
+  // its width on rows that are pure prose? It does not. The shell sizes one
+  // label column from the widest label it is handed and indents EVERY row
+  // by it, so each wrapped line of a description paid nine columns for a
+  // label it does not have — on top of wrapping against a budget nine
+  // columns short, which is the same nine columns spent twice.
+  let (_dir, mut app) = app_with_the_rich_view_open(&"lorem ipsum dolor sit amet ".repeat(40));
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  // The modal's rows, not the terminal's: in the boxed layout the worktree
+  // pane behind it owns column 0's `│`, and `left_rule` below would find
+  // that one rather than the modal's own (issue #594).
+  let rows = modal_rows(&buf);
+
+  let body = rows
+    .iter()
+    .find(|r| r.contains("lorem"))
+    .unwrap_or_else(|| panic!("the body must be on screen — rows:\n{}", rows.join("\n")));
+  let left_rule = body
+    .chars()
+    .position(|c| c == '│')
+    .expect("a body row sits inside the frame");
+  let text = body.chars().position(|c| c == 'l').expect("the body text");
+
+  // The frame's own inset: the rule, then the block's two padding columns.
+  // Anything past that is the empty label column.
+  assert_eq!(
+    text - left_rule,
+    3,
+    "a label-less row must start at the frame's padding, not {} columns in — row: {body:?}",
+    text - left_rule
+  );
+}
+
+#[test]
+fn markdown_reaches_the_terminal_rendered_not_as_source() {
+  // Issue #551, the complaint in one assertion: `## Description` and
+  // `**bold**` were painted with their markers, because the body reached the
+  // renderer as the Markdown source it arrived as.
+  let (_dir, mut app) = app_with_the_rich_view_open(
+    "## Description\n\nA **bold** claim and `some_code` and a [link](https://example.test/x).\n\n- one\n- [x] done\n\n<!-- hidden -->",
+  );
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+  let rows = row_strings(&buf);
+  let all = rows.join("\n");
+
+  assert!(all.contains("Description"), "the heading text is there — rows:\n{all}");
+  assert!(
+    !all.contains("## Description"),
+    "and it is a heading, not its source — rows:\n{all}"
+  );
+  assert!(all.contains("bold"), "the emphasised word is there");
+  assert!(!all.contains("**bold**"), "without its markers — rows:\n{all}");
+  assert!(all.contains("• one"), "a list item gets a bullet — rows:\n{all}");
+  assert!(all.contains("☑ done"), "a task gets its box — rows:\n{all}");
+  assert!(!all.contains("hidden"), "an HTML comment is not shown — rows:\n{all}");
+  assert!(all.contains("link"), "a link shows its text");
+  assert!(!all.contains("https://example.test/x"), "not its URL — rows:\n{all}");
+}
+
+#[test]
+fn an_emphasised_run_is_painted_in_its_own_style() {
+  // The needle the assertions above cannot reach: the text can be correct
+  // while every run is painted identically, which is the same view with
+  // extra steps. Read off the real cells.
+  let (_dir, mut app) = app_with_the_rich_view_open("plainword **boldword** `codeword`");
+  app.set_term_width(200);
+  let buf = render_at(&mut app, 200, 50);
+
+  let cell_style = |needle: &str| {
+    let area = *buf.area();
+    for y in 0..area.height {
+      let row: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+      if let Some(at) = row.find(needle) {
+        // `find` is a byte offset and every character here is ASCII.
+        let cell = &buf[(at as u16, y)];
+        return Some((cell.fg, cell.modifier));
+      }
+    }
+    None
+  };
+
+  let plain = cell_style("plainword").expect("plain prose on screen");
+  let bold = cell_style("boldword").expect("the emphasised run on screen");
+  let code = cell_style("codeword").expect("the code run on screen");
+
+  assert_ne!(bold, plain, "an emphasised run must not paint like plain prose");
+  assert_ne!(code, plain, "inline code must not paint like plain prose");
+  assert_ne!(code, bold, "code and emphasis are different things");
+}
+
+#[test]
+#[ignore = "not an assertion: prints the rich view so a human can look at it"]
+fn dump_the_rich_view() {
+  // Question 1 of issue #551: "screenshot the view against a real PR with a
+  // long body — that picture is the brief". `GWM_DUMP_BODY` points at a file
+  // holding one, so the picture can be retaken after any change here:
+  //
+  //   gh pr view 582 --json body -q .body > /tmp/body.md
+  //   GWM_DUMP_BODY=/tmp/body.md cargo test --test tui_modal_render_tests \
+  //     dump_the_rich_view -- --ignored --nocapture
+  //
+  // `GWM_DUMP_TABS=1` instead prints the two-tab case.
+  let body = std::env::var("GWM_DUMP_BODY")
+    .ok()
+    .and_then(|p| std::fs::read_to_string(p).ok())
+    .unwrap_or_else(|| "## Heading\n\nSome **bold** prose.".into());
+  // With `GWM_DUMP_TABS` set, both sides are linked so the tab bar shows.
+  let (_dir, mut app) = if std::env::var_os("GWM_DUMP_TABS").is_some() {
+    app_with_both_tabs()
+  } else {
+    app_with_the_rich_view_open(&body)
+  };
+  let (w, h) = (160, 60);
+  app.set_term_width(w);
+  let buf = render_at(&mut app, w, h);
+  println!("{}", row_strings(&buf).join("\n"));
+}
+
+/// The rich view with BOTH sides linked and fetched, so the tab bar renders.
+fn app_with_both_tabs() -> (tempfile::TempDir, App) {
+  let (dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  pin_bordered(&mut app);
+  app.sidebar.open = false;
+  gwm::github::link_pr(&repo, &branch, 551).unwrap();
+  gwm::github::link_issue(&repo, &branch, 420).unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::github::IssueStatus {
+    number: 420,
+    title: "the view itself".into(),
+    state: gwm::github::IssueState::Open,
+    url: "https://example.test/issues/420".into(),
+    labels: vec!["tui".into()],
+    updated_at: "2026-08-01T10:00:00Z".into(),
+    detail: gwm::forge::IssueDetail {
+      body: "The issue body.".into(),
+      author: "kbrdn1".into(),
+      comments: vec![],
+    },
+  }));
+  app.apply_pr_fetch_result(Ok(gwm::github::PrStatus {
+    number: 551,
+    title: "polish the rich view".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pull/551".into(),
+    updated_at: "2026-08-24T10:00:00Z".into(),
+    checks_passed: 13,
+    checks_total: 13,
+    ci: gwm::github::CiState::Passing,
+    checks: vec![],
+    detail: gwm::forge::PrDetail {
+      body: "The PR body.".into(),
+      author: "kbrdn1".into(),
+      additions: 1,
+      deletions: 0,
+      base_ref: "dev".into(),
+      head_ref: branch,
+      reviews: vec![],
+      comments: vec![],
+    },
+  }));
+  app.enter_rich_view();
+  (dir, app)
+}
+
+#[test]
+fn the_tab_bar_is_on_screen_when_both_sides_are_linked() {
+  // Issue #551: the PR wins whenever one is linked, which left the issue
+  // with no way back. The bar is what says the other side is one key away.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  let inside = modal_rows(&buf).join("\n");
+
+  assert!(inside.contains("Issue #420"), "the issue tab — modal:\n{inside}");
+  assert!(inside.contains("PR #551"), "the PR tab — modal:\n{inside}");
+}
+
+#[test]
+fn the_tab_bar_does_not_push_the_hint_row_out_of_the_frame() {
+  // Two rows were added to `lines`, so two rows had to be added to the
+  // height. Under-count them and `Paragraph` simply drops the tail: the hint
+  // bar, which is the row that tells the reader `Tab` exists at all.
+  //
+  // Asserted inside the frame. The footer at the bottom of the screen
+  // advertises the very same verbs, so a whole-buffer search passes with the
+  // hint bar missing — which is exactly what it did.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(160);
+  let buf = render_at(&mut app, 160, 50);
+  let inside = modal_rows(&buf).join("\n");
+
+  assert!(
+    inside.contains("issue/pr"),
+    "the tab hint must survive the frame — modal:\n{inside}"
+  );
+  assert!(
+    inside.contains("close"),
+    "and so must the rest of the hint bar — modal:\n{inside}"
+  );
+}
+
+#[test]
+fn scrolling_right_brings_a_code_lines_tail_on_screen() {
+  // Issue #551. The offset is state; this is the half that matters. A fenced
+  // line is kept whole rather than reflowed, so without the renderer
+  // honouring the offset its tail is simply unreachable — and the row-level
+  // ellipsis that used to cut it would throw those columns away before
+  // anything could scroll to them.
+  //
+  // The needle is a marker placed at column 300 of a 400-column line, which
+  // no plausible modal width can show at rest.
+  let mut line = "x".repeat(400);
+  line.replace_range(300..309, "NEEDLEHIT");
+  let (_dir, mut app) = app_with_the_rich_view_open(&format!("```\n{line}\n```"));
+  app.set_term_width(160);
+
+  let before = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    !before.contains("NEEDLEHIT"),
+    "precondition: the tail is off screen at rest — modal:\n{before}"
+  );
+
+  for _ in 0..40 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+
+  assert!(
+    after.contains("NEEDLEHIT"),
+    "scrolling right must reach it — modal:\n{after}"
+  );
+}
+
+#[test]
+fn scrolling_leaves_the_wrapped_prose_where_it_was() {
+  // The offset is bounded to preformatted rows on purpose: prose was
+  // wrapped to fit, so it has no tail to reach and sliding it would only
+  // hide its left edge.
+  let (_dir, mut app) =
+    app_with_the_rich_view_open(&format!("A paragraph that stays put.\n\n```\n{}\n```", "x".repeat(400)));
+  app.set_term_width(160);
+  let _ = render_at(&mut app, 160, 50);
+  for _ in 0..40 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+
+  assert!(
+    after.contains("A paragraph that stays put."),
+    "the prose must not slide out of the frame — modal:\n{after}"
+  );
+}
+
+#[test]
+fn scrolling_reaches_the_tail_of_a_line_of_wide_glyphs() {
+  // Codex review, pass 1 (P2): the offset bound and the render clip both
+  // counted CHARS, while the terminal spends CELLS. A line of CJK is twice
+  // as wide as it is long, so the bound stopped at half the columns it
+  // needed to and the tail could not be reached at any offset — on the one
+  // feature whose whole purpose is reaching that tail.
+  let line = format!("{}NEEDLEHIT", "界".repeat(120));
+  let (_dir, mut app) = app_with_the_rich_view_open(&format!("```\n{line}\n```"));
+  app.set_term_width(160);
+
+  let before = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    !before.contains("NEEDLEHIT"),
+    "precondition: 240 cells of glyphs put the tail off screen — modal:\n{before}"
+  );
+
+  for _ in 0..80 {
+    app.rich_view_scroll_right();
+  }
+  let after = modal_rows(&render_at(&mut app, 160, 50)).join("\n");
+  assert!(
+    after.contains("NEEDLEHIT"),
+    "the tail must be reachable — modal:\n{after}"
+  );
+}
+
+#[test]
+fn a_segmented_row_too_wide_for_the_modal_is_ellipsised() {
+  // Codex review, pass 2 (P2): `value` carried the ellipsised text but the
+  // segment branch walked the original runs until the budget ran out, so a
+  // styled row was cut silently. The `url` row is the one that hits this
+  // first, and losing the end of a URL with no mark saying so is the exact
+  // failure the ellipsis exists to prevent.
+  let (_dir, mut app) = app_with_the_rich_view_open("body");
+  app.set_term_width(44);
+  let buf = render_at(&mut app, 44, 40);
+  let rows = modal_rows(&buf);
+  let url = rows
+    .iter()
+    .find(|r| r.contains("example.test"))
+    .unwrap_or_else(|| panic!("the url row must be on screen — modal:\n{}", rows.join("\n")));
+
+  assert!(url.contains('…'), "a row cut by the modal must say so: {url:?}");
+}
+
+#[test]
+fn a_row_cut_after_a_badge_keeps_its_ellipsis_on_screen() {
+  // Codex review, pass 4 (P2), on the ellipsis added in pass 2. It reserved
+  // its column against the whole row's width instead of against what was
+  // LEFT after the runs already painted, so a row opening with a badge came
+  // out one column over and ratatui clipped the ellipsis itself — putting
+  // the silent truncation back exactly where pass 2 had removed it.
+  //
+  // The identity row is the one that opens with a badge, and a narrow
+  // terminal is where it stops fitting.
+  let (_dir, mut app) = app_with_both_tabs();
+  app.set_term_width(40);
+  let buf = render_at(&mut app, 40, 40);
+  let rows = modal_rows(&buf);
+  let identity = rows
+    .iter()
+    // Not the title, which rides the top rule and carries the same number,
+    // and not the tab bar, which names both sides on one row.
+    .find(|r| r.contains("#551") && !r.contains('╭') && !r.contains("Issue"))
+    .unwrap_or_else(|| panic!("the identity row must be on screen — modal:\n{}", rows.join("\n")));
+
+  assert!(
+    identity.contains('…'),
+    "a row the modal cut must say so, and the mark must survive the clip: {identity:?}"
+  );
+}
+
+// ── the note editor's mode indicator (#557) ────────────────────────────────
+
+#[test]
+fn the_note_title_names_the_mode_when_the_knob_is_on() {
+  // A mode the user cannot see is a mode they type verbs into by accident.
+  // The title is the one piece of chrome the editor already has.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the modal must say which mode it is in:\n{}",
+    row_strings(&buf).join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "INSERT"),
+    "and it must follow the mode:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_note_title_says_nothing_about_modes_with_the_knob_off() {
+  // The #515 title, unchanged, for everyone who turns the mode back off.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(!buffer_contains(&buf, "INSERT"), "no mode chip without the knob");
+  assert!(!buffer_contains(&buf, "NORMAL"));
+}
+
+#[test]
+fn a_long_branch_name_does_not_push_the_mode_chip_off_the_title() {
+  // The title is clipped from the right, so whichever half sits last is the
+  // half a long branch name costs. Whether the keys are text is worth more
+  // than the name of the branch the modal was opened from.
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = true;
+  app.note_editor = Some(gwm::tui::state::note_editor::NoteEditor::open(
+    "feat/#557-a-branch-name-long-enough-to-run-past-the-right-hand-edge-of-the-modal".into(),
+    PathBuf::from("/tmp/n.md"),
+    "",
+  ));
+  app.note_editor.as_mut().unwrap().enter_normal();
+  app.view = View::Note;
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  assert!(
+    buffer_contains(&buf, "NORMAL"),
+    "the mode chip was clipped off by the branch name:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn the_note_modal_carries_the_mode_line_on_its_own_last_row() {
+  // The app footer says the same thing, but it sits at the bottom of the
+  // terminal: on a tall screen that is thirty rows away from the box the
+  // eye is in, which is where the keys are being pressed. Asserted on the
+  // modal's own last inner row, so the footer behind it cannot satisfy it.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  // Frame anatomy from the bottom: the border, the block's one row of
+  // bottom padding, then the mode line.
+  let rows = closed_modal_rows(&buf, "note at 100x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("hjkl"),
+    "the modal's last row must carry the normal-mode keys, got:\n{}",
+    rows.join("\n")
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let rows = closed_modal_rows(&buf, "note in insert at 100x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("INSERT") && !last_inner.contains("hjkl"),
+    "and it must follow the mode into insert, got:\n{last_inner}"
+  );
+
+  // Where the row has the width for the whole list, `Esc` names what it
+  // does in this mode rather than the gesture it performs in the other.
+  // At 100 columns the tail is what the truncation eats, which is the
+  // documented order and why the help overlay carries the same keys.
+  let buf = render_at(&mut app, 160, TERM_H);
+  let rows = closed_modal_rows(&buf, "note in insert at 160x40");
+  let last_inner = rows[rows.len() - 3].clone();
+  assert!(
+    last_inner.contains("Esc normal mode") && !last_inner.contains("save & close"),
+    "the full insert line must say where `Esc` goes, got:\n{last_inner}"
+  );
+}
+
+#[test]
+fn the_note_modal_still_renders_when_there_is_no_room_for_both() {
+  // The mode line takes a row off the buffer, so the smallest modal has to
+  // stay drawable: a layout whose text pane collapses to zero must not
+  // panic or lose the frame.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+  for c in "note".chars() {
+    app.handle_note_key(crossterm::event::KeyEvent::new(
+      crossterm::event::KeyCode::Char(c),
+      crossterm::event::KeyModifiers::NONE,
+    ));
+  }
+
+  for (w, h) in [(40u16, 6u16), (30, 5), (20, 4)] {
+    let buf = render_at(&mut app, w, h);
+    assert!(!row_strings(&buf).is_empty(), "the note modal must survive {w}x{h}");
+  }
+}
+
+#[test]
+fn the_mode_badge_is_painted_not_just_spelled() {
+  // A word in a row of words is a word; the mode is state, and it reads as
+  // state when it is a block of colour. Same reverse-video treatment the
+  // statusbar's context anchor has always had.
+  use ratatui::style::Modifier;
+
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let (x, y, w, h) = modal_rect(&buf).expect("the note modal");
+  // The frame from the bottom: border, one row of block padding, the mode
+  // line.
+  let row = y + h - 3;
+  let painted: String = (x..x + w)
+    .filter(|col| buf[(*col, row)].modifier.contains(Modifier::REVERSED))
+    .map(|col| buf[(col, row)].symbol())
+    .collect();
+  assert_eq!(
+    painted.trim(),
+    "NORMAL",
+    "the mode badge must be the reverse-video run on the mode line, row:\n{}",
+    (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
+  );
+
+  app.handle_note_key(crossterm::event::KeyEvent::new(
+    crossterm::event::KeyCode::Char('i'),
+    crossterm::event::KeyModifiers::NONE,
+  ));
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let painted: String = (x..x + w)
+    .filter(|col| buf[(*col, row)].modifier.contains(Modifier::REVERSED))
+    .map(|col| buf[(col, row)].symbol())
+    .collect();
+  assert_eq!(painted.trim(), "INSERT", "and it follows the mode");
+}
+
+#[test]
+fn the_mode_badge_is_absent_with_the_mode_off() {
+  // No badge for a state nobody can be in: with `note_vim = false` the
+  // editor has one mode and naming it would be chrome.
+  use ratatui::style::Modifier;
+
+  let (_dir, mut app) = make_app();
+  app.config.tui.note_vim = false;
+  app.list_state.select(Some(0));
+  app.open_note_editor();
+
+  let buf = render_at(&mut app, TERM_W, TERM_H);
+  let (x, y, w, h) = modal_rect(&buf).expect("the note modal");
+  let row = y + h - 3;
+  assert!(
+    (x..x + w).all(|col| !buf[(col, row)].modifier.contains(Modifier::REVERSED)),
+    "no badge without the mode, row:\n{}",
+    (x..x + w).map(|col| buf[(col, row)].symbol()).collect::<String>()
+  );
+}
+
+#[test]
+fn working_tree_modal_renders_its_title_body_and_footer() {
+  use gwm::tui::{WorkingTreeCounts, WT_CREATED_ICON, WT_MODIFIED_ICON};
+  use ratatui::text::Line;
+
+  // Issue #592: the sidebar pane's tree, given the whole screen. The rows
+  // are injected as owned state (the same boundary the command-logs render
+  // test pins) so this stays offline and deterministic — `enter_working_tree`
+  // is what shells out, and `tui_app_tests` covers that half.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("src/tui/"), Line::from("└─ ui.rs"), Line::from("README.md")];
+  app.working_tree.counts = WorkingTreeCounts {
+    created: 1,
+    modified: 2,
+    deleted: 0,
+  };
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+  assert_present(&buf, "ui.rs", "a tree row from the injected listing");
+  assert_present(&buf, "README.md", "a second tree row");
+  // The pane's change-count footer travels with the listing (issue #287):
+  // the same `<glyph> <n>` segments the bordered sidebar pane puts on its
+  // bottom rule, asserted through the constants so a glyph change here is a
+  // deliberate edit rather than a silently-passing literal.
+  //
+  // Scanned on the modal's LAST row and pinned to the right (Copilot review,
+  // PR #612): a whole-buffer `assert_present` catches the counts vanishing,
+  // but not `title_bottom(...)` losing its `.right_aligned()` or the segments
+  // migrating into the body. Placement is the observable part here. The
+  // per-category COLOURS are not re-pinned: `working_tree_counts_footer` owns
+  // them and `tui_ui_helpers_tests::working_tree_counts_footer_shows_only_nonzero_colored_segments`
+  // is where they are asserted, at the shared source both surfaces call.
+  let rows = modal_rows(&buf);
+  let bottom = rows.last().expect("the modal renders at least one row").clone();
+  let created = format!("{WT_CREATED_ICON} 1");
+  let modified = format!("{WT_MODIFIED_ICON} 2");
+  assert!(
+    bottom.contains(&created) && bottom.contains(&modified),
+    "the change counts ride the modal's bottom rule — bottom row was {bottom:?}, modal rows:\n{}",
+    rows.join("\n")
+  );
+  // Right-aligned means nothing but padding and the corner follows the last
+  // segment. Left or centred would leave `─` rule on its right.
+  let last = bottom.find(&modified).expect("modified segment on the bottom rule") + modified.len();
+  assert!(
+    bottom[last..].chars().all(|c| c == ' ' || c == '╯'),
+    "the counts ride the RIGHT of the bottom rule; found rule after them in {bottom:?}"
+  );
+  assert!(
+    bottom[..tail_of(&bottom, &created)].contains('─'),
+    "and the rule runs up to them from the left in {bottom:?}"
+  );
+  assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
+fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
+  use gwm::tui::MetaColumn;
+  use ratatui::text::Line;
+
+  // Issue #592, the responsive half of the commit listing's treatment
+  // (#593). The counts sit in their own rect on the right, so what a narrow
+  // terminal loses is the column, never the file name.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("├─ src/tui/"), Line::from("└─ ui.rs")];
+  app.working_tree.meta = MetaColumn {
+    lines: vec![Line::from(""), Line::from("+120 -34")],
+    width: 8,
+  };
+  app.view = View::WorkingTree;
+
+  // Wide: the counts are drawn, and nothing but the border follows them.
+  let wide = render_at(&mut app, 180, 40);
+  let rows = modal_rows(&wide);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("no row for the file — modal was:\n{}", rows.join("\n")));
+  assert!(
+    row.contains("+120 -34"),
+    "the counts ride the row they describe — got {row:?}"
+  );
+  let after = row.find("+120 -34").unwrap() + "+120 -34".len();
+  assert!(
+    row[after..].chars().all(|c| c == ' ' || c == '│' || c == '║'),
+    "and they are pinned right: only padding and the border follow, got {row:?}"
+  );
+
+  // Narrow: the name survives whole, the column is what goes. The modal takes
+  // 90% of the terminal and spends two more cells on its border, so 30
+  // columns leave a 25-cell body — less than the 34 the column needs beside
+  // `WT_NAME_FLOOR`. 40 would NOT do: it leaves exactly 34, which fits, and
+  // the assertion would fail on the boundary rather than past it. The exact
+  // boundary is pinned on `meta_pick` itself, in `tui_app_tests`.
+  let narrow = render_at(&mut app, 30, 40);
+  let rows = modal_rows(&narrow);
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("the name is never what is dropped — modal was:\n{}", rows.join("\n")));
+  assert!(
+    !row.contains("+120"),
+    "the column yields before the name does — got {row:?}"
+  );
+}
+
+#[test]
+fn working_tree_modal_renders_a_loader_while_the_worker_is_out() {
+  // The read moved to a worker (Copilot review, PR #612), so there is a
+  // frame with no rows yet. It must say so: an empty canvas reads as "no
+  // changes", which is the one answer this overlay must not give by
+  // accident.
+  let (_dir, mut app) = make_app();
+  app
+    .working_tree
+    .begin(Some(std::path::Path::new("/tmp/gwm-test/pending")));
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+  assert_present(&buf, "loading", "the loader, not a blank canvas");
+  // The exit is still advertised while it waits.
+  assert_present(&buf, "close", "the modal footer advertises the exit");
+}
+
+#[test]
+fn working_tree_modal_pins_its_worktree_and_path_above_the_scrolling_body() {
+  use ratatui::text::Line;
+
+  // Issue #629, the other half: the listing is a set of file names with no
+  // statement of which worktree they were read from, and the auto-refresh
+  // can move the list selection while the overlay is up. The row resolves
+  // from the path pinned in `WorkingTreeModal` rather than from the live
+  // selection, so it describes the same worktree the rows describe.
+  //
+  // Asserted by POSITION for the same reason the commits case is: presence
+  // alone passes on a row that scrolls away.
+  let (_dir, mut app) = make_app();
+  let wt = deletable_worktree("payment-webhooks");
+  app.worktrees = vec![wt.clone()];
+  app.working_tree.begin(Some(&wt.path));
+  app.working_tree.loading = false;
+  app.working_tree.lines = (0..40).map(|i| Line::from(format!("file-{i}.rs"))).collect();
+  app.view = View::WorkingTree;
+
+  let top = modal_rows(&render_at(&mut app, 100, 18));
+  let row = top
+    .iter()
+    .position(|r| r.contains("/tmp/gwm-test/payment-webhooks"))
+    .unwrap_or_else(|| panic!("no context row — modal rows:\n{}", top.join("\n")));
+  assert!(
+    top[row].contains("payment-webhooks"),
+    "the row carries the worktree name beside its path — got {:?}",
+    top[row]
+  );
+  assert!(
+    top[row + 1].contains("file-0.rs"),
+    "the listing starts on the row right below it — got {:?}",
+    top[row + 1]
+  );
+
+  app.working_tree.scroll = u16::MAX;
+  let bottom = modal_rows(&render_at(&mut app, 100, 18));
+  assert!(
+    bottom[row].contains("/tmp/gwm-test/payment-webhooks"),
+    "the context row is FIXED: same line at max scroll — got {:?}, modal rows:\n{}",
+    bottom[row],
+    bottom.join("\n")
+  );
+  assert!(
+    !bottom[row + 1].contains("file-0.rs"),
+    "and it is the body that moved under it — got {:?}",
+    bottom[row + 1]
+  );
+}
+
+#[test]
+fn working_tree_modal_keeps_its_context_row_while_the_worker_is_out() {
+  use ratatui::text::Line;
+
+  // The loader arm returns early (PR #612), so it is a second renderer with
+  // its own layout. Without the row there, the loader and the first loaded
+  // row land on different lines and the content visibly jumps when the
+  // worker returns.
+  let (_dir, mut app) = make_app();
+  let wt = deletable_worktree("payment-webhooks");
+  app.worktrees = vec![wt.clone()];
+  app.working_tree.begin(Some(&wt.path));
+  app.view = View::WorkingTree;
+  assert!(app.is_working_tree_loading(), "the overlay opens on its loader");
+
+  let waiting = modal_rows(&render(&mut app));
+  let row = waiting
+    .iter()
+    .position(|r| r.contains("/tmp/gwm-test/payment-webhooks"))
+    .unwrap_or_else(|| panic!("no context row while loading — modal rows:\n{}", waiting.join("\n")));
+  assert!(
+    waiting[row + 1].contains("loading"),
+    "the loader sits under it — got {:?}",
+    waiting[row + 1]
+  );
+
+  // The same line in the loaded arm: the two renderers are separate, so a
+  // row present in only one of them makes the content jump when the worker
+  // lands.
+  app.working_tree.loading = false;
+  app.working_tree.lines = vec![Line::from("src/tui/ui.rs")];
+  let loaded = modal_rows(&render(&mut app));
+  assert!(
+    loaded[row].contains("/tmp/gwm-test/payment-webhooks") && loaded[row + 1].contains("src/tui/ui.rs"),
+    "the listing lands exactly where the loader was — rows {:?} / {:?}, modal rows:\n{}",
+    loaded[row],
+    loaded[row + 1],
+    loaded.join("\n")
+  );
+}
+
+#[test]
+fn working_tree_modal_renders_an_empty_listing_without_panicking() {
+  // The empty snapshot is what `enter_working_tree` loads when nothing is
+  // selected. It is NOT the errored-`git status` case: that one still
+  // produces a row (`! <error>`, `working_tree_lines`), which is the point
+  // of rendering it. The overlay still opens on its frame either way.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines.clear();
+  app.view = View::WorkingTree;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Working Tree", "working tree overlay title");
+}
+
+// ── The compact frame (issue #594) ─────────────────────────────────────────
+//
+// Everything above pins the boxed frame. Below is the other half of
+// `[tui] layout`: no rules at all, a filled title band on the frame's first
+// row, and the quiet `section_bg` band under its last one. The cases are
+// enumerated rather than sampled: `compact_case_for` carries no wildcard,
+// so a new overlay stops this file compiling until it is accounted for.
+
+/// The theme role a modal's frame is built from: the rules in the boxed
+/// layout, the title band's ground in the compact one. Three of them, and
+/// the band is mixed from whichever the modal passes: a destructive
+/// confirmation mixed from `accent` would drop the one signal it exists
+/// to carry.
+#[derive(Debug, Clone, Copy)]
+enum Band {
+  Accent,
+  /// The two forms: creating and renaming a worktree.
+  Clean,
+  /// The two irreversible confirmations: delete and merge.
+  Danger,
+}
+
+/// One overlay, under `[tui] layout = "compact"`.
+struct CompactCase {
+  /// Matches the name the boxed `sizing_matrix` uses where the surface is
+  /// in both, so a failure names the same modal in either half.
+  name: &'static str,
+  /// The `View` this case must actually leave the app in. Checked at
+  /// render time: without it the coverage guard below matches a case by
+  /// its *name*, and a setup that opened the wrong overlay (or none) would
+  /// satisfy it.
+  view: View,
+  setup: ModalSetup,
+  /// The role its band is mixed from.
+  band: Band,
+  /// `false` on the surfaces whose last row is content rather than a
+  /// footer, and which therefore paint no band under it.
+  footer: bool,
+}
+
+/// The app `setup` builds, flipped back to the layout gwm actually ships.
+/// Every setup in this file pins `Bordered` (see `make_app`), which is what
+/// the assertions above want and the opposite of what these want.
+fn compact_app(setup: &ModalSetup) -> (tempfile::TempDir, App) {
+  let (dir, mut app) = setup();
+  app.config.tui.layout = TuiLayout::Compact;
+  (dir, app)
+}
+
+/// The modal's rect in the compact layout.
+///
+/// There is no glyph to hunt: the frame paints no rules, which is the whole
+/// point of the layout, so `modal_rect`'s `╭` is gone and a locator built on
+/// it would return `None` and make every assertion below pass vacuously.
+///
+/// What marks the modal out instead is the one thing `draw` does to the
+/// buffer before an overlay paints: everything already on screen is set
+/// `DIM` (#594), and the overlay's own `Clear` resets the cells under it.
+/// So the modal is exactly the bounding box of the cells carrying no `DIM`,
+/// and "no overlay was painted" comes back as `None` rather than as a rect
+/// describing something else.
+fn compact_modal_rect(buf: &Buffer) -> Option<(u16, u16, u16, u16)> {
+  use ratatui::style::Modifier;
+  let area = *buf.area();
+  let lit = |x: u16, y: u16| !buf[(x, y)].modifier.contains(Modifier::DIM);
+  let mut rect: Option<(u16, u16, u16, u16)> = None;
+  for y in 0..area.height {
+    for x in 0..area.width {
+      if !lit(x, y) {
+        continue;
+      }
+      rect = Some(match rect {
+        None => (x, y, x, y),
+        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+      });
+    }
+  }
+  rect.map(|(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// A PR carrying `n` CI checks, so `enter_ci_checks` has something to open.
+fn app_with_ci_checks(n: usize) -> (tempfile::TempDir, App) {
+  let (dir, mut app) = app_with_the_rich_view_open("body");
+  let mut pr = match app.pr_fetch_state() {
+    gwm::tui::GitHubFetchState::Loaded(pr) => pr.clone(),
+    _ => panic!("the fixture fetched a PR"),
+  };
+  pr.checks = (0..n)
+    .map(|i| gwm::forge::PrCheck {
+      name: format!("build-{i}"),
+      outcome: gwm::forge::CheckOutcome::Passing,
+      url: Some(format!("https://example.test/checks/{i}")),
+      workflow_name: Some("ci".into()),
+      started_at: None,
+      completed_at: None,
+    })
+    .collect();
+  app.apply_pr_fetch_result(Ok(pr));
+  app.enter_ci_checks();
+  (dir, app)
+}
+
+/// Every overlay, in the compact layout: the boxed matrix, plus the four
+/// surfaces it does not carry.
+fn compact_cases() -> Vec<CompactCase> {
+  let mut cases: Vec<CompactCase> = sizing_matrix()
+    .into_iter()
+    .map(|(name, setup, _, _)| CompactCase {
+      band: match name {
+        "confirm" => Band::Danger,
+        "create" | "edit/rename" => Band::Clean,
+        _ => Band::Accent,
+      },
+      view: match name {
+        "help" => View::Help,
+        "config-panel" => View::Config,
+        "command-palette" => View::CommandPalette,
+        "create" => View::Create,
+        "edit/rename" => View::Edit,
+        "confirm" => View::Confirm,
+        "open-menu" => View::OpenMenu,
+        "link-prompt" => View::LinkPrompt,
+        "exec-picker" => View::ExecPicker,
+        "detail/agents" => View::DetailOverlay,
+        "report" => View::Report,
+        "command-logs" => View::CommandLogs,
+        "working-tree" => View::WorkingTree,
+        "commits" => View::Commits,
+        "note-editor" => View::Note,
+        other => panic!("the boxed matrix grew {other:?}; name the View it renders"),
+      },
+      name,
+      setup,
+      footer: true,
+    })
+    .collect();
+  cases.push(CompactCase {
+    name: "confirm/merge",
+    view: View::Confirm,
+    setup: Box::new(|| {
+      let (dir, mut app) = app_with_the_rich_view_open("body");
+      app.enter_confirm_merge();
+      assert_eq!(app.view, View::Confirm, "the merge confirmation must be up");
+      (dir, app)
+    }),
+    band: Band::Danger,
+    footer: true,
+  });
+  cases.push(CompactCase {
+    name: "clean",
+    view: View::CleanReport,
+    setup: Box::new(|| {
+      let (dir, _) = init_repo();
+      std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+      std::fs::create_dir(dir.path().join("target")).unwrap();
+      std::fs::write(dir.path().join("target").join("blob"), vec![0u8; 4096]).unwrap();
+      let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+      pin_bordered(&mut app);
+      app.sidebar.open = false;
+      app.enter_clean_overlay();
+      (dir, app)
+    }),
+    band: Band::Accent,
+    footer: true,
+  });
+  cases.push(CompactCase {
+    name: "detail/attach",
+    view: View::DetailOverlay,
+    setup: Box::new(|| {
+      let (dir, mut app) = make_app();
+      app.open_agent_overlay();
+      app.open_agent_input();
+      (dir, app)
+    }),
+    band: Band::Accent,
+    footer: true,
+  });
+  cases.push(CompactCase {
+    name: "detail/ci-filter",
+    view: View::DetailOverlay,
+    setup: Box::new(|| {
+      // Enough checks to FILL the fixed listing window at the size these
+      // tests render (`(term.height - 12).clamp(3, 10)`, so 10 rows at
+      // 120x40). A shorter list blank-pads its tail, which would leave the
+      // last row empty and exercise the `without_footer` path without ever
+      // reaching the condition that motivates it: a data row on the frame's
+      // bottom line.
+      let (dir, mut app) = app_with_ci_checks(16);
+      app.ci_input_open();
+      (dir, app)
+    }),
+    band: Band::Accent,
+    // The last row here is a listing row whenever the fixed window is
+    // full, so the frame paints no ground under it.
+    footer: false,
+  });
+  cases.push(CompactCase {
+    name: "link-prompt/number",
+    view: View::LinkPrompt,
+    setup: Box::new(|| {
+      let (dir, mut app) = make_app();
+      app.enter_link_prompt();
+      app.handle_link_prompt_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('i'),
+      ));
+      (dir, app)
+    }),
+    band: Band::Accent,
+    footer: true,
+  });
+  cases
+}
+
+/// Every `View`, so the guard below can walk them.
+const ALL_VIEWS: [View; 18] = [
+  View::List,
+  View::Create,
+  View::Confirm,
+  View::Report,
+  View::Help,
+  View::OpenMenu,
+  View::LinkPrompt,
+  View::CommandPalette,
+  View::CommandLogs,
+  View::WorkingTree,
+  View::Commits,
+  View::Config,
+  View::Pty,
+  View::ExecPicker,
+  View::CleanReport,
+  View::Edit,
+  View::DetailOverlay,
+  View::Note,
+];
+
+/// The compact case that covers `view`, or why there is none.
+///
+/// No wildcard arm, deliberately: a new overlay variant stops this file
+/// compiling until someone says which case renders it. That is the guard:
+/// "no modal missed" enumerated by construction rather than by eyeball.
+fn compact_case_for(view: View) -> Option<&'static str> {
+  match view {
+    // Not an overlay.
+    View::List => None,
+    // The PTY overlay renders a live child process. There is no fixture
+    // for one that does not spawn a shell, and its frame is the one that
+    // opts out of the footer band anyway (`without_footer`), which the CI
+    // filter case below covers. Its title band goes through the same
+    // `ModalFrame::render` as every other.
+    View::Pty => None,
+    View::Help => Some("help"),
+    View::Create => Some("create"),
+    View::Confirm => Some("confirm"),
+    View::Report => Some("report"),
+    View::OpenMenu => Some("open-menu"),
+    View::LinkPrompt => Some("link-prompt"),
+    View::CommandPalette => Some("command-palette"),
+    View::CommandLogs => Some("command-logs"),
+    View::WorkingTree => Some("working-tree"),
+    View::Commits => Some("commits"),
+    View::Config => Some("config-panel"),
+    View::ExecPicker => Some("exec-picker"),
+    View::CleanReport => Some("clean"),
+    View::Edit => Some("edit/rename"),
+    View::DetailOverlay => Some("detail/agents"),
+    View::Note => Some("note-editor"),
+  }
+}
+
+#[test]
+fn every_overlay_view_has_a_compact_case() {
+  let cases = compact_cases();
+  for view in ALL_VIEWS {
+    let Some(name) = compact_case_for(view) else {
+      continue;
+    };
+    let case = cases
+      .iter()
+      .find(|c| c.name == name)
+      .unwrap_or_else(|| panic!("{view:?} names the case {name:?}, which the compact matrix does not carry"));
+    assert_eq!(
+      case.view, view,
+      "the case {name:?} is registered against {:?}, not the {view:?} it is supposed to cover",
+      case.view
+    );
+  }
+  // A duplicated name would let one case answer for two views.
+  let mut names: Vec<&str> = cases.iter().map(|c| c.name).collect();
+  names.sort_unstable();
+  let before = names.len();
+  names.dedup();
+  assert_eq!(before, names.len(), "two compact cases share a name");
+}
+
+#[test]
+fn every_compact_modal_is_painted_and_locatable() {
+  // The oracle for everything below: a rect that came back `None` would
+  // make each assertion pass over an empty buffer instead of failing.
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    // The setup opened what the case says it opens. Without this the
+    // coverage guard above matches a case by its name alone.
+    assert_eq!(
+      app.view, case.view,
+      "{}: the setup left the app on {:?}",
+      case.name, app.view
+    );
+    let buf = render_at(&mut app, 120, 40);
+    let rect = compact_modal_rect(&buf);
+    assert!(
+      rect.is_some(),
+      "{}: no compact modal on screen. rows:\n{}",
+      case.name,
+      row_strings(&buf).join("\n")
+    );
+    let (_, _, w, h) = rect.unwrap();
+    assert!(
+      w > 2 && h > 1,
+      "{}: the frame collapsed to {w}x{h}. rows:\n{}",
+      case.name,
+      row_strings(&buf).join("\n")
+    );
+  }
+}
+
+#[test]
+fn a_compact_modal_paints_no_rule_on_any_side() {
+  // The ask of #594: no border on the horizontal sides, and none top or
+  // bottom either: the bands replace them. Only the frame's own edges are
+  // examined: a modal's *content* may legitimately hold box-drawing glyphs
+  // (the commit graph does), and it never reaches the edge columns.
+  const RULES: [&str; 10] = ["│", "─", "╭", "╮", "╰", "╯", "┌", "┐", "└", "┘"];
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    for row in y..y + h {
+      for col in [x, x + w - 1] {
+        let symbol = buf[(col, row)].symbol().to_string();
+        assert!(
+          !RULES.contains(&symbol.as_str()),
+          "{}: a rule {symbol:?} at ({col},{row}), and the compact frame has no sides. rows:\n{}",
+          case.name,
+          row_strings(&buf).join("\n")
+        );
+      }
+    }
+    for col in x..x + w {
+      for row in [y, y + h - 1] {
+        let symbol = buf[(col, row)].symbol().to_string();
+        assert!(
+          !RULES.contains(&symbol.as_str()),
+          "{}: a rule {symbol:?} at ({col},{row}), and the compact frame has no top or bottom. rows:\n{}",
+          case.name,
+          row_strings(&buf).join("\n")
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn a_compact_modal_opens_on_a_filled_title_band() {
+  // A *background* role, so the assertion is on the cells' `bg` and not on
+  // anything the flattened rows could show. The band spans the frame edge
+  // to edge: a ground that stopped at its text would read as a highlighted
+  // word rather than as the top of a panel.
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let role = match case.band {
+      Band::Accent => app.theme.accent,
+      Band::Clean => app.theme.clean,
+      Band::Danger => app.theme.prunable,
+    };
+    let expected = gwm::tui::band_fill(role, app.theme.section_bg);
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, _) = compact_modal_rect(&buf).expect("a compact modal");
+    for col in x..x + w {
+      assert_eq!(
+        buf[(col, y)].bg,
+        expected,
+        "{}: the title band must be filled edge to edge, cell ({col},{y}) is not. rows:\n{}",
+        case.name,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+#[test]
+fn a_compact_modal_closes_on_a_muted_footer_band() {
+  for case in compact_cases().into_iter().filter(|c| c.footer) {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let expected = app.theme.section_bg;
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    let footer = y + h - 1;
+    for col in x..x + w {
+      assert_eq!(
+        buf[(col, footer)].bg,
+        expected,
+        "{}: the footer band must be filled edge to edge, cell ({col},{footer}) is not. rows:\n{}",
+        case.name,
+        row_strings(&buf).join("\n")
+      );
+    }
+  }
+}
+
+#[test]
+fn a_compact_modal_keeps_a_blank_row_at_each_end_of_its_content() {
+  // User feedback on PR #616: content must never sit flush against a band,
+  // at either end, the way the boxed layout's interior padding already
+  // guarantees. The top row is the frame's (its `inner` starts past it);
+  // the bottom one belongs to the modal, which is why it is asserted here
+  // rather than assumed: the four full-size overlays and the note editor
+  // had no gap above their hints before this.
+  for case in compact_cases() {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    let row = |r: u16| -> String { (x..x + w).map(|col| buf[(col, r)].symbol()).collect() };
+    assert!(
+      row(y + 1).trim().is_empty(),
+      "{}: the row under the title band must be blank, got {:?}",
+      case.name,
+      row(y + 1)
+    );
+    if case.footer {
+      assert!(
+        row(y + h - 2).trim().is_empty(),
+        "{}: the row above the footer band must be blank, got {:?}",
+        case.name,
+        row(y + h - 2)
+      );
+    }
+  }
+}
+
+#[test]
+fn a_modal_that_opts_out_paints_no_footer_band() {
+  // `without_footer` is a claim about the last row, so it is worth an
+  // assertion rather than an exemption from one: skipping these cases in
+  // the test above would leave the opt-out unpinned in both directions.
+  for case in compact_cases().into_iter().filter(|c| !c.footer) {
+    let (_dir, mut app) = compact_app(&case.setup);
+    let ground = app.theme.section_bg;
+    let buf = render_at(&mut app, 120, 40);
+    let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+    let footer = y + h - 1;
+    assert!(
+      (x..x + w).any(|col| buf[(col, footer)].bg != ground),
+      "{}: the last row is content, so it must not come back painted edge to edge in the footer ground. rows:\n{}",
+      case.name,
+      row_strings(&buf).join("\n")
+    );
+  }
+}
+
+#[test]
+fn the_hints_ride_the_footer_band_rather_than_a_row_of_their_own() {
+  // The band is a ground under the row the modal already spends on its
+  // hint line, not an extra row: if the frame reserved one, the hint would
+  // sit above it and the band would come back blank.
+  let (_dir, mut app) = compact_app(
+    &(Box::new(|| {
+      let (d, mut a) = make_app();
+      a.enter_help();
+      (d, a)
+    }) as ModalSetup),
+  );
+  let buf = render_at(&mut app, 120, 40);
+  let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+  let footer: String = (x..x + w).map(|col| buf[(col, y + h - 1)].symbol()).collect();
+  assert!(
+    footer.contains("close"),
+    "the help overlay's close hint must be on the band itself. footer: {footer:?}"
+  );
+}
+
+#[test]
+fn the_working_tree_counts_ride_the_footer_band_in_compact() {
+  // The boxed frame puts them in the bottom rule (`title_bottom`). Compact
+  // has no rule to put them in, so they take the right of the band, the
+  // same place a compact pane puts its counter.
+  let (_dir, mut app) = make_app();
+  app.config.tui.layout = TuiLayout::Compact;
+  app.enter_working_tree();
+  let counts = gwm::tui::working_tree_counts_footer(&app.working_tree.counts, &app.theme);
+  let buf = render_at(&mut app, 120, 40);
+  let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+  let footer: String = (x..x + w).map(|col| buf[(col, y + h - 1)].symbol()).collect();
+  match counts {
+    // The fixture's working tree is what it is; assert against whatever the
+    // pane itself would show rather than against a count pinned by hand.
+    Some(line) => {
+      let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+      let text = text.trim();
+      assert!(
+        footer.contains(text),
+        "the counts {text:?} must ride the footer band. footer: {footer:?}"
+      );
+    }
+    None => assert!(
+      footer.contains("close"),
+      "with no counts the band still carries the hints. footer: {footer:?}"
+    ),
+  }
+}
+
+#[test]
+fn the_background_is_shaded_behind_a_compact_modal_and_the_modal_is_not() {
+  // A compact modal has no rule, so the ground does the separating.
+  use ratatui::style::Modifier;
+  let (_dir, mut app) = make_app();
+  app.config.tui.layout = TuiLayout::Compact;
+  // An RGB preset: the shading mixes toward black, and a palette built from
+  // ANSI names has no components to mix, so that theme keeps `DIM` alone,
+  // which is the documented fallback and not what this test is about. The
+  // default theme is exactly such a palette.
+  app.theme = gwm::tui::theme::Theme::preset("claude-dark").expect("a built-in RGB preset");
+  let band = gwm::tui::compact_header_fill(&app.theme);
+  // The worktrees pane's own header band, on the row under the app header.
+  let lit = render_at(&mut app, 120, 40)[(0, 1)].bg;
+  assert_eq!(lit, band, "the fixture must put the pane's band where this reads it");
+
+  app.enter_help();
+  let buf = render_at(&mut app, 120, 40);
+  let (x, y, w, h) = compact_modal_rect(&buf).expect("a compact modal");
+  assert!(
+    buf[(0, 0)].modifier.contains(Modifier::DIM),
+    "the header behind the modal must be dimmed"
+  );
+  // DIM alone would not do it: it touches the foreground only, and the
+  // pane's band sits directly above a full-size overlay's own band. The
+  // grounds have to move apart, not just the text on them.
+  assert_ne!(
+    buf[(0, 1)].bg,
+    band,
+    "the pane's band behind the modal must be darkened, not merely dimmed"
+  );
+  assert!(
+    !buf[(x + w / 2, y + h / 2)].modifier.contains(Modifier::DIM),
+    "the modal itself must come back at full strength"
+  );
+}
+
+#[test]
+fn a_bordered_modal_leaves_the_background_alone() {
+  // The shading is the compact frame's compensation for its missing rule.
+  // The boxed layout already has the boundary, and #594 changes nothing
+  // there.
+  use ratatui::style::Modifier;
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  let buf = render_at(&mut app, 120, 40);
+  assert!(
+    !buf[(0, 0)].modifier.contains(Modifier::DIM),
+    "the boxed layout must not dim what it floats over"
+  );
+}
+
+#[test]
+fn a_content_sized_modal_spends_two_rows_less_in_compact() {
+  // The sizing contract, measured rather than restated: boxed costs two
+  // rules and two padding rows, compact costs the title band and the blank
+  // row under it (the footer band is a ground under a row the modal
+  // already had). A call site that kept its own `+ 4` would show up here
+  // as a modal two rows too tall with dead space above the band.
+  for name in ["open-menu", "link-prompt", "create", "exec-picker"] {
+    let (_name, setup, _, _) = sizing_matrix()
+      .into_iter()
+      .find(|(n, _, _, _)| *n == name)
+      .expect("the matrix carries this modal");
+    let (_dir, mut boxed) = setup();
+    let boxed_h = modal_rect(&render_at(&mut boxed, 120, 40)).expect("a boxed modal").3;
+    let (_dir, mut compact) = compact_app(&setup);
+    let compact_h = compact_modal_rect(&render_at(&mut compact, 120, 40))
+      .expect("a compact modal")
+      .3;
+    assert_eq!(
+      compact_h + 2,
+      boxed_h,
+      "{name}: compact is {compact_h} rows against the boxed {boxed_h}"
+    );
+  }
 }

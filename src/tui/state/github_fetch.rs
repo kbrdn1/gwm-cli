@@ -121,7 +121,7 @@ pub struct GitHubFetch {
   pub link_slug: Option<String>,
   /// The resolved forge backend for the active repo (issue #419), or
   /// `None` when `origin` is missing / unparseable. Re-resolved on every
-  /// [`Self::refresh_link`] rather than cached on the `App`: in workspace
+  /// [`Self::reread_link`] rather than cached on the `App`: in workspace
   /// mode the active repo — and with it the `.gwm.toml` `forge` key — can
   /// change under the cursor.
   pub forge: Option<std::sync::Arc<dyn crate::forge::Forge>>,
@@ -147,7 +147,7 @@ impl Default for GitHubFetch {
 impl GitHubFetch {
   /// Construct an empty `GitHubFetch` with no link, no slug, and empty
   /// per-key caches. The `App` constructor calls this once and then
-  /// immediately runs [`Self::refresh_link`] against the repo so the
+  /// immediately runs [`Self::reread_link`] against the repo so the
   /// cold state lasts only as long as the constructor itself.
   pub fn new() -> Self {
     Self {
@@ -160,26 +160,18 @@ impl GitHubFetch {
     }
   }
 
-  /// Re-read the link for `branch` against `repo`, re-resolve the
-  /// repo slug from the `origin` remote, and reset every cached
-  /// fetch state. Called by `App::refresh_link` after the user
-  /// navigates to a different worktree — the cached state refers to a
-  /// different `(issue, pr)` tuple and would be misleading if reused.
-  /// (`App::refresh_link` separately drops any in-flight GitHub worker
-  /// on the spine — see [`Self::invalidate`] for the pairing.)
-  pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
-    let _ = self.reread_link(repo, branch, config);
-    self.invalidate();
-  }
-
-  /// Re-read the link and forge **without** dropping fetched results.
+  /// Re-read the link and forge, keeping the fetched results.
   ///
-  /// [`Self::refresh_link`] clears the caches on purpose: a selection
-  /// change must not leave the previous row's status on screen (PR #68).
-  /// But the open menu calls it only to catch a link made in another
-  /// terminal, and clearing there wiped the server-reported `web_url` it
-  /// was about to read, so it always fell back to a locally built URL —
-  /// wrong exactly where it matters, on an origin whose web host or port
+  /// This used to have a wholesale-clearing sibling (`refresh_link`) that
+  /// every link re-read went through, on the PR #68 reasoning that a
+  /// selection change must not leave the previous row's status on screen.
+  /// Post-#138 the caches are keyed by number, so they cannot do that:
+  /// each row reads its own number and an unfetched one reads `Idle`. The
+  /// clear only threw away the prefetch, leaving the TUI's context verbs
+  /// with nothing on every row but the first (issue #597), and it was
+  /// wrong for the open menu too — it wiped the server-reported `web_url`
+  /// that menu was about to read, so the URL fell back to a locally built
+  /// one, wrong exactly where it matters: an origin whose web host or port
   /// gwm cannot infer (Codex review #458).
   ///
   /// Preserving is safe as long as the *instance* is unchanged: the
@@ -233,9 +225,12 @@ impl GitHubFetch {
 
   /// Flush every cached fetch state. Equivalent to "the cached
   /// `(issue, pr)` tuples are no longer authoritative". Called by
-  /// [`Self::refresh_link`]; exposed standalone for callers (e.g. an
-  /// explicit "force refresh" key like `F`) that want to wipe the cache
-  /// without re-reading the link.
+  /// [`Self::reread_link`] when the forge instance moves under the
+  /// selection; exposed standalone for callers (e.g. an explicit "force
+  /// refresh" key like `F`) that want to wipe the cache without
+  /// re-reading the link. Note that a plain selection change is NOT one
+  /// of them (issue #597) — the caches are per-number, so they stay
+  /// authoritative for whatever the new row links to.
   ///
   /// Post-#255 this clears only the result cache. Dropping any *in-
   /// flight* worker's late result is the spine's job: the `App` pairs
@@ -251,6 +246,47 @@ impl GitHubFetch {
     // Threads are keyed on the PR they hang from, so they go stale for
     // exactly the same reasons and at exactly the same moment.
     self.pr_threads_cache.clear();
+  }
+
+  /// Flush the cached *outcomes* and leave the fetches still in flight
+  /// alone (issue #597, Codex review on #618).
+  ///
+  /// What a relist expires is a result that has stopped being
+  /// authoritative. A `Loading` entry is not one: nothing has been read
+  /// yet, so there is no stale answer behind it, and dropping it only
+  /// throws away work in progress. Worse, the caller pairs a full
+  /// [`Self::invalidate`] with a spine generation-bump, so the worker's
+  /// result is discarded when it lands — and with a
+  /// `tui.auto_refresh_secs` shorter than the forge's latency, every tick
+  /// superseded the fetch before it could arrive, leaving the row unfilled
+  /// for good while the cancelled subprocesses kept running.
+  ///
+  /// Keeping an in-flight fetch is sound here because a relist does not
+  /// change what a number means: only a move between forge instances does,
+  /// and `App::refresh_link` still answers that with the full flush and the
+  /// generation-bump that must move with it.
+  ///
+  /// `keep_pr_threads` names the one PR whose inline review threads a rich
+  /// view has on screen (issue #619). That view renders the PR from its own
+  /// snapshot, so expiring the PR cache never blanks it — but it reads the
+  /// threads live from here, so expiring them emptied the section under the
+  /// reader the moment the PR landed and rebuilt the rows. Re-requesting
+  /// them instead would be fresher and worse: the section collapses to
+  /// `loading…` for the round trip, once per `tui.auto_refresh_secs`,
+  /// taking the reader's scroll position with it. So the threads on screen
+  /// are held until the view is closed or refreshed (`f`), which flushes
+  /// them through [`Self::invalidate`] and asks again.
+  pub fn invalidate_settled(&mut self, keep_pr_threads: Option<u64>) {
+    // A fn, not a closure: the three caches hold three different payload
+    // types and a closure cannot be generic over them.
+    fn in_flight<T>(state: &GitHubFetchState<T>) -> bool {
+      matches!(state, GitHubFetchState::Loading)
+    }
+    self.issue_cache.retain(|_, s| in_flight(s));
+    self.pr_cache.retain(|_, s| in_flight(s));
+    self
+      .pr_threads_cache
+      .retain(|n, s| in_flight(s) || Some(*n) == keep_pr_threads);
   }
 
   /// Stamp an auto-detected PR onto the resolved `link` when none is

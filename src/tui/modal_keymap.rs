@@ -89,6 +89,14 @@ pub enum KeyContext {
   Detail,
   /// Command-logs overlay (issue #226, scroll-only + copy).
   CommandLogs,
+  /// Full-size Working Tree listing (issue #592, scroll-only). Its own
+  /// context rather than a share of [`Self::CommandLogs`]: the two look
+  /// alike but rebinding one must not silently rebind the other.
+  WorkingTree,
+  /// Full-size commit listing (issue #593, scroll + load-more). Its own
+  /// context rather than a share of [`Self::CommandLogs`]: the two scroll
+  /// alike but rebinding one must not silently rebind the other.
+  Commits,
   /// Settings panel navigation (issue #232).
   Config,
   /// Settings panel while a numeric field is being edited (sub-mode of
@@ -170,6 +178,8 @@ impl KeyContext {
       KeyContext::Help => "help",
       KeyContext::Detail => "detail",
       KeyContext::CommandLogs => "command_logs",
+      KeyContext::WorkingTree => "working_tree",
+      KeyContext::Commits => "commits",
       KeyContext::Config => "config",
       KeyContext::ConfigEdit => "config.edit",
       KeyContext::Report => "report",
@@ -200,6 +210,8 @@ impl KeyContext {
       Help,
       Detail,
       CommandLogs,
+      WorkingTree,
+      Commits,
       Config,
       ConfigEdit,
       Report,
@@ -277,6 +289,10 @@ define_modal_actions! {
     ConfirmFocusConfirm => "focus_confirm" [ "Left", "h" ],
     ConfirmFocusCancel  => "focus_cancel"  [ "Right", "l" ],
     ConfirmToggleFocus  => "toggle_focus"  [ "Tab" ],
+    // #551: cycle merge / squash / rebase without leaving the modal. Only
+    // does anything while the modal holds a merge, which is also the only
+    // context whose hint bar advertises it.
+    ConfirmCycleMethod  => "cycle_method"  [ "m" ],
   }
   Help {
     HelpClose        => "close"         [ "Esc", "q", "?" ],
@@ -294,6 +310,10 @@ define_modal_actions! {
     DetailAttach     => "attach"       [ "a" ],
     DetailDetach     => "detach"       [ "d" ],
     DetailInput      => "attach_by_id" [ "i" ],
+    // #591: resume the highlighted session in a multiplexer pane. `o` is the
+    // list view's `mux_pane`-adjacent letter (`Action::TerminalPty`), so it
+    // already reads as "open a terminal here".
+    DetailOpenPane   => "open_pane"    [ "o" ],
   }
   CommandLogs {
     CommandLogsClose        => "close"         [ "Esc", "q" ],
@@ -304,6 +324,25 @@ define_modal_actions! {
     CommandLogsScrollLeft   => "scroll_left"   [ "Left", "h" ],
     CommandLogsScrollTop    => "scroll_top"    [ "Home", "g" ],
     CommandLogsScrollBottom => "scroll_bottom" [ "End", "G" ],
+  }
+  WorkingTree {
+    WorkingTreeClose        => "close"         [ "Esc", "q" ],
+    WorkingTreeScrollDown   => "scroll_down"   [ "Down", "j" ],
+    WorkingTreeScrollUp     => "scroll_up"     [ "Up", "k" ],
+    WorkingTreeScrollTop    => "scroll_top"    [ "Home", "g" ],
+    WorkingTreeScrollBottom => "scroll_bottom" [ "End", "G" ],
+    WorkingTreeHalfDown     => "half_down"     [ "D" ],
+    WorkingTreeHalfUp       => "half_up"       [ "U" ],
+  }
+  Commits {
+    CommitsClose        => "close"         [ "Esc", "q", "c" ],
+    CommitsLoadMore     => "load_more"     [ "m" ],
+    CommitsScrollDown   => "scroll_down"   [ "Down", "j" ],
+    CommitsScrollUp     => "scroll_up"     [ "Up", "k" ],
+    CommitsScrollTop    => "scroll_top"    [ "Home", "g" ],
+    CommitsScrollBottom => "scroll_bottom" [ "End", "G" ],
+    CommitsHalfDown     => "half_down"     [ "D" ],
+    CommitsHalfUp       => "half_up"       [ "U" ],
   }
   Config {
     ConfigClose        => "close"         [ "Esc", "q" ],
@@ -380,8 +419,35 @@ define_modal_actions! {
     RichViewPrev    => "select_prev" [ "k", "Up" ],
     RichViewOpen    => "open"        [ "Enter" ],
     RichViewRefresh => "refresh"     [ "f" ],
+    // #551: the issue and the PR are two tabs of one view. `Tab` rather
+    // than `h`/`l`, which the horizontal offset wants for the rows that
+    // cannot wrap.
+    RichViewTab     => "next_tab"    [ "Tab" ],
+    // #551: a fenced code line and a diff hunk are kept whole rather than
+    // reflowed, so this is the only way to their tail.
+    RichViewLeft    => "scroll_left"  [ "h", "Left" ],
+    RichViewRight   => "scroll_right" [ "l", "Right" ],
+    // #551 validation feedback. `y` / `Y` are the list view's yanks too,
+    // and free here: this context had no yank at all.
+    RichViewYankUrl  => "yank_url"  [ "y" ],
+    RichViewYankBody => "yank_body" [ "Y" ],
+    // #551 validation feedback: same verb as the list view's `M`, reachable
+    // from the view that shows what is about to be merged.
+    RichViewMerge    => "merge"     [ "m" ],
+    // #551 validation feedback: pager motions, vim spelling. `D` / `U`
+    // rather than `Ctrl+D` / `Ctrl+U` because an unmodified letter is free
+    // in this context and the modifier is not worth the reach.
+    RichViewHalfDown => "half_down" [ "D" ],
+    RichViewHalfUp   => "half_up"   [ "U" ],
+    // `g` alone, not the `gg` chord: modal contexts bind one key per verb,
+    // and a second `g` simply repeats a jump that is already at the top.
+    RichViewTop      => "top"       [ "g", "Home" ],
+    RichViewBottom   => "bottom"    [ "G", "End" ],
+    // The CI checks list of the same PR, one key away rather than a close
+    // and a re-open from the list view.
+    RichViewCiChecks => "ci_checks" [ "c" ],
   }
-  // #515: two verbs, because everything else is text. `Esc` writes and
+  // #515: the verbs, because everything else is text. `Esc` writes and
   // closes — there is no discard, the buffer is emptied instead (see
   // `state::note_editor`). `Ctrl+e` hands the same file to `$EDITOR`,
   // which is what `N` itself used to do.
@@ -389,9 +455,21 @@ define_modal_actions! {
   // `Ctrl+e` is now spoken for. If line motions ever land here, the
   // readline `Ctrl+a` / `Ctrl+e` pair cannot have it — pick another key
   // rather than shadowing the way out to a real editor.
+  //
+  // #557: the two list verbs are Ctrl-modified for the reason the whole
+  // context exists — an unmodified printable is text here, and binding one
+  // to a verb is refused at load time. Which chord is left is decided by
+  // what tmux keeps for itself: `Ctrl+b` is the prefix, and `Ctrl+h` /
+  // `Ctrl+j` / `Ctrl+k` / `Ctrl+l` are the vim-tmux-navigator pane set that
+  // ships in tmux.nvim and every dotfiles repo that copied it. tmux only
+  // forwards those when the pane is running vim, so a note written inside
+  // tmux never sees them — measured on a real config, where `Ctrl+l` did
+  // nothing at all. `Ctrl+u` is free and reads as "unordered".
   Note {
-    NoteClose      => "close"       [ "Esc" ],
-    NoteOpenEditor => "open_editor" [ "Ctrl+e" ],
+    NoteClose          => "close"           [ "Esc" ],
+    NoteOpenEditor     => "open_editor"     [ "Ctrl+e" ],
+    NoteToggleBullet   => "toggle_bullet"   [ "Ctrl+u" ],
+    NoteToggleCheckbox => "toggle_checkbox" [ "Ctrl+t" ],
   }
 }
 

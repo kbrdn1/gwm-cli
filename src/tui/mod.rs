@@ -28,14 +28,17 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
-  NoteKey, OpenTarget, RepoMeta, View, WorkspaceState,
+  agent_pane_status, detached_browser_status, mux_pane_status, plan_agent_pane, plan_terminal_browser,
+  read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey,
+  LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, ToggleStroke,
+  View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
 };
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
+pub use state::commits::{CommitsModal, CommitsSnapshot, MetaColumn, COMMITS_MAX, COMMITS_PAGE};
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
 };
@@ -48,6 +51,7 @@ pub use state::link_prompt::LinkPrompt;
 pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
+pub use state::working_tree::{WorkingTreeModal, WorkingTreeSnapshot};
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -69,23 +73,27 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, bootstrap_report_lines,
-  branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style,
-  ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_line, config_capture_footer_hints,
+  agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, band_fill,
+  bootstrap_report_lines, branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, cells,
+  centered_abs, chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, commit_meta_columns,
+  commits_meta_pick, compact_header_fill, compact_header_line, compact_header_style, config_capture_footer_hints,
   config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
-  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, display_path_with_home,
-  ellipsize_middle, field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll,
-  format_status, freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line,
-  help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color,
-  issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys,
-  link_target_line, list_pane_counter, modal_height, modal_hint_for_context, modal_hint_for_context_with_fields,
-  modal_hint_line, modal_width, overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color,
-  picker_window, pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
-  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
-  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
-  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
-  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
-  WT_DELETED_ICON, WT_MODIFIED_ICON,
+  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, detail_overlay_width,
+  detail_visible_rows, display_path_with_home, ellipsize_middle, field_input_line, filled_cells_for_progress,
+  folded_status_line, footer_line, form_field_scroll, format_status, freshness_color, github_status_lines, header_line,
+  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
+  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
+  link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter, markdown_style, meta_pick,
+  modal_height, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
+  overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
+  pr_summary_line, recent_commits_lines, recent_commits_listing, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_listing,
+  working_tree_meta_column, working_tree_pane_title, working_tree_stat_spans, working_tree_status_counts,
+  working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext,
+  SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMITS_SUBJECT_FLOOR,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -216,11 +224,16 @@ fn confirm_fire(app: &mut App) {
     return;
   }
   match app.confirm_press_y(Instant::now()) {
-    ConfirmKeyAction::FireNow => {
-      if let Err(e) = app.confirm_delete() {
-        app.status = format!("delete failed: {}", e);
+    // Routed on what the modal is actually about (#551). Exhaustive: the
+    // countdown and the danger border are shared, the consequence is not.
+    ConfirmKeyAction::FireNow => match app.confirm_kind() {
+      ConfirmKind::DeleteWorktree => {
+        if let Err(e) = app.confirm_delete() {
+          app.status = format!("delete failed: {}", e);
+        }
       }
-    }
+      ConfirmKind::MergePr => app.confirm_merge(),
+    },
     // Armed / Disarmed update the status line; the loop keeps the modal
     // open and lets the countdown tick (or wait for another y / Esc).
     ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
@@ -315,7 +328,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // covers the changes, this covers the FIRST frame — an overlay opened
     // before any resize event would otherwise wrap against the 80-column
     // default whatever the real terminal is. A no-op once they agree.
-    app.set_term_width(terminal.size().unwrap_or_default().width);
+    let size = terminal.size().unwrap_or_default();
+    app.set_term_width(size.width);
+    app.set_term_height(size.height);
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -388,6 +403,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // resize that never reached it would leave the rows wrapped for the
       // previous terminal and the renderer would ellipsise the overflow.
       app.set_term_width(cols);
+      app.set_term_height(rows);
       clear_without_cursor_query(terminal)?;
       continue;
     }
@@ -480,7 +496,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             // (c → CI checks while the status pane is focused); the
             // palette path deliberately does not — its entries dispatch
             // by name (Codex review #455).
-            let action = app.resolve_contextual_action(action);
             run_action(terminal, &mut app, action)?;
           }
         }
@@ -502,17 +517,35 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // so the open key toggles it shut even when rebound.
       // #219: keys resolved through the `command_logs` modal context. The
       // bound global `command_logs` key still toggles the overlay shut.
-      View::CommandLogs => match app.resolve_modal(KeyContext::CommandLogs, key) {
-        Some(ModalAction::CommandLogsClose) => app.view = View::List,
+      View::CommandLogs => match app.handle_command_logs_key(key) {
+        CommandLogsKey::Close => app.view = View::List,
         // `y` copies the whole transcript to the clipboard (issue #279).
-        Some(ModalAction::CommandLogsCopy) => copy_command_logs_to_clipboard(&mut app),
-        Some(ModalAction::CommandLogsScrollDown) => app.command_logs.scroll_down(),
-        Some(ModalAction::CommandLogsScrollUp) => app.command_logs.scroll_up(),
-        Some(ModalAction::CommandLogsScrollRight) => app.command_logs.scroll_right(),
-        Some(ModalAction::CommandLogsScrollLeft) => app.command_logs.scroll_left(),
-        Some(ModalAction::CommandLogsScrollTop) => app.command_logs.scroll_to_top(),
-        Some(ModalAction::CommandLogsScrollBottom) => app.command_logs.scroll_to_bottom(),
-        _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
+        CommandLogsKey::Copy => copy_command_logs_to_clipboard(&mut app),
+        CommandLogsKey::Handled => {}
+      },
+      // Full-size Working Tree listing (issue #592). A read-only overlay
+      // over an already-taken snapshot: it scrolls like the command logs,
+      // and the bound global `working_tree` key (default `W`) toggles it
+      // shut even when rebound.
+      // Routing lives in a testable `App` method (the #217 shape), because
+      // the precedence it encodes is the whole point of #613.
+      View::WorkingTree => {
+        if app.handle_working_tree_key(key) {
+          app.view = View::List;
+        }
+      }
+      // Full-size commit listing (issue #593). Scrolls like the Command
+      // Logs overlay; `m` re-reads one page deeper. Closes on Esc, `q` or
+      // `c` — the key that opened it.
+      View::Commits => match app.resolve_modal(KeyContext::Commits, key) {
+        Some(ModalAction::CommitsClose) => app.view = View::List,
+        Some(ModalAction::CommitsLoadMore) => app.load_more_commits(),
+        Some(ModalAction::CommitsScrollDown) => app.commits.scroll_down(),
+        Some(ModalAction::CommitsScrollUp) => app.commits.scroll_up(),
+        Some(ModalAction::CommitsScrollTop) => app.commits.scroll_to_top(),
+        Some(ModalAction::CommitsScrollBottom) => app.commits.scroll_to_bottom(),
+        Some(ModalAction::CommitsHalfDown) => app.commits.scroll_half_down(),
+        Some(ModalAction::CommitsHalfUp) => app.commits.scroll_half_up(),
         _ => {}
       },
       // Settings panel (issue #232; editable in #279). While a numeric input
@@ -546,42 +579,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // tab exactly as before; the bound global `config_panel` key still
       // toggles the overlay shut.
       View::Config => {
-        let on_all = app.config_panel.tab == SettingsTab::All;
-        match app.resolve_modal(KeyContext::Config, key) {
-          Some(ModalAction::ConfigClose) => app.view = View::List,
-          Some(ModalAction::ConfigNextTab) => app.config_panel.next_tab(),
-          Some(ModalAction::ConfigPrevTab) => app.config_panel.prev_tab(),
-          Some(ModalAction::ConfigToggleLayer) => app.config_panel.toggle_layer(),
-          // On the Keys tab `activate` arms a live keystroke capture for the
-          // selected binding (issue #294); elsewhere it cycles a choice or
-          // opens the numeric/text edit buffer.
-          Some(ModalAction::ConfigActivate) => {
-            if app.config_panel.tab == SettingsTab::Keys {
-              app.config_panel.begin_capture();
-            } else {
-              app.activate_selected_setting();
-            }
-          }
-          Some(ModalAction::ConfigSelectNext) => {
-            if on_all {
-              app.config_panel.scroll_down();
-            } else {
-              app.config_panel.select_next();
-            }
-          }
-          Some(ModalAction::ConfigSelectPrev) => {
-            if on_all {
-              app.config_panel.scroll_up();
-            } else {
-              app.config_panel.select_prev();
-            }
-          }
-          Some(ModalAction::ConfigScrollRight) if on_all => app.config_panel.scroll_right(),
-          Some(ModalAction::ConfigScrollLeft) if on_all => app.config_panel.scroll_left(),
-          Some(ModalAction::ConfigScrollTop) if on_all => app.config_panel.scroll_to_top(),
-          Some(ModalAction::ConfigScrollBottom) if on_all => app.config_panel.scroll_to_bottom(),
-          _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
-          _ => {}
+        // The toggle resolves BEFORE the nav verbs (issue #613), and only on
+        // this arm: the capture and edit sub-modes above own every stroke
+        // while they are live, so a `config_panel` key rebound to a digit
+        // must still type into a numeric field.
+        if app.handle_config_nav_key(key) {
+          app.view = View::List;
         }
       }
       // Create-overlay keys live in a testable `App` method (issue #217);
@@ -598,7 +601,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         CreateKey::Cancel => app.view = View::List,
         CreateKey::Handled => {}
       },
-      View::Confirm if app.is_delete_worktree_loading() => {}
+      // Keys are inert while either mutation runs: the modal is showing a
+      // loader for something already in flight.
+      View::Confirm if app.is_delete_worktree_loading() || app.is_merge_loading() => {}
       // #219: keys resolve through the `confirm` context. `confirm` (def `y`)
       // fires regardless of focus (unchanged muscle memory); `activate` (def
       // Enter) acts on the *focused* button — focus defaults to Cancel (#187),
@@ -616,6 +621,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::ConfirmFocusConfirm) => app.confirm.focus_confirm(),
         Some(ModalAction::ConfirmFocusCancel) => app.confirm.focus_cancel(),
         Some(ModalAction::ConfirmToggleFocus) => app.confirm.toggle_focus(),
+        Some(ModalAction::ConfirmCycleMethod) => app.cycle_merge_method(),
         _ if app.key_matches_action(key, Action::ToggleDeleteBranch) => app.toggle_delete_branch(),
         _ => {}
       },
@@ -634,17 +640,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::OpenMenuToggle) => app.open_menu_toggle_selection(),
         Some(ModalAction::OpenMenuAccept) => {
           if let Some(url) = app.open_menu_pick(app.open_menu_selected) {
-            open_url(&url, &mut app);
+            open_url(terminal, &url, &mut app);
           }
         }
         Some(ModalAction::OpenMenuIssue) => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
-            open_url(&url, &mut app);
+            open_url(terminal, &url, &mut app);
           }
         }
         Some(ModalAction::OpenMenuPr) => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Pr) {
-            open_url(&url, &mut app);
+            open_url(terminal, &url, &mut app);
           }
         }
         _ if app.key_matches_action(key, Action::FetchGithub) => app.refresh_github_status(),
@@ -753,7 +759,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           KeyCode::Esc if ci => app.ci_input_cancel(),
           KeyCode::Esc => app.agent_input_cancel(),
           KeyCode::Enter if ci => match app.ci_input_selected_url() {
-            Some(url) => open_url(&url, &mut app),
+            Some(url) => open_url(terminal, &url, &mut app),
             // The method flips back to List only when a row WAS picked —
             // report the missing URL like the List-mode Enter does (Codex
             // review #455). A query with no match keeps the filter open.
@@ -785,7 +791,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           Some(ModalAction::CiChecksNext) => app.detail_overlay.select_next(),
           Some(ModalAction::CiChecksPrev) => app.detail_overlay.select_prev(),
           Some(ModalAction::CiChecksOpen) => match app.ci_selected_url() {
-            Some(url) => open_url(&url, &mut app),
+            Some(url) => open_url(terminal, &url, &mut app),
             None => app.status = "this check exposes no details URL".into(),
           },
           Some(ModalAction::CiChecksFilter) => app.ci_input_open(),
@@ -809,10 +815,33 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           Some(ModalAction::RichViewNext) => app.detail_overlay.select_next(),
           Some(ModalAction::RichViewPrev) => app.detail_overlay.select_prev(),
           Some(ModalAction::RichViewOpen) => match app.rich_selected_url() {
-            Some(url) => open_url(&url, &mut app),
+            Some(url) => open_url(terminal, &url, &mut app),
             None => app.status = "this row has nothing to open".into(),
           },
           Some(ModalAction::RichViewRefresh) => app.rich_view_refresh(),
+          Some(ModalAction::RichViewTab) => app.rich_view_next_tab(),
+          Some(ModalAction::RichViewYankUrl) => match app.rich_yank_url() {
+            Some(url) => copy_text_to_clipboard(&mut app, &url, "url copied"),
+            None => app.status = "no url to copy".into(),
+          },
+          Some(ModalAction::RichViewYankBody) => match app.rich_yank_body() {
+            Some(body) => copy_text_to_clipboard(&mut app, &body, "description copied"),
+            None => app.status = "this one has no description".into(),
+          },
+          Some(ModalAction::RichViewMerge) => app.enter_confirm_merge(),
+          Some(ModalAction::RichViewHalfDown) => {
+            let n = app.rich_half_page();
+            app.detail_overlay.select_page_down(n);
+          }
+          Some(ModalAction::RichViewHalfUp) => {
+            let n = app.rich_half_page();
+            app.detail_overlay.select_page_up(n);
+          }
+          Some(ModalAction::RichViewTop) => app.detail_overlay.select_first(),
+          Some(ModalAction::RichViewBottom) => app.detail_overlay.select_last(),
+          Some(ModalAction::RichViewCiChecks) => app.enter_ci_checks(),
+          Some(ModalAction::RichViewLeft) => app.rich_view_scroll_left(),
+          Some(ModalAction::RichViewRight) => app.rich_view_scroll_right(),
           _ => {}
         }
       }
@@ -823,6 +852,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         Some(ModalAction::DetailAttach) => app.attach_selected_agent(),
         Some(ModalAction::DetailDetach) => app.detach_selected_agent(),
         Some(ModalAction::DetailInput) => app.open_agent_input(),
+        Some(ModalAction::DetailOpenPane) => app.open_selected_agent_pane(),
         _ => {}
       },
       View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {
@@ -1066,6 +1096,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
       }
     }
     Action::Create if !app.picker_mode => app.enter_create(),
+    Action::CreateFromIssue if !app.picker_mode => app.enter_create_from_issue(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
     // #484: `Space` marks the cursor row. Picker-gated — `gwm switch` picks
     // exactly one path, so a mark set has nothing to act on there.
@@ -1090,6 +1121,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #420: `I` opens the rich PR / issue view on the linked side.
     Action::RichView if !app.picker_mode => app.enter_rich_view(),
+    // #551 validation feedback: merge the selected worktree's linked PR.
+    Action::MergePr if !app.picker_mode => app.enter_confirm_merge(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.
@@ -1101,7 +1134,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // #290: BrowseLinks replaces OpenMenu.
     Action::BrowseLinks if !app.picker_mode => app.enter_open_menu(),
     // Not picker-gated — `gwm switch` can open docs too.
-    Action::OpenDocs => open_url(DOCS_URL, app),
+    Action::OpenDocs => open_url(terminal, DOCS_URL, app),
     Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
     Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
     // #290: ReviewFullscreen replaces Review.
@@ -1125,6 +1158,13 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // overlay it is read-only and not picker-gated — harmless inside
     // `gwm switch`, opening from any List state.
     Action::ConfigPanel => app.enter_config_panel(),
+    // Issue #592: `5` opens the Working Tree listing at full size. Read-only
+    // like the two overlays above, so it is not picker-gated either.
+    Action::WorkingTree => app.enter_working_tree(),
+    // Issue #593: `c` opens the commit listing full size, in both panes.
+    // Read-only like the two overlays above, so it is not picker-gated
+    // either.
+    Action::Commits => app.enter_commits(),
     // Issue #325: `x` opens the exec profile picker. Picker-gated —
     // running a profile in a PTY is a focus-mode action, meaningless in
     // the stripped-down `gwm switch` picker.
@@ -1394,7 +1434,7 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured: add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+  use crate::multiplexer::{macro_mux_command, spawn_noun};
   // Macros run in the selected worktree. With nothing selected (e.g. a filter
   // with no matches), refuse rather than silently running in the main repo —
   // a destructive command must not hit the wrong tree (Codex review on #292).
@@ -1403,48 +1443,53 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     return Ok(());
   };
 
-  #[cfg(windows)]
-  let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-  #[cfg(not(windows))]
-  let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-  let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+  let (shell, shell_flag) = platform_shell();
 
   // Resolve the mux command up front so a `mux_pane` macro can fall back to the
   // PTY overlay when no multiplexer is active (the documented behaviour — Codex
   // review on PR #292), rather than no-oping.
+  // Resolved outside the `if` because the success line needs it too: a macro
+  // under `mux_open_in = "tab"` opens a tmux window, and saying "pane" there
+  // describes the key rather than the screen (Codex review on PR #606).
+  let mode = app.config.tui.mux_open_in.spawn_mode(app.config.tui.mux_pane_direction);
   let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
     let label = format!("macro{}", n);
-    if detect_tmux(std::env::var("TMUX").ok()) {
-      Some(build_tmux_command(&label, &path, SpawnMode::Split))
-    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      Some(build_zellij_command(&label, &path, SpawnMode::Split))
-    } else {
-      app.status = format!("macro{}: no multiplexer; falling back to PTY overlay", n);
-      None
+    let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
+    // A multiplexer can be detected and still be unable to carry the macro's
+    // command: herdr in every mode, zellij under a tab, and every backend
+    // under a workspace (#588 / #589 / #608). Opening anyway would run
+    // nothing in it and drop the macro silently, so the PTY overlay is the
+    // honest fallback and the status bar says which backend said no.
+    match macro_mux_command(
+      &label,
+      &path,
+      mode,
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+      ws.as_deref(),
+    ) {
+      Ok(spawn) => Some(spawn),
+      Err(why) => {
+        app.status = format!("macro{}: {}; falling back to PTY overlay", n, why);
+        None
+      }
     }
   } else {
     None
   };
 
-  if let Some(cmd) = mux_cmd {
-    let bin = cmd[0].as_str();
-    let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-    if bin == "zellij" {
-      // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
-      // shell, so a command with spaces/shell syntax must be wrapped in
-      // `-- <shell> -c <cmd>` (Codex review on PR #292).
-      full_cmd.push("--");
-      full_cmd.push(shell.as_str());
-      full_cmd.push(shell_flag);
-      full_cmd.push(macro_cfg.command.as_str());
-    } else {
-      // tmux takes the command as a SINGLE shell-command operand and hands it
-      // to the shell itself, so we pass it as one trailing argument rather than
-      // pre-splitting into `sh -c <cmd>`.
-      full_cmd.push(macro_cfg.command.as_str());
-    }
-    match std::process::Command::new(bin).args(&full_cmd).spawn() {
-      Ok(_) => app.status = format!("macro{} opened in mux pane", n),
+  // How a command rides along an argv moved next to the refusal that gates
+  // it (#591): `o` on the agents overlay needs the same two shapes, and the
+  // pair is one decision. `None` is herdr, which `macro_mux_command` already
+  // refused above, so this falls into the PTY overlay the same way.
+  let mux_argv = mux_cmd.and_then(|(mux, cmd)| {
+    crate::multiplexer::attach_pane_command(mux, &cmd, &macro_cfg.command, &shell, shell_flag).map(|argv| (mux, argv))
+  });
+
+  if let Some((mux, full_cmd)) = mux_argv {
+    match std::process::Command::new(&full_cmd[0]).args(&full_cmd[1..]).spawn() {
+      Ok(_) => app.status = format!("macro{} opened in new {}", n, spawn_noun(mux, mode)),
       Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
     }
   } else {
@@ -1459,6 +1504,21 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     }
   }
   Ok(())
+}
+
+/// The interactive shell a command line is handed to, and its "run this
+/// string" flag.
+///
+/// Shared by the `[tui.macro*]` runner and the agent-resume pane (#591):
+/// both have a shell *line* to run and a backend that wants an argv, and a
+/// second copy of the `cfg!(windows)` pair is a second place to forget
+/// `/C`.
+pub(crate) fn platform_shell() -> (String, &'static str) {
+  #[cfg(windows)]
+  let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+  #[cfg(not(windows))]
+  let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+  (shell, if cfg!(windows) { "/C" } else { "-c" })
 }
 
 /// Copy the Command Logs transcript to the clipboard (issue #279, `y`).
@@ -1572,10 +1632,119 @@ fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
 /// branch. A `[docs]` config override is a possible follow-up.
 pub const DOCS_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/tree/main/docs");
 
-/// Spawn the OS opener for `url` (used by the OpenMenu key handler and the
-/// `.` open-docs key, issue #233).
-/// Failures land in the status bar — we never propagate up.
-fn open_url(url: &str, app: &mut App) {
+/// Open `url`, the single funnel every link in the TUI goes through (issue
+/// #233): the browse-links menu, the open-menu Issue / PR picks, a row in the
+/// rich PR/issue view, a CI check's details URL, and `.` for the docs.
+///
+/// Since #590 the destination is a decision rather than a constant:
+/// [`plan_terminal_browser`] answers it, and the OS opener is the last rung
+/// as well as the default. Failures land in the status bar; we never
+/// propagate up.
+fn open_url(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, url: &str, app: &mut App) {
+  // A browser does not care where it is started from, so nothing here refuses
+  // on a missing selection the way `t` does: the selected worktree is a
+  // preference, the current directory a fine answer without one.
+  let cwd = app
+    .selected()
+    .map(|w| w.path.clone())
+    .or_else(|| std::env::current_dir().ok())
+    .unwrap_or_else(|| PathBuf::from("."));
+  let plan = plan_terminal_browser(
+    url,
+    &cwd,
+    &app.config.tui,
+    std::env::var("TMUX").ok(),
+    std::env::var("ZELLIJ").ok(),
+    std::env::var("HERDR_ENV").ok(),
+    std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
+    &|bin| which::which(bin).is_ok(),
+  );
+  match plan {
+    BrowserPlan::MuxPane { argv, noun } => {
+      // `output()` rather than `spawn()`, for the reason spelled out in
+      // [`App::open_in_mux_pane_from`]: this runs while ratatui owns the
+      // screen, so a child that inherits the pipes draws over the frame.
+      // Both failure shapes fall through to the opener rather than leaving the
+      // key with nothing to show for it (Codex review on PR #615): a stale
+      // `$TMUX` from a dead session, a multiplexer binary gone from `$PATH`, a
+      // zellij too old for the flag, a split the layout refuses. The plan
+      // cannot see any of those, they only surface on the spawn, and the
+      // system browser is the documented last rung for exactly this.
+      match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+        Ok(out) if out.status.success() => app.status = mux_pane_status(url, noun, true, "", ""),
+        Ok(out) => open_system_browser(
+          url,
+          app,
+          Some(mux_pane_status(
+            url,
+            noun,
+            false,
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+          )),
+        ),
+        Err(e) => open_system_browser(url, app, Some(format!("mux-pane failed: {}", e))),
+      }
+    }
+    BrowserPlan::Overlay { argv, why } => {
+      let sz = terminal.size().unwrap_or_default();
+      let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+      let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+      // Exec'd directly, with no shell in between: `spawn` runs `argv[0]
+      // argv[1..]` itself, and the browser is already an argv.
+      let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+      match PtyOverlay::spawn(PtyKind::Browser, &argv, &cwd, inner_cols, inner_rows) {
+        Ok(pty) => {
+          // `_over_current`: a link opened from the rich PR/issue view or the
+          // CI checks overlay must land back there when the browser closes.
+          app.open_pty_overlay_over_current(pty);
+          app.status = format!("{}: opened {} in the overlay", why, url);
+        }
+        // The overlay is itself a fallback, so its failure falls through to
+        // the opener rather than leaving the key with nothing to show for it.
+        Err(e) => open_system_browser(url, app, Some(format!("overlay failed: {}", e))),
+      }
+    }
+    BrowserPlan::Detached { argv } => {
+      // `output()` like the mux path, and for the same reason: this runs while
+      // ratatui owns the screen, so a child inheriting the pipes draws over
+      // the frame.
+      //
+      // Unlike the mux path, the wait is real: `tmux split-window` returns in
+      // milliseconds, `terminal-browser open --split` measured ~4s to create
+      // its pane and exit, and the loop is blocked for all of it. Accepted
+      // here rather than threaded through `TaskRunner`, because the browser is
+      // opening in front of the user for those seconds and the frame behind it
+      // is not what they are looking at. If it grows a second failure mode
+      // (a browser that hangs rather than exits) it belongs on the task spine
+      // like every other slow child; see the follow-up filed on #590.
+      match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+        Ok(out) if out.status.success() => app.status = detached_browser_status(url, true, "", ""),
+        Ok(out) => open_system_browser(
+          url,
+          app,
+          Some(detached_browser_status(
+            url,
+            false,
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+          )),
+        ),
+        Err(e) => open_system_browser(url, app, Some(format!("browser failed: {}", e))),
+      }
+    }
+    BrowserPlan::System { why } => open_system_browser(url, app, why),
+  }
+}
+
+/// Hand `url` to the OS opener: gwm's behaviour up to 1.9, and still the
+/// default and the last rung of [`plan_terminal_browser`].
+///
+/// `why` is `Some` only when a terminal browser was configured and could not
+/// be honoured, and it goes in the status line for that case alone: an opt-in
+/// that quietly does nothing reads as a broken feature, while a note on every
+/// link for users who set nothing would be noise.
+fn open_system_browser(url: &str, app: &mut App, why: Option<String>) {
   let opener = if cfg!(target_os = "macos") {
     "open"
   } else if cfg!(target_os = "windows") {
@@ -1584,7 +1753,12 @@ fn open_url(url: &str, app: &mut App) {
     "xdg-open"
   };
   match std::process::Command::new(opener).arg(url).spawn() {
-    Ok(_) => app.status = format!("opened {}", url),
+    Ok(_) => {
+      app.status = match why {
+        Some(why) => format!("{}: opened {} in the system browser", why, url),
+        None => format!("opened {}", url),
+      }
+    }
     Err(e) => app.status = format!("failed to open {}: {}", url, e),
   }
 }

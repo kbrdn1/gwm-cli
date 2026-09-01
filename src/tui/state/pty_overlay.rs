@@ -30,6 +30,11 @@ pub enum PtyKind {
   /// An `[exec.profiles.<name>]` profile command, run in the selected
   /// worktree via the exec picker overlay (issue #325).
   Exec,
+  /// The `[tui] terminal_browser` command on a URL (issue #590), when a
+  /// multiplexer is present but its container takes no command. The pane
+  /// is the preferred home; this is where the browser goes when there is
+  /// none to be had.
+  Browser,
 }
 
 /// Live PTY overlay — one spawned process, one vt100 parser, one mpsc reader

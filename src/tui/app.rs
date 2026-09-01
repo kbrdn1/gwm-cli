@@ -7,6 +7,8 @@ use super::state::async_task::{
 };
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
+use super::state::commits::{CommitsModal, COMMITS_PAGE};
+use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field, Mode};
@@ -17,6 +19,7 @@ use super::state::link_prompt::LinkPrompt;
 use super::state::pty_overlay::PtyOverlay;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
+use super::state::working_tree::WorkingTreeModal;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
@@ -25,7 +28,7 @@ use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::lifecycle::{self, HookPhase, HookSkips};
-use crate::naming::{BranchSpec, WorktreeName};
+use crate::naming::{sanitise_for_terminal, BranchSpec, WorktreeName};
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
@@ -62,6 +65,65 @@ pub struct LauncherPlan {
   pub base: Option<String>,
 }
 
+/// What an open [`View::Confirm`] is asking about.
+///
+/// Exhaustive matches, no `_` arm: the modal carries a safety countdown and
+/// a danger border because what follows cannot be taken back, and a third
+/// use must state its own answer rather than inherit the delete flow's.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum ConfirmKind {
+  #[default]
+  DeleteWorktree,
+  /// Landing a PR / MR on its base branch (issue #551).
+  MergePr,
+}
+
+/// The merge a confirmation is holding, snapshotted when it opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMerge {
+  pub number: u64,
+  pub title: String,
+  pub head_ref: String,
+  pub base_ref: String,
+  pub method: crate::forge::MergeMethod,
+  /// The CI rollup as it stood when the modal opened, rendered in the
+  /// summary. Merging on a red CI is the case the confirmation earns its
+  /// cost, and gwm shows it rather than deciding for the forge: `main` here
+  /// carries required checks, so the server refuses on its own and its
+  /// error is more accurate than a rule invented in this process.
+  pub ci: crate::forge::CiState,
+  pub checks_passed: u32,
+  pub checks_total: u32,
+  /// `PR` / `MR`, resolved by the caller.
+  pub noun: String,
+}
+
+/// Outcome of [`App::handle_command_logs_key`] (issue #613): the two side
+/// effects the run loop owns, since neither belongs in a state transition.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CommandLogsKey {
+  /// Close the overlay.
+  Close,
+  /// Write the transcript to the clipboard (the run loop owns the I/O).
+  Copy,
+  /// Consumed; nothing for the caller to do.
+  Handled,
+}
+
+/// Outcome of [`App::modal_toggle_stroke`] (issue #613): what a modal
+/// should do with a keystroke offered to its toggle key before the modal
+/// verbs get a look at it.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ToggleStroke {
+  /// The buffer completed the toggle chord. Close the overlay.
+  Fired,
+  /// The buffer is a strict prefix of the toggle chord. The stroke is
+  /// consumed; wait for the next one and do not run the modal verbs.
+  Pending,
+  /// Nothing to do with the toggle. Fall through to the modal verbs.
+  Unclaimed,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
   List,
@@ -85,6 +147,19 @@ pub enum View {
   /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
   /// state lives on [`App::command_logs`].
   CommandLogs,
+  /// Full-size Working Tree listing (issue #592). A ~90% fullscreen modal
+  /// showing the same file-explorer tree the sidebar pane paints, given the
+  /// whole screen so a large change set reads in one go instead of two rows
+  /// at a time through `J` / `K`. Opened on `W`, scrolled like the help
+  /// overlay; state lives on [`App::working_tree`].
+  WorkingTree,
+  /// Full-size commit listing (issue #593). A ~90% fullscreen modal
+  /// showing the same graph the sidebar's Commits pane paints, given the
+  /// whole screen, plus a load-more key that re-reads at a deeper limit so
+  /// history is paged rather than capped at
+  /// [`super::ui::RECENT_COMMITS_LIMIT`]. Opened on `6`, scrolled like the
+  /// help overlay; state lives on [`App::commits`].
+  Commits,
   /// Configuration panel (issue #232). A ~90% fullscreen modal over a
   /// dimmed list showing the resolved `.gwm.toml` (user-level global
   /// deep-merged under the repo file) with a per-row source column
@@ -289,6 +364,14 @@ pub struct WorkspaceState {
   /// Index into `repos` of the currently active repo (mirrors `App.repo*`).
   pub active: usize,
 }
+
+/// Columns one `h` / `l` moves the rich view (issue #551).
+///
+/// Eight rather than one: the rows this scrolls are code and diff lines,
+/// where the reader is looking for a stretch of text rather than nudging a
+/// cursor, and a one-column step turns a 200-column line into a key-repeat
+/// exercise. Small enough to still land on a specific column in a few taps.
+const RICH_H_STEP: usize = 8;
 
 pub struct App {
   pub repo: Repository,
@@ -551,9 +634,18 @@ pub struct App {
   /// renders off `App` state rather than locking the global mid-frame.
   pub command_logs: CommandLogs,
 
+  /// Full-size commit listing overlay state (issue #593): the scroll
+  /// cursor plus the paged graph snapshot, filled by
+  /// [`Self::enter_commits`] and deepened by [`Self::load_more_commits`].
+  pub commits: CommitsModal,
+
   /// Configuration panel overlay state (issue #232): the scroll cursor
   /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
   pub config_panel: ConfigPanel,
+
+  /// Full-size Working Tree overlay state (issue #592): the scroll cursor
+  /// plus the snapshotted tree rows, filled by [`Self::enter_working_tree`].
+  pub working_tree: WorkingTreeModal,
 
   /// The user-level global config path this `App` was constructed with
   /// (issue #232). Stored so [`Self::enter_config_panel`] resolves the
@@ -566,6 +658,11 @@ pub struct App {
   /// terminal PTY session is open; `None` at all other times.
   /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
   pub pty_overlay: Option<PtyOverlay>,
+
+  /// The view the open PTY overlay covers, restored when it closes (#590).
+  /// `None` when no overlay is open, or when it was opened from the table,
+  /// which is where every caller before `terminal_browser` came from.
+  pty_return: Option<View>,
 
   /// Exec profile picker overlay state (issue #325). Populated by
   /// [`Self::enter_exec_picker`] from `[exec.profiles.*]`; on `Enter` the
@@ -645,12 +742,65 @@ pub struct App {
   /// compared equal and left `Enter` pointing at the old host (Codex
   /// review #529).
   detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
+  /// Whether the reader CHOSE the rich view's current side (issue #551).
+  ///
+  /// The view opens on the PR whenever one is linked and lets a landing PR
+  /// promote an issue that was only standing in for it (#529). Tabs make
+  /// those two rules collide: an issue the reader tabbed to must not be
+  /// yanked away by the next fetch, while an issue the view opened on by
+  /// default still must be. This is the bit that tells them apart, and it
+  /// belongs to one open overlay — `close_detail_overlay` clears it.
+  rich_tab_pinned: bool,
+  /// What the open confirmation modal is about (validation feedback on
+  /// issue #551).
+  ///
+  /// The modal was single-purpose — `View::Confirm` meant "delete a
+  /// worktree" and nothing else — and a merge needs the same ceremony:
+  /// countdown, danger border, a summary naming what is about to happen.
+  /// Discriminated the way `DetailKind` discriminates the detail overlay,
+  /// with exhaustive matches and no `_` arm, so a third use has to answer
+  /// the question rather than inherit the delete flow's behaviour.
+  confirm_kind: ConfirmKind,
+  /// The merge the confirmation is holding, snapshotted when it opened.
+  ///
+  /// A snapshot for the same reason `pending_delete` is one (#484): an
+  /// auto-refresh can land during the safety countdown, and the row under
+  /// the cursor is not necessarily the row the user aimed at.
+  pending_merge: Option<PendingMerge>,
+  /// The error banner a failed merge leaves in the modal, mirroring
+  /// `delete_failure`: the forge's own words, kept where the decision was
+  /// made rather than flashed on a status bar the reader may miss.
+  merge_failure: Option<String>,
+  /// The rich view to come back to when a modal opened FROM it closes
+  /// (validation feedback on issue #551).
+  ///
+  /// `c` and `m` are reached from inside the view, so returning to the
+  /// worktree table on `Esc` throws away where the reader was: they have to
+  /// re-select the row and press `I` again to get back to the thing they
+  /// were reading. The source is kept rather than re-fetched, for the
+  /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
+  /// invalidates the cache on its way out.
+  rich_return: Option<(RichSource, bool)>,
+  /// How many columns the rich view is scrolled right (issue #551).
+  ///
+  /// Only the rows that cannot be reflowed are wide enough to need it — a
+  /// fenced code line, a diff hunk — and they are the reason it exists: in
+  /// code the column is the meaning, so the line is kept whole and this is
+  /// the only way to its tail. Every other row was wrapped to fit and simply
+  /// loses its left edge, which is why the offset is bounded by the widest
+  /// preformatted row rather than by the widest row.
+  rich_h_offset: usize,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
   /// renderer knows, so the event loop stamps it here — see
   /// [`Self::set_term_width`], which also re-wraps an open overlay.
   term_width: u16,
+  /// The terminal height the App was last drawn at, stamped beside
+  /// [`Self::term_width`] (issue #551). A half-page jump has to move by the
+  /// window the reader is actually looking at, and only the frame knows how
+  /// tall that is.
+  term_height: u16,
 
   /// The status the open rich view renders (issue #420 / Codex review
   /// #529). The overlay owns its source rather than reading it back from
@@ -731,6 +881,7 @@ impl App {
     }
     let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
+      pty_return: None,
       repo,
       display_repo_name: repo_name.clone(),
       repo_name,
@@ -784,6 +935,8 @@ impl App {
       task_rx,
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
+      working_tree: WorkingTreeModal::new(),
+      commits: CommitsModal::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
@@ -797,10 +950,17 @@ impl App {
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
       detail_overlay_link: None,
+      rich_tab_pinned: false,
+      confirm_kind: ConfirmKind::DeleteWorktree,
+      pending_merge: None,
+      merge_failure: None,
+      rich_return: None,
+      rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
       term_width: 80,
+      term_height: 24,
       rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
@@ -1227,6 +1387,15 @@ impl App {
     // (the bulk prefetch is a no-op in workspace mode).
     self.sync_active_repo();
     self.refresh_link();
+    // The shared tail above expired every fetched status, and workspace mode
+    // has no bulk refill behind it: a fetch in flight when the auto-refresh
+    // timer fires would lose its generation and have its result dropped, with
+    // nothing to replace it — and with an `auto_refresh_secs` shorter than the
+    // forge's latency, every fetch a context verb starts could be cancelled
+    // that way (Codex review on #618). Refilled here rather than in that tail
+    // because only now has the repo swap resolved the link and the slug
+    // against the row actually selected.
+    self.spawn_selected_github();
   }
 
   /// Builder-style setter for `trust_mode`. The TUI entrypoint
@@ -1885,6 +2054,10 @@ impl App {
             self.persist_loaded_issue_title(status);
             self.sync_rich_overlay(RichSource::Issue(status.clone()));
           }
+          // #625: the create form is a second consumer of this message when
+          // it is waiting on this very number. Before `complete_issue` so the
+          // status line it sets is not overwritten by the refresh report.
+          self.apply_awaited_issue(number, &result);
           self.github.complete_issue(number, result);
           applied = true;
           github_applied = true;
@@ -1967,6 +2140,13 @@ impl App {
           // refresh / sync arms use).
           refresh_applied = true;
         }
+        TaskMsg::MergePr(generation, outcome) => {
+          if !self.tasks.complete(TaskKind::MergePr, generation) {
+            continue;
+          }
+          self.apply_merge_result(outcome);
+          continue;
+        }
         TaskMsg::DeleteWorktree(generation, outcome) => {
           if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
             // Late result — a newer run (or an invalidate) superseded it.
@@ -2007,6 +2187,12 @@ impl App {
           applied = true;
           // Delete owns the status line this tick.
           refresh_applied = true;
+        }
+        TaskMsg::AgentPane(generation, result) => {
+          if !self.apply_agent_pane_result(generation, result) {
+            continue;
+          }
+          applied = true;
         }
         TaskMsg::Pull(generation, name, result) => {
           if !self.tasks.complete(TaskKind::Pull, generation) {
@@ -2073,6 +2259,57 @@ impl App {
           applied = true;
           refresh_applied = true;
         }
+        TaskMsg::WorkingTree(generation, path, snap) => {
+          if !self.tasks.complete(TaskKind::WorkingTree, generation) {
+            continue;
+          }
+          // The selection moved while the read ran (or the overlay was
+          // closed and reopened elsewhere): this payload describes a
+          // worktree the overlay is no longer showing.
+          if self.working_tree.path.as_deref() != Some(path.as_path()) {
+            continue;
+          }
+          self.working_tree.load(snap);
+          applied = true;
+        }
+        TaskMsg::Commits(generation, path, limit, snap) => {
+          if !self.tasks.complete(TaskKind::Commits, generation) {
+            continue;
+          }
+          // Two ways this payload can be stale: the selection moved while
+          // the walk ran (or the overlay was closed and reopened elsewhere),
+          // and the overlay paged past the limit this result was read at.
+          // Both describe a listing the overlay is no longer showing.
+          if self.commits.path.as_deref() != Some(path.as_path()) || self.commits.limit != limit {
+            continue;
+          }
+          self.commits.load(snap);
+          // Chained here rather than from `enter_commits`: the oids to read
+          // are the ones that just landed, and the identity to read them
+          // for is whatever the overlay holds NOW — the user may have
+          // closed and reopened while the rows were in flight.
+          self.request_commit_stats();
+          applied = true;
+        }
+        TaskMsg::CommitStats(generation, path, limit, tip, tiers) => {
+          if !self.tasks.complete(TaskKind::CommitStats, generation) {
+            continue;
+          }
+          // Same three-part identity the rows are matched on. A payload
+          // that fails it describes a listing the overlay is no longer
+          // showing; dropping it is safe here because, unlike the rows,
+          // nothing is waiting on it — the columns already say author and
+          // age, and the next `request_commit_stats` covers the current
+          // listing.
+          if self.commits.path.as_deref() != Some(path.as_path())
+            || self.commits.limit != limit
+            || self.commits.head != tip
+          {
+            continue;
+          }
+          self.commits.load_stats(tiers);
+          applied = true;
+        }
         TaskMsg::Sidebar(generation, path, mode, sections) => {
           // Late result — the selection moved and `refresh` bumped the slot's
           // generation (a mutation invalidated a pre-mutation rebuild), so this
@@ -2127,6 +2364,19 @@ impl App {
   /// `true` while the delete-worktree worker is in flight (issue #257).
   pub fn is_delete_worktree_loading(&self) -> bool {
     self.tasks.is_loading(TaskKind::DeleteWorktree)
+  }
+
+  /// Whether a merge is in flight. The modal stays up and shows a loader
+  /// while it is, the way the delete flow does: the operation talks to a
+  /// server, and a modal that vanished would leave the reader guessing
+  /// whether anything happened.
+  pub fn is_merge_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::MergePr)
+  }
+
+  /// The failure banner for the merge modal.
+  pub fn merge_failure(&self) -> Option<&str> {
+    self.merge_failure.as_deref()
   }
 
   /// `true` when a requested quit can safely leave the event loop now.
@@ -2317,6 +2567,68 @@ impl App {
 
     self.sync_legacy_pending_flag();
     outcome
+  }
+
+  /// What one keystroke means for a modal's own toggle key (issue #613).
+  ///
+  /// [`Self::key_matches_action`] answers the same question for a single
+  /// stroke, which left two silent holes in every overlay that closes on
+  /// its opener:
+  ///
+  /// - a **multi-stroke** binding (`working_tree = ["g w"]`) could open the
+  ///   overlay through the chord-aware list dispatch but never match here,
+  ///   because the lookup only ever saw the last stroke;
+  /// - a binding the overlay's own context already claims (`= ["j"]`) was
+  ///   resolved as a modal verb first, so the key opened the overlay and
+  ///   then scrolled it instead of closing.
+  ///
+  /// This resolves against `action` **alone** rather than the whole keymap:
+  /// inside a modal the toggle is the one global binding allowed to fire,
+  /// and letting [`Self::dispatch_key`] run there would make `d` open the
+  /// delete confirm from behind an overlay.
+  ///
+  /// [`ToggleStroke::Pending`] means the stroke was consumed as the prefix
+  /// of the toggle chord: the caller must NOT hand it to the modal verbs,
+  /// or `g` would scroll to the top on its way to `g w`.
+  pub fn modal_toggle_stroke(&mut self, key: KeyEvent, action: Action) -> ToggleStroke {
+    let stroke = KeyStroke::from_event(&key);
+    let mut tentative = self.pending_chord.clone();
+    tentative.push(stroke.clone());
+
+    let outcome = match self.resolve_toggle_buffer(action, &tentative) {
+      ToggleStroke::Unclaimed if !self.pending_chord.is_empty() => {
+        // Mismatched continuation. Drop the in-flight prefix and retry the
+        // stroke on its own, the vim-style fallback `dispatch_key` does:
+        // one action can hold several chords, so with
+        // `working_tree = ["g w", "j k"]` a `g` followed by `j` has to start
+        // the second chord rather than fall through to a scroll verb.
+        self.pending_chord.clear();
+        self.resolve_toggle_buffer(action, &[stroke])
+      }
+      other => other,
+    };
+    match &outcome {
+      ToggleStroke::Pending => {}
+      // Fired or Unclaimed: nothing is in flight either way.
+      _ => self.pending_chord.clear(),
+    }
+    self.sync_legacy_pending_flag();
+    outcome
+  }
+
+  /// Resolve one buffer against the chords bound to `action` alone, arming
+  /// [`Self::pending_chord`] on a strict prefix. The inner step of
+  /// [`Self::modal_toggle_stroke`], which owns the retry and the clears.
+  fn resolve_toggle_buffer(&mut self, action: Action, buffer: &[KeyStroke]) -> ToggleStroke {
+    let chords = self.keymap.chords_for(action);
+    if chords.iter().any(|c| c.as_slice() == buffer) {
+      return ToggleStroke::Fired;
+    }
+    if chords.iter().any(|c| c.len() > buffer.len() && c.starts_with(buffer)) {
+      self.pending_chord = buffer.to_vec();
+      return ToggleStroke::Pending;
+    }
+    ToggleStroke::Unclaimed
   }
 
   pub fn key_matches_action(&self, key: KeyEvent, action: Action) -> bool {
@@ -2567,7 +2879,10 @@ impl App {
     use super::ui::HintContext;
     match self.view {
       View::Create => self.create_hint_context(),
-      View::Confirm => HintContext::Confirm,
+      View::Confirm => match self.confirm_kind {
+        ConfirmKind::DeleteWorktree => HintContext::Confirm,
+        ConfirmKind::MergePr => HintContext::ConfirmMerge,
+      },
       View::OpenMenu => HintContext::OpenMenu,
       // #219: the two link-prompt stages advertise different keys — the
       // choose-target picker vs the number-input submit/cancel — so the
@@ -2589,9 +2904,23 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
+      // Same for the full-size Working Tree listing (issue #592).
+      View::WorkingTree => self.pane_hint_context(),
+      // Same for the full-size commit listing (issue #593).
+      View::Commits => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
-      View::Note => HintContext::Note,
+      // #557: the note bar follows the mode. With the knob off there is no
+      // mode to follow, and the #515 bar is what stays — a `NORMAL` chip on
+      // an editor that has no normal mode would name a state nobody can be
+      // in.
+      View::Note => match self.note_editor.as_ref() {
+        Some(editor) if self.config.tui.note_vim => match editor.mode {
+          crate::tui::state::note_editor::NoteMode::Normal => HintContext::NoteNormal,
+          crate::tui::state::note_editor::NoteMode::Insert => HintContext::NoteInsert,
+        },
+        _ => HintContext::Note,
+      },
       View::CleanReport => HintContext::Clean,
       View::Edit => self.rename_hint_context(),
       // Issue #408: the detail overlay advertises its close/scroll keys.
@@ -2615,6 +2944,7 @@ impl App {
     use super::ui::HintContext;
     match self.create_form.mode {
       Mode::Freeform => HintContext::CreateFreeform,
+      Mode::FromIssue => HintContext::CreateFromIssue,
       Mode::Structured => HintContext::Create,
     }
   }
@@ -2629,7 +2959,11 @@ impl App {
     use super::ui::HintContext;
     match self.create_form.mode {
       Mode::Freeform => HintContext::RenameFreeform,
-      Mode::Structured => HintContext::Rename,
+      // The rename modal never opens in `FromIssue`: nothing routes there,
+      // and deriving a name for a worktree that already exists is what
+      // `gwm link` is for. It shares the structured row rather than growing
+      // a context no surface can reach.
+      Mode::FromIssue | Mode::Structured => HintContext::Rename,
     }
   }
 
@@ -2698,6 +3032,343 @@ impl App {
     self.command_logs.sync();
     self.command_logs.reset();
     self.view = View::CommandLogs;
+  }
+
+  /// Open the full-size Working Tree listing (issues #592, #613).
+  ///
+  /// The overlay opens immediately on a loader and the `git status` read
+  /// runs on a [`TaskKind::WorkingTree`] worker. It is deliberately NOT
+  /// inline: `STATUS_SCAN_CAP` bounds how many records git yields, not how
+  /// long it takes to produce the first one, so an untracked tree on a cold
+  /// or network filesystem would freeze the event loop for the length of the
+  /// walk (Copilot review, PR #612). Same boundary as the sidebar's own
+  /// preview (#343), reached from a keypress rather than from navigation.
+  ///
+  /// The rows are read fresh rather than taken from `SidebarState::cache`:
+  /// that cache is keyed by `(path, mode)` and only rebuilt while the
+  /// sidebar is open and in commits mode, so it is empty in the two states
+  /// where the overlay is most useful.
+  ///
+  /// With nothing selected the overlay still opens, empty — the
+  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
+  /// reads as a dead key.
+  pub fn enter_working_tree(&mut self) {
+    let selected = self.selected().cloned();
+    let target = selected.as_ref().map(|w| w.path.as_path());
+    // Coalescing is only sound while the in-flight read is for the SAME
+    // worktree (Copilot review, PR #612). Close a slow snapshot for A,
+    // select B, reopen: the request would come back `None` because the slot
+    // is still A's, no worker would exist for B, and A's payload is dropped
+    // on the path check below — leaving the loader up with nothing left to
+    // clear it. `invalidate` bumps the generation and frees the slot, so A's
+    // late result is discarded and B gets its own read.
+    if self.working_tree.loading && self.working_tree.path.as_deref() != target {
+      self.tasks.invalidate(TaskKind::WorkingTree);
+    }
+    self.working_tree.begin(target);
+    self.view = View::WorkingTree;
+    let Some(w) = selected else {
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::WorkingTree) else {
+      // A read for this same worktree is already out; ride on it, which is
+      // what keeps a held `W` from spawning a `git status` per repeat.
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let snap = crate::tui::ui::working_tree_listing(&w, &theme);
+      let _ = tx.send(TaskMsg::WorkingTree(generation, w.path, snap));
+    });
+  }
+
+  /// `true` while the Working Tree overlay is waiting on its worker.
+  pub fn is_working_tree_loading(&self) -> bool {
+    self.working_tree.loading
+  }
+
+  /// Route one keystroke through the Command Logs overlay (issues #226,
+  /// #613). The two side effects the run loop owns (close, clipboard write)
+  /// come back as [`CommandLogsKey`] rather than firing here, so the routing
+  /// stays a pure state transition, the way [`Self::handle_create_key`] does
+  /// (issue #217).
+  ///
+  /// Same precedence as [`Self::handle_working_tree_key`]: the toggle first,
+  /// then the modal verbs.
+  pub fn handle_command_logs_key(&mut self, key: KeyEvent) -> CommandLogsKey {
+    match self.modal_toggle_stroke(key, Action::CommandLogs) {
+      ToggleStroke::Fired => return CommandLogsKey::Close,
+      ToggleStroke::Pending => return CommandLogsKey::Handled,
+      ToggleStroke::Unclaimed => {}
+    }
+    match self.resolve_modal(KeyContext::CommandLogs, key) {
+      Some(ModalAction::CommandLogsClose) => return CommandLogsKey::Close,
+      Some(ModalAction::CommandLogsCopy) => return CommandLogsKey::Copy,
+      Some(ModalAction::CommandLogsScrollDown) => self.command_logs.scroll_down(),
+      Some(ModalAction::CommandLogsScrollUp) => self.command_logs.scroll_up(),
+      Some(ModalAction::CommandLogsScrollRight) => self.command_logs.scroll_right(),
+      Some(ModalAction::CommandLogsScrollLeft) => self.command_logs.scroll_left(),
+      Some(ModalAction::CommandLogsScrollTop) => self.command_logs.scroll_to_top(),
+      Some(ModalAction::CommandLogsScrollBottom) => self.command_logs.scroll_to_bottom(),
+      _ => {}
+    }
+    CommandLogsKey::Handled
+  }
+
+  /// Route one keystroke through the Settings panel's navigation mode
+  /// (issues #232, #613). Returns `true` when the panel should close.
+  ///
+  /// Navigation ONLY: the capture and edit sub-modes own every stroke while
+  /// they are live and stay routed ahead of this in the run loop, so a
+  /// `config_panel` key rebound to a digit still types into a numeric field
+  /// instead of closing the panel out from under the edit.
+  pub fn handle_config_nav_key(&mut self, key: KeyEvent) -> bool {
+    match self.modal_toggle_stroke(key, Action::ConfigPanel) {
+      ToggleStroke::Fired => return true,
+      ToggleStroke::Pending => return false,
+      ToggleStroke::Unclaimed => {}
+    }
+    let on_all = self.config_panel.tab == SettingsTab::All;
+    match self.resolve_modal(KeyContext::Config, key) {
+      Some(ModalAction::ConfigClose) => return true,
+      Some(ModalAction::ConfigNextTab) => self.config_panel.next_tab(),
+      Some(ModalAction::ConfigPrevTab) => self.config_panel.prev_tab(),
+      Some(ModalAction::ConfigToggleLayer) => self.config_panel.toggle_layer(),
+      // On the Keys tab `activate` arms a live keystroke capture for the
+      // selected binding (issue #294); elsewhere it cycles a choice or
+      // opens the numeric/text edit buffer.
+      Some(ModalAction::ConfigActivate) => {
+        if self.config_panel.tab == SettingsTab::Keys {
+          self.config_panel.begin_capture();
+        } else {
+          self.activate_selected_setting();
+        }
+      }
+      Some(ModalAction::ConfigSelectNext) => {
+        if on_all {
+          self.config_panel.scroll_down();
+        } else {
+          self.config_panel.select_next();
+        }
+      }
+      Some(ModalAction::ConfigSelectPrev) => {
+        if on_all {
+          self.config_panel.scroll_up();
+        } else {
+          self.config_panel.select_prev();
+        }
+      }
+      Some(ModalAction::ConfigScrollRight) if on_all => self.config_panel.scroll_right(),
+      Some(ModalAction::ConfigScrollLeft) if on_all => self.config_panel.scroll_left(),
+      Some(ModalAction::ConfigScrollTop) if on_all => self.config_panel.scroll_to_top(),
+      Some(ModalAction::ConfigScrollBottom) if on_all => self.config_panel.scroll_to_bottom(),
+      _ => {}
+    }
+    false
+  }
+
+  /// Route one keystroke through the full-size Working Tree overlay
+  /// (issues #592, #613). Returns `true` when the overlay should close.
+  ///
+  /// The routing lives here rather than in the event loop, the way
+  /// [`Self::handle_create_key`] does (issue #217), so the ONE thing a
+  /// `match` in the run loop cannot express in a test is pinned: the
+  /// toggle resolves **before** the modal verbs. Move the two blocks and
+  /// `a_rebound_toggle_beats_the_scroll_verb_it_shadows` goes red.
+  pub fn handle_working_tree_key(&mut self, key: KeyEvent) -> bool {
+    match self.modal_toggle_stroke(key, Action::WorkingTree) {
+      ToggleStroke::Fired => return true,
+      // Consumed as a chord prefix: the modal verbs must not see it.
+      ToggleStroke::Pending => return false,
+      ToggleStroke::Unclaimed => {}
+    }
+    match self.resolve_modal(KeyContext::WorkingTree, key) {
+      Some(ModalAction::WorkingTreeClose) => return true,
+      Some(ModalAction::WorkingTreeScrollDown) => self.working_tree.scroll_down(),
+      Some(ModalAction::WorkingTreeScrollUp) => self.working_tree.scroll_up(),
+      Some(ModalAction::WorkingTreeHalfDown) => self.working_tree.scroll_half_down(),
+      Some(ModalAction::WorkingTreeHalfUp) => self.working_tree.scroll_half_up(),
+      Some(ModalAction::WorkingTreeScrollTop) => self.working_tree.scroll_to_top(),
+      Some(ModalAction::WorkingTreeScrollBottom) => self.working_tree.scroll_to_bottom(),
+      _ => {}
+    }
+    false
+  }
+
+  /// Open the full-size commit listing (issue #593).
+  ///
+  /// The overlay opens immediately on a loader and the revwalk runs on a
+  /// [`TaskKind::Commits`] worker. It is deliberately NOT inline: the walk
+  /// sorts `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph
+  /// before yielding a row. Measured on this repo, asking for 300 commits
+  /// costs the same as asking for all 2058 — the limit truncates the
+  /// output, it bounds nothing about the latency, so an inline call would
+  /// freeze the event loop for as long as the history is deep. Same
+  /// boundary as the sidebar's own preview (#343), reached from a keypress
+  /// rather than from navigation.
+  ///
+  /// The rows are read fresh rather than taken from `SidebarState::cache`:
+  /// that cache is keyed by `(path, mode)` and only rebuilt while the
+  /// sidebar is open and in commits mode, so it is empty in the two states
+  /// where the overlay is most useful. The read still goes through
+  /// [`crate::worktree::recent_commits_cached`] at [`COMMITS_PAGE`], which
+  /// is the sidebar's own limit, so a sidebar that already walked this tip
+  /// makes the worker a hash lookup.
+  ///
+  /// The tip comes from `WorktreeInfo.head`, the snapshot `worktree::list`
+  /// took at the last refresh, NOT from resolving HEAD here. A commit
+  /// landing between two refreshes is therefore invisible to the overlay
+  /// until the next one — which is exactly what the sidebar's Commits pane
+  /// shows, since it hands the same `WorktreeInfo` to the same memo
+  /// (`ui.rs`, `SidebarMode::Commits`). Resolving HEAD at open would make
+  /// the overlay disagree with the pane it is a full-size view of, and the
+  /// staleness window is one auto-refresh interval. Raised twice by Codex
+  /// on PR #614 and declined both times: the snapshot is the contract of
+  /// `recent_commits_cached`, not an oversight here.
+  ///
+  /// With nothing selected the overlay still opens, empty — the
+  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
+  /// reads as a dead key.
+  pub fn enter_commits(&mut self) {
+    let selected = self.selected().cloned();
+    let target = selected.as_ref().map(|w| w.path.as_path());
+    // Coalescing is only sound while the in-flight read is for the SAME
+    // worktree, at the SAME limit, on the SAME tip (the #592 lesson, PR
+    // #612; the tip added by a Codex review on PR #614 — a commit landing
+    // while the overlay is closed mid-read would otherwise be swallowed by
+    // a worker holding the old `head`). Otherwise the
+    // request would come back `None` because the slot is still the old
+    // read's, no worker would exist for this one, and the old payload is
+    // dropped by the checks in the drain — leaving the loader up with
+    // nothing left to clear it.
+    let tip = selected.as_ref().and_then(|w| w.head.clone());
+    if self.commits.loading
+      && (self.commits.path.as_deref() != target || self.commits.limit != COMMITS_PAGE || self.commits.head != tip)
+    {
+      self.tasks.invalidate(TaskKind::Commits);
+    }
+    self.commits.begin(target, COMMITS_PAGE, tip);
+    self.view = View::Commits;
+    if let Some(w) = selected {
+      self.request_commits_read(w, COMMITS_PAGE);
+    }
+  }
+
+  /// The worktree the commit overlay opened on, if it is still listed.
+  ///
+  /// Deliberately not [`Self::selected`]: the auto-refresh moves the
+  /// selection while the overlay is up, and the drain matches a payload
+  /// against `commits.path`, so a read fired for the newly-selected
+  /// worktree is dropped on the path check *after* `complete` freed the
+  /// slot, leaving nothing to clear the loader (Codex review, PR #614).
+  ///
+  /// `None` once another process removes the worktree and the refresh drops
+  /// it from the list: there is no longer anything to walk.
+  fn commits_target(&self) -> Option<&WorktreeInfo> {
+    let path = self.commits.path.as_deref()?;
+    self.worktrees.iter().find(|w| w.path == path)
+  }
+
+  /// Whether the commit overlay can page deeper: the listing says a page
+  /// exists AND the worktree it opened on is still there to read.
+  ///
+  /// [`CommitsModal::can_load_more`] owns the arithmetic and cannot see the
+  /// worktree list, so on its own it keeps saying yes for a worktree that
+  /// has been removed underneath the overlay. The renderer and
+  /// [`Self::load_more_commits`] both read *this*, so the advertised key
+  /// and the key that acts can never disagree.
+  pub fn commits_can_load_more(&self) -> bool {
+    self.commits.can_load_more() && self.commits_target().is_some()
+  }
+
+  /// Re-read the commit listing one page deeper (issue #593).
+  ///
+  /// A re-read rather than an append: the graph renderer resolves a row's
+  /// connectors against the parents of the rows below it, so a page tacked
+  /// onto the end would draw its topology against nothing. The memo in
+  /// [`crate::worktree::recent_commits_cached`] is keyed on the limit, so
+  /// the deeper read is a fresh entry rather than an invalidation of the
+  /// sidebar's.
+  ///
+  /// The rows already on screen stay up while the worker runs, so paging
+  /// keeps its place instead of blanking. A no-op when
+  /// [`Self::commits_can_load_more`] is false; the footer drops the `load
+  /// more` hint on that same predicate, so the key is never advertised
+  /// where it would do nothing.
+  pub fn load_more_commits(&mut self) {
+    if !self.commits_can_load_more() {
+      return;
+    }
+    let Some(w) = self.commits_target().cloned() else {
+      return;
+    };
+    let limit = self.commits.next_limit();
+    self.commits.begin_more(limit);
+    self.request_commits_read(w, limit);
+  }
+
+  /// Spawn the worker that walks `w`'s log to `limit` and renders it.
+  ///
+  /// A `None` from the slot means a read for this same worktree and limit
+  /// is already out: ride on it, which is what keeps a held `6` from
+  /// spawning a revwalk per repeat. Callers that need a *different* read
+  /// invalidate the slot first.
+  fn request_commits_read(&mut self, w: WorktreeInfo, limit: usize) {
+    let Some(generation) = self.tasks.request(TaskKind::Commits) else {
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let snap = crate::tui::ui::recent_commits_listing(&w, limit, crate::worktree::unix_now(), &theme);
+      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, snap));
+    });
+  }
+
+  /// `true` while the commit listing is waiting on its worker.
+  pub fn is_commits_loading(&self) -> bool {
+    self.commits.loading
+  }
+
+  /// Spawn the second, slower read: one `git log --raw --numstat` over the
+  /// oids already on screen, rebuilding the metadata columns with the diff
+  /// counts (issue #593).
+  ///
+  /// Chained after the rows rather than folded into them. The revwalk takes
+  /// about 0.4s and this takes one to three seconds depending on the page
+  /// depth, so folding the two would hold the whole listing behind the
+  /// slower half. The rows appear first and the column grows under them.
+  ///
+  /// A no-op with nothing to read, and when the stats for this listing are
+  /// already in place — the drain calls this on every landing, including
+  /// the ones that only re-installed the same rows.
+  pub fn request_commit_stats(&mut self) {
+    if self.commits.stats_loaded || self.commits.rows.is_empty() {
+      return;
+    }
+    let Some(path) = self.commits.path.clone() else {
+      return;
+    };
+    let (limit, tip) = (self.commits.limit, self.commits.head.clone());
+    let oids: Vec<git2::Oid> = self.commits.rows.iter().map(|r| r.hash).collect();
+    let rows = self.commits.rows.clone();
+    // A read for a different listing is still out: free the slot, or this
+    // one never starts and the columns never grow.
+    if self.tasks.is_loading(TaskKind::CommitStats) {
+      self.tasks.invalidate(TaskKind::CommitStats);
+    }
+    let Some(generation) = self.tasks.request(TaskKind::CommitStats) else {
+      return;
+    };
+    let theme = self.theme;
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let stats = crate::worktree::commit_stats(&path, &oids).unwrap_or_default();
+      let now = crate::worktree::unix_now();
+      let tiers = crate::tui::ui::commit_meta_columns(&rows, now, &stats, &theme);
+      let _ = tx.send(TaskMsg::CommitStats(generation, path, limit, tip, tiers));
+    });
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective
@@ -2955,18 +3626,58 @@ impl App {
   /// Open the PTY overlay: store `pty` and switch to [`View::Pty`].
   pub fn open_pty_overlay(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
     self.pty_overlay = Some(pty);
+    self.pty_return = None;
     self.view = View::Pty;
   }
 
+  /// [`Self::open_pty_overlay`], but closing it lands back on the view it
+  /// covered instead of on the worktree table (issue #590).
+  ///
+  /// A separate entry point rather than a rule inside `open_pty_overlay`,
+  /// because "where does closing this land" is the caller's decision and the
+  /// callers genuinely disagree. Stashing the current view unconditionally
+  /// looked harmless and was not: the exec picker spawns its PTY from
+  /// `View::ExecPicker`, so every finished run would have dropped the user
+  /// back on the picker instead of the list, contradicting
+  /// `close_exec_picker`'s contract (Codex review on PR #615).
+  ///
+  /// A `terminal_browser` link is the one caller that opens from on top of a
+  /// modal: the rich PR/issue view and the CI checks overlay both open URLs,
+  /// and landing the reader on the table there loses the modal AND the row
+  /// they were on. Only the view is stashed, because opening a PTY touches no
+  /// other overlay state.
+  pub fn open_pty_overlay_over_current(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
+    let back = self.view;
+    self.open_pty_overlay(pty);
+    if back != View::Pty {
+      self.pty_return = Some(back);
+    }
+  }
+
   /// Close the PTY overlay: kill the child process, drop the state, and
-  /// return to [`View::List`]. Safe to call when no overlay is open.
+  /// return to whatever the overlay covered ([`View::List`] for every caller
+  /// that opened from the table). Safe to call when no overlay is open.
   pub fn close_pty_overlay(&mut self) {
     if let Some(ref mut pty) = self.pty_overlay {
       pty.kill();
     }
     self.pty_overlay = None;
+    let back = self.pty_return.take();
     if self.view == View::Pty {
-      self.view = View::List;
+      self.view = back.unwrap_or(View::List);
+      // A restored forge modal is revalidated before the reader can act on it
+      // (Codex review on PR #615). `View::Pty` does not suspend the auto
+      // refresh, and `close_forge_overlay_if_link_disagrees` returns early on
+      // any view but `DetailOverlay`, so a link that moved while the browser
+      // was up would come back to rows nobody re-checked, with `Enter`
+      // opening the old PR's URL. That is the exact bug class the guard was
+      // written for; it only needed to be asked again on the way back. Self
+      // gated, so it is a no-op for every other restored view.
+      self.close_forge_overlay_if_link_disagrees();
+      // Identity held, so the modal is still up: give it what landed while it
+      // was covered, or the reader comes back to rows the cache has already
+      // replaced (Codex review on PR #615).
+      self.resync_forge_overlay_from_cache();
     }
   }
 
@@ -3149,6 +3860,74 @@ impl App {
     self.view = View::DetailOverlay;
   }
 
+  /// Why a verb that needs the selected row's forge context cannot run
+  /// yet, and — when the answer is "nobody asked" — the fetch that fixes
+  /// it (issue #597).
+  ///
+  /// `Idle` on a LINKED side is not "nothing to show", it is "never
+  /// fetched". The bulk prefetch runs at startup and on every relist but
+  /// is skipped entirely in workspace mode, so a row can reach a verb with
+  /// a perfectly good link and a cold cache; reporting that as a missing
+  /// link sent the reader off to fix the one thing that was fine. An
+  /// `Error` is terminal in the cache, so it deserves the same distinction
+  /// for the opposite reason: the fetch the hint asked for has already run.
+  ///
+  /// Returns `None` when the side is `Loaded` (the caller renders it) or
+  /// unlinked — only the caller knows how to word which side it needed —
+  /// and otherwise the status line to show.
+  fn forge_fetch_gap(&mut self, side: LinkTarget) -> Option<String> {
+    /// The cache states without their payloads: the two sides carry
+    /// different ones and this decision reads neither.
+    enum Phase {
+      Fetched,
+      InFlight,
+      Failed(String),
+      Unfetched,
+    }
+    fn phase_of<T>(state: &GitHubFetchState<T>) -> Phase {
+      match state {
+        GitHubFetchState::Loaded(_) => Phase::Fetched,
+        GitHubFetchState::Loading => Phase::InFlight,
+        GitHubFetchState::Error(e) => Phase::Failed(e.clone()),
+        GitHubFetchState::Idle => Phase::Unfetched,
+      }
+    }
+
+    let number = match side {
+      LinkTarget::Issue => self.github.link.issue?,
+      LinkTarget::Pr => self.github.link.pr?,
+    };
+    let noun = match side {
+      LinkTarget::Issue => "Issue".to_string(),
+      LinkTarget::Pr => self.pr_noun_titlecase(),
+    };
+    let phase = match side {
+      LinkTarget::Issue => phase_of(self.github.issue_fetch_state(number)),
+      LinkTarget::Pr => phase_of(self.github.pr_fetch_state(number)),
+    };
+    match phase {
+      Phase::Fetched => None,
+      Phase::InFlight => Some(format!("fetching {noun} #{number}…")),
+      Phase::Failed(e) => Some(format!("{noun} #{number} could not be fetched: {e}")),
+      Phase::Unfetched => {
+        // Ask now, through the same spawn helpers and behind the same slug
+        // guard the bulk prefetch uses: without a resolved forge the spawn
+        // marks the cache `Loading` for a request that is never made, and
+        // the section would spin for good.
+        let slug = self.github.link_slug.clone()?;
+        let started = match side {
+          LinkTarget::Issue => self.spawn_github_issue(number, &slug),
+          LinkTarget::Pr => self.spawn_github_pr(number, &slug),
+        };
+        if !started {
+          return None;
+        }
+        self.spinner.reset();
+        Some(format!("fetching {noun} #{number}…"))
+      }
+    }
+  }
+
   /// Open the CI checks overlay (issue #436): one row per classified
   /// `statusCheckRollup` entry of the linked PR, in rollup order. With no
   /// linked PR or an empty rollup the overlay would be a bordered void —
@@ -3165,16 +3944,34 @@ impl App {
     }
     let checks = match self.pr_fetch_state() {
       GitHubFetchState::Loaded(pr) if !pr.checks.is_empty() => pr.checks.clone(),
+      // Fetched, and the rollup really is empty: a commit was just pushed
+      // and the workflows have not started. Naming the link and the fetch
+      // here named the two things that were already done (issue #597).
+      GitHubFetchState::Loaded(pr) => {
+        let number = pr.number;
+        self.status = format!("no CI checks reported by {} #{number}", self.pr_noun_titlecase());
+        return;
+      }
       _ => {
-        // Resolve the active fetch binding instead of hard-coding `F`
+        // A linked-but-unfetched PR is asked for rather than refused, and
+        // an in-flight or failed one is reported as what it is (#597).
+        // Only a row with no PR at all gets the link hint, and that hint
+        // resolves the active fetch binding instead of hard-coding `F`
         // (Codex review #455); an unbound action drops the parenthetical.
-        self.status = match self.keymap.primary_chord(Action::FetchGithub) {
-          Some(key) => format!("no CI checks to show: link a PR and fetch ({key}) first"),
-          None => "no CI checks to show: link a PR and fetch first".into(),
+        let msg = match self.forge_fetch_gap(LinkTarget::Pr) {
+          Some(msg) => msg,
+          None => match self.keymap.primary_chord(Action::FetchGithub) {
+            Some(key) => format!("no CI checks to show: link a PR and fetch ({key}) first"),
+            None => "no CI checks to show: link a PR and fetch first".into(),
+          },
         };
+        self.status = msg;
         return;
       }
     };
+    // Before the overlay is replaced: `c` is reachable from inside the rich
+    // view, and `Esc` there should come back to it rather than to the table.
+    self.remember_rich_view();
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
@@ -3246,12 +4043,22 @@ impl App {
       self.open_rich_overlay(source, title, width);
       return;
     }
+    // Neither side can be shown yet. A linked side that nobody has asked
+    // for is asked for here rather than reported as absent (issue #597) —
+    // the PR first, the side this view prefers. Both are probed, since
+    // either one landing is enough to fill the view.
+    let pr_gap = self.forge_fetch_gap(LinkTarget::Pr);
+    let issue_gap = self.forge_fetch_gap(LinkTarget::Issue);
     // Resolve the active binding rather than hard-coding `F`, the same way
     // `enter_ci_checks` does.
-    self.status = match self.keymap.primary_chord(Action::FetchGithub) {
-      Some(key) => format!("nothing to show: link an issue or PR and fetch ({key}) first"),
-      None => "nothing to show: link an issue or PR and fetch first".into(),
+    let msg = match pr_gap.or(issue_gap) {
+      Some(msg) => msg,
+      None => match self.keymap.primary_chord(Action::FetchGithub) {
+        Some(key) => format!("nothing to show: link an issue or PR and fetch ({key}) first"),
+        None => "nothing to show: link an issue or PR and fetch first".into(),
+      },
     };
+    self.status = msg;
   }
 
   /// Common tail of [`Self::enter_rich_view`]: build the rows, pin the
@@ -3260,7 +4067,12 @@ impl App {
     let (kind, rows, target, number) = match &source {
       RichSource::Pr(pr) => (
         crate::tui::state::detail_overlay::DetailKind::RichPr,
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        crate::tui::state::rich_view::rich_pr_rows(
+          pr,
+          self.github.pr_threads_state(pr.number),
+          width,
+          &self.pr_noun_titlecase(),
+        ),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -3296,7 +4108,13 @@ impl App {
   /// The wrap budget handed to the row builders: the overlay modal's inner
   /// width for the terminal the App was last drawn at.
   fn rich_view_width(&self) -> usize {
-    crate::tui::ui::overlay_modal_width(self.term_width).saturating_sub(6) as usize
+    // Names the rich view's OWN policy (issue #551), not the routing the
+    // renderer goes through: `enter_rich_view` sizes the wrap before
+    // `open_rich_overlay` has set the kind, so routing on
+    // `self.detail_overlay.kind` here would budget the first open against
+    // whichever consumer used the overlay last. Both sides still resolve to
+    // `rich_view_modal_width`, which is the number that has to agree.
+    crate::tui::ui::rich_view_modal_width(self.term_width).saturating_sub(6) as usize
   }
 
   /// Stamp the terminal width and re-wrap an open rich view (issue #420).
@@ -3305,6 +4123,22 @@ impl App {
   /// resize that never reached the `App` would leave the rows wrapped for
   /// the previous width, and the renderer ellipsises whatever overflows —
   /// so the widened terminal would show *less* text, not more.
+  /// Stamp the terminal height. Unlike the width it changes no wrapping,
+  /// so it needs no rebuild: only the jump distance reads it.
+  pub fn set_term_height(&mut self, rows: u16) {
+    self.term_height = rows;
+  }
+
+  /// Rows the rich view shows at once, through the renderer's own answer.
+  fn rich_visible_rows(&self) -> usize {
+    crate::tui::ui::detail_visible_rows(self.term_height)
+  }
+
+  /// Half a window, the `Ctrl+D` / `Ctrl+U` distance, never zero.
+  pub fn rich_half_page(&self) -> usize {
+    (self.rich_visible_rows() / 2).max(1)
+  }
+
   pub fn set_term_width(&mut self, cols: u16) {
     if self.term_width == cols {
       return;
@@ -3329,13 +4163,217 @@ impl App {
     }
     let width = self.rich_view_width();
     let rows = match &self.rich_overlay_source {
-      Some(RichSource::Pr(pr)) => {
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width)
-      }
+      Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(
+        pr,
+        self.github.pr_threads_state(pr.number),
+        width,
+        &self.pr_noun_titlecase(),
+      ),
       Some(RichSource::Issue(issue)) => crate::tui::state::rich_view::rich_issue_rows(issue, width),
       None => return,
     };
     self.detail_overlay.set_rows(rows);
+  }
+
+  /// The rich view's tabs as `(label, active)`, or empty when there is only
+  /// one side to show (issue #551).
+  ///
+  /// Empty is the signal the renderer keys off: a lone tab is not a tab, it
+  /// is a label, and drawing a one-entry bar would cost a row to say nothing
+  /// the title does not already say.
+  pub fn rich_view_tabs(&self) -> Vec<(String, bool)> {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay {
+      return Vec::new();
+    }
+    // The ACTIVE side is read off the overlay's own source, not off the
+    // fetch cache (Codex review, pass 2). The overlay deliberately keeps
+    // its source when a refresh fails, so requiring both caches to be
+    // `Loaded` took the bar away exactly when the reader most needed it:
+    // the displayed side errored, the other one landed, and `Tab` went
+    // inert with stale data on screen and no way across.
+    //
+    // Only the DESTINATION has to be loaded, since it is the one a switch
+    // has to render.
+    let (on_issue, active) = match (&self.rich_overlay_source, self.detail_overlay.kind) {
+      (Some(RichSource::Issue(i)), DetailKind::RichIssue) => (true, format!("Issue #{}", i.number)),
+      (Some(RichSource::Pr(p)), DetailKind::RichPr) => (false, format!("{} #{}", self.pr_noun_titlecase(), p.number)),
+      _ => return Vec::new(),
+    };
+    let other = if on_issue {
+      match self.pr_fetch_state() {
+        GitHubFetchState::Loaded(pr) => format!("{} #{}", self.pr_noun_titlecase(), pr.number),
+        _ => return Vec::new(),
+      }
+    } else {
+      match self.issue_fetch_state() {
+        GitHubFetchState::Loaded(issue) => format!("Issue #{}", issue.number),
+        _ => return Vec::new(),
+      }
+    };
+    if on_issue {
+      vec![(active, true), (other, false)]
+    } else {
+      vec![(other, false), (active, true)]
+    }
+  }
+
+  /// Switch the rich view to the other side, and remember that the reader
+  /// asked for it (issue #551).
+  ///
+  /// A no-op with only one side fetched: there is nothing to switch TO, and
+  /// blanking the overlay or closing it would both be worse than ignoring
+  /// the key.
+  pub fn rich_view_next_tab(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.rich_view_tabs().is_empty() {
+      return;
+    }
+    let width = self.rich_view_width();
+    let source = match self.detail_overlay.kind {
+      DetailKind::RichPr => {
+        let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() else {
+          return;
+        };
+        RichSource::Issue(issue.clone())
+      }
+      DetailKind::RichIssue => {
+        let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() else {
+          return;
+        };
+        RichSource::Pr(pr.clone())
+      }
+      DetailKind::Agents | DetailKind::CiChecks => return,
+    };
+    let title = match &source {
+      RichSource::Pr(pr) => format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+      RichSource::Issue(issue) => format!("Issue #{} · {}", issue.number, issue.title),
+    };
+    // Before the rows are built, so the inline-comments section opens as
+    // "loading" rather than appearing out of nowhere one landing later —
+    // the same order `enter_rich_view` uses.
+    if let RichSource::Pr(pr) = &source {
+      let number = pr.number;
+      self.spawn_github_pr_threads(number);
+    }
+    self.rich_tab_pinned = true;
+    // The offset describes the side being left. Carried across, the other
+    // tab would open already scrolled, with its first columns hidden.
+    self.rich_h_offset = 0;
+    self.open_rich_overlay(source, title, width);
+  }
+
+  /// How far right the rich view is scrolled, in columns (issue #551).
+  ///
+  /// Clamped on READ rather than at each site that could invalidate it. The
+  /// bound moves whenever the rows or the modal width do: a wider terminal
+  /// is a wider modal, so the same row runs out of tail sooner, and a
+  /// refresh can return a body whose widest line is shorter. Past the bound
+  /// the renderer skips beyond the end of the line and paints a blank row
+  /// with nothing on screen to explain it. One clamp here means a path
+  /// added later inherits it instead of having to remember it.
+  pub fn rich_h_offset(&self) -> usize {
+    self.rich_h_offset.min(self.rich_h_max())
+  }
+
+  /// The furthest right the view can usefully scroll: enough to bring the
+  /// widest PREFORMATTED row's last column on screen, and not one column
+  /// more.
+  ///
+  /// Bounded by the preformatted rows alone because they are the only ones
+  /// that can be wider than the modal. Bounding by the widest row of any
+  /// kind would be the same number in practice and wrong in principle: a
+  /// wrapped row has no tail to reach, so scrolling past its left edge only
+  /// hides text that was already fully on screen.
+  fn rich_h_max(&self) -> usize {
+    let widest = self
+      .detail_overlay
+      .rows
+      .iter()
+      .filter(|r| r.preformatted)
+      // In terminal CELLS, the unit the modal's width is in (Codex review
+      // on #551). A line of CJK is twice as wide as it is long, so a
+      // character count bounds the offset at half of what the line needs
+      // and its tail stays unreachable.
+      .map(|r| crate::tui::ui::cells(&r.value))
+      .max()
+      .unwrap_or(0);
+    widest.saturating_sub(self.rich_view_width())
+  }
+
+  /// `l` / `→` inside the rich view.
+  pub fn rich_view_scroll_right(&mut self) {
+    self.rich_h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
+  }
+
+  /// `h` / `←` inside the rich view.
+  pub fn rich_view_scroll_left(&mut self) {
+    self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
+  }
+
+  /// Remember the open rich view so a child modal can come back to it.
+  ///
+  /// A no-op when the rich view is not what is on screen, which is what
+  /// makes it safe to call from `enter_ci_checks` and `enter_confirm_merge`
+  /// unconditionally: both are reachable from the worktree table too, and
+  /// from there there is nothing to come back to.
+  fn remember_rich_view(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    let from_rich = self.view == View::DetailOverlay
+      && matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr);
+    if !from_rich {
+      self.rich_return = None;
+      return;
+    }
+    self.rich_return = self.rich_overlay_source.clone().map(|s| (s, self.rich_tab_pinned));
+  }
+
+  /// Reopen the rich view a child modal was opened from, if there was one.
+  ///
+  /// `true` when it took the view back, so the caller knows not to fall
+  /// through to the worktree table.
+  fn restore_rich_view(&mut self) -> bool {
+    let Some((source, pinned)) = self.rich_return.take() else {
+      return false;
+    };
+    let width = self.rich_view_width();
+    let title = match &source {
+      RichSource::Pr(pr) => format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
+      RichSource::Issue(issue) => format!("Issue #{} · {}", issue.number, issue.title),
+    };
+    self.open_rich_overlay(source, title, width);
+    // The tab the reader had chosen survives the round trip; without this a
+    // PR landing right after would promote the issue tab out from under
+    // them, which is the bug the pin exists to prevent.
+    self.rich_tab_pinned = pinned;
+    true
+  }
+
+  /// The URL of the open rich view's ACTIVE tab, for `y`.
+  ///
+  /// Read off the overlay's own source rather than the fetch cache, the
+  /// same reason `rebuild_rich_rows` gives: a manual refresh flushes that
+  /// cache, and a yank landing in that window would copy an empty string
+  /// over whatever the user had.
+  pub fn rich_yank_url(&self) -> Option<String> {
+    match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => Some(pr.url.clone()),
+      RichSource::Issue(issue) => Some(issue.url.clone()),
+    }
+    .filter(|u| !u.is_empty())
+  }
+
+  /// The body of the open rich view's ACTIVE tab, for `Y`.
+  ///
+  /// `None` for an empty description, which is ordinary: copying nothing
+  /// over whatever was on the clipboard is worse than saying there is
+  /// nothing to copy.
+  pub fn rich_yank_body(&self) -> Option<String> {
+    let body = match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => &pr.detail.body,
+      RichSource::Issue(issue) => &issue.detail.body,
+    };
+    (!body.trim().is_empty()).then(|| body.clone())
   }
 
   /// The URL of the selected rich-view row, when it carries one — the
@@ -3369,23 +4407,6 @@ impl App {
       if let Some(n) = self.github.link.pr {
         self.spawn_github_pr_threads(n);
       }
-    }
-  }
-
-  /// Contextual KEY routing (issue #436) — same mechanism that turns
-  /// `j` / `k` into sidebar scroll: while the status pane holds the
-  /// focus, the `c` keystroke (EditWorktree) opens the CI checks
-  /// overlay instead of the rename modal. Applied by the event loop on
-  /// the **key path only** (Codex review #455): the command palette
-  /// dispatches actions by their NAME, so its `edit-worktree` entry
-  /// must stay a rename in every context (a dedicated `ci-checks`
-  /// entry already exists there). Pure, so the contract is pinned
-  /// without an event loop.
-  pub fn resolve_contextual_action(&self, action: Action) -> Action {
-    if action == Action::EditWorktree && self.sidebar.open && self.sidebar.focused {
-      Action::CiChecks
-    } else {
-      action
     }
   }
 
@@ -3673,6 +4694,159 @@ impl App {
     self.refresh_agent_overlay_rows(&path);
   }
 
+  /// The session behind the highlighted overlay row **and the worktree the
+  /// overlay is about**, resolved from the SAME pool the rows were built
+  /// from.
+  ///
+  /// That is the whole point of going through `detail_overlay_target`:
+  /// [`Self::agent_all_sessions`] is a *different* collection with a
+  /// different refresh trigger (the attach-by-id prompt fills it on open),
+  /// so reading the id back from there would hand out a session whose `cwd`
+  /// is another repo, or nothing at all on a user who never pressed `i`.
+  fn selected_agent_session(&self) -> Option<(crate::agent_sessions::AgentSession, PathBuf)> {
+    let sid = self.detail_overlay.selected_meta()?;
+    let (path, _) = self.detail_overlay_target.as_ref()?;
+    let session = self
+      .agent_snapshot
+      .as_ref()?
+      .get(&crate::agent_sessions::path_display_key(path))?
+      .sessions
+      .iter()
+      .find(|s| s.id == sid)
+      .cloned()?;
+    Some((session, path.clone()))
+  }
+
+  /// Resume the selected session in a new multiplexer pane (`o` inside the
+  /// agents overlay, issue #591).
+  pub fn open_selected_agent_pane(&mut self) {
+    self.open_selected_agent_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+      std::env::var("HERDR_WORKSPACE_ID").ok(),
+    );
+  }
+
+  /// [`Self::open_selected_agent_pane`] with the env probes passed in, the
+  /// shape [`Self::open_in_mux_pane_from`] already uses so a state test can
+  /// drive every refusal without rewriting a process-global variable.
+  ///
+  /// **Multiplexer only, deliberately.** With none detected the key says so
+  /// and does nothing: the point of `o` is to put the session *next to* gwm,
+  /// and the PTY overlay the `[tui.macro*]` path falls back to would cover
+  /// gwm instead, which is not that.
+  pub fn open_selected_agent_pane_from(
+    &mut self,
+    tmux: Option<String>,
+    zellij: Option<String>,
+    herdr: Option<String>,
+    workspace: Option<String>,
+  ) {
+    let Some((session, target)) = self.selected_agent_session() else {
+      // The `no agent session found` placeholder row carries no meta.
+      // `attach` falls through to the attach-by-id prompt there; `o` has
+      // nothing to resume, and opening a prompt from a key that promises a
+      // pane would be a different verb.
+      self.status = "no agent session selected to resume".into();
+      return;
+    };
+    let plan = match plan_agent_pane(
+      &session,
+      &target,
+      &self.config.tui,
+      tmux,
+      zellij,
+      herdr,
+      workspace.as_deref(),
+    ) {
+      Ok(plan) => plan,
+      Err(refusal) => {
+        self.status = refusal;
+        return;
+      }
+    };
+    let kind = session.kind.display().to_string();
+    let active = matches!(
+      crate::agent_sessions::Freshness::classify(session.last_activity, session.ended, std::time::SystemTime::now()),
+      crate::agent_sessions::Freshness::Active
+    );
+    match plan {
+      AgentPanePlan::OneShot { argv, noun } => {
+        // `output()` rather than `spawn()`, for the reason spelled out in
+        // [`Self::open_in_mux_pane_from`]: this runs while ratatui owns the
+        // screen, so a child that inherits the pipes draws over the frame.
+        // Affordable inline because both verbs return as soon as the pane
+        // exists, without waiting on the shell they start.
+        match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+          Ok(out) => {
+            self.status = agent_pane_status(
+              &kind,
+              noun,
+              active,
+              out.status.success(),
+              &String::from_utf8_lossy(&out.stdout),
+              &String::from_utf8_lossy(&out.stderr),
+            )
+          }
+          Err(e) => self.status = format!("mux-pane failed: {}", e),
+        }
+      }
+      AgentPanePlan::Sequenced { open, line, noun } => {
+        let Some(generation) = self.tasks.request(TaskKind::AgentPane) else {
+          // A resume is already in flight: coalesce rather than open a
+          // second container for the same keypress.
+          return;
+        };
+        self.spinner.reset();
+        self.status = TaskKind::AgentPane.loading_label().into();
+        self.spawn_agent_pane(generation, open, line, kind, noun, active);
+      }
+    }
+  }
+
+  /// Land a herdr resume worker's answer on the status bar (#591). `false`
+  /// for a superseded generation, whose late result must not clobber a newer
+  /// keypress's status.
+  ///
+  /// Split from the drain so the landing is drivable by a state test: the
+  /// worker itself talks to a real herdr and cannot be.
+  ///
+  /// The worker worded both arms, because it is the only side that knows
+  /// which of open / wait / run answered.
+  pub fn apply_agent_pane_result(&mut self, generation: u64, result: std::result::Result<String, String>) -> bool {
+    if !self.tasks.complete(TaskKind::AgentPane, generation) {
+      return false;
+    }
+    self.status = match result {
+      Ok(line) => line,
+      Err(e) => e,
+    };
+    true
+  }
+
+  /// The herdr half of `o` (#591), off the event loop: open the container,
+  /// wait for its shell to reach a prompt, then type the resume line into it.
+  ///
+  /// Every step is a separate `herdr` process, and every step can fail with
+  /// something worth reading, so the status line is built here rather than in
+  /// the drain: only this side knows which of the three said no.
+  fn spawn_agent_pane(
+    &self,
+    generation: u64,
+    open: Vec<String>,
+    line: String,
+    kind: String,
+    noun: &'static str,
+    active: bool,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = run_herdr_agent_pane(&open, &line, &kind, noun, active);
+      let _ = tx.send(TaskMsg::AgentPane(generation, result));
+    });
+  }
+
   /// Rebuild the open overlay's rows after a pin change, refresh the
   /// render-side pins copy (the Agents pane shows pinned-only), and push
   /// the new pin state to every other surface (snapshot re-detection).
@@ -3700,8 +4874,15 @@ impl App {
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
     self.detail_overlay_link = None;
+    self.rich_tab_pinned = false;
+    self.rich_h_offset = 0;
     self.ci_overlay_checks.clear();
     self.rich_overlay_source = None;
+    // Back to the rich view when this overlay was opened from it, rather
+    // than all the way out to the table (validation feedback on #551).
+    if self.restore_rich_view() {
+      return;
+    }
     self.view = View::List;
   }
 
@@ -4220,7 +5401,13 @@ impl App {
       return;
     };
     let text = crate::notes::read(&self.repo, &branch).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    // #557: `note_vim` opens in normal mode, the way vim itself does. The
+    // knob is what keeps that off everyone else's `N`.
+    if self.config.tui.note_vim {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
     self.view = View::Note;
   }
 
@@ -4299,7 +5486,61 @@ impl App {
     use crate::tui::modal_keymap::{KeyContext, ModalAction};
     use crossterm::event::KeyCode as KC;
 
+    use crate::tui::state::note_editor::NoteMode;
+
     let stroke = crate::tui::keymap::KeyStroke::from_event(&key);
+
+    // #557: normal mode routes BEFORE the typing reservation, because that
+    // reservation is what makes `j` a letter. Only reachable behind
+    // `[tui] note_vim = true`, so with the knob off this block never sees
+    // a key and the #515 editor is untouched.
+    let normal = self.note_editor.as_ref().is_some_and(|e| e.mode == NoteMode::Normal);
+    if normal {
+      // Backspace, Enter and Delete are text in insert mode, so they must
+      // not edit here: a Backspace that ate a character would be prose
+      // lost to a key pressed to move. vim's own answers are `h`, `j`, `x`.
+      // Everything else (Esc, the arrows, the page keys, the Ctrl chords)
+      // means the same in both modes and falls through to the blocks below.
+      //
+      // The letter comes off `stroke`, not off `key`: terminals disagree on
+      // how they report a shifted letter (bare `Char('G')`, `Char('G')` +
+      // SHIFT, or the kitty protocol's `Char('g')` + SHIFT), and
+      // `KeyStroke::new` is what folds all three to `Char('G')` (PR #192).
+      // Routing the raw code would turn `G` into `g` and take every
+      // uppercase verb with it (Codex review #582, first pass).
+      let verb = if stroke
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+      {
+        None
+      } else {
+        match stroke.code {
+          KC::Char(c) => Some(c),
+          KC::Backspace => Some('h'),
+          KC::Enter => Some('j'),
+          KC::Delete => Some('x'),
+          _ => None,
+        }
+      };
+      match verb {
+        Some(c) => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.normal_key(c);
+          }
+          return NoteKey::Handled;
+        }
+        // Any other key abandons a half-typed sequence, which is what
+        // `pending` promises: `d`, `Down`, `d` must open a fresh `dd`
+        // rather than delete the line the arrow landed on. There is no
+        // undo here, so a `dd` nobody typed is prose gone for good.
+        None => {
+          if let Some(editor) = self.note_editor.as_mut() {
+            editor.pending = None;
+          }
+        }
+      }
+    }
+
     if KeyContext::Note.reserved_typing_stroke(&stroke) {
       if let Some(editor) = self.note_editor.as_mut() {
         match key.code {
@@ -4315,6 +5556,22 @@ impl App {
 
     match self.resolve_modal(KeyContext::Note, key) {
       Some(ModalAction::NoteClose) => {
+        // #557: with a mode, the first `Esc` is the one that leaves insert
+        // and closing takes two. That is the cost of shipping the mode on,
+        // and `note_vim = false` is what buys the single press back.
+        //
+        // This reads the knob where the block above reads the mode, and
+        // they are the same fact from two sides: normal mode is only ever
+        // entered with the knob on, but insert mode is where both worlds
+        // meet, so `Esc` cannot tell them apart without asking.
+        if self.config.tui.note_vim {
+          if let Some(editor) = self.note_editor.as_mut() {
+            if editor.mode == NoteMode::Insert {
+              editor.enter_normal();
+              return NoteKey::Handled;
+            }
+          }
+        }
         self.flush_note();
         self.note_editor = None;
         self.view = View::List;
@@ -4332,6 +5589,16 @@ impl App {
         }
         return NoteKey::Handled;
       }
+      // #557: the two list verbs. Ctrl-modified, so they reach this far
+      // rather than being consumed as text above.
+      Some(ModalAction::NoteToggleBullet) => {
+        self.edit_note_buffer(|editor| editor.toggle_bullet());
+        return NoteKey::Handled;
+      }
+      Some(ModalAction::NoteToggleCheckbox) => {
+        self.edit_note_buffer(|editor| editor.toggle_checkbox());
+        return NoteKey::Handled;
+      }
       _ => {}
     }
 
@@ -4339,20 +5606,36 @@ impl App {
     // module note gives for `Esc` / `Enter`: an arrow key means one thing
     // in a text buffer and rebinding it would only take it away.
     let height = self.note_editor.as_ref().map_or(10, |e| e.viewport);
+    self.edit_note_buffer(|editor| match key.code {
+      KC::Left => editor.left(),
+      KC::Right => editor.right(),
+      KC::Up => editor.up(),
+      KC::Down => editor.down(),
+      KC::Home => editor.home(),
+      KC::End => editor.end(),
+      KC::PageUp => editor.page_up(height),
+      KC::PageDown => editor.page_down(height),
+      _ => {}
+    });
+    NoteKey::Handled
+  }
+
+  /// Run `f` on the open note buffer, then restore the normal-mode caret
+  /// invariant (issue #557, Codex review #582).
+  ///
+  /// Movement and the list toggles are written for insert mode, where the
+  /// caret may sit one past the last char. In normal mode it may not, or
+  /// `x` deletes nothing and `i` inserts past the end of the line. Whoever
+  /// moves the caret restores the invariant, rather than every reader of
+  /// `cursor_col` having to distrust it.
+  fn edit_note_buffer(&mut self, f: impl FnOnce(&mut crate::tui::state::note_editor::NoteEditor)) {
+    use crate::tui::state::note_editor::NoteMode;
     if let Some(editor) = self.note_editor.as_mut() {
-      match key.code {
-        KC::Left => editor.left(),
-        KC::Right => editor.right(),
-        KC::Up => editor.up(),
-        KC::Down => editor.down(),
-        KC::Home => editor.home(),
-        KC::End => editor.end(),
-        KC::PageUp => editor.page_up(height),
-        KC::PageDown => editor.page_down(height),
-        _ => {}
+      f(editor);
+      if editor.mode == NoteMode::Normal {
+        editor.clamp_normal();
       }
     }
-    NoteKey::Handled
   }
 
   /// Re-read the note after `$EDITOR` exited (issue #515), so the modal
@@ -4362,8 +5645,16 @@ impl App {
       return;
     };
     let (branch, path) = (editor.branch.clone(), editor.path.clone());
+    // #557: the buffer is rebuilt, so the mode has to be carried over by
+    // hand — coming back from `$EDITOR` into insert mode would leave a vim
+    // user typing verbs into their note.
+    let mode = editor.mode;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    self.note_editor = Some(crate::tui::state::note_editor::NoteEditor::open(branch, path, &text));
+    let mut editor = crate::tui::state::note_editor::NoteEditor::open(branch, path, &text);
+    if mode == crate::tui::state::note_editor::NoteMode::Normal {
+      editor.enter_normal();
+    }
+    self.note_editor = Some(editor);
   }
 
   /// Re-read the selected row's note presence once the editor has exited
@@ -4673,6 +5964,11 @@ impl App {
   fn worktree_name_from_form(&self) -> std::result::Result<WorktreeName, String> {
     match self.create_form.mode {
       Mode::Freeform => WorktreeName::freeform(&self.create_form.name).map_err(|e| e.to_string()),
+      // `FromIssue` has no name to compose yet — that is the point of the
+      // round trip. `submit_create` branches before reaching here; the live
+      // preview reaches here and gets a reason rather than a half-built
+      // branch built from an empty type.
+      Mode::FromIssue => Err("waiting for the issue".into()),
       Mode::Structured => {
         let type_ = self
           .branch_types
@@ -5028,30 +6324,85 @@ impl App {
   }
 
   /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
-  /// Detects tmux / zellij at runtime via environment variables; prints a
-  /// status message when no supported multiplexer is active.
+  /// Detects tmux / zellij / herdr at runtime via environment variables;
+  /// prints a status message when no supported multiplexer is active.
   pub fn open_in_mux_pane(&mut self) {
-    use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+    self.open_in_mux_pane_from(
+      std::env::var("TMUX").ok(),
+      std::env::var("ZELLIJ").ok(),
+      std::env::var("HERDR_ENV").ok(),
+      std::env::var("HERDR_WORKSPACE_ID").ok(),
+    );
+  }
+
+  /// [`Self::open_in_mux_pane`] with the env probes passed in, so a state
+  /// test can drive the refusals without rewriting a process-global
+  /// variable (#588). `$TMUX` is read by the clipboard path too, so unsetting
+  /// it in a test would put every yank test in the same binary under the env
+  /// lock.
+  pub fn open_in_mux_pane_from(
+    &mut self,
+    tmux: Option<String>,
+    zellij: Option<String>,
+    herdr: Option<String>,
+    workspace: Option<String>,
+  ) {
     let Some(w) = self.selected() else {
       self.status = "no worktree selected".into();
       return;
     };
     let path = w.path.clone();
     let name = w.name.clone();
-    // `mux_pane` promises a pane, so split the current pane (tmux
-    // `split-window` / zellij `new-pane`) rather than opening a new
-    // window/tab (Codex review on PR #292).
-    let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-      build_tmux_command(&name, &path, SpawnMode::Split)
-    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      build_zellij_command(&name, &path, SpawnMode::Split)
-    } else {
-      self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
+    // `[tui] mux_open_in` says what to open and `mux_pane_direction` which
+    // half a pane takes (#608 / #589). Before them this was a Split with no
+    // direction at all, which left the answer to each backend: tmux stacked,
+    // zellij took the biggest free space, herdr went right.
+    //
+    // Herdr comes last in the cascade, so a user running gwm inside both it
+    // and tmux keeps what they had before #588.
+    let mode = self
+      .config
+      .tui
+      .mux_open_in
+      .spawn_mode(self.config.tui.mux_pane_direction);
+    let Some(mux) = crate::multiplexer::detect_multiplexer(tmux, zellij, herdr) else {
+      self.status = "no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into();
       return;
     };
+    // A target the backend has no level for (`workspace` outside herdr) is
+    // refused here rather than downgraded to a tab: the setting saying one
+    // thing while the screen shows another is the failure worth avoiding.
+    let cmd = match crate::multiplexer::build_command(mux, &name, &path, mode, workspace.as_deref()) {
+      Ok(cmd) => cmd,
+      Err(why) => {
+        self.status = why.into();
+        return;
+      }
+    };
     let bin = cmd[0].as_str();
-    match std::process::Command::new(bin).args(&cmd[1..]).spawn() {
-      Ok(_) => self.status = format!("opened {} in new pane", name),
+    // `output()` rather than `spawn()`: both pipes have to be captured
+    // because this runs while ratatui owns the screen, and a child that
+    // inherits them draws over the frame (`herdr pane split` prints its
+    // `pane_info` JSON on every call, which would land in the middle of the
+    // worktree table). Capturing without reading would then deadlock on a
+    // full pipe, and dropping the streams on the floor would leave the status
+    // bar saying "opened" over a refusal.
+    //
+    // Waiting is affordable because all three verbs are control commands that
+    // return as soon as the pane exists: `herdr tab create` measured 40ms,
+    // and `tmux split-window` / `zellij action new-pane` do not wait on the
+    // shell they start either. A multiplexer that hangs here hangs the TUI,
+    // which is the trade for a status bar that does not lie.
+    match std::process::Command::new(bin).args(&cmd[1..]).output() {
+      Ok(out) => {
+        self.status = mux_pane_status(
+          &name,
+          crate::multiplexer::spawn_noun(mux, mode),
+          out.status.success(),
+          &String::from_utf8_lossy(&out.stdout),
+          &String::from_utf8_lossy(&out.stderr),
+        )
+      }
       Err(e) => self.status = format!("mux-pane failed: {}", e),
     }
   }
@@ -5097,6 +6448,22 @@ impl App {
     // does not draw, so the first keypress went nowhere at all.
     self.create_form.field = self.create_form.entry_field();
     self.status = format!("{} · esc: cancel", self.structured_form_instruction());
+  }
+
+  /// Open the create form on an issue number, to derive the triple from an
+  /// issue that already exists (issue #625).
+  ///
+  /// The counterpart of `gwm create --issue <N>`, and deliberately not its
+  /// mirror image: the CLI has to *refuse* labels that select no branch type
+  /// or two, because a non-interactive command has nowhere to ask and
+  /// `--type` is the escape hatch. A form does have somewhere to ask, so
+  /// those cases land the user on the type selector with everything else
+  /// filled in.
+  pub fn enter_create_from_issue(&mut self) {
+    self.view = View::Create;
+    self.create_form.enter_from_issue();
+    self.create_failure = None;
+    self.status = "issue number, then enter: derive the branch from it · esc: cancel".into();
   }
 
   pub fn create_next_field(&mut self) {
@@ -5201,6 +6568,11 @@ impl App {
           // The submit field is named from the patterns, not hardcoded to
           // `desc` (#418): a pattern without one told the user to press enter
           // on a field the form does not present.
+          // #625: unreachable through this arm — the toggle is a no-op in
+          // this mode — but the match is over the mode, so it is written out
+          // rather than folded into a catch-all that would hide a future
+          // path in.
+          Mode::FromIssue => "issue number, then enter: derive the branch from it".into(),
           Mode::Structured if back.is_empty() => self.structured_form_instruction(),
           Mode::Structured => format!("{}{back}free-form", self.structured_form_instruction()),
         };
@@ -5213,6 +6585,10 @@ impl App {
         // all, since Enter then only ever rotated.
         let submit_field = match self.create_form.mode {
           Mode::Freeform => Field::Name,
+          // `FromIssue` presents `Issue` alone whatever the patterns carry,
+          // so `last_field()` (which reads the patterns) would name an input
+          // this mode does not draw and Enter would only ever rotate.
+          Mode::FromIssue => Field::Issue,
           Mode::Structured => self.create_form.last_field(),
         };
         if self.create_form.field == submit_field {
@@ -5234,6 +6610,144 @@ impl App {
     CreateKey::Handled
   }
 
+  /// Resolve the number typed in [`Mode::FromIssue`] into a prefilled
+  /// structured form (issue #625).
+  ///
+  /// Two entry points into one prefill. A number the TUI has already fetched
+  /// (a linked row, the sidebar prefetch, a second attempt after `Esc`) is
+  /// read straight out of the cache, because `spawn_github_issue` coalesces
+  /// on a cache hit and no `TaskMsg::GithubIssue` would ever arrive — the
+  /// form would sit on a loader forever. Anything else marks the number as
+  /// awaited and spawns the worker, and
+  /// [`Self::apply_awaited_issue`] finishes the job when the result lands.
+  fn derive_from_issue(&mut self) -> Result<()> {
+    let typed = self.create_form.issue.trim();
+    let Some(number) = typed.parse::<u64>().ok().filter(|n| *n > 0) else {
+      self.status = "type the number of an issue that already exists, then enter".into();
+      return Ok(());
+    };
+
+    // Same refusal as `gwm create --issue`, and for the same reason: this is
+    // usually a wrong number. Checked before anything is fetched, and it
+    // reads the link `gwm list` renders, so a worktree attached by hand with
+    // `gwm link` counts too.
+    if let Some(existing) = self.worktrees.iter().find(|w| w.link.issue == Some(number)) {
+      self.status = format!("#{} already has a worktree: {}", number, existing.name);
+      self.view = View::List;
+      self.create_form.reset();
+      return Ok(());
+    }
+
+    if let GitHubFetchState::Loaded(status) = self.github.issue_fetch_state(number) {
+      let status = status.clone();
+      self.prefill_from_issue(&status);
+      return Ok(());
+    }
+
+    let Some(slug) = self.github.link_slug.clone() else {
+      self.status = "no forge remote: cannot look the issue up".into();
+      return Ok(());
+    };
+    self.create_form.awaiting_issue = Some(number);
+    if !self.spawn_github_issue(number, &slug) {
+      // Not a cache hit (that branch returned above), so the spine
+      // coalesced onto a worker already in flight for this number. Its
+      // result reaches `apply_awaited_issue` like any other.
+      self.status = format!("looking up #{} …", number);
+      return Ok(());
+    }
+    self.spinner.reset();
+    self.status = format!("looking up #{} …", number);
+    Ok(())
+  }
+
+  /// Apply a `TaskMsg::GithubIssue` result to a form that asked for it
+  /// (issue #625).
+  ///
+  /// Returns `true` when the message was this form's answer, so the caller
+  /// knows the status line has been claimed.
+  ///
+  /// The number comparison is the whole guard. This is a *second* consumer of
+  /// a message that also fires for the sidebar prefetch and for an explicit
+  /// refresh, and the spine's generation check is consumed before the form
+  /// sees it, so a result for any other issue must leave the form alone.
+  /// `pub` for `tests/tui_app_tests.rs`: the staleness guard is the whole
+  /// point of this function and it is not reachable through the event loop
+  /// from an integration test.
+  pub fn apply_awaited_issue(&mut self, number: u64, result: &std::result::Result<IssueStatus, String>) -> bool {
+    if self.create_form.awaiting_issue != Some(number) || self.view != View::Create {
+      return false;
+    }
+    self.create_form.awaiting_issue = None;
+    match result {
+      Ok(status) => {
+        let status = status.clone();
+        self.prefill_from_issue(&status);
+      }
+      Err(e) => {
+        // Stay in `FromIssue` with the number still typed: the forge said no
+        // (wrong number, no network), and retrying is one keystroke.
+        self.status = format!("#{}: {}", number, sanitise_for_terminal(e));
+      }
+    }
+    true
+  }
+
+  /// Fill the structured form from a fetched issue and hand it back to the
+  /// user (issue #625).
+  ///
+  /// Derived through the very functions `gwm create --issue` uses, so the two
+  /// surfaces cannot produce different slugs for the same title.
+  ///
+  /// It prefills rather than creating. The derivation is a guess about a
+  /// title, and this is the one surface that can show the guess before
+  /// committing to it: the user sees the branch the form will write, adjusts
+  /// the type or the slug, and confirms with a second Enter through the
+  /// ordinary, already-tested submit path.
+  fn prefill_from_issue(&mut self, status: &IssueStatus) {
+    let derived_type = crate::issue_templates::type_from_labels(&self.config.issue_template, &status.labels).ok();
+    if let Some(index) = derived_type
+      .as_deref()
+      .and_then(|name| self.branch_types.iter().position(|t| t.name == name))
+    {
+      self.create_form.type_index = index;
+    }
+    let prefix = derived_type
+      .as_deref()
+      .map(|name| crate::issue_templates::title_prefix_for(&self.repo, &self.config, name))
+      .unwrap_or_default();
+    let desc = crate::issue_templates::desc_from_title(&status.title, &prefix).unwrap_or_default();
+
+    // Set, not toggled: `toggle_mode` is a no-op in this mode, and the prefill
+    // is not the user asking to switch — it is this mode finishing.
+    self.create_form.mode = Mode::Structured;
+    self.create_form.field = self.create_form.entry_field();
+    self.create_form.issue = status.number.to_string();
+    self.create_form.desc = desc;
+    self.create_form.awaiting_issue = None;
+
+    // Where the CLI refuses, the form asks: land focus on the type selector
+    // so the one thing the labels could not settle is the one thing under
+    // the cursor.
+    let mut notes: Vec<String> = Vec::new();
+    match derived_type {
+      Some(name) => notes.push(format!("type: {}", sanitise_for_terminal(&name))),
+      None => {
+        self.create_form.field = Field::Type;
+        notes.push("labels do not name one type: pick it".into());
+      }
+    }
+    if status.state == IssueState::Closed {
+      notes.push("issue is closed".into());
+    }
+    self.status = format!(
+      "#{} {} · {} · enter: create",
+      status.number,
+      sanitise_for_terminal(&status.title),
+      notes.join(" · ")
+    );
+  }
+
   pub fn submit_create(&mut self) -> Result<()> {
     // Issue #416: free-form validation lands here rather than per keystroke,
     // so the user can type through an intermediate state. A rejected name
@@ -5247,6 +6761,13 @@ impl App {
     // other still demanding a value it would discard — two composers of one
     // value drift, and this is the second time on this form (the previews did
     // it in #476).
+    // Issue #625: this mode has no branch to compose yet. Enter asks the
+    // forge, and the answer prefills the structured form; the create itself
+    // is the second Enter, through this same function.
+    if self.create_form.mode == Mode::FromIssue {
+      return self.derive_from_issue();
+    }
+
     let wt_name = match self.worktree_name_from_form() {
       Ok(n) => n,
       Err(e) => {
@@ -5451,6 +6972,69 @@ impl App {
     self.spinner.reset();
   }
 
+  /// Open the merge confirmation for the PR of the current context.
+  ///
+  /// Serves both surfaces (validation feedback on issue #551): the rich
+  /// view, where the active tab names the PR, and the worktree table, where
+  /// the selected row's link does. Three states are told apart rather than
+  /// collapsed into one refusal, the way `enter_rich_view` tells them
+  /// apart: no PR linked, linked but not fetched, ready.
+  pub fn enter_confirm_merge(&mut self) {
+    // Same workspace contract as `enter_rich_view` and `rich_view_refresh`:
+    // a failed `Repository::open` for the selected row leaves the link
+    // pointing at the previously active repo, and a merge would then land
+    // the OLD repo's PR. The one guard here that cannot be skipped.
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable; can't merge its PR".into();
+      return;
+    }
+    let Some(number) = self.github.link.pr else {
+      self.status = match self.keymap.primary_chord(Action::LinkPrompt) {
+        Some(key) => format!("no {} linked here: link one first ({key})", self.pr_noun_lower()),
+        None => format!("no {} linked here", self.pr_noun_lower()),
+      };
+      return;
+    };
+    let GitHubFetchState::Loaded(pr) = self.github.pr_fetch_state(number) else {
+      self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+        Some(key) => format!("{} #{number} not fetched yet ({key})", self.pr_noun_titlecase(),),
+        None => format!("{} #{number} not fetched yet", self.pr_noun_titlecase()),
+      };
+      return;
+    };
+    self.pending_merge = Some(PendingMerge {
+      number: pr.number,
+      title: crate::naming::sanitise_for_terminal(&pr.title),
+      head_ref: crate::naming::sanitise_for_terminal(&pr.detail.head_ref),
+      base_ref: crate::naming::sanitise_for_terminal(&pr.detail.base_ref),
+      method: self.config.merge_method,
+      ci: pr.ci,
+      checks_passed: pr.checks_passed,
+      checks_total: pr.checks_total,
+      noun: self.pr_noun_titlecase(),
+    });
+    self.remember_rich_view();
+    self.confirm_kind = ConfirmKind::MergePr;
+    self.view = View::Confirm;
+    self.confirm.reset();
+    self.spinner.reset();
+  }
+
+  /// `PR` / `MR` in lower case, for a sentence.
+  fn pr_noun_lower(&self) -> String {
+    self.pr_noun_titlecase().to_lowercase()
+  }
+
+  /// What the open confirmation is about.
+  pub fn confirm_kind(&self) -> ConfirmKind {
+    self.confirm_kind
+  }
+
+  /// The merge the confirmation is holding, for the renderer.
+  pub fn pending_merge(&self) -> Option<&PendingMerge> {
+    self.pending_merge.as_ref()
+  }
+
   pub fn confirm_delete(&mut self) -> Result<()> {
     // Fire the snapshot taken when the overlay opened, not a fresh
     // resolution: an auto-refresh can land during the safety countdown and
@@ -5487,6 +7071,106 @@ impl App {
   /// rest of a cleanup the user explicitly asked for. Each target is opened
   /// through its own repo, so a workspace batch spanning several repos is
   /// removed from the right one.
+  /// Apply a merge outcome, the seam the drain arm and the tests share.
+  ///
+  /// Split out for the reason `apply_pr_fetch_result` is: a helper that
+  /// lives only inside the drain loop is a helper no test can reach, and
+  /// this one decides whether the modal closes or stays.
+  pub fn apply_merge_result(&mut self, outcome: std::result::Result<(), String>) {
+    match outcome {
+      Ok(()) => {
+        let pending = self.pending_merge.take();
+        let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
+        let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
+        self.confirm_kind = ConfirmKind::DeleteWorktree;
+        self.merge_failure = None;
+        // A merged PR is still the thing the reader was looking at, and the
+        // refresh below will bring its new state to the same view.
+        if !self.restore_rich_view() {
+          self.view = View::List;
+        }
+        // The refresh FIRST, the message second. The PR's state and the
+        // branch's divergence both changed, so the cache has to be dropped
+        // or the pane keeps saying `open` — but `refresh_github_status`
+        // writes a status line of its own on the way (a repo with no forge
+        // remote says so), and doing it after would bury the one thing the
+        // user is waiting to read.
+        self.refresh_github_status();
+        self.status = format!("{noun} #{number} merged");
+      }
+      // The modal stays, carrying the forge's own words. It refuses a merge
+      // for reasons gwm does not model (a required check, a review still
+      // pending, a protected base) and its message says which; closing on
+      // failure would throw that away and leave the reader to guess whether
+      // to retry.
+      Err(e) => {
+        self.merge_failure = Some(e.trim().to_string());
+        self.status = format!("merge failed: {}", e.trim());
+      }
+    }
+  }
+
+  /// Cycle the method the open merge confirmation will use (issue #551).
+  ///
+  /// On the modal rather than only in `.gwm.toml`, because the choice is
+  /// per-merge as often as it is per-project: the config sets what you do
+  /// by default, this is for the one PR where the default is wrong. Inert
+  /// unless a merge is what the modal is holding, and inert while it runs.
+  ///
+  /// Re-arming the countdown is deliberate: the summary now describes a
+  /// different consequence, so the moment of friction is owed again.
+  pub fn cycle_merge_method(&mut self) {
+    use crate::forge::MergeMethod;
+    if self.confirm_kind != ConfirmKind::MergePr || self.is_merge_loading() {
+      return;
+    }
+    let Some(pending) = self.pending_merge.as_mut() else {
+      return;
+    };
+    pending.method = match pending.method {
+      MergeMethod::Merge => MergeMethod::Squash,
+      MergeMethod::Squash => MergeMethod::Rebase,
+      MergeMethod::Rebase => MergeMethod::Merge,
+    };
+    let method = pending.method;
+    self.confirm.reset();
+    self.status = format!("merge method: {} ({})", method.as_str(), method.summary());
+  }
+
+  /// Fire the merge the confirmation is holding.
+  ///
+  /// Off the render thread, like every other mutation here: `gh pr merge`
+  /// talks to a server and takes seconds, and a synchronous call would
+  /// freeze the frame for all of them.
+  pub fn confirm_merge(&mut self) {
+    let Some(pending) = self.pending_merge.clone() else {
+      return;
+    };
+    // Fire the SNAPSHOT taken when the modal opened, not a fresh lookup: an
+    // auto-refresh can land during the countdown and move the link (#484 is
+    // the same lesson on the delete side).
+    let Some(forge) = self.github.forge.clone() else {
+      self.status = "no forge resolved for this repo".into();
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::MergePr) else {
+      return;
+    };
+    // The modal STAYS UP (validation feedback), showing a loader the way
+    // the delete flow does. Dismissing it here left the screen with only a
+    // status line for an operation that talks to a server and can fail.
+    self.merge_failure = None;
+    self.confirm.dismiss();
+    self.spinner.reset();
+    self.status = TaskKind::MergePr.loading_label().into();
+    let tx = self.task_tx.clone();
+    let (number, method) = (pending.number, pending.method);
+    std::thread::spawn(move || {
+      let outcome = forge.merge_pr(number, method).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::MergePr(generation, outcome));
+    });
+  }
+
   fn spawn_delete_worktrees(&self, generation: u64, targets: Vec<DeleteTarget>, delete_branch: bool) {
     let tx = self.task_tx.clone();
     let trust_mode = self.trust_mode;
@@ -5564,9 +7248,19 @@ impl App {
       self.status = TaskKind::DeleteWorktree.loading_label().into();
       return;
     }
+    if self.is_merge_loading() {
+      self.status = TaskKind::MergePr.loading_label().into();
+      return;
+    }
     self.confirm.dismiss();
     self.delete_failure = None;
     self.pending_delete.clear();
+    self.pending_merge = None;
+    self.merge_failure = None;
+    self.confirm_kind = ConfirmKind::DeleteWorktree;
+    if self.restore_rich_view() {
+      return;
+    }
     self.view = View::List;
   }
 
@@ -5819,22 +7513,31 @@ impl App {
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
 
-  /// Re-read the link for the currently selected worktree's branch. Also
-  /// re-resolves the repo slug from the origin remote, and resets any
-  /// previously cached GitHub fetch state since it would refer to a
-  /// different (issue, pr) tuple now. Delegates to
-  /// [`GitHubFetch::refresh_link`] for the pure state mutation; the
-  /// branch resolution still lives here because it depends on
-  /// `App`'s `selected()` + `repo.head()` fallback.
+  /// Re-read the link for the currently selected worktree's branch, and
+  /// re-resolve the repo slug from the origin remote. Delegates to
+  /// [`GitHubFetch::reread_link`] for the pure state mutation; the branch
+  /// resolution still lives here because it depends on `App`'s
+  /// `selected()` + `repo.head()` fallback.
+  ///
+  /// **The fetched statuses survive this** (issue #597). The result cache
+  /// has been keyed by `(side, number)` since #138, so it cannot serve one
+  /// row's status for another: a row reads its own number, and a number it
+  /// never fetched reads `Idle`. Flushing it on every link re-read was a
+  /// leftover of the pre-#138 single slot (PR #68), and since this runs on
+  /// every navigation it threw away the prefetch `App::new` and every
+  /// relist start — which is why standing on any row but the one the TUI
+  /// opened on left `C` / `I` with nothing to show.
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
-    self.github.refresh_link(&self.repo, branch.as_deref(), &self.config);
-    // Navigation invariant (issue #255): the cache clear above must be paired
-    // with a spine generation-bump so any in-flight `gh` worker for the
-    // previous worktree's link is dropped instead of stamping the now-active
-    // worktree's cache. `refresh_link` no longer holds the old issue/PR
-    // numbers, so invalidate by predicate.
-    self.tasks.invalidate_matching(TaskKind::is_github);
+    // Only a change of forge *instance* makes a cached number mean
+    // something else, and `reread_link` reports exactly that by dropping
+    // the caches and returning `true`. Navigation invariant (issue #255):
+    // that flush must be paired with a spine generation-bump, so any
+    // in-flight `gh` worker started against the previous instance is
+    // dropped instead of stamping the new one's cache.
+    if self.github.reread_link(&self.repo, branch.as_deref(), &self.config) {
+      self.tasks.invalidate_matching(TaskKind::is_github);
+    }
     // Every link mutation funnels through here or through the
     // `refresh_github_status` re-probe — both revalidate the CI overlay's
     // pinned identity (Codex review #455): an auto-refresh relist can move
@@ -5870,6 +7573,57 @@ impl App {
     };
     if current != self.detail_overlay_link {
       self.close_detail_overlay();
+    }
+  }
+
+  /// Re-run the open forge modal's sync against the fetch cache (Codex
+  /// review on PR #615).
+  ///
+  /// The companion of [`Self::close_forge_overlay_if_link_disagrees`], and
+  /// needed because that guard only answers "is this still the same PR".
+  /// `View::Pty` does not suspend the auto refresh, so a result can land
+  /// while the browser covers the modal; every sync that would absorb it
+  /// returns early on `view != DetailOverlay`, and the modal holds its own
+  /// rows rather than reading the cache at render time. An unchanged number
+  /// therefore restored the pre-browser rows over a cache that had moved,
+  /// and the reader had no way to tell.
+  ///
+  /// Routed through the same two syncs the landing paths use rather than
+  /// touching rows here, for the reason [`Self::land_pr_threads`] gives: the
+  /// view renders the side the link prefers, and that invariant lives in one
+  /// place.
+  ///
+  /// Exhaustive match with no `_` arm, the rule
+  /// [`crate::tui::state::detail_overlay::DetailKind::is_forge_linked`]
+  /// documents: a fourth consumer must not silently inherit "nothing to
+  /// resync".
+  fn resync_forge_overlay_from_cache(&mut self) {
+    use crate::tui::state::detail_overlay::DetailKind;
+    if self.view != View::DetailOverlay {
+      return;
+    }
+    match self.detail_overlay.kind {
+      DetailKind::CiChecks => {
+        if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+          let pr = pr.clone();
+          self.refresh_ci_overlay_on_pr_landing(&pr);
+        }
+      }
+      DetailKind::RichIssue => {
+        if let GitHubFetchState::Loaded(issue) = self.issue_fetch_state() {
+          let issue = issue.clone();
+          self.sync_rich_overlay(RichSource::Issue(issue));
+        }
+      }
+      DetailKind::RichPr => {
+        if let GitHubFetchState::Loaded(pr) = self.pr_fetch_state() {
+          let pr = pr.clone();
+          self.sync_rich_overlay(RichSource::Pr(pr));
+        }
+      }
+      // Agent rows come from the local session store, which the browser
+      // cannot have changed, and there is no fetch cache to re-read.
+      DetailKind::Agents => {}
     }
   }
 
@@ -6107,14 +7861,83 @@ impl App {
     }
   }
 
+  /// Request the SELECTED row's linked issue / PR, returning how many
+  /// workers actually started (issue #597, Codex review on #618).
+  ///
+  /// The narrow counterpart to
+  /// [`Self::refresh_linked_github_statuses_for_worktrees`]: the link and the
+  /// slug both belong to the active repo, so this is sound in workspace mode
+  /// where resolving *every* merged row against one slug is not (#303). Both
+  /// guards the bulk path uses still apply — no slug, no request; a terminal
+  /// cache hit or a coalesced spine slot does not spawn a second subprocess.
+  fn spawn_selected_github(&mut self) -> u32 {
+    let Some(slug) = self.github.link_slug.clone() else {
+      return 0;
+    };
+    let mut spawned = 0u32;
+    if let Some(n) = self.github.link.issue {
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if let Some(n) = self.github.link.pr {
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if spawned > 0 {
+      self.spinner.reset();
+    }
+    spawned
+  }
+
+  /// The PR whose inline review threads the rich view is currently
+  /// rendering, if that is what is on screen (issue #619).
+  ///
+  /// Gated on the VIEW rather than on `rich_overlay_source` alone: the
+  /// source outlives the overlay until [`Self::close_detail_overlay`]
+  /// clears it, and a keep that outlives the reader would pin one PR's
+  /// threads in the cache for the rest of the session. `DetailOverlay`
+  /// covers the child modals that are overlays themselves (the CI checks
+  /// list, the agents list) — they come back to this view, so what they
+  /// come back to must still have its comments.
+  fn rich_view_pr_number(&self) -> Option<u64> {
+    if self.view != View::DetailOverlay {
+      return None;
+    }
+    match self.rich_overlay_source.as_ref()? {
+      RichSource::Pr(pr) => Some(pr.number),
+      RichSource::Issue(_) => None,
+    }
+  }
+
   fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    // A relist is the moment the fetched statuses stop being authoritative,
+    // and since #597 nothing else expires them: the link re-read on every
+    // navigation keeps them now. So the expiry runs FIRST, ahead of every
+    // early return below, and it is what bounds staleness to
+    // `tui.auto_refresh_secs`. Workspace mode needs it most, since it takes
+    // the early return and refills per-selection instead.
+    //
+    // Settled entries only, and no spine generation-bump: a fetch in flight
+    // has no stale answer behind it to expire, so cancelling it would throw
+    // away work and expire nothing (Codex review on #618). The respawns
+    // below coalesce onto it through `TaskRunner::request`.
+    //
+    // Except the inline review threads of a PR a rich view has on screen
+    // (#619): that view reads them live from the cache, so expiring them
+    // blanked the section under the reader on the next PR landing.
+    let on_screen = self.rich_view_pr_number();
+    self.github.invalidate_settled(on_screen);
+
     // Workspace mode (#36): this bulk prefetch resolves every merged row's
     // issue/PR against a single repo's slug (`self.github.link_slug`), which
     // mis-attributes numbers across child repos with different remotes (Codex
     // review #303 P2). In workspace mode GitHub state is fetched per-selection
-    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, which
-    // re-resolves the slug from the selected row's own repo. So skip the bulk
-    // cross-repo prefetch here.
+    // instead — the relist refills the selected row through
+    // `spawn_selected_github`, and the context verbs ask for what they need
+    // through `forge_fetch_gap` (#597). So skip the bulk cross-repo prefetch
+    // here, having already expired what it would have replaced.
     if self.is_workspace() {
       return 0;
     }
@@ -6139,7 +7962,6 @@ impl App {
       return 0;
     }
 
-    self.invalidate_github();
     let mut spawned = 0u32;
     for n in issues {
       if self.spawn_github_issue(n, &slug) {
@@ -6432,6 +8254,12 @@ impl App {
         if self.github.link.pr != Some(pr.number) {
           return;
         }
+        // The reader is on the issue tab because they asked to be (#551).
+        // Promoting here is right for an issue that was standing in for a
+        // PR that had not landed yet, and wrong for one that was chosen.
+        if self.rich_tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
+          return;
+        }
         (
           DetailKind::RichPr,
           format!("{} #{} · {}", self.pr_noun_titlecase(), pr.number, pr.title),
@@ -6450,7 +8278,12 @@ impl App {
     let width = self.rich_view_width();
     let (rows, target, number) = match &source {
       RichSource::Pr(pr) => (
-        crate::tui::state::rich_view::rich_pr_rows(pr, self.github.pr_threads_state(pr.number), width),
+        crate::tui::state::rich_view::rich_pr_rows(
+          pr,
+          self.github.pr_threads_state(pr.number),
+          width,
+          &self.pr_noun_titlecase(),
+        ),
         LinkTarget::Pr,
         pr.number,
       ),
@@ -6462,6 +8295,13 @@ impl App {
     };
     let title = crate::naming::sanitise_for_terminal(&title);
     let promoted = self.detail_overlay.kind != kind;
+    // A promotion changes sides, so it owes the same reset a tab switch
+    // does (Codex review, pass 6): the offset describes the side being
+    // left, and the new one would open already scrolled with its first
+    // columns hidden and nothing saying why.
+    if promoted {
+      self.rich_h_offset = 0;
+    }
     self.rich_overlay_source = Some(source);
     self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
     if promoted {
@@ -6939,4 +8779,461 @@ fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
     .clone()
     .or_else(|| std::env::var("EDITOR").ok())
     .unwrap_or_else(|| "vi".into())
+}
+
+/// Status-bar line for a finished `mux_pane` spawn (#588).
+///
+/// Split out of [`App::open_in_mux_pane_from`] because it is the observable
+/// half: the spawn cannot be exercised from a test without opening a real
+/// pane, but what the status bar says about its outcome can.
+///
+/// A refusal reads out of the multiplexer's own words. stderr wins when both
+/// streams spoke (tmux and zellij put diagnostics there), but stdout is not
+/// ignored: herdr answers over its socket API, so its error arrives as a JSON
+/// body on stdout with a non-zero exit. The line is trimmed to its first
+/// non-empty line because the status bar is one row.
+pub fn mux_pane_status(name: &str, noun: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in new {}", name, noun);
+  }
+  format!("mux-pane refused: {}", first_detail_line(stdout, stderr))
+}
+
+/// The first non-empty line a failed child said, stderr before stdout, for a
+/// status bar that has one line to explain itself.
+fn first_detail_line<'a>(stdout: &'a str, stderr: &'a str) -> &'a str {
+  [stderr, stdout]
+    .iter()
+    .find_map(|stream| stream.lines().map(str::trim).find(|line| !line.is_empty()))
+    .unwrap_or("no output")
+}
+
+/// The status line for a browser that places itself (#590), the job
+/// [`mux_pane_status`] does for a pane gwm opened.
+///
+/// Not that function with `noun = "pane"`, which is the shortcut this exists
+/// to refuse: gwm asked for **no** pane here, so "mux-pane refused" would name
+/// a step that never ran and send the user reading their multiplexer config
+/// for a browser that simply exited non-zero. What failed is the browser, and
+/// that is what the one line has to say.
+pub fn detached_browser_status(url: &str, ok: bool, stdout: &str, stderr: &str) -> String {
+  if ok {
+    return format!("opened {} in its own pane", url);
+  }
+  format!("browser refused: {}", first_detail_line(stdout, stderr))
+}
+
+/// Everything `o` on the agents overlay (#591) decides before a process is
+/// spawned: which multiplexer, at what level, what the pane runs, and where.
+/// `Ok` carries the argv plus the pair the status line needs to name what it
+/// opened; `Err` is the refusal, worded for the status bar.
+///
+/// Split out of [`App::open_selected_agent_pane_from`] for the reason
+/// [`mux_pane_status`] was: the spawn cannot be exercised from a test without
+/// opening a real pane, but every decision leading to it can.
+///
+/// The three steps are [`detect_multiplexer`], [`macro_refusal`] and
+/// [`build_command`], in that order, which is what
+/// [`crate::multiplexer::macro_mux_command`] does for a `[tui.macro*]`. It is
+/// not called directly for one reason: its "no multiplexer" wording is the
+/// macro's, and `o` shares its sentence with `t` instead, naming the three
+/// variables gwm actually probed. Every *decision* still comes from those
+/// three shared functions, so a fourth backend or a fifth mode is answered
+/// once.
+///
+/// **`target` is the worktree the overlay is about, not `session.cwd`.** The
+/// recorded cwd looks like the obvious answer and is the wrong one, because
+/// the overlay lists **pinned** sessions too, and a pin exists precisely when
+/// the recorded directory names the wrong tree (it is why `gwm agents attach`
+/// is in the workflow at all). `overlay_pins` deliberately leaves `cwd`
+/// alone, "purely as provenance", so for a pinned Claude session resolved by
+/// the id sweep it is not even a worktree: it is the slug directory under
+/// `~/.claude/projects`. Resuming there would drop the agent inside its own
+/// artefact store. An auto-matched row has `cwd == target` anyway, and for a
+/// pinned one the target is the user's own explicit override, so the overlay
+/// target is right in both cases and the pinned case is only right this way.
+///
+/// The level comes from `[tui] mux_open_in` and `[tui] mux_pane_direction`,
+/// the same pair `t` reads (#589 / #608), so the two keys cannot open at
+/// different levels from the same overlay. That is also why the refusals
+/// multiply: under `mux_open_in = "tab"` a zellij tab takes no command
+/// either, and [`macro_refusal`] is what knows.
+pub fn plan_agent_pane(
+  session: &crate::agent_sessions::AgentSession,
+  target: &Path,
+  tui: &crate::config::TuiConfig,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+) -> std::result::Result<AgentPanePlan, String> {
+  use crate::multiplexer as mux_mod;
+  let kind = session.kind.display();
+  let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
+  let Some(mux) = mux_mod::detect_multiplexer(tmux, zellij, herdr) else {
+    return Err("no multiplexer detected ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into());
+  };
+  // "Can this backend run a command here" comes before "can it open this
+  // target at all", so a zellij user hears about the tab rather than about a
+  // workspace flag they never set. Same order `macro_mux_command` asks in.
+  //
+  // `macro_refusal` answers for the backends that take their command in the
+  // SAME argv that opens the container, the only shape a `[tui.macro*]` can
+  // spawn inline. herdr is not one of them and is deliberately not asked: it
+  // takes the command afterwards, through the pane id its response carries
+  // (#599), which is a sequenced round trip rather than an argv.
+  if mux != mux_mod::Multiplexer::Herdr {
+    if let Some(why) = mux_mod::macro_refusal(mux, mode) {
+      return Err(format!("{why}: cannot resume a session there"));
+    }
+  }
+  let argv = mux_mod::build_command(mux, kind, target, mode, workspace).map_err(str::to_string)?;
+  // Fail closed on an id no shell can be trusted with. Nothing real is
+  // refused here (every backend's id is a UUID or a slug); what this rules
+  // out is a hostile artefact on disk meeting a template that happens to
+  // quote the placeholder, where quoting alone would not save us.
+  let Some(command) = crate::config::expand_agent_resume(tui.agent_resume.template_for(session.kind), &session.id)
+  else {
+    return Err(format!(
+      "session id {:?} is not safe to pass to a shell: refusing to resume",
+      session.id
+    ));
+  };
+  // The shell is read here rather than injected: it is only consumed by the
+  // zellij wrapping, which `attach_pane_command` owns and its own tests pin
+  // with an explicit shell. Threading it through this signature bought a
+  // parameter and no coverage.
+  let noun = mux_mod::spawn_noun(mux, mode);
+  // herdr: the container opens empty and the line is typed into it once its
+  // shell reaches a prompt. That wait is the reason this shape exists.
+  if mux == mux_mod::Multiplexer::Herdr {
+    return Ok(AgentPanePlan::Sequenced {
+      open: argv,
+      line: command,
+      noun,
+    });
+  }
+  let (shell, shell_flag) = crate::tui::platform_shell();
+  let argv = mux_mod::attach_pane_command(mux, &argv, &command, &shell, shell_flag)
+    .ok_or_else(|| "this backend's panes take no command".to_string())?;
+  Ok(AgentPanePlan::OneShot { argv, noun })
+}
+
+/// The two shapes a resume can take, because the backends genuinely differ
+/// (#591).
+///
+/// tmux and zellij carry the command in the argv that opens the pane and
+/// return as soon as it exists (~40ms measured), so that spawn stays inline.
+/// herdr opens an empty container and the command goes in afterwards,
+/// through the pane id the response carries, and only once the new shell has
+/// reached its prompt: sent earlier the text lands in the middle of the rc
+/// files' output and is dropped. That wait was ~60s on a worktree with
+/// `direnv` and a nix flake, so running it inline would freeze the TUI for a
+/// minute; it becomes a [`crate::tui::TaskKind::AgentPane`] worker instead.
+///
+/// One enum rather than two functions, so a caller cannot forget the second
+/// shape exists.
+pub enum AgentPanePlan {
+  /// One control command that both opens and runs (tmux, zellij).
+  OneShot {
+    argv: Vec<String>,
+    /// What was opened, for the status line: pane / window / tab.
+    noun: &'static str,
+  },
+  /// Open, wait for the shell, then type the line (herdr).
+  Sequenced {
+    open: Vec<String>,
+    line: String,
+    noun: &'static str,
+  },
+}
+
+/// Status-bar line for a finished agent-resume spawn (#591).
+///
+/// The mux wording is [`mux_pane_status`]'s, `noun` included, so a refusal
+/// still reads out of the multiplexer's own words and one place decides what
+/// a pane spawn sounds like.
+///
+/// The one thing added is the warning a **live** session earns. A session
+/// with `ended = true` resumes without comment, which is what resume is for;
+/// resuming one that is still running elsewhere may fork or refuse depending
+/// on the tool, and the user deserves to hear that rather than find a silent
+/// second pane. A refusal gains no warning: what failed is the spawn, and
+/// "still active" appended there would read as its cause.
+pub fn agent_pane_status(kind: &str, noun: &str, active: bool, ok: bool, stdout: &str, stderr: &str) -> String {
+  let base = mux_pane_status(&format!("{kind} session"), noun, ok, stdout, stderr);
+  if ok && active {
+    format!("{base}; still active elsewhere, the agent may fork or refuse")
+  } else {
+    base
+  }
+}
+
+/// Where a URL the TUI opens actually goes (issue #590).
+///
+/// Three rungs, in the order of how much of gwm stays on screen:
+///
+/// * [`MuxPane`]: the browser runs *beside* gwm. What the issue asks for,
+///   and the only rung that needs a multiplexer able to carry a command.
+/// * [`Overlay`]: a multiplexer is there but its container takes no command
+///   (herdr in every mode, a zellij tab), so the browser runs *over* gwm in
+///   the PTY overlay that already hosts lazygit and `[tui.macro*]`. Still a
+///   terminal browser, which is the point; the cost is the frame it covers,
+///   and `why` is what the status bar says instead of leaving that unexplained.
+/// * [`System`]: the OS opener, gwm's behaviour up to 1.9 and the default
+///   forever: `why` is `None` when nothing was configured, `Some` when the
+///   feature was asked for and could not be honoured. An opt-in that quietly
+///   does nothing reads as a broken feature.
+///
+/// [`MuxPane`]: BrowserPlan::MuxPane
+/// [`Overlay`]: BrowserPlan::Overlay
+/// [`System`]: BrowserPlan::System
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserPlan {
+  /// One control command that opens the pane/tab and runs the browser in it.
+  MuxPane {
+    argv: Vec<String>,
+    /// What was opened, for the status line: pane / window / tab.
+    noun: &'static str,
+  },
+  /// Run `argv` in the PTY overlay. `why` names the backend that refused a
+  /// pane, so the overlay does not look like a bug.
+  ///
+  /// An argv rather than a shell line: [`PtyOverlay::spawn`] execs
+  /// `argv[0] argv[1..]` directly, so wrapping it in `platform_shell()`
+  /// would add a re-parse for nothing, and on Windows that shell is
+  /// `cmd.exe`, which reads neither the POSIX quoting `shell_words::join`
+  /// writes nor `&` as anything but a command separator (Codex review on
+  /// PR #615).
+  ///
+  /// [`PtyOverlay::spawn`]: crate::tui::state::pty_overlay::PtyOverlay::spawn
+  Overlay { argv: Vec<String>, why: &'static str },
+  /// Launch `argv` and stop there: the browser places itself (issue #590,
+  /// `terminal_browser_open_in = "detached"`).
+  ///
+  /// Not a pane and not the overlay, and that is the whole point.
+  /// `terminal-browser open {url} --split right` asks the multiplexer for its
+  /// own pane and exits ~4s later, so hosting it in one of gwm's would split
+  /// twice. Hosting it in the PTY overlay is worse than wrong, it is
+  /// impossible: it draws through the terminal's image protocol, which
+  /// positions against the real window and lands in the screen's top-left
+  /// corner whatever the overlay's rect says.
+  Detached { argv: Vec<String> },
+  /// Hand the URL to the OS opener. `None` when `terminal_browser` is unset.
+  System { why: Option<String> },
+}
+
+/// Decide where `url` opens (issue #590).
+///
+/// The gate is the issue's own: **a terminal browser with nowhere to put it
+/// is worse than the system browser**, so an unset `terminal_browser` or an
+/// absent multiplexer is today's behaviour, unchanged, on every platform.
+///
+/// The env values are parameters rather than reads, the shape
+/// [`plan_agent_pane`] and [`crate::multiplexer::detect_multiplexer`] already
+/// use: `$TMUX` is also read by the clipboard path, so a test that unset it
+/// would pull every yank test in the same binary under the env lock.
+/// `on_path` is a parameter for the same reason. "The browser is not
+/// installed" is the branch the issue asks for ("detect if install"), and it
+/// cannot be driven on a runner whose `$PATH` nobody controls.
+///
+/// The level comes from `[tui] mux_open_in` / `mux_pane_direction`, the pair
+/// `t` and `o` already read (#589 / #608), so a user does not configure where
+/// panes open twice.
+// Eight parameters, one more than `plan_agent_pane`, and every one of them is
+// a test seam rather than a convenience: the three env values because `$TMUX`
+// is read by the clipboard path too (rewriting it in a test would pull every
+// yank test in the same binary under the env lock), and `on_path` because "the
+// browser is not installed" is a branch no runner's `$PATH` can be made to
+// produce. Bundling them into a struct would hide that and buy nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_terminal_browser(
+  url: &str,
+  cwd: &Path,
+  tui: &crate::config::TuiConfig,
+  tmux: Option<String>,
+  zellij: Option<String>,
+  herdr: Option<String>,
+  workspace: Option<&str>,
+  on_path: &dyn Fn(&str) -> bool,
+) -> BrowserPlan {
+  use crate::multiplexer as mux_mod;
+  // Not configured: silent. This is the default, and a note on every `B`
+  // would be noise about a feature the user never asked for.
+  let Some(template) = tui.terminal_browser.as_deref() else {
+    return BrowserPlan::System { why: None };
+  };
+  // The gate. Nothing below runs without somewhere to put the browser.
+  let Some(mux) = mux_mod::detect_multiplexer(tmux, zellij, herdr) else {
+    return BrowserPlan::System {
+      why: Some("no multiplexer ($TMUX / $ZELLIJ / $HERDR_ENV not set)".into()),
+    };
+  };
+  let Some(argv) = crate::config::expand_terminal_browser(template, url) else {
+    return BrowserPlan::System {
+      why: Some(format!("terminal_browser cannot render {url:?}")),
+    };
+  };
+  // A leading `KEY=VAL` is shell syntax, and no shell runs on this path: the
+  // template is tokenised precisely so the URL never meets one. Refused here
+  // rather than half-honoured, because the two halves disagree otherwise
+  // (Codex review on PR #615). `doctor::executable_in` deliberately walks
+  // *past* a leading assignment to find the real binary, which is right for
+  // the surfaces that do go through a shell, so the probe below would resolve
+  // `w3m`, find it, and wave the config through. Every consumer then execs
+  // `argv[0]` verbatim, the literal string `"NO_COLOR=1"`: the overlay and the
+  // detached path fail outright, and zellij opens the pane, reports success,
+  // and leaves a dead process inside it.
+  //
+  // `env` is the portable spelling and keeps working, being a real binary, so
+  // the refusal names it instead of just saying no. Only the *first* token is
+  // checked: `--url={url}` is a documented form and carries no assignment.
+  if let Some(assignment) = argv.first().filter(|t| !t.starts_with('=') && t.contains('=')) {
+    return BrowserPlan::System {
+      why: Some(format!(
+        "terminal_browser starts with the shell assignment {assignment:?}; write `env {assignment} ...` instead"
+      )),
+    };
+  }
+  // "detect if install" from the issue: probing beats spawning a missing
+  // file, because a failed spawn inside a mux pane closes the pane before
+  // anyone reads the error.
+  //
+  // The binary behind any wrapper, not `argv[0]`: `terminal_browser = "env -u
+  // NO_COLOR w3m {url}"` is a valid setting, and probing `env` there would
+  // pass on a machine with no `w3m` and open a pane that dies on the spot
+  // (Codex review on PR #615). `doctor` already walks this, `env -u NAME`'s
+  // detached operand included, so the walk is shared rather than re-written.
+  // A command that resolves to nothing keeps `argv[0]`, so the message still
+  // names something the user actually wrote.
+  // Both the wrapper and the binary behind it, because running the browser
+  // needs both (Codex review on PR #615). Probing only the one behind is the
+  // mirror of the bug that walk was written for: `env NO_COLOR=1 w3m {url}`
+  // on Windows finds `w3m.exe` while `env.exe` is absent, `env` being a
+  // coreutil Windows does not ship. The consumers exec `argv[0]`, so a
+  // missing wrapper dies exactly like a missing browser, and under zellij it
+  // dies inside a pane that reported success.
+  //
+  // `argv[0]` first: it is what the spawn reaches for, so when both are
+  // missing the message names the one that fails first.
+  let probe = crate::doctor::executable_in(&argv).unwrap_or_else(|| argv[0].clone());
+  for bin in [argv[0].as_str(), probe.as_str()] {
+    if !on_path(bin) {
+      return BrowserPlan::System {
+        why: Some(format!("{} not on PATH", bin)),
+      };
+    }
+  }
+  // A browser that places itself is launched and nothing else. Checked after
+  // the multiplexer gate rather than before it, because placing itself still
+  // means asking a multiplexer for a pane: with none running,
+  // `terminal-browser open` would take over the pane gwm is drawing in.
+  if tui.terminal_browser_open_in == crate::config::TerminalBrowserHost::Detached {
+    return BrowserPlan::Detached { argv };
+  }
+  let mode = tui.mux_open_in.spawn_mode(tui.mux_pane_direction);
+  let noun = mux_mod::spawn_noun(mux, mode);
+  // "Can this backend run a command here" first, then "can it open this
+  // target at all", the order `macro_mux_command` asks in, so a zellij user
+  // hears about the tab rather than about a workspace flag they never set.
+  // Either refusal lands in the overlay: the browser still renders in the
+  // terminal, which is what was asked for.
+  if let Some(why) = mux_mod::macro_refusal(mux, mode) {
+    return BrowserPlan::Overlay { argv, why };
+  }
+  let open = match mux_mod::build_command(mux, &argv[0], cwd, mode, workspace) {
+    Ok(open) => open,
+    Err(why) => return BrowserPlan::Overlay { argv, why },
+  };
+  // `attach_pane_argv`, not `attach_pane_command`: the browser is already an
+  // argv, so no `platform_shell()` re-parse is needed and none happens. tmux
+  // still gets one joined operand because it has no argv form, and the shell
+  // that reads it is tmux's own, which is POSIX wherever tmux runs.
+  match mux_mod::attach_pane_argv(mux, &open, &argv) {
+    Some(spawn) => BrowserPlan::MuxPane { argv: spawn, noun },
+    // Unreachable behind `macro_refusal`, which already answered for every
+    // backend without a trailing-command form. Spelled out rather than
+    // unwrapped: the failure it guards is an empty pane and a dropped
+    // command, and that is worth being unrepresentable.
+    None => BrowserPlan::Overlay {
+      argv,
+      why: "this backend's panes take no command",
+    },
+  }
+}
+
+/// How long the herdr resume waits for the freshly-opened shell to reach its
+/// prompt before giving up (#591).
+///
+/// Sized from measurement, not taste: a worktree with `direnv` and a nix
+/// flake took ~60s to finish its rc files, and the resume line is dropped if
+/// it is typed before then. Double that leaves room for a cold nix store
+/// without leaving a stuck worker running for the rest of the session.
+const HERDR_SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Gap between two `pane process-info` polls while waiting.
+const HERDR_POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Open a herdr container, wait for its shell, and type the resume line into
+/// it (#591). Runs on a worker thread; returns the status line to show.
+///
+/// The three steps are separate `herdr` processes and each has its own way of
+/// failing, so each is reported in its own words rather than folded into one
+/// "it did not work".
+fn run_herdr_agent_pane(
+  open: &[String],
+  line: &str,
+  kind: &str,
+  noun: &'static str,
+  active: bool,
+) -> std::result::Result<String, String> {
+  let run = |argv: &[String]| -> std::result::Result<String, String> {
+    let out = std::process::Command::new(&argv[0])
+      .args(&argv[1..])
+      .output()
+      .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if out.status.success() {
+      Ok(stdout)
+    } else {
+      // herdr answers over its socket API, so a refusal arrives as a JSON
+      // body on stdout with a non-zero exit; stderr is the fallback.
+      let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+      Err(first_line(&stderr).unwrap_or_else(|| first_line(&stdout).unwrap_or_else(|| "no output".into())))
+    }
+  };
+
+  // 1. Open the container. Its response carries the pane the shell runs in,
+  //    whichever level was opened.
+  let opened = run(open).map_err(|e| format!("mux-pane refused: {e}"))?;
+  let Some(pane) = crate::multiplexer::herdr_pane_id(&opened) else {
+    return Err("herdr opened a container but named no pane to run in".into());
+  };
+
+  // 2. Wait for that pane's shell to reach its prompt. Typing earlier loses
+  //    the line inside the rc files' own output (measured on direnv + nix).
+  let info_cmd = crate::multiplexer::build_herdr_process_info_command(&pane);
+  let deadline = std::time::Instant::now() + HERDR_SHELL_WAIT;
+  loop {
+    if crate::multiplexer::herdr_shell_is_idle(&run(&info_cmd).unwrap_or_default()) {
+      break;
+    }
+    if std::time::Instant::now() >= deadline {
+      return Err(format!(
+        "{pane} is open but its shell was still busy after {}s: nothing was resumed",
+        HERDR_SHELL_WAIT.as_secs()
+      ));
+    }
+    std::thread::sleep(HERDR_POLL_EVERY);
+  }
+
+  // 3. Type the line. One argument: `pane run` re-joins its argv with spaces
+  //    before typing, so pre-splitting would undo the quoting.
+  run(&crate::multiplexer::build_herdr_run_command(&pane, line))
+    .map_err(|e| format!("herdr refused the resume: {e}"))?;
+  Ok(agent_pane_status(kind, noun, active, true, "", ""))
+}
+
+/// First non-empty trimmed line, for a one-row status bar.
+fn first_line(s: &str) -> Option<String> {
+  s.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
 }

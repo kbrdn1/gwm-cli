@@ -14,11 +14,14 @@
 //! width it was last drawn at and rebuilds the rows on resize, so the
 //! builder itself stays pure.
 //!
-//! **What is capped, and it says so.** A comment thread on a busy PR is
-//! unbounded, and a bot review body regularly runs to hundreds of lines.
-//! Each body is capped, the comment list is capped, and every cut emits an
-//! explicit `… N more` row — a silently truncated view reads as a complete
-//! one.
+//! **The scroll window is the budget** (issue #551). Bodies and the comment
+//! list used to be capped, each cut marked with an explicit `… N more` row.
+//! That was honest, but it rationed something the overlay does not have to
+//! ration: the view scrolls, so what the reader sees at once is bounded by
+//! the terminal, not by the row count, and a longer list costs only the rows
+//! themselves. A description cut at `… 85 more lines` was the loudest
+//! complaint against this view. What stays capped is the diff hunk, and for
+//! a different reason: see [`hunk_rows`].
 //!
 //! **The inline review threads are a second transport.** The comments
 //! anchored to a diff hunk are reachable through GraphQL only
@@ -30,35 +33,20 @@
 
 use super::detail_overlay::{DetailRole, DetailRow};
 use super::github_fetch::GitHubFetchState;
+use super::markdown::{self, Emphasis, Segment};
 use crate::forge::{
   ForgeComment, ForgeReview, IssueStatus, PrState, PrStatus, ReviewState, ReviewThread, ReviewThreads,
 };
 use crate::naming::{sanitise_block_for_terminal, sanitise_for_terminal};
+use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, ISSUE_ICON, PR_ICON};
 
-/// Width reserved for the label column. Every label this module emits fits
-/// in it, so the wrap budget is knowable before the rows exist — the shell
-/// derives its own `label_w` from the widest label it is handed, which
-/// would otherwise be circular.
+/// Width the metadata block's label column is expected to need. The wrap
+/// budget no longer subtracts it (see [`wrap_budget`]), but the METADATA
+/// rows do carry labels, and the shell sizes its column from the widest one
+/// it is handed: a longer label added later would push those rows past the
+/// modal's inner width. Pinned by
+/// `tests/tui_rich_view_tests.rs::every_emitted_label_fits_the_reserved_column`.
 pub const LABEL_W: usize = 7;
-
-/// Wrapped lines kept from one body (description or review). Enough for a
-/// filled-in PR description; past that the browser is the better tool.
-const BODY_MAX_LINES: usize = 40;
-
-/// Wrapped lines kept from one comment. Bot comments (CodeRabbit,
-/// Copilot) routinely run past this; the header row keeps its permalink so
-/// Enter opens the full thread.
-const COMMENT_MAX_LINES: usize = 12;
-
-/// Comments rendered before the list itself is cut.
-const MAX_COMMENTS: usize = 20;
-
-/// Inline review threads rendered before the list is cut (issue #528).
-const MAX_THREADS: usize = 10;
-
-/// Comments rendered per thread. A thread is a discussion; past this the
-/// permalink on its header row is the better way in.
-const MAX_THREAD_COMMENTS: usize = 5;
 
 /// Diff-hunk lines kept, counted **from the end**: the forge puts the
 /// anchored line last, so a long hunk drops its head, never its tail.
@@ -71,13 +59,45 @@ const HUNK_MAX_LINES: usize = 6;
 /// **separate** transport from the PR itself and therefore has its own
 /// state: it is still in flight when this view first opens, and on a
 /// backend that cannot answer it never resolves to a list at all.
-pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, width: usize) -> Vec<DetailRow> {
+pub fn rich_pr_rows(
+  pr: &PrStatus,
+  threads: &GitHubFetchState<ReviewThreads>,
+  width: usize,
+  noun: &str,
+) -> Vec<DetailRow> {
   let mut rows = Vec::new();
   let d = &pr.detail;
 
-  meta(&mut rows, "state", pr_state_label(pr.state));
+  // One line saying identity, state and CI, the way the Status pane behind
+  // the modal says them (validation feedback on issue #551). It replaces
+  // the `state` and `checks` rows rather than sitting above them.
+  let role = pr_state_role(pr.state);
+  let mut identity = vec![
+    Segment::new(format!("{PR_ICON} "), role),
+    // `MR` for GitLab, following the resolved forge the way the overlay
+    // title does (issue #419). Rendered as handed over: `Forge::pr_noun`
+    // already returns the short form, and the first cut of this shortened
+    // it again against a long form that never arrives, so every merge
+    // request read `PR #…` (Codex review, pass 3).
+    Segment::new(format!("{noun} #{}", pr.number), Emphasis::Plain),
+    Segment::new(" ", Emphasis::Plain),
+    Segment::chip(format!(" {} ", pr_state_label(pr.state)), role),
+  ];
+  if let Some((label, ci_role, icon)) = ci_summary(pr) {
+    identity.push(Segment::new(" ", Emphasis::Plain));
+    identity.push(Segment::chip(
+      format!(" {icon} CI {label} {}/{} ", pr.checks_passed, pr.checks_total),
+      ci_role,
+    ));
+  }
+  meta_segments(&mut rows, "", identity);
   if !d.author.is_empty() {
-    meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
+    // An identity, not prose: the same weight the worktree name carries.
+    meta_segments(
+      &mut rows,
+      "author",
+      vec![Segment::new(sanitise_for_terminal(&d.author), Emphasis::Bold)],
+    );
   }
   // Both refs or neither: "→ dev" alone tells the user nothing about what
   // is being merged, and GitLab is the backend that serves one without the
@@ -88,34 +108,33 @@ pub fn rich_pr_rows(pr: &PrStatus, threads: &GitHubFetchState<ReviewThreads>, wi
       sanitise_for_terminal(&d.head_ref),
       sanitise_for_terminal(&d.base_ref)
     );
-    meta(&mut rows, "branch", &pair);
+    meta_segments(&mut rows, "branch", vec![Segment::new(pair, Emphasis::Branch)]);
   }
   // A zero diff is a measurement gwm does not have (the GitLab backend
   // never fills it), not a PR that changes nothing — so it is omitted
   // rather than rendered as a truthful-looking `+0 −0`.
   if d.additions > 0 || d.deletions > 0 {
-    meta(&mut rows, "diff", &format!("+{} −{}", d.additions, d.deletions));
-  }
-  if pr.checks_total > 0 {
-    let label = match pr.ci {
-      crate::forge::CiState::Passing => "passing",
-      crate::forge::CiState::Failing => "failing",
-      crate::forge::CiState::Running => "running",
-      crate::forge::CiState::None => "no checks",
-    };
-    meta(
+    meta_segments(
       &mut rows,
-      "checks",
-      &format!("{label} {}/{}", pr.checks_passed, pr.checks_total),
+      "diff",
+      vec![
+        Segment::new(format!("+{}", d.additions), Emphasis::Success),
+        Segment::new(" ", Emphasis::Plain),
+        Segment::new(format!("−{}", d.deletions), Emphasis::Failure),
+      ],
     );
   }
   if !pr.updated_at.is_empty() {
-    meta(&mut rows, "updated", day(&pr.updated_at));
+    meta_segments(
+      &mut rows,
+      "updated",
+      vec![Segment::new(day(&pr.updated_at), Emphasis::Muted)],
+    );
   }
   url_row(&mut rows, &pr.url);
 
   let budget = wrap_budget(width);
-  body_section(&mut rows, "description", &d.body, budget, BODY_MAX_LINES);
+  body_section(&mut rows, "description", &d.body, budget);
   reviews_section(&mut rows, &d.reviews, budget);
   threads_section(&mut rows, threads, budget);
   comments_section(&mut rows, &d.comments, budget);
@@ -128,16 +147,28 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
   let mut rows = Vec::new();
   let d = &issue.detail;
 
-  meta(
+  // Following `ui::issue_badge_color`: a closed issue is `locked`, not
+  // `prunable`. It is resolved, where a closed PR is abandoned.
+  let (label, role) = match issue.state {
+    crate::forge::IssueState::Open => ("open", Emphasis::Success),
+    crate::forge::IssueState::Closed => ("closed", Emphasis::Notice),
+  };
+  meta_segments(
     &mut rows,
-    "state",
-    match issue.state {
-      crate::forge::IssueState::Open => "open",
-      crate::forge::IssueState::Closed => "closed",
-    },
+    "",
+    vec![
+      Segment::new(format!("{ISSUE_ICON} "), role),
+      Segment::new(format!("Issue #{}", issue.number), Emphasis::Plain),
+      Segment::new(" ", Emphasis::Plain),
+      Segment::chip(format!(" {label} "), role),
+    ],
   );
   if !d.author.is_empty() {
-    meta(&mut rows, "author", &sanitise_for_terminal(&d.author));
+    meta_segments(
+      &mut rows,
+      "author",
+      vec![Segment::new(sanitise_for_terminal(&d.author), Emphasis::Bold)],
+    );
   }
   if !issue.labels.is_empty() {
     let labels = issue
@@ -149,21 +180,30 @@ pub fn rich_issue_rows(issue: &IssueStatus, width: usize) -> Vec<DetailRow> {
     meta(&mut rows, "labels", &labels);
   }
   if !issue.updated_at.is_empty() {
-    meta(&mut rows, "updated", day(&issue.updated_at));
+    meta_segments(
+      &mut rows,
+      "updated",
+      vec![Segment::new(day(&issue.updated_at), Emphasis::Muted)],
+    );
   }
   url_row(&mut rows, &issue.url);
 
   let budget = wrap_budget(width);
-  body_section(&mut rows, "description", &d.body, budget, BODY_MAX_LINES);
+  body_section(&mut rows, "description", &d.body, budget);
   comments_section(&mut rows, &d.comments, budget);
   rows
 }
 
-/// Columns available to a wrapped body line: the modal's inner width minus
-/// the label column and its two padding columns. Never zero — a zero
-/// budget would make the wrap loop unable to advance.
+/// Columns available to a wrapped body line: the modal's whole inner width.
+///
+/// Every row this module wraps is label-less, and the shell no longer
+/// indents a label-less row behind the label column (issue #551, question 2
+/// of the issue body). Reserving those columns here as well spent them
+/// twice: the line was wrapped nine columns short AND painted nine columns
+/// in. Never zero, a zero budget would make the wrap loop unable to
+/// advance.
 fn wrap_budget(width: usize) -> usize {
-  width.saturating_sub(LABEL_W + 2).max(8)
+  width.max(8)
 }
 
 fn pr_state_label(s: PrState) -> &'static str {
@@ -183,13 +223,50 @@ fn day(ts: &str) -> &str {
 }
 
 fn meta(rows: &mut Vec<DetailRow>, label: &str, value: &str) {
+  meta_segments(rows, label, vec![Segment::new(value, Emphasis::Plain)]);
+}
+
+/// A metadata row whose value carries its own colours (issue #551).
+///
+/// The block used to read at one weight throughout, while the Status pane
+/// right behind the modal colours the same facts. The roles here are the
+/// pane's: `Success` is where `pr_badge_color` sends an open PR, `Notice`
+/// where it sends a merged one.
+fn meta_segments(rows: &mut Vec<DetailRow>, label: &str, segments: Vec<Segment>) {
   rows.push(DetailRow {
     label: label.into(),
-    value: value.into(),
+    value: segments.iter().map(|s| s.text.as_str()).collect(),
     role: DetailRole::Normal,
-    meta: None,
-    extra: None,
+    segments,
+    ..Default::default()
   });
+}
+
+/// The CI half of the identity row, or `None` when there is nothing
+/// measured to say. Mirrors `ui::ci_indicator`, which cannot be called from
+/// here: it resolves theme colours, and this module stays ratatui-free.
+fn ci_summary(pr: &PrStatus) -> Option<(&'static str, Emphasis, &'static str)> {
+  if pr.checks_total == 0 {
+    return None;
+  }
+  match pr.ci {
+    crate::forge::CiState::Passing => Some(("passing", Emphasis::Success, CI_PASSING_ICON)),
+    crate::forge::CiState::Failing => Some(("failing", Emphasis::Failure, CI_FAILING_ICON)),
+    crate::forge::CiState::Running => Some(("running", Emphasis::Running, CI_RUNNING_ICON)),
+    // `checks_total > 0` with no state is a payload gwm cannot read, not a
+    // PR without checks, so it says nothing rather than saying "none".
+    crate::forge::CiState::None => None,
+  }
+}
+
+/// The colour a PR state takes, following `ui::pr_badge_color`.
+fn pr_state_role(s: PrState) -> Emphasis {
+  match s {
+    PrState::Open => Emphasis::Success,
+    PrState::Draft => Emphasis::Muted,
+    PrState::Merged => Emphasis::Notice,
+    PrState::Closed => Emphasis::Failure,
+  }
 }
 
 /// The one actionable row of the metadata block: Enter opens it.
@@ -202,8 +279,9 @@ fn url_row(rows: &mut Vec<DetailRow>, url: &str) {
     label: "url".into(),
     value: clean.clone(),
     role: DetailRole::Normal,
+    segments: vec![Segment::new(clean.clone(), Emphasis::Link)],
     meta: Some(clean),
-    extra: None,
+    ..Default::default()
   });
 }
 
@@ -214,6 +292,7 @@ fn blank(rows: &mut Vec<DetailRow>) {
     role: DetailRole::Muted,
     meta: None,
     extra: None,
+    ..Default::default()
   });
 }
 
@@ -227,17 +306,18 @@ fn heading(rows: &mut Vec<DetailRow>, text: String) {
     role: DetailRole::Active,
     meta: None,
     extra: None,
+    ..Default::default()
   });
 }
 
 /// Wrapped body lines under `title`, or nothing at all when the body is
 /// empty — an empty section header is worse than no section.
-fn body_section(rows: &mut Vec<DetailRow>, title: &str, body: &str, budget: usize, cap: usize) {
+fn body_section(rows: &mut Vec<DetailRow>, title: &str, body: &str, budget: usize) {
   if body.trim().is_empty() {
     return;
   }
   heading(rows, title.to_string());
-  push_body(rows, body, budget, cap, "");
+  push_body(rows, body, budget, "");
 }
 
 fn reviews_section(rows: &mut Vec<DetailRow>, reviews: &[ForgeReview], budget: usize) {
@@ -252,23 +332,25 @@ fn reviews_section(rows: &mut Vec<DetailRow>, reviews: &[ForgeReview], budget: u
       ReviewState::Pending => DetailRole::Running,
       _ => DetailRole::Muted,
     };
+    let segments = vec![
+      Segment::chip(format!(" {} ", r.state.label()), verdict_role(r.state)),
+      Segment::new(
+        truncate(
+          &format!(" {} · {}", sanitise_for_terminal(&r.author), day(&r.submitted_at)),
+          budget,
+        ),
+        Emphasis::Plain,
+      ),
+    ];
     rows.push(DetailRow {
       label: String::new(),
-      value: truncate(
-        &format!(
-          "{} · {} · {}",
-          r.state.label(),
-          sanitise_for_terminal(&r.author),
-          day(&r.submitted_at)
-        ),
-        budget,
-      ),
+      value: segments.iter().map(|s| s.text.as_str()).collect(),
       role,
-      meta: None,
-      extra: None,
+      segments,
+      ..Default::default()
     });
     // A bare approval carries no body, which is the common case.
-    push_body(rows, &r.body, budget.saturating_sub(2).max(8), BODY_MAX_LINES, "  ");
+    push_body(rows, &r.body, budget.saturating_sub(2).max(8), "  ");
   }
 }
 
@@ -277,22 +359,9 @@ fn comments_section(rows: &mut Vec<DetailRow>, comments: &[ForgeComment], budget
     return;
   }
   heading(rows, format!("comments ({})", comments.len()));
-  for c in comments.iter().take(MAX_COMMENTS) {
-    rows.push(DetailRow {
-      label: String::new(),
-      value: truncate(
-        &format!("{} · {}", sanitise_for_terminal(&c.author), day(&c.created_at)),
-        budget,
-      ),
-      role: DetailRole::Normal,
-      // The permalink, so Enter opens the full thread the cap elided.
-      meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
-      extra: None,
-    });
-    push_body(rows, &c.body, budget.saturating_sub(2).max(8), COMMENT_MAX_LINES, "  ");
-  }
-  if let Some(dropped) = comments.len().checked_sub(MAX_COMMENTS).filter(|n| *n > 0) {
-    more(rows, format!("… {dropped} more comments"));
+  for c in comments {
+    rows.push(author_header("", &c.author, &c.created_at, budget, c.url.as_deref()));
+    push_body(rows, &c.body, budget.saturating_sub(2).max(8), "  ");
   }
 }
 
@@ -321,6 +390,7 @@ fn threads_section(rows: &mut Vec<DetailRow>, state: &GitHubFetchState<ReviewThr
         role: DetailRole::Failure,
         meta: None,
         extra: None,
+        ..Default::default()
       });
       return;
     }
@@ -341,12 +411,15 @@ fn threads_section(rows: &mut Vec<DetailRow>, state: &GitHubFetchState<ReviewThr
   }
 
   heading(rows, format!("inline comments ({total})"));
-  for t in threads.iter().take(MAX_THREADS) {
+  for t in threads {
     thread_rows(rows, t, budget);
   }
-  let dropped = (*total as usize).saturating_sub(threads.len().min(MAX_THREADS));
+  // The fetch itself is paginated, so `total` can still exceed what arrived.
+  // That marker survives the cap removal: it reports what gwm does not have,
+  // not what it chose to leave out.
+  let dropped = (*total as usize).saturating_sub(threads.len());
   if dropped > 0 {
-    more(rows, format!("… {dropped} more threads"));
+    more(rows, format!("… {dropped} more threads not fetched"));
   }
 }
 
@@ -380,35 +453,25 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
     },
     meta: None,
     extra: None,
+    ..Default::default()
   });
 
-  hunk_rows(rows, &t.diff_hunk, budget);
+  hunk_rows(rows, &t.diff_hunk);
 
-  for c in t.comments.iter().take(MAX_THREAD_COMMENTS) {
-    rows.push(DetailRow {
-      label: String::new(),
-      value: truncate(
-        &format!("    {} · {}", sanitise_for_terminal(&c.author), day(&c.created_at)),
-        budget,
-      ),
-      role: DetailRole::Normal,
-      // The permalink to this very comment, so Enter opens the thread the
-      // caps elided.
-      meta: c.url.clone().map(|u| sanitise_for_terminal(&u)),
-      extra: None,
-    });
-    push_body(
-      rows,
-      &c.body,
-      budget.saturating_sub(2).max(8),
-      COMMENT_MAX_LINES,
-      "      ",
-    );
+  for c in &t.comments {
+    rows.push(author_header(
+      "    ",
+      &c.author,
+      &c.created_at,
+      budget,
+      c.url.as_deref(),
+    ));
+    push_body(rows, &c.body, budget.saturating_sub(2).max(8), "      ");
   }
-  let shown = t.comments.len().min(MAX_THREAD_COMMENTS);
-  let dropped = (t.total_comments as usize).saturating_sub(shown);
+  // Same distinction as the thread list: what the fetch did not return.
+  let dropped = (t.total_comments as usize).saturating_sub(t.comments.len());
   if dropped > 0 {
-    more(rows, format!("    … {dropped} more comments"));
+    more(rows, format!("    … {dropped} more comments not fetched"));
   }
 }
 
@@ -419,7 +482,7 @@ fn thread_rows(rows: &mut Vec<DetailRow>, t: &ReviewThread, budget: usize) {
 /// context — in a diff the leading `+` / `-` / space *is* the meaning, and
 /// a line that silently changes side is worse than one that is visibly
 /// cut. Prose can afford the reflow; this cannot.
-fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
+fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str) {
   if hunk.trim().is_empty() {
     return;
   }
@@ -431,35 +494,89 @@ fn hunk_rows(rows: &mut Vec<DetailRow>, hunk: &str, budget: usize) {
     more(rows, format!("    … {start} earlier hunk lines"));
   }
   for line in &lines[start..] {
+    // Whole, not truncated (issue #551): the row is flagged preformatted and
+    // the horizontal offset reaches its tail. Truncating here threw the tail
+    // away before anything could scroll to it.
+    let text = format!("    {line}");
     rows.push(DetailRow {
       label: String::new(),
-      value: truncate(&format!("    {line}"), budget),
+      value: text.clone(),
       role: DetailRole::Muted,
-      meta: None,
-      extra: None,
+      preformatted: true,
+      segments: vec![Segment::new(text, Emphasis::Code)],
+      ..Default::default()
     });
   }
 }
 
-/// Wrap `body` and push it, capped at `cap` lines with an explicit tail
-/// row when the cap bites. `indent` prefixes every line (review and
-/// comment bodies sit one step in from their header).
-fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, cap: usize, indent: &str) {
+/// Render `body` as Markdown and push it whole (issue #551). `indent`
+/// prefixes every line (review and comment bodies sit one step in from their
+/// header).
+///
+/// The rows carry both forms: `value` is what the reader sees as one plain
+/// string, which is what measuring, filtering and the row tests work
+/// against, and `segments` is the same text split into styled runs for the
+/// renderer.
+fn push_body(rows: &mut Vec<DetailRow>, body: &str, budget: usize, indent: &str) {
   if body.trim().is_empty() {
     return;
   }
-  let lines = wrap_block(body, budget.saturating_sub(indent.len()).max(8));
-  for line in lines.iter().take(cap) {
+  for line in markdown::render(body, budget.saturating_sub(indent.len()).max(8)) {
+    let mut segments = line.segments;
+    if !indent.is_empty() {
+      segments.insert(0, Segment::new(indent.to_string(), Emphasis::Plain));
+    }
     rows.push(DetailRow {
       label: String::new(),
-      value: format!("{indent}{line}"),
+      value: segments.iter().map(|s| s.text.as_str()).collect(),
       role: DetailRole::Normal,
-      meta: None,
-      extra: None,
+      preformatted: line.preformatted,
+      segments,
+      ..Default::default()
     });
   }
-  if lines.len() > cap {
-    more(rows, format!("{indent}… {} more lines", lines.len() - cap));
+}
+
+/// A comment header: the author as a badge, the date as plain text
+/// (validation feedback on issue #551). One helper for the conversation and
+/// for the inline threads, so the two sections cannot read as different
+/// kinds of content.
+fn author_header(indent: &str, author: &str, created_at: &str, budget: usize, url: Option<&str>) -> DetailRow {
+  let mut segments = Vec::new();
+  if !indent.is_empty() {
+    segments.push(Segment::new(indent.to_string(), Emphasis::Plain));
+  }
+  // `name` rather than an outcome colour: an author is an identity, not a
+  // verdict. Same role the directory badge in the header takes.
+  segments.push(Segment::chip(
+    format!(" {} ", sanitise_for_terminal(author)),
+    Emphasis::Plain,
+  ));
+  segments.push(Segment::new(
+    truncate(&format!(" {}", day(created_at)), budget),
+    Emphasis::Muted,
+  ));
+  DetailRow {
+    label: String::new(),
+    value: segments.iter().map(|s| s.text.as_str()).collect(),
+    role: DetailRole::Normal,
+    segments,
+    // The permalink, so Enter opens the thread on the forge.
+    meta: url.map(sanitise_for_terminal),
+    ..Default::default()
+  }
+}
+
+/// The colour a review verdict takes. `Pending` is in flight, `Commented`
+/// and `Dismissed` carry no verdict, and `Unknown` is a state this build
+/// did not read (see `ReviewState::Unknown`) — none of them is an outcome,
+/// so none of them gets an outcome colour.
+fn verdict_role(s: ReviewState) -> Emphasis {
+  match s {
+    ReviewState::Approved => Emphasis::Success,
+    ReviewState::ChangesRequested => Emphasis::Failure,
+    ReviewState::Pending => Emphasis::Running,
+    ReviewState::Commented | ReviewState::Dismissed | ReviewState::Unknown => Emphasis::Muted,
   }
 }
 
@@ -470,107 +587,8 @@ fn more(rows: &mut Vec<DetailRow>, text: String) {
     role: DetailRole::Muted,
     meta: None,
     extra: None,
+    ..Default::default()
   });
-}
-
-/// Sanitise, then wrap a multi-line block to `budget` columns.
-///
-/// Sanitising first is deliberate: a body comes from a remote forge, so it
-/// can carry a bidi override that reorders how the terminal paints the row
-/// (issue #502) or a lone CR that repaints over the line already there.
-/// Both are neutralised at this boundary, before any width is measured —
-/// a `?` is one column, the character it replaced may not have been.
-fn wrap_block(body: &str, budget: usize) -> Vec<String> {
-  let clean = sanitise_block_for_terminal(body).replace('\t', "    ");
-  let mut out = Vec::new();
-  for line in clean.lines() {
-    if line.trim().is_empty() {
-      out.push(String::new());
-      continue;
-    }
-    out.extend(wrap_line(line, budget));
-  }
-  out
-}
-
-/// Word-wrap one line, hard-splitting any single word wider than the
-/// budget. A URL or a base64 blob has no break opportunity, and a
-/// word-only wrap would emit an over-wide row the renderer then ellipsises
-/// — losing exactly the tail the user was after.
-///
-/// **A line that already fits is returned untouched** (Codex review #529).
-/// The word loop below runs on `split_whitespace`, which drops the leading
-/// indent and collapses runs of spaces, and that is not cosmetic: a PR
-/// description almost always carries a fenced block, and for YAML or
-/// Python the indentation *is* the meaning. Since preformatted lines are
-/// short by nature, passing short lines through verbatim preserves them
-/// while prose still wraps. A preformatted line long enough to need
-/// wrapping is re-spaced anyway, but its continuations are re-indented to
-/// the original column so the block keeps its shape.
-fn wrap_line(line: &str, budget: usize) -> Vec<String> {
-  let budget = budget.max(1);
-  if line.chars().count() <= budget {
-    return vec![line.to_string()];
-  }
-  let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-  // An indent wider than the budget would leave no room to make progress.
-  let indent = if indent.chars().count() + 8 <= budget {
-    indent
-  } else {
-    String::new()
-  };
-  let mut out = Vec::new();
-  let mut cur = String::new();
-  let mut cur_cols = 0usize;
-  let budget = budget - indent.chars().count();
-  for word in line.split_whitespace() {
-    let word_cols = word.chars().count();
-    if word_cols > budget {
-      if cur_cols > 0 {
-        out.push(std::mem::take(&mut cur));
-        cur_cols = 0;
-      }
-      let mut chunk = String::new();
-      for c in word.chars() {
-        chunk.push(c);
-        if chunk.chars().count() == budget {
-          out.push(std::mem::take(&mut chunk));
-        }
-      }
-      if !chunk.is_empty() {
-        cur = chunk;
-        cur_cols = cur.chars().count();
-      }
-      continue;
-    }
-    let need = if cur_cols == 0 {
-      word_cols
-    } else {
-      cur_cols + 1 + word_cols
-    };
-    if need > budget {
-      out.push(std::mem::take(&mut cur));
-      cur.push_str(word);
-      cur_cols = word_cols;
-    } else {
-      if cur_cols > 0 {
-        cur.push(' ');
-      }
-      cur.push_str(word);
-      cur_cols = need;
-    }
-  }
-  if !cur.is_empty() {
-    out.push(cur);
-  }
-  if out.is_empty() {
-    out.push(String::new());
-  }
-  if indent.is_empty() {
-    out
-  } else {
-    out.into_iter().map(|l| format!("{indent}{l}")).collect()
-  }
 }
 
 /// Single-line ellipsis for the header rows, which are built from short

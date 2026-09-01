@@ -142,18 +142,47 @@ with one value, and the palette above it is unchanged.
   what `agents.tape` and `demo.tape` capture. A tape that specifically wants the
   sidebar pane has to buy it about three more rows than its neighbours.
 
+## everything is rendered at 2x
+
+`Set FontSize` is 30 and every `Set Width`, `Set Height` and `Set Padding` is
+twice the terminal size the capture is framed for. The pixels are a rendering
+concern, not a framing one: the docs site paints a capture *wider* than its own
+pixels (a 1000px `hero.png` measured 1230 CSS px in a 2560px viewport) and a
+HiDPI display doubles that again, so a capture rendered at terminal scale is
+upscaled before anyone reads it ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)).
+
+vhs 0.11 has no `Set Scale` (it answers `Unknown setting: Scale`), so density
+comes from doubling font size and geometry together. The grid barely moves:
+a column costs twice the pixels, and the residue of the division lands where it
+lands.
+
+| logical | 1x | 2x | columns 1x | columns 2x |
+|:--|--:|--:|--:|--:|
+| `narrow` | 800 | 1600 | 81 | 82 |
+| `bootstrap`, `doctor`, `trust-ledger`, `shell-init` | 900 | 1800 | 92 | 93 |
+| most of the set | 1000 | 2000 | 103 | 104 |
+| `cli-agents` | 1220 | 2440 | 127 | 129 |
+| `keybindings`, `keymap`, `config-panel`, `palette` | 1240 | 2480 | 130 | 131 |
+| `cli-list` | 1340 | 2680 | 141 | 142 |
+| `side-by-side` | 1400 | 2800 | 147 | 149 |
+
+A gained column is only harmless while it stays on the same side of a layout
+threshold, so check the two captures that exist *because* of one: `narrow` has
+to stay under `SIDEBAR_MIN_WIDTH` (120) to keep showing the stacked layout, and
+`side-by-side` has to stay above it. Both keep a wide margin above.
+
 ## sizes
 
 Set per tape, not shared, and every one of them was arrived at by looking at
-the result. Two rules produced the current matrix
+the result. Sizes below are the logical ones; the tapes carry twice each
+number. Two rules produced the current matrix
 ([#544](https://github.com/kbrdn1/gwm-cli/issues/544)):
 
 **Width targets 800-1000px**, which is where a screenshot's text renders at
 roughly the size of the prose around it in a README. Columns do not follow from
-pixels by intuition, so measure rather than estimate: at `FontSize 15` and
-`Padding 22`, **800px is 81 columns, 1000px is 103, 1160px is 121, 1500px is
-159**. The way to check is a throwaway tape that runs
-`echo $(tput cols) x $(tput lines)` and screenshots itself.
+pixels by intuition, so measure rather than estimate: the table above is the
+current reading, and the way to take it is a throwaway tape that runs
+`printf '%sx%s' $(tput cols) $(tput lines) > /tmp/cols.txt` in a `Hide` block.
 
 Four captures sit above the band because the surface does not fit inside it,
 and each is a measurement rather than a preference:
@@ -166,8 +195,8 @@ and each is a measurement rather than a preference:
 | `cli-agents` | 1220 | `gwm agents` prints 126 |
 
 **Height is cut to the content**, one blank row above the status bar. Do not
-eyeball it: read the pixels. A row is 19.5px and the padding is 44px, so a band
-of background rows between the last content and the status bar converts
+eyeball it: read the pixels. A row is 39px at 2x and the padding is 88px, so a
+band of background rows between the last content and the status bar converts
 directly into rows to remove. Two cases defeat a naive scan and need an eye
 instead: `side-by-side`, whose separator paints every row, and `bordered`,
 whose box edges do the same.

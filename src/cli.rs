@@ -16,9 +16,9 @@ use crate::labels::{self, LabelDiff};
 use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
-  build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
+  build_command, detect_herdr, detect_tmux, detect_zellij, Multiplexer, SpawnMode, SplitDirection,
 };
-use crate::naming::{BranchSpec, WorktreeName};
+use crate::naming::{sanitise_for_terminal, BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
 use crate::removal;
@@ -184,14 +184,52 @@ pub enum Command {
   /// Create a new worktree (and matching branch).
   Create {
     /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
-    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    #[arg(required_unless_present_any = ["name", "from_issue"], conflicts_with = "name")]
     branch_type: Option<String>,
     /// Issue number (digits only).
-    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    #[arg(required_unless_present_any = ["name", "from_issue"], conflicts_with = "name")]
     issue: Option<String>,
     /// Short description (kebab-case, will be normalized).
-    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    #[arg(required_unless_present_any = ["name", "from_issue"], conflicts_with = "name")]
     desc: Option<String>,
+    /// Derive the triple from an issue that already exists on the forge
+    /// (issue #617), e.g. `gwm create --issue 594`.
+    ///
+    /// `<desc>` comes from the issue title with the type's `title_prefix`
+    /// taken back off, normalised through the same kebab-case path a
+    /// hand-typed `<desc>` goes through and truncated on a word boundary.
+    /// `<type>` comes from the issue's labels via
+    /// `[issue_template.by_type.*].labels`, the map `gwm new` writes with,
+    /// read backwards. Labels that match nothing, or that match two types,
+    /// are not guessed at: `--type` supplies the answer.
+    ///
+    /// Re-running is safe: a worktree that already carries the number is
+    /// printed and the command exits 0. A closed issue is refused unless
+    /// `--force` is passed.
+    ///
+    /// Exclusive with the positional triple and with `--name`: the mode is
+    /// chosen explicitly, never inferred from how many arguments were
+    /// supplied.
+    #[arg(long = "issue", value_name = "N", conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
+    from_issue: Option<u64>,
+    /// Branch type for `--issue <N>` when the issue's labels do not select
+    /// exactly one, or to override the one they do select.
+    //
+    // `conflicts_with_all` as well as `requires`, and a `//` because it is a
+    // note for the next maintainer rather than for `--help`: clap drops a
+    // `requires` target from the required set when it conflicts with an
+    // argument that *is* present, so `requires` alone let `gwm create feat 1
+    // x --type fix` through as a silent no-op.
+    #[arg(long = "type", value_name = "TYPE", requires = "from_issue",
+          conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
+    type_override: Option<String>,
+    /// With `--issue <N>`, open a worktree for a closed issue instead of
+    /// refusing. A worktree for a closed issue is usually a wrong number,
+    /// so it takes saying so.
+    // Same double declaration as `--type`, for the same clap reason.
+    #[arg(long, requires = "from_issue",
+          conflicts_with_all = ["branch_type", "issue", "desc", "name"])]
+    force: bool,
     /// Name the worktree freely instead of using the <TYPE> <ISSUE> <DESC>
     /// triple (issue #416), e.g. `gwm create --name spike-redis`. The name
     /// becomes the branch verbatim; `branch_pattern` / `path_pattern` do not
@@ -528,26 +566,53 @@ pub enum Command {
   /// Requires `$TMUX` to be set, i.e. gwm must be invoked from inside an
   /// existing tmux session. Outside a tmux session the command exits
   /// non-zero with a clear error rather than spawning a stray server.
-  /// Use `--split` to open in a horizontal split of the current pane
-  /// instead of a new window.
+  /// Use `--split` to open in a split of the current pane instead of a
+  /// new window; `--direction` picks which half it takes.
   Tmux {
     /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
     pattern: String,
     /// Split the current pane instead of opening a new window.
     #[arg(short = 'p', long = "split")]
     split: bool,
+    /// Which half the new pane takes. Implies `--split`; defaults to
+    /// `[tui] mux_pane_direction`.
+    #[arg(long = "direction", value_enum)]
+    direction: Option<SplitDirection>,
   },
   /// Open the matched worktree in a new zellij tab (current session).
   ///
   /// Requires `$ZELLIJ` to be set. `--cwd` on `zellij action new-tab`
   /// needs zellij ≥ 0.40. Use `--split` to open in a new pane of the
-  /// current tab instead of a new tab.
+  /// current tab instead of a new tab; `--direction` picks which half it
+  /// takes, where zellij would otherwise use the biggest free space.
   Zellij {
     /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
     pattern: String,
     /// Split the current tab into a new pane instead of opening a new tab.
     #[arg(short = 'p', long = "split")]
     split: bool,
+    /// Which half the new pane takes. Implies `--split`; defaults to
+    /// `[tui] mux_pane_direction`.
+    #[arg(long = "direction", value_enum)]
+    direction: Option<SplitDirection>,
+  },
+  /// Open the matched worktree in a new herdr tab (current session).
+  ///
+  /// Requires `$HERDR_ENV` to be set, i.e. gwm must be invoked from a
+  /// pane herdr manages. Uses `herdr tab create`, or `herdr pane split`
+  /// with `--split` to open in a pane of the current tab instead. herdr
+  /// has no implicit direction, so the split takes the one from
+  /// `--direction` or from `[tui] mux_pane_direction`.
+  Herdr {
+    /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
+    pattern: String,
+    /// Split the current pane instead of opening a new tab.
+    #[arg(short = 'p', long = "split")]
+    split: bool,
+    /// Which half the new pane takes. Implies `--split`; defaults to
+    /// `[tui] mux_pane_direction`.
+    #[arg(long = "direction", value_enum)]
+    direction: Option<SplitDirection>,
   },
   /// Link the current (or named) worktree to a GitHub issue or pull request.
   ///
@@ -1079,6 +1144,9 @@ pub fn run(cli: Cli) -> Result<()> {
       branch_type,
       issue,
       desc,
+      from_issue,
+      type_override,
+      force,
       name,
       no_bootstrap,
       reuse_branch,
@@ -1090,10 +1158,15 @@ pub fn run(cli: Cli) -> Result<()> {
         None => None,
       };
       cmd_create(
-        branch_type,
-        issue,
-        desc,
-        name,
+        CreateArgs {
+          branch_type,
+          issue,
+          desc,
+          from_issue,
+          type_override,
+          force,
+          name,
+        },
         no_bootstrap,
         reuse_branch,
         skip_hooks,
@@ -1139,8 +1212,21 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
     Command::Switch => cmd_switch(),
-    Command::Tmux { pattern, split } => cmd_multiplexer(Multiplexer::Tmux, pattern, split),
-    Command::Zellij { pattern, split } => cmd_multiplexer(Multiplexer::Zellij, pattern, split),
+    Command::Tmux {
+      pattern,
+      split,
+      direction,
+    } => cmd_multiplexer(Multiplexer::Tmux, pattern, split, direction),
+    Command::Zellij {
+      pattern,
+      split,
+      direction,
+    } => cmd_multiplexer(Multiplexer::Zellij, pattern, split, direction),
+    Command::Herdr {
+      pattern,
+      split,
+      direction,
+    } => cmd_multiplexer(Multiplexer::Herdr, pattern, split, direction),
     Command::Link {
       target,
       number,
@@ -2675,6 +2761,44 @@ pub struct RepoContext {
 /// Surfaces [`GwmError::NotInGitRepo`] outside a repo or in a bare
 /// repo (no workdir), and propagates any `.gwm.toml` parse error from
 /// [`Config::load_for_repo`].
+/// Stack size for the thread the CLI actually runs on.
+///
+/// Windows gives a process's main thread 1 MiB, against 8 MiB on macOS and
+/// Linux, and [`Cli::parse_from`] alone sits at that ceiling in a debug build:
+/// clap's derive expands one `Command` builder per subcommand and per argument
+/// into a single frame, and every `///` in this file is a `long_help` string
+/// inside it. Measured while adding three arguments to `Create` for #617: the
+/// binary before survived a 1024 KiB stack and died at 512 KiB, the binary
+/// after died at 1024 KiB and survived 2048 KiB. So every `gwm.exe`
+/// invocation aborted with `STATUS_STACK_OVERFLOW`, the whole CLI test suite
+/// included, while every Unix runner stayed green.
+///
+/// Trimming doc comments back under the ceiling buys one release and hands the
+/// same failure to the next argument anyone adds. Running the work on a thread
+/// whose stack size gwm chooses takes the ceiling out of the picture, and
+/// costs address space rather than memory: a thread stack is reserved up
+/// front and committed page by page as it is used.
+///
+/// Pinned by `tests/main_stack_tests.rs`, which probes from a thread the size
+/// of the one Windows gives main.
+pub const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Run `f` on a thread with [`STACK_SIZE`] bytes of stack and hand back what
+/// it returned.
+///
+/// A panic inside `f` is re-raised here rather than swallowed, so the process
+/// still aborts with the message and status it would have had running inline.
+/// `Err` is a failed *spawn* (thread limit, out of memory), which the caller
+/// reports rather than silently degrading: falling back to the caller's own
+/// stack is exactly the state this function exists to avoid.
+pub fn on_own_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
+  let worker = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(f)?;
+  match worker.join() {
+    Ok(value) => Ok(value),
+    Err(payload) => std::panic::resume_unwind(payload),
+  }
+}
+
 pub fn repo_context(start: Option<&Path>) -> Result<RepoContext> {
   let repo = worktree::discover_repo(start)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
@@ -2716,17 +2840,104 @@ fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<Pa
     .ok_or(GwmError::WorkspaceRepoNotFound { name, available })
 }
 
-// `cmd_create` mirrors the `Create` subcommand's independent CLI args 1:1
-// (three positionals + three flags + the resolved trust mode), and #36 adds
-// the workspace `start` path. Bundling them into a struct would only add an
-// indirection that obscures the direct subcommand → handler mapping the rest
-// of this dispatcher follows, so the arg count is deliberate here.
-#[allow(clippy::too_many_arguments)]
-fn cmd_create(
+/// The three ways `gwm create` can be told what to name the worktree: the
+/// positional triple, `--name`, or `--issue <N>` plus its two riders.
+///
+/// Grouped because they answer one question between them and clap already
+/// makes them mutually exclusive; the handler's remaining args (bootstrap,
+/// hooks, trust, workspace start) still map 1:1 onto the subcommand's, which
+/// is the property this dispatcher cares about.
+struct CreateArgs {
   branch_type: Option<String>,
   issue: Option<String>,
   desc: Option<String>,
+  from_issue: Option<u64>,
+  type_override: Option<String>,
+  force: bool,
   name: Option<String>,
+}
+
+/// The worktree already carrying `number`, if any (issue #617).
+///
+/// Reads the same link `gwm list` renders, so a worktree linked by hand with
+/// `gwm link --issue` counts as much as one whose branch name carries the
+/// number. Network-free: `worktree::list` resolves links from git config and
+/// the branch name, never from the forge.
+fn worktree_for_issue(repo: &Repository, number: u64) -> Result<Option<PathBuf>> {
+  Ok(
+    worktree::list(repo)?
+      .into_iter()
+      .find(|w| w.link.issue == Some(number))
+      .map(|w| w.path),
+  )
+}
+
+/// Resolve `--issue <N>` into the positional triple (issue #617).
+///
+/// `Ok(None)` means the worktree already exists and has been reported: the
+/// caller returns without touching disk. That check comes **first**, before
+/// the closed-issue refusal, because an issue closes while its worktree is
+/// still alive and re-running must not start failing on a worktree that is
+/// right there.
+fn triple_from_issue(
+  repo: &Repository,
+  config: &Config,
+  number: u64,
+  type_override: Option<String>,
+  force: bool,
+) -> Result<Option<(String, String, String)>> {
+  if let Some(existing) = worktree_for_issue(repo, number)? {
+    println!(
+      "worktree for issue #{} already exists at {}",
+      number,
+      existing.display()
+    );
+    return Ok(None);
+  }
+
+  let forge = forge::resolve(repo, config)?;
+  println!("resolving issue #{} on {} …", number, forge.slug());
+  let status = forge.fetch_issue(number)?;
+  if status.state == IssueState::Closed && !force {
+    return Err(GwmError::Other(format!(
+      "issue #{} is closed. Pass --force to open a worktree for it anyway.",
+      number
+    )));
+  }
+
+  let branch_type = match type_override {
+    Some(t) => t,
+    None => issue_templates::type_from_labels(&config.issue_template, &status.labels)?,
+  };
+  let prefix = issue_templates::title_prefix_for(repo, config, &branch_type);
+  let desc = issue_templates::desc_from_title(&status.title, &prefix)?;
+
+  // Every value on these three lines is untrusted, and the slug is the only
+  // one that is safe by construction (`kebab` keeps ASCII alphanumerics and
+  // nothing else). The title, the URL and the labels are arbitrary text from
+  // the forge. The type is too: `--type` is argv, which clap hands through
+  // with its control bytes intact, and a type derived from the labels is a
+  // key of `[issue_template.by_type]`, i.e. a string out of an unvetted
+  // repo's `.gwm.toml` — #473's threat model exactly. It is echoed here
+  // *before* `BranchSpec::new_with_types` gets to reject it, so validation is
+  // not the guard.
+  //
+  // `sanitise_for_terminal` and not the diagnostic variant: these are
+  // single-line field values spliced into a line, and the diagnostic variant
+  // deliberately lets a newline through (re-indented) for the one message
+  // whose job is to point at a broken config line.
+  println!("✓ fetched issue #{} {}", number, sanitise_for_terminal(&status.title));
+  println!("  {}", sanitise_for_terminal(&status.url));
+  println!(
+    "  labels: {} → type: {}",
+    sanitise_for_terminal(&status.labels.join(", ")),
+    sanitise_for_terminal(&branch_type)
+  );
+  Ok(Some((branch_type, number.to_string(), desc)))
+}
+
+fn cmd_create(
+  args: CreateArgs,
   no_bootstrap: bool,
   reuse_branch: bool,
   skip_hooks: Option<String>,
@@ -2736,10 +2947,33 @@ fn cmd_create(
   let RepoContext { repo, workdir, config } = repo_context(start)?;
   let repo_name = worktree::repo_name(&repo);
 
-  // clap guarantees exactly one of the two shapes reaches here:
-  // `--name` conflicts with all three positionals, and each positional is
-  // `required_unless_present = "name"`, so a partial triple is rejected
-  // before dispatch rather than silently read as a free-form request.
+  let CreateArgs {
+    branch_type,
+    issue,
+    desc,
+    from_issue,
+    type_override,
+    force,
+    name,
+  } = args;
+
+  // Issue #617: `--issue <N>` fills the triple from the forge instead of
+  // having it retyped. Everything after this point is the pre-existing
+  // path, including the `#{issue}` in `branch_pattern` that makes the link
+  // resolve on its own.
+  let (branch_type, issue, desc) = match from_issue {
+    None => (branch_type, issue, desc),
+    Some(number) => match triple_from_issue(&repo, &config, number, type_override, force)? {
+      None => return Ok(()),
+      Some((t, i, d)) => (Some(t), Some(i), Some(d)),
+    },
+  };
+
+  // clap guarantees exactly one of the naming shapes reaches here:
+  // `--name` conflicts with all three positionals and with `--issue`, and
+  // each positional is `required_unless_present_any = ["name", "from_issue"]`,
+  // so a partial triple is rejected before dispatch rather than silently read
+  // as a free-form request.
   let wt_name = match name {
     Some(name) => WorktreeName::freeform(&name)?,
     None => {
@@ -2748,7 +2982,7 @@ fn cmd_create(
         (Some(t), Some(i), Some(d)) => (t, i, d),
         _ => {
           return Err(GwmError::Other(
-            "`gwm create` needs <TYPE> <ISSUE> <DESC> or --name".into(),
+            "`gwm create` needs <TYPE> <ISSUE> <DESC>, --name, or --issue <N>".into(),
           ))
         }
       };
@@ -2985,12 +3219,18 @@ fn cmd_new(
   println!("creating linked worktree for {}", branch);
 
   cmd_create(
-    Some(spec.type_),
-    Some(issue),
-    Some(spec.desc),
-    // `gwm new` always produces a structured worktree — it has just created
-    // the issue whose number the branch carries.
-    None,
+    CreateArgs {
+      branch_type: Some(spec.type_),
+      issue: Some(issue),
+      desc: Some(spec.desc),
+      // `gwm new` always produces a structured worktree — it has just
+      // created the issue whose number the branch carries, so neither the
+      // free-form name nor the `--issue` derivation applies.
+      from_issue: None,
+      type_override: None,
+      force: false,
+      name: None,
+    },
     no_bootstrap,
     reuse_branch,
     skip_hooks,
@@ -3931,10 +4171,17 @@ fn cmd_switch() -> Result<()> {
   }
 }
 
-/// `gwm tmux <pattern>` / `gwm zellij <pattern>` — open the matched
-/// worktree in a new window/tab (or split with `--split`). The handler
-/// is shared between the two multiplexers because the only difference
-/// is the argv shape, already encoded in `multiplexer::build_*_command`.
+/// `gwm tmux <pattern>` / `gwm zellij <pattern>` / `gwm herdr <pattern>`
+/// — open the matched worktree in a new window/tab (or split with
+/// `--split`). The handler is shared between the three multiplexers
+/// because the only difference is the argv shape, already encoded in
+/// `multiplexer::build_command`.
+///
+/// A split takes its direction from `--direction`, else from
+/// `[tui] mux_pane_direction` (issue #589). Reading the config is the one
+/// step this handler does lazily: it happens only for a bare `--split`, so
+/// the other two forms keep working on a repo whose `.gwm.toml` does not
+/// parse.
 ///
 /// Error contract (ordered, first match wins):
 ///   1. Not inside a git repo → `NotInGitRepo`.
@@ -3944,17 +4191,21 @@ fn cmd_switch() -> Result<()> {
 ///
 /// Ordering #1 before #2 matches `gwm cd` / `gwm switch`: the repo gate
 /// is the more fundamental problem, so we surface it first.
-fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()> {
+fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool, direction: Option<SplitDirection>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
 
   let env_name = match mux {
     Multiplexer::Tmux => "TMUX",
     Multiplexer::Zellij => "ZELLIJ",
+    // Herdr sets HERDR_ENV=1 in every pane it manages; the other
+    // HERDR_* variables (pane id, tab id, socket) ride along with it.
+    Multiplexer::Herdr => "HERDR_ENV",
   };
   let env_value = std::env::var(env_name).ok();
   let running = match mux {
     Multiplexer::Tmux => detect_tmux(env_value),
     Multiplexer::Zellij => detect_zellij(env_value),
+    Multiplexer::Herdr => detect_herdr(env_value),
   };
   if !running {
     // `${env_name}` renders bare in stderr (not shell source, so no
@@ -3968,11 +4219,36 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()>
   }
 
   let found = worktree::find_fuzzy(&repo, &pattern)?;
-  let mode = if split { SpawnMode::Split } else { SpawnMode::Window };
-  let argv = match mux {
-    Multiplexer::Tmux => build_tmux_command(&found.name, &found.path, mode),
-    Multiplexer::Zellij => build_zellij_command(&found.name, &found.path, mode),
+  let mode = match (split, direction) {
+    // `--direction` is the per-invocation override, and it says "pane"
+    // loudly enough that requiring `--split` alongside it would only be
+    // ceremony.
+    (_, Some(dir)) => SpawnMode::Split(dir),
+    // Only a bare `--split` reads the config, so a malformed `.gwm.toml`
+    // cannot break the two forms that never needed a direction.
+    (true, None) => {
+      let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+      SpawnMode::Split(Config::load_for_repo(&workdir)?.tui.mux_pane_direction)
+    }
+    (false, None) => SpawnMode::Window,
   };
+  // `$HERDR_WORKSPACE_ID` pins a new herdr tab to the calling pane's
+  // workspace; without it herdr uses whichever workspace the server has
+  // focused, which is a different project's window as often as not. The
+  // other two backends ignore it, and so does a herdr split.
+  // The refusal is unreachable from here today — this handler never builds a
+  // `Workspace`, because the CLI spells its own target (bare is a tab, `-p`
+  // is a pane) and `--workspace` is taken by the repo-set flag (#36). It is
+  // still surfaced rather than unwrapped: the day a flag does reach it, the
+  // user gets the builder's own sentence instead of a panic.
+  let argv = build_command(
+    mux,
+    &found.name,
+    &found.path,
+    mode,
+    std::env::var("HERDR_WORKSPACE_ID").ok().as_deref(),
+  )
+  .map_err(|why| GwmError::Other(why.to_string()))?;
   spawn_multiplexer(mux, &argv)
 }
 
@@ -3987,7 +4263,8 @@ fn spawn_multiplexer(mux: Multiplexer, argv: &[String]) -> Result<()> {
       mux.binary()
     ))
   })?;
-  // The data string already names the binary (`tmux` / `zellij`), so
+  // The data string already names the binary (`tmux` / `zellij` /
+  // `herdr`), so
   // the rendered message reads `command failed: tmux exited with
   // status Some(1)` — attributable to the verb the user typed.
   let status = std::process::Command::new(bin)

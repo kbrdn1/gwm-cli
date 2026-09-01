@@ -2394,3 +2394,272 @@ fn a_detached_head_is_recorded_as_such_and_deletes_no_branch() {
     "a detached removal deletes no branch, whatever --delete-branch says"
   );
 }
+
+// ---- per-commit diff stats (issue #593) ------------------------------------
+
+/// Build a `git log --raw --numstat -z --format=%H` stream by hand. The
+/// real one puts the `%H`'s trailing newline in front of the next token,
+/// which the parser has to strip, so the fixture reproduces it.
+fn z_stream(records: &[(&str, &[&str])]) -> String {
+  let mut out = String::new();
+  for (hash, tokens) in records {
+    out.push_str(hash);
+    out.push('\0');
+    out.push('\n');
+    for t in *tokens {
+      out.push_str(t);
+      out.push('\0');
+    }
+  }
+  out
+}
+
+const OID_A: &str = "1111111111111111111111111111111111111111";
+const OID_B: &str = "2222222222222222222222222222222222222222";
+
+#[test]
+fn commit_stats_count_adds_changes_and_removals() {
+  use gwm::worktree::parse_commit_stats;
+  let raw = z_stream(&[(
+    OID_A,
+    &[
+      ":100644 100644 aaa bbb M",
+      "src/one.rs",
+      ":000000 100644 000 ccc A",
+      "src/new.rs",
+      ":100644 000000 ddd 000 D",
+      "src/gone.rs",
+      "6\t2\tsrc/one.rs",
+      "40\t0\tsrc/new.rs",
+      "0\t17\tsrc/gone.rs",
+    ],
+  )]);
+
+  let stats = parse_commit_stats(&raw);
+  let s = stats[&git2::Oid::from_str(OID_A).unwrap()];
+  assert_eq!(s.files_added, 1);
+  assert_eq!(s.files_modified, 1);
+  assert_eq!(s.files_deleted, 1);
+  assert_eq!(s.files_touched(), 3);
+  assert_eq!(s.insertions, 46);
+  assert_eq!(s.deletions, 19);
+}
+
+#[test]
+fn a_rename_does_not_desynchronise_the_next_commit() {
+  // `R` emits TWO paths where every other status emits one. A parser that
+  // counted token positions would read the second path as the next record
+  // and charge the rest of this commit to the wrong oid — or to none.
+  use gwm::worktree::parse_commit_stats;
+  let raw = z_stream(&[
+    (
+      OID_A,
+      &[
+        ":100644 100644 aaa bbb R100",
+        "src/old.rs",
+        "src/new.rs",
+        ":100644 100644 ccc ddd M",
+        "src/after.rs",
+        "0\t0\tsrc/old.rs\tsrc/new.rs",
+        "3\t1\tsrc/after.rs",
+      ],
+    ),
+    (OID_B, &[":100644 100644 eee fff M", "src/b.rs", "9\t4\tsrc/b.rs"]),
+  ]);
+
+  let stats = parse_commit_stats(&raw);
+  let a = stats[&git2::Oid::from_str(OID_A).unwrap()];
+  assert_eq!(
+    a.files_modified, 2,
+    "the rename and the plain edit both count as changed"
+  );
+  assert_eq!(a.insertions, 3);
+  assert_eq!(a.deletions, 1);
+
+  let b = stats[&git2::Oid::from_str(OID_B).unwrap()];
+  assert_eq!(b.files_modified, 1, "the second commit is not polluted by the first");
+  assert_eq!(b.insertions, 9);
+  assert_eq!(b.deletions, 4);
+}
+
+#[test]
+fn a_binary_file_counts_as_touched_with_no_lines() {
+  // git reports `-` for both counts on a binary blob. It changed a file,
+  // so it belongs in `files_*`; it has no lines to add to the totals.
+  use gwm::worktree::parse_commit_stats;
+  let raw = z_stream(&[(OID_A, &[":100644 100644 aaa bbb M", "logo.png", "-\t-\tlogo.png"])]);
+
+  let s = parse_commit_stats(&raw)[&git2::Oid::from_str(OID_A).unwrap()];
+  assert_eq!(s.files_modified, 1);
+  assert_eq!(s.insertions, 0);
+  assert_eq!(s.deletions, 0);
+}
+
+#[test]
+fn a_commit_that_changed_nothing_is_present_and_zero() {
+  // An empty commit emits no diff entries at all. It must still appear in
+  // the map: an absent oid is "not read yet" to the caller, and a row that
+  // says nothing forever is worse than one that says zero.
+  use gwm::worktree::parse_commit_stats;
+  let stats = parse_commit_stats(&z_stream(&[(OID_A, &[])]));
+  let s = stats[&git2::Oid::from_str(OID_A).unwrap()];
+  assert_eq!(s.files_touched(), 0);
+  assert_eq!(s, Default::default());
+}
+
+#[test]
+fn commit_stats_gives_a_merge_its_first_parent_diff() {
+  // `git log` emits NO diff for a merge by default, and this project
+  // merges rather than squashes, so without `--diff-merges=first-parent` a
+  // large share of real rows would read as "changed nothing" — confidently
+  // wrong, and invisible on a linear fixture. Hence a fixture that merges.
+  use gwm::worktree::commit_stats;
+  let (dir, repo) = init_repo();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let base = repo.head().unwrap().peel_to_commit().unwrap();
+
+  // A side branch with one file, merged back into a main that moved on.
+  // The index is reset to `base` before each side: sharing it would let the
+  // second branch inherit the first one's file, and the merge would then
+  // introduce nothing and pass this test for the wrong reason.
+  let commit_on_base = |name: &str, file: &str, update_ref: Option<&str>| {
+    std::fs::write(dir.path().join(file), format!("fn {name}() {{}}\n")).unwrap();
+    let mut idx = repo.index().unwrap();
+    idx.read_tree(&base.tree().unwrap()).unwrap();
+    idx.add_path(std::path::Path::new(file)).unwrap();
+    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let oid = repo.commit(update_ref, &sig, &sig, name, &tree, &[&base]).unwrap();
+    repo.find_commit(oid).unwrap()
+  };
+  let side = commit_on_base("side", "side.rs", None);
+  let main = commit_on_base("main", "main.rs", Some("HEAD"));
+  let merge = {
+    let mut idx = repo.merge_commits(&main, &side, None).unwrap();
+    let tree = repo.find_tree(idx.write_tree_to(&repo).unwrap()).unwrap();
+    repo
+      .commit(Some("HEAD"), &sig, &sig, "merge side", &tree, &[&main, &side])
+      .unwrap()
+  };
+
+  let stats = commit_stats(dir.path(), &[merge]).unwrap();
+  let s = stats.get(&merge).expect("the merge is in the map");
+  assert_eq!(
+    s.files_added, 1,
+    "the merge brought side.rs onto the first parent — got {s:?}"
+  );
+  assert!(s.insertions > 0, "and its lines with it — got {s:?}");
+}
+
+#[test]
+fn commit_stats_reads_the_oids_it_is_given() {
+  // The set must equal the rows on screen, which is why the oids are
+  // passed explicitly instead of trusting a `-N` that sorts differently
+  // from the revwalk.
+  use gwm::worktree::commit_stats;
+  let (dir, repo) = init_repo();
+  let seed = repo.head().unwrap().target().unwrap();
+
+  let stats = commit_stats(dir.path(), &[seed]).unwrap();
+  assert_eq!(stats.len(), 1, "one oid in, one entry out");
+  assert!(stats.contains_key(&seed));
+
+  assert!(
+    commit_stats(dir.path(), &[]).unwrap().is_empty(),
+    "no oids means no git call and no entries"
+  );
+}
+
+// ---- working-tree diff counts (issue #592) --------------------------------
+
+#[test]
+fn parse_numstat_keys_a_rename_by_its_destination() {
+  // `git diff --numstat -z` writes an ordinary entry as
+  // `<ins>\t<del>\t<path>\0`, but a rename or a copy leaves the path field
+  // EMPTY and follows with `<from>\0<to>\0`. A parser that reads one token
+  // per entry would take those two paths as two more entries and lose the
+  // rest of the stream; the destination is the path the status listing
+  // shows, so it is the one keyed.
+  let raw = "3\t1\tkept.rs\x005\t2\t\x00old/name.rs\x00new/name.rs\x004\t0\tafter.rs\x00";
+  let stats = worktree::parse_numstat(raw);
+
+  assert_eq!(stats.len(), 3, "three entries, not five — got {stats:?}");
+  assert_eq!(stats["kept.rs"].insertions, 3);
+  assert_eq!(stats["new/name.rs"].insertions, 5, "keyed by the destination");
+  assert_eq!(stats["new/name.rs"].deletions, 2);
+  assert!(!stats.contains_key("old/name.rs"), "the source is consumed, not keyed");
+  assert_eq!(
+    stats["after.rs"].insertions, 4,
+    "the entry after a rename is still read — the stream did not desynchronise"
+  );
+}
+
+#[test]
+fn parse_numstat_reads_a_binary_file_as_no_lines() {
+  // Git reports `-\t-\t<path>` for a binary blob: it counts no lines, and
+  // neither does this. Zero on both sides renders as nothing rather than as
+  // `+0 -0`.
+  let stats = worktree::parse_numstat("-\t-\tlogo.png\x0012\t0\tsrc/main.rs\x00");
+
+  assert_eq!(stats["logo.png"], worktree::FileStat::default());
+  assert_eq!(stats["src/main.rs"].insertions, 12);
+}
+
+#[test]
+fn parse_numstat_keeps_a_tab_inside_a_path() {
+  // POSIX allows a tab in a filename, and `-z` writes paths verbatim. Only
+  // the first two tabs delimit the counts; everything past them is the
+  // path.
+  let stats = worktree::parse_numstat("1\t2\tweird\tname.rs\x00");
+
+  assert_eq!(stats.len(), 1, "one entry — got {stats:?}");
+  assert_eq!(stats["weird\tname.rs"].deletions, 2);
+}
+
+#[test]
+fn working_tree_stats_counts_staged_and_unstaged_together() {
+  // One read against HEAD rather than two against the index: the overlay
+  // lists both kinds of change in one tree, so a split would only have to
+  // be summed back per file.
+  let (dir, repo) = init_repo();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  std::fs::write(dir.path().join("staged.rs"), "a\nb\n").unwrap();
+  std::fs::write(dir.path().join("dirty.rs"), "a\nb\nc\n").unwrap();
+  {
+    let mut idx = repo.index().unwrap();
+    idx.add_path(std::path::Path::new("staged.rs")).unwrap();
+    idx.add_path(std::path::Path::new("dirty.rs")).unwrap();
+    idx.write().unwrap();
+    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo
+      .commit(Some("HEAD"), &sig, &sig, "base", &tree, &[&parent])
+      .unwrap();
+  }
+  // One file changed in the index only, the other in the worktree only.
+  std::fs::write(dir.path().join("staged.rs"), "a\nb\nc\nd\n").unwrap();
+  {
+    let mut idx = repo.index().unwrap();
+    idx.add_path(std::path::Path::new("staged.rs")).unwrap();
+    idx.write().unwrap();
+  }
+  std::fs::write(dir.path().join("dirty.rs"), "a\n").unwrap();
+  // libgit2 mmaps the index, so the handle goes before git is asked to read
+  // the same file (this repo has taken that red on windows-latest before).
+  drop(repo);
+
+  let stats = worktree::working_tree_stats(dir.path()).unwrap();
+  assert_eq!(stats["staged.rs"].insertions, 2, "the staged half counts — {stats:?}");
+  assert_eq!(stats["dirty.rs"].deletions, 2, "so does the unstaged half — {stats:?}");
+}
+
+#[test]
+fn working_tree_stats_on_an_unborn_head_is_empty_not_an_error() {
+  // `git diff HEAD` fails in a repository with no commit. Every file there
+  // is untracked or newly staged and carries no count either way, so this
+  // is an empty map rather than a failure that would strand the overlay.
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init(dir.path()).unwrap();
+  std::fs::write(dir.path().join("first.rs"), "fn main() {}\n").unwrap();
+
+  assert!(worktree::working_tree_stats(dir.path()).unwrap().is_empty());
+}

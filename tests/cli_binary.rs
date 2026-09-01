@@ -51,6 +51,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  switch "))
     .stdout(predicate::str::contains("  tmux "))
     .stdout(predicate::str::contains("  zellij "))
+    // Issue #588: herdr is the third multiplexer backend.
+    .stdout(predicate::str::contains("  herdr "))
     .stdout(predicate::str::contains("  doctor "))
     .stdout(predicate::str::contains("  link "))
     .stdout(predicate::str::contains("  unlink "))
@@ -1512,6 +1514,7 @@ fn list_format_table_is_default() {
 
 // --------------------------------------------------------------------------
 // Issue #23 — `gwm tmux <pattern>` / `gwm zellij <pattern>`
+// Issue #588 — `gwm herdr <pattern>`
 // --------------------------------------------------------------------------
 //
 // The actual spawn (`std::process::Command::new("tmux").args(...)`) is out
@@ -1519,12 +1522,18 @@ fn list_format_table_is_default() {
 // every CI runner. We instead pin the user-visible contract:
 //
 //   1. The subcommands exist and are listed in `gwm --help`.
-//   2. Outside the corresponding multiplexer (no `$TMUX` / `$ZELLIJ`),
-//      the command exits non-zero with a clear stderr that names the
-//      missing multiplexer — no silent no-op.
+//   2. Outside the corresponding multiplexer (no `$TMUX` / `$ZELLIJ` /
+//      `$HERDR_ENV`), the command exits non-zero with a clear stderr that
+//      names the missing multiplexer — no silent no-op.
 //   3. Outside a git repo, the standard `NotInGitRepo` error wins.
 //   4. The argv-builder unit tests in `tests/multiplexer_tests.rs`
 //      cover what gets handed to the spawn.
+//
+// Since #589 the spawn itself is partly in scope after all: a fake `tmux`
+// on `$PATH` that echoes its argv needs no live server, and it is the only
+// place the clap parse, the backend dispatch and the config-vs-flag
+// precedence are exercised together. The builder tests cannot see any of
+// those three.
 
 #[test]
 fn tmux_outside_tmux_session_fails_with_clear_error() {
@@ -1556,6 +1565,146 @@ fn zellij_outside_zellij_session_fails_with_clear_error() {
 }
 
 #[test]
+fn herdr_outside_herdr_session_fails_with_clear_error() {
+  // Herdr sets `$HERDR_ENV` in the panes it manages; outside one the
+  // command must refuse rather than shell out to a herdr that would go
+  // looking for a socket that isn't there.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("HERDR_ENV")
+    .args(["herdr", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("herdr").and(predicate::str::contains("not")));
+}
+
+/// Issue #589. The flag surface: `--direction` takes the two values every
+/// backend can honour and rejects the rest at parse time.
+///
+/// Cross-platform on purpose, unlike the spawn test below: this asserts
+/// clap's own contract (exit 2 for a usage error, the possible values
+/// echoed back), which has no shell in it.
+#[test]
+fn tmux_direction_rejects_a_value_no_backend_can_honour() {
+  // `left` and `up` joined the set in #611 (tmux `-h -b` / `-v -b`, zellij
+  // takes the words), so the rejected value has to be one no backend
+  // spells. It must fail at the parse rather than reach a builder that
+  // would have to guess.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("TMUX", "/fake-socket,1,0")
+    .args(["tmux", "anything", "--direction", "sideways"])
+    .assert()
+    .failure()
+    .code(2)
+    .stderr(predicate::str::contains("sideways"))
+    .stderr(predicate::str::contains("right").and(predicate::str::contains("down")))
+    .stderr(predicate::str::contains("left").and(predicate::str::contains("up")));
+}
+
+/// Issue #589. The whole chain the builder tests cannot reach: clap parses
+/// `--split` / `--direction`, the dispatcher picks the backend, and the
+/// direction resolves against `[tui] mux_pane_direction`.
+///
+/// The fake `tmux` echoes its argv to stdout, which `spawn_multiplexer`
+/// inherits, so the assertion reads the real spawn rather than a builder's
+/// return value. Unix-only for the same reason as `write_recording_glab`:
+/// what is under test is platform-independent in gwm's own code, and a
+/// `.cmd` shim would mostly exercise `cmd.exe` quoting.
+#[cfg(unix)]
+#[test]
+fn tmux_split_takes_its_direction_from_the_config_and_the_flag_overrides_it() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  // `down` rather than the default, so a config that is never read cannot
+  // pass this test by accident: `right` is what the code falls back to.
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[tui]
+mux_pane_direction = "down"
+"#,
+      base = toml_basic_string(base.path()),
+    ),
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "589", "mux-dir"])
+    .assert()
+    .success();
+
+  let fake = tempfile::TempDir::new().unwrap();
+  write_recording_mux(fake.path(), "tmux");
+
+  let run = |args: &[&str]| {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("PATH", prepend_path(fake.path()))
+      .env("TMUX", "/fake-socket,1,0")
+      .args(args)
+      .output()
+      .unwrap()
+  };
+
+  // A bare `--split` reads the config: `down` is tmux's `-v`.
+  let out = run(&["tmux", "mux-dir", "--split"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(out.status.success(), "the spawn must succeed, got: {argv}");
+  assert!(
+    argv.contains("split-window -v"),
+    "`mux_pane_direction = \"down\"` must reach tmux as `-v`, got: {argv}"
+  );
+
+  // `--direction` overrides the config, and says "pane" on its own: no
+  // `--split` alongside it here, and the result is still a split.
+  let out = run(&["tmux", "mux-dir", "--direction", "right"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("split-window -h"),
+    "`--direction right` must beat the config and imply a split, got: {argv}"
+  );
+
+  // The two directions #611 added cost tmux a second flag (`-b` flips the
+  // side on the axis `-h` / `-v` picked), so this is where a builder that
+  // dropped one of the two would show up.
+  let out = run(&["tmux", "mux-dir", "--direction", "left"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("split-window -h -b"),
+    "`--direction left` must reach tmux as `-h -b`, got: {argv}"
+  );
+  let out = run(&["tmux", "mux-dir", "--direction", "up"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("split-window -v -b"),
+    "`--direction up` must reach tmux as `-v -b`, got: {argv}"
+  );
+
+  // No flag at all is still a window, whatever the direction says.
+  let out = run(&["tmux", "mux-dir"]);
+  let argv = String::from_utf8_lossy(&out.stdout).into_owned();
+  assert!(
+    argv.contains("new-window") && argv.contains("feat-589-mux-dir"),
+    "no flag must still open a named window, got: {argv}"
+  );
+}
+
+#[test]
 fn tmux_outside_git_repo_fails() {
   // `NotInGitRepo` wins over the multiplexer-not-running gate when both
   // apply — the user is told to fix the more fundamental problem first.
@@ -1578,6 +1727,19 @@ fn zellij_outside_git_repo_fails() {
     .current_dir(dir.path())
     .env_remove("ZELLIJ")
     .args(["zellij", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn herdr_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("HERDR_ENV")
+    .args(["herdr", "anything"])
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
@@ -1617,6 +1779,20 @@ fn zellij_outside_zellij_error_does_not_escape_dollar() {
 }
 
 #[test]
+fn herdr_outside_herdr_error_does_not_escape_dollar() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("HERDR_ENV")
+    .args(["herdr", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("\\$").not())
+    .stderr(predicate::str::contains("$HERDR_ENV"));
+}
+
+#[test]
 fn tmux_help_mentions_split_flag() {
   // The `-p` flag (split-pane instead of new-window) is the one knob users
   // care about; it must show up in `--help` so it's discoverable without
@@ -1630,6 +1806,13 @@ fn tmux_help_mentions_split_flag() {
 fn zellij_help_mentions_split_flag() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["zellij", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("--split"));
+}
+
+#[test]
+fn herdr_help_mentions_split_flag() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["herdr", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--split"));
 }
 
@@ -2247,6 +2430,27 @@ fi
     .unwrap();
     script
   }
+}
+
+/// A fake multiplexer binary that echoes its argv on stdout (issue #589).
+///
+/// `spawn_multiplexer` uses `.status()`, so the child inherits gwm's
+/// stdout and the argv lands in what `assert_cmd` captures. No log file,
+/// therefore no path quoting to get wrong, and no live tmux server on the
+/// runner.
+///
+/// Unix-only for the same reason as [`write_recording_glab`]: the contract
+/// under test is platform-independent in gwm's own code, and a `.cmd` shim
+/// would mostly exercise `cmd.exe` quoting rules.
+#[cfg(unix)]
+fn write_recording_mux(root: &Path, name: &str) -> PathBuf {
+  let script = root.join(name);
+  fs::write(&script, "#!/bin/sh\nprintf 'MUXARGV: %s\\n' \"$*\"\n").unwrap();
+  let mut perms = fs::metadata(&script).unwrap().permissions();
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
 }
 
 /// A fake `glab` that records how it was invoked before answering.
@@ -3003,6 +3207,382 @@ fn create_subcommand_outside_git_repo_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- create --issue <N> (issue #617) -------------------------------------
+
+/// `.gwm.toml` for the `--issue` tests: the same `[worktree]` block
+/// `write_test_config` writes, plus the `[issue_template.by_type]` map the
+/// derivation reads backwards. `feat` and `fix` are separable by label;
+/// `hotfix` deliberately shares `bug` with `fix` so the ambiguity arm has a
+/// fixture.
+fn write_issue_template_config(repo_root: &Path, base: &Path) {
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[issue_template.by_type]
+feat   = {{ title_prefix = "[Feature]: ", labels = ["feature"] }}
+fix    = {{ title_prefix = "[Bug]: ", labels = ["bug"] }}
+hotfix = {{ title_prefix = "[Hotfix]: ", labels = ["bug"] }}
+"#,
+    base = toml_basic_string(base),
+  );
+  std::fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+/// Fake `gh` answering `gh issue view <n> …` with `issue_json`.
+///
+/// The payload is written to a file the script cats back, rather than
+/// interpolated into the script body: an issue title is arbitrary text and
+/// `cmd.exe`'s `echo` would eat `<`, `>`, `|` and `&` out of it.
+fn write_issue_gh(root: &Path, issue_json: &str) -> PathBuf {
+  let payload = root.join("issue.json");
+  fs::write(&payload, issue_json).unwrap();
+  #[cfg(unix)]
+  {
+    let script = root.join("gh");
+    fs::write(
+      &script,
+      format!(
+        r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  cat "{payload}"
+fi
+"#,
+        payload = payload.display(),
+      ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+  }
+  #[cfg(windows)]
+  {
+    let script = root.join("gh.cmd");
+    fs::write(
+      &script,
+      format!(
+        "@echo off\r\nif \"%~1\"==\"issue\" if \"%~2\"==\"view\" type \"{payload}\"\r\n",
+        payload = payload.display(),
+      ),
+    )
+    .unwrap();
+    script
+  }
+}
+
+fn issue_json(number: u64, title: &str, state: &str, labels: &[&str]) -> String {
+  let labels = labels
+    .iter()
+    .map(|l| format!(r#"{{"name":"{l}"}}"#))
+    .collect::<Vec<_>>()
+    .join(",");
+  format!(
+    r#"{{"number":{number},"title":"{title}","state":"{state}","url":"https://github.com/kbrdn1/gwm-cli/issues/{number}","labels":[{labels}],"updatedAt":"2026-08-29T00:00:00Z"}}"#
+  )
+}
+
+fn repo_with_origin() -> (tempfile::TempDir, git2::Repository) {
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  (dir, repo)
+}
+
+#[test]
+fn create_from_issue_derives_the_branch_from_the_labels_and_the_title() {
+  // The whole point of #617: nothing about the branch is retyped. `feature`
+  // selects `feat`, `[Feature]: ` comes back off the title, and the rest of
+  // the title becomes the slug through the same kebab path a hand-typed
+  // <desc> goes through.
+  let (dir, repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#594-modals-should-follow-layout"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  assert!(
+    base.path().join("feat-594-modals-should-follow-layout").exists(),
+    "the derived worktree must land on disk"
+  );
+  repo
+    .find_branch("feat/#594-modals-should-follow-layout", git2::BranchType::Local)
+    .expect("the derived branch must exist");
+}
+
+#[test]
+fn create_from_issue_refuses_a_closed_issue_until_forced() {
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(592, "[Feature]: working tree modal", "CLOSED", &["feature"]),
+  );
+
+  let run = |args: &[&str]| {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .env("GWM_GH", &fake_gh)
+      .env("PATH", prepend_path(fake_bin.path()))
+      .args(args);
+    cmd
+  };
+
+  run(&["create", "--issue", "592"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("closed"))
+    .stderr(predicate::str::contains("--force"));
+  assert!(
+    !base.path().join("feat-592-working-tree-modal").exists(),
+    "the refusal must leave no worktree behind"
+  );
+
+  run(&["create", "--issue", "592", "--force"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#592-working-tree-modal"));
+  assert!(base.path().join("feat-592-working-tree-modal").exists());
+}
+
+#[test]
+fn create_from_issue_is_safe_to_re_run() {
+  // "already created" is not an error: the command prints where the worktree
+  // is and exits 0, so re-running it after an interruption is harmless.
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
+  );
+
+  let run = || {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .env("GWM_GH", &fake_gh)
+      .env("PATH", prepend_path(fake_bin.path()))
+      .args(["create", "--issue", "594"]);
+    cmd
+  };
+
+  run().assert().success();
+  run()
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("already exists"))
+    .stdout(predicate::str::contains("feat-594-modals-should-follow-layout"));
+}
+
+#[test]
+fn create_from_issue_re_run_check_precedes_the_closed_refusal() {
+  // An issue closes while its worktree is still alive. If the closed gate
+  // ran first, a command that succeeded yesterday would start failing on a
+  // worktree that is right there on disk.
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+  let fake_bin = tempfile::TempDir::new().unwrap();
+
+  let open = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &open)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594"])
+    .assert()
+    .success();
+
+  // Same fake, now answering CLOSED for the very same number.
+  let closed_bin = tempfile::TempDir::new().unwrap();
+  let closed = write_issue_gh(
+    closed_bin.path(),
+    &issue_json(594, "[Feature]: modals should follow layout", "CLOSED", &["feature"]),
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &closed)
+    .env("PATH", prepend_path(closed_bin.path()))
+    .args(["create", "--issue", "594"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn create_from_issue_refuses_labels_that_do_not_separate_two_types() {
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(597, "[Bug]: selection github context", "OPEN", &["bug"]),
+  );
+
+  let run = |args: &[&str]| {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(dir.path())
+      .env("GWM_ALLOW_BOOTSTRAP", "1")
+      .env("GWM_GH", &fake_gh)
+      .env("PATH", prepend_path(fake_bin.path()))
+      .args(args);
+    cmd
+  };
+
+  run(&["create", "--issue", "597"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("fix"))
+    .stderr(predicate::str::contains("hotfix"))
+    .stderr(predicate::str::contains("--type"));
+
+  // `--type` is the way out the error names, and it must actually work.
+  run(&["create", "--issue", "597", "--type", "fix"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("fix/#597-selection-github-context"));
+}
+
+#[test]
+fn create_issue_flag_is_exclusive_with_the_positional_triple_and_with_name() {
+  // Same contract `--name` already carries: the mode is chosen explicitly,
+  // never inferred from how many arguments were supplied.
+  let (dir, _repo) = repo_with_origin();
+
+  for args in [
+    vec!["create", "--issue", "594", "feat", "594", "x"],
+    vec!["create", "--issue", "594", "--name", "spike"],
+  ] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(&args)
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("cannot be used with"));
+  }
+}
+
+#[test]
+fn create_type_and_force_are_only_meaningful_alongside_issue() {
+  // Both riders are refused on the positional path, and both are named as
+  // missing `--issue` when nothing else is supplied. Without either half,
+  // `gwm create feat 1 x --type fix` would be a silent no-op.
+  let (dir, _repo) = repo_with_origin();
+
+  for args in [
+    vec!["create", "feat", "1", "x", "--type", "fix"],
+    vec!["create", "feat", "1", "x", "--force"],
+  ] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(&args)
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("cannot be used with"));
+  }
+
+  for args in [vec!["create", "--type", "fix"], vec!["create", "--force"]] {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(&args)
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("--issue"));
+  }
+}
+
+#[test]
+fn create_from_issue_never_echoes_a_control_byte_it_was_handed() {
+  // #473's threat model reaches this echo twice over. `--type` is argv, and
+  // clap hands a value through with its control bytes intact; a type derived
+  // from the labels is a key of `[issue_template.by_type]`, a string out of
+  // an unvetted repo's `.gwm.toml`. Both land in the same slot, and the slot
+  // is printed *before* `BranchSpec::new_with_types` gets to reject the type,
+  // so validation is not what stops the escape.
+  //
+  // The `contains("labels:")` half is what keeps this from passing vacuously:
+  // without it, a command that failed before printing anything would satisfy
+  // "no ESC on stdout" for entirely the wrong reason.
+  let (dir, _repo) = repo_with_origin();
+  let base = tempfile::TempDir::new().unwrap();
+  write_issue_template_config(dir.path(), base.path());
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_issue_gh(
+    fake_bin.path(),
+    &issue_json(594, "[Feature]: modal layout", "OPEN", &["feature"]),
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["create", "--issue", "594", "--type", "\u{1b}]0;pwned\u{7}feat"])
+    .assert()
+    // The type is not one of the repo's branch types, so the command fails —
+    // after the echo has already run.
+    .failure()
+    .stdout(predicate::str::contains("labels:"))
+    .stdout(predicate::str::contains("\u{1b}").not())
+    .stdout(predicate::str::contains("\u{7}").not());
+}
+
+#[test]
+fn create_help_documents_the_issue_flag() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--issue"))
+    .stdout(predicate::str::contains("--type"))
+    .stdout(predicate::str::contains("--force"));
 }
 
 // --- remove -------------------------------------------------------------

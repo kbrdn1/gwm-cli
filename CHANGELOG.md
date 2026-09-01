@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.10.0`](changelogs/1.10.0.md), 2026-09-01
 - [`1.9.0`](changelogs/1.9.0.md), 2026-08-16
 - [`1.8.0`](changelogs/1.8.0.md), 2026-08-13
 - [`1.7.1`](changelogs/1.7.1.md), 2026-08-12

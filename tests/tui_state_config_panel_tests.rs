@@ -156,16 +156,23 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → layout / dim unfocused / status one line / sidebar position /
-  // sidebar layout / clipboard / open / countdown / auto refresh in order.
-  // `layout` leads since #545: it is the structural choice the rest of the
-  // tab refines, and the two density knobs (#545, #547) sit right under it.
+  // Tui tab → layout / dim unfocused / status one line / note vim / mux
+  // opens in / mux pane side / sidebar position / sidebar layout / clipboard / open / countdown
+  // / auto refresh in order. `layout` leads since #545: it is the structural
+  // choice the rest of the tab refines, and the boolean knobs (#545, #547,
+  // #557) sit right under it.
   panel.tab = SettingsTab::Tui;
   assert_eq!(panel.selected_field(), Some(SettingField::Layout));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::DimUnfocused));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::StatusOneLine));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::NoteVim));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::MuxOpenIn));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::MuxPaneDirection));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
   panel.select_next();
@@ -530,6 +537,8 @@ fn every_choice_is_a_value_the_config_can_load_back() {
     SettingField::SidebarPosition,
     SettingField::SidebarOrientation,
     SettingField::Clipboard,
+    SettingField::MuxOpenIn,
+    SettingField::MuxPaneDirection,
     SettingField::OpenMode,
   ] {
     let key = field.key_path();
@@ -563,7 +572,8 @@ fn sidebar_choice_lists_cover_every_variant() {
   // that is the exhaustive `match` in `label()`, which fails to compile on a new
   // variant and forces a visit to the `ALL` right above it. Closing the gap
   // properly would need a derive (strum); not worth a dependency for two enums.
-  use gwm::config::{ClipboardMode, SidebarOrientation, SidebarPosition};
+  use gwm::config::{ClipboardMode, MuxTarget, SidebarOrientation, SidebarPosition};
+  use gwm::multiplexer::SplitDirection;
 
   for o in SidebarOrientation::ALL {
     assert!(
@@ -588,6 +598,32 @@ fn sidebar_choice_lists_cover_every_variant() {
   assert_eq!(
     SettingField::SidebarPosition.choices().len(),
     SidebarPosition::ALL.len(),
+    "no stale choice left behind"
+  );
+
+  for t in MuxTarget::ALL {
+    assert!(
+      SettingField::MuxOpenIn.choices().contains(&t.label()),
+      "{t:?} ({}) is missing from the mux target choices",
+      t.label()
+    );
+  }
+  assert_eq!(
+    SettingField::MuxOpenIn.choices().len(),
+    MuxTarget::ALL.len(),
+    "no stale choice left behind"
+  );
+
+  for d in SplitDirection::ALL {
+    assert!(
+      SettingField::MuxPaneDirection.choices().contains(&d.label()),
+      "{d:?} ({}) is missing from the mux pane direction choices",
+      d.label()
+    );
+  }
+  assert_eq!(
+    SettingField::MuxPaneDirection.choices().len(),
+    SplitDirection::ALL.len(),
     "no stale choice left behind"
   );
 
@@ -684,4 +720,66 @@ fn the_tui_tab_reaches_the_status_fold_setting() {
       "status_one_line choice {choice:?} must parse as a bool"
     );
   }
+}
+
+#[test]
+fn the_tui_tab_reaches_the_note_mode_setting() {
+  // #557: the vim mode ships on, so `note_vim = false` is the opt-out —
+  // and an opt-out only a TOML editor can reach is one most users will
+  // never find. Same `Bool` reasoning as the two fields above.
+  let fields = SettingsTab::Tui.fields();
+  assert!(
+    fields.contains(&SettingField::NoteVim),
+    "note_vim must be reachable from the TUI tab, got {fields:?}"
+  );
+  assert_eq!(SettingField::NoteVim.kind(), FieldKind::Bool);
+  assert_eq!(SettingField::NoteVim.key_path(), "tui.note_vim");
+
+  let cfg = gwm::config::Config::default();
+  assert_eq!(SettingField::NoteVim.current(&cfg), "true");
+  assert_eq!(SettingField::NoteVim.next_choice(&cfg).as_deref(), Some("false"));
+  for choice in SettingField::NoteVim.choices() {
+    assert!(
+      choice.parse::<bool>().is_ok(),
+      "note_vim choice {choice:?} must parse as a bool"
+    );
+  }
+}
+
+#[test]
+fn the_tui_tab_reaches_the_terminal_browser_setting() {
+  // #590 asks for the setting in `.gwm.toml` AND in the Settings pane, for
+  // the same reason as the three fields above: a knob only a TOML editor can
+  // reach is a knob most users never find.
+  //
+  // `Text`, not `Choice`: the value is a command line (`w3m {url}`), so there
+  // is no fixed set to cycle. That also makes the empty string reachable from
+  // the panel, which is how the feature is turned back off. The config reads
+  // `""` as unset (same convention as `[tui.open] shell_cmd`).
+  let fields = SettingsTab::Tui.fields();
+  assert!(
+    fields.contains(&SettingField::TerminalBrowser),
+    "terminal_browser must be reachable from the TUI tab, got {fields:?}"
+  );
+  assert_eq!(SettingField::TerminalBrowser.kind(), FieldKind::Text);
+  assert_eq!(SettingField::TerminalBrowser.key_path(), "tui.terminal_browser");
+  assert!(
+    SettingField::TerminalBrowser.choices().is_empty(),
+    "a command line has no fixed choice set to cycle"
+  );
+
+  // Unset is the default and shows as empty rather than as a fabricated
+  // command the user never set.
+  let cfg = gwm::config::Config::default();
+  assert_eq!(SettingField::TerminalBrowser.current(&cfg), "");
+  let cfg = gwm::config::Config {
+    tui: gwm::config::TuiConfig {
+      terminal_browser: Some("w3m {url}".into()),
+      ..Default::default()
+    },
+    ..Default::default()
+  };
+  assert_eq!(SettingField::TerminalBrowser.current(&cfg), "w3m {url}");
+  // And the row is addressable by lookup, not by a literal index.
+  let _ = tui_idx(SettingField::TerminalBrowser);
 }

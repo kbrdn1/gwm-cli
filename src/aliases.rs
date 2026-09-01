@@ -384,6 +384,7 @@ const BUILT_IN_SUBCOMMANDS: &[&str] = &[
   "switch",
   "tmux",
   "zellij",
+  "herdr",
   "link",
   "unlink",
   "open",

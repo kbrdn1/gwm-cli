@@ -3,6 +3,19 @@ use gwm::{aliases, cli};
 use std::ffi::OsString;
 
 fn main() {
+  // The CLI runs on a thread whose stack size gwm chooses rather than on the
+  // 1 MiB Windows gives a process's main thread; see `cli::STACK_SIZE` for the
+  // measurement. `main` itself does nothing but spawn and relay the status.
+  match cli::on_own_stack(run) {
+    Ok(code) => std::process::exit(code),
+    Err(e) => {
+      eprintln!("error: could not start gwm on its own stack: {}", e);
+      std::process::exit(1);
+    }
+  }
+}
+
+fn run() -> i32 {
   // Issue #86: expand CLI aliases BEFORE clap parses argv. We need
   // the repo workdir to read `.gwm.toml`'s `[aliases]` block, so the
   // discovery happens here in `main` rather than inside `cli::run` —
@@ -41,8 +54,9 @@ fn main() {
   let args = cli::Cli::parse_from(expanded);
   if let Err(e) = cli::run(args) {
     eprintln!("error: {}", clean_error(&e));
-    std::process::exit(1);
+    return 1;
   }
+  0
 }
 
 /// Neutralise an error before it reaches the terminal (issue #473).

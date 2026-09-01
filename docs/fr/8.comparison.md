@@ -140,7 +140,7 @@ bug corrigé.
 
 À peu près à parité, avec des différences de forme plutôt que de présence :
 
-- l'intégration tmux et zellij
+- l'intégration tmux, zellij et herdr
 - une palette de commandes
 - des helpers shell et des complétions (bash, zsh, fish)
 - des commandes personnalisées liées à des touches
