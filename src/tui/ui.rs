@@ -251,6 +251,13 @@ pub const SETTINGS_ICON: &str = "\u{2699}";
 /// strip already use.
 const AFFORDANCE_W: usize = 2;
 
+/// The key the mouse-released chip names. Filled by [`draw_header`] from the
+/// live keymap so a rebound `toggle_mouse` shows through; the builder stays
+/// pure and takes it as a plain string through a thread-local-free route —
+/// the chip is only ever built with this constant substituted, so it lives
+/// beside the arithmetic that sizes it.
+const MOUSE_RELEASE_HINT: &str = "M";
+
 /// Cells the affordance group costs the row: a leading gap, both affordances,
 /// and a gap between them.
 const AFFORDANCES_W: usize = 1 + AFFORDANCE_W + 1 + AFFORDANCE_W;
@@ -309,7 +316,14 @@ impl Header {
 /// user can make wide, and an undercount there pushes the pinned version chip
 /// past the row. Tracked as #563 with the rest of the row arithmetic; the
 /// three truncators it calls into measure cells since #554 / #560 / #562.
-pub fn header_line(repo_name: &str, workdir_display: &str, picker_mode: bool, width: usize, theme: &Theme) -> Header {
+pub fn header_line(
+  repo_name: &str,
+  workdir_display: &str,
+  picker_mode: bool,
+  mouse_released: bool,
+  width: usize,
+  theme: &Theme,
+) -> Header {
   // A zero-width row can hold nothing — return an empty line rather than let
   // `trunc` floor a 1-column `…` into existence.
   if width == 0 {
@@ -383,6 +397,22 @@ pub fn header_line(repo_name: &str, workdir_display: &str, picker_mode: bool, wi
   } else {
     0
   };
+
+  // Mouse-released chip — a mode indicator, like the picker chip beside it
+  // (issue #624). Reading the mouse and letting the terminal select text are
+  // mutually exclusive, so `M` is a mode the user sits in, and a mode with no
+  // sign on screen is one they get stuck in: every click doing nothing looks
+  // like a broken build rather than a switch they threw. The status bar says
+  // it once, at the moment of the toggle, and the next message overwrites it.
+  if mouse_released {
+    let chip = format!(" mouse off · {} ", MOUSE_RELEASE_HINT);
+    let need = 1 + cells(&chip);
+    if used + need + version_w < width {
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(chip, picker_style));
+      used += need;
+    }
+  }
 
   // Path — dimmed secondary context. It stays immediately after the current
   // directory badge and is dropped/truncated under pressure; the version chip
@@ -564,6 +594,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, map: &mut MouseMap) {
     &app.display_repo_name,
     &workdir,
     app.picker_mode,
+    !app.mouse_capture,
     area.width as usize,
     &app.theme,
   );

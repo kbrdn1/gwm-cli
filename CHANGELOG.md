@@ -56,12 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `activate` — so a rebind reaches the mouse and no modal grows a second copy
   of its own teardown.
 
-  gwm asks the terminal for only the two mouse modes it reads. `EnableMouseCapture`
-  bundles drag and motion reporting on top, which nothing here consumes and
-  which is what a terminal reads to decide the application wants the whole
-  mouse. Whether `Shift`+drag then reaches the terminal's own selection is
-  still the terminal's call — Ghostty 1.3.1 says no — which is what the
-  release key is for.
+  Reading the mouse and letting the terminal select text are mutually
+  exclusive — while gwm is reading, a drag belongs to gwm — so `M` switches
+  between the two, and the header carries a ` mouse off · M ` chip while it is
+  off — a mode with no sign on screen is one you get stuck in, with every
+  click doing nothing reading as a broken build rather than as a switch you
+  threw. gwm keeps
+  its side of that trade as small as it can: it asks for press tracking
+  (`1000`) only, never the drag and motion reporting (`1002` / `1003`) most
+  TUIs turn on with it, because nothing here reads a drag. `Shift`+drag is
+  honoured by the terminal rather than by the application, and not every one
+  honours it: measured on Ghostty 1.3.1 under herdr, it does not.
 
   The PTY overlay still drops mouse events, exactly as it did before: nothing
   ever forwarded them to the child, so this is the status quo rather than a

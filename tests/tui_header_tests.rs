@@ -35,7 +35,15 @@ fn version_token() -> String {
 
 #[test]
 fn header_surfaces_version_repo_and_path_when_wide() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default()).line;
+  let line = header_line(
+    "gwm-cli",
+    "/Users/me/Projects/gwm-cli",
+    false,
+    false,
+    120,
+    &Theme::default(),
+  )
+  .line;
   let text = plain(&line);
   assert!(text.contains(&version_token()), "missing version: {}", text);
   assert!(text.contains("gwm-cli"), "missing repo name: {}", text);
@@ -44,7 +52,15 @@ fn header_surfaces_version_repo_and_path_when_wide() {
 
 #[test]
 fn header_fits_on_a_single_line_within_the_given_width() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default()).line;
+  let line = header_line(
+    "gwm-cli",
+    "/Users/me/Projects/gwm-cli",
+    false,
+    false,
+    120,
+    &Theme::default(),
+  )
+  .line;
   assert!(
     display_width(&line) <= 120,
     "header width {} exceeded 120: {:?}",
@@ -59,6 +75,7 @@ fn version_renders_as_a_reverse_video_chip_on_the_accent_colour() {
   let line = header_line(
     "gwm-cli",
     "/tmp/x",
+    false,
     false,
     120,
     &Theme {
@@ -81,7 +98,15 @@ fn version_renders_as_a_reverse_video_chip_on_the_accent_colour() {
 
 #[test]
 fn current_dir_name_is_a_leading_badge_and_path_is_dimmed() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default()).line;
+  let line = header_line(
+    "gwm-cli",
+    "/Users/me/Projects/gwm-cli",
+    false,
+    false,
+    120,
+    &Theme::default(),
+  )
+  .line;
   let repo = span_with(&line, "gwm-cli").expect("repo span present");
   assert!(
     repo.style.add_modifier.contains(Modifier::REVERSED),
@@ -101,7 +126,15 @@ fn current_dir_name_is_a_leading_badge_and_path_is_dimmed() {
 
 #[test]
 fn version_chip_is_pinned_to_the_end_when_wide() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default()).line;
+  let line = header_line(
+    "gwm-cli",
+    "/Users/me/Projects/gwm-cli",
+    false,
+    false,
+    120,
+    &Theme::default(),
+  )
+  .line;
   let text = plain(&line);
   assert!(
     text.trim_end().ends_with(&format!("gwm {}", version_token())),
@@ -111,13 +144,13 @@ fn version_chip_is_pinned_to_the_end_when_wide() {
 
 #[test]
 fn picker_chip_present_only_in_picker_mode() {
-  let off = header_line("gwm-cli", "/tmp/x", false, 120, &Theme::default()).line;
+  let off = header_line("gwm-cli", "/tmp/x", false, false, 120, &Theme::default()).line;
   assert!(
     !plain(&off).to_lowercase().contains("picker"),
     "picker chip leaked outside picker mode: {}",
     plain(&off)
   );
-  let on = header_line("gwm-cli", "/tmp/x", true, 120, &Theme::default()).line;
+  let on = header_line("gwm-cli", "/tmp/x", true, false, 120, &Theme::default()).line;
   let chip = span_with(&on, "picker").expect("picker chip present in picker mode");
   assert!(
     chip.style.add_modifier.contains(Modifier::REVERSED),
@@ -132,6 +165,7 @@ fn narrow_width_drops_path_but_keeps_version_chip_and_repo() {
   let line = header_line(
     "gwm-cli",
     "/Users/me/some/really/long/path/that/will/not/fit/gwm-cli",
+    false,
     false,
     width,
     &Theme::default(),
@@ -159,7 +193,7 @@ fn narrow_width_drops_path_but_keeps_version_chip_and_repo() {
 
 #[test]
 fn zero_width_emits_an_empty_line_without_overflowing() {
-  let line = header_line("gwm-cli", "/tmp/x", false, 0, &Theme::default()).line;
+  let line = header_line("gwm-cli", "/tmp/x", false, false, 0, &Theme::default()).line;
   assert_eq!(display_width(&line), 0, "zero width must produce nothing");
   assert!(!plain(&line).contains('\n'));
 }
@@ -167,7 +201,7 @@ fn zero_width_emits_an_empty_line_without_overflowing() {
 #[test]
 fn control_chars_never_break_the_single_line_contract() {
   // A pathological workdir with embedded newline/tab must not split the row.
-  let line = header_line("gwm-cli", "/tmp/a\nb\tc", false, 120, &Theme::default()).line;
+  let line = header_line("gwm-cli", "/tmp/a\nb\tc", false, false, 120, &Theme::default()).line;
   assert!(!plain(&line).contains('\n'), "newline leaked into header row");
   assert!(!plain(&line).contains('\t'), "tab leaked into header row");
 }
@@ -201,7 +235,7 @@ fn the_header_never_paints_past_its_width_on_wide_glyphs() {
     ("🚀🚀🚀🚀🚀", "~/dev/🚀🚀🚀🚀🚀🚀🚀🚀"),
   ] {
     for w in [80usize, 100, 120] {
-      let line = header_line(repo, path, false, w, &theme).line;
+      let line = header_line(repo, path, false, false, w, &theme).line;
       assert!(
         painted_line(&line) <= w,
         "{repo:?} at {w} columns: header painted {} cells: {:?}",
@@ -233,7 +267,7 @@ fn a_bidi_control_in_the_repo_or_path_never_reaches_the_row() {
       (format!("re{c}po"), "~/dev/x".to_string()),
       ("repo".into(), format!("~/dev/x{c}y")),
     ] {
-      let line = header_line(&repo, &path, false, 120, &Theme::default()).line;
+      let line = header_line(&repo, &path, false, false, 120, &Theme::default()).line;
       assert!(
         !plain(&line).contains(*c),
         "the header replayed U+{:04X} from {:?}",
@@ -263,7 +297,14 @@ fn painted_col_of(line: &Line<'_>, needle: &str) -> Option<usize> {
 
 #[test]
 fn the_header_carries_both_panel_affordances_left_of_the_version_chip() {
-  let h = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
+  let h = header_line(
+    "gwm-cli",
+    "/Users/me/Projects/gwm-cli",
+    false,
+    false,
+    120,
+    &Theme::default(),
+  );
   let text = plain(&h.line);
 
   let logs = text.find(COMMAND_LOGS_ICON).expect("no command-logs affordance");
@@ -291,7 +332,7 @@ fn the_header_carries_both_panel_affordances_left_of_the_version_chip() {
 fn the_reported_affordance_columns_are_where_the_glyphs_are_painted() {
   let theme = Theme::default();
   for w in [80usize, 100, 120, 200] {
-    let h = header_line("gwm-cli", "/Users/me/dev/gwm-cli", false, w, &theme);
+    let h = header_line("gwm-cli", "/Users/me/dev/gwm-cli", false, false, w, &theme);
     let logs = h.logs.clone().unwrap_or_else(|| panic!("no logs range at {w} columns"));
     let settings = h
       .settings
@@ -326,7 +367,7 @@ fn a_row_too_narrow_for_the_affordances_drops_them_and_keeps_the_version_chip() 
   // Wide enough for ` gwm <version> ` and the repo badge, not for six more
   // cells of affordance.
   let w = version.chars().count() + 6 + 4;
-  let h = header_line("gwm-cli", "/Users/me/dev/gwm-cli", false, w, &theme);
+  let h = header_line("gwm-cli", "/Users/me/dev/gwm-cli", false, false, w, &theme);
 
   assert!(
     h.logs.is_none(),
@@ -352,7 +393,7 @@ fn a_row_too_narrow_for_the_affordances_drops_them_and_keeps_the_version_chip() 
 fn the_path_is_sacrificed_before_the_affordances() {
   let theme = Theme::default();
   let long = "/Users/me/Projects/some/deeply/nested/place/gwm-cli";
-  let h = header_line("gwm-cli", long, false, 60, &theme);
+  let h = header_line("gwm-cli", long, false, false, 60, &theme);
   let text = plain(&h.line);
 
   assert!(!text.contains(long), "the path should have been truncated: {text:?}");
@@ -360,4 +401,46 @@ fn the_path_is_sacrificed_before_the_affordances() {
     h.logs.is_some() && h.settings.is_some(),
     "the affordances outlive the path: {text:?}"
   );
+}
+
+/// The mode indicator. `M` is the only way to get the terminal's text
+/// selection back, so it is a mode the user sits in — and a mode with no sign
+/// on screen is one they get stuck in: every click doing nothing reads as a
+/// broken build rather than as a switch they threw. The status bar says it
+/// once, at the toggle, and the next message overwrites it.
+#[test]
+fn the_header_says_when_the_mouse_has_been_released() {
+  let theme = Theme::default();
+
+  let on = header_line("gwm-cli", "/tmp/x", false, false, 120, &theme).line;
+  assert!(
+    !plain(&on).contains("mouse"),
+    "the captured state is the default and says nothing: {:?}",
+    plain(&on)
+  );
+
+  let off = header_line("gwm-cli", "/tmp/x", false, true, 120, &theme).line;
+  let text = plain(&off);
+  assert!(text.contains("mouse off"), "no mode indicator: {text:?}");
+  assert!(
+    text.contains(&format!("mouse off · {}", "M")),
+    "the chip has to name the key that undoes it: {text:?}"
+  );
+  assert!(
+    text.contains(&version_token()),
+    "and the pinned chip is still pinned: {text:?}"
+  );
+}
+
+#[test]
+fn the_mouse_chip_is_dropped_before_the_version_chip_on_a_narrow_row() {
+  let theme = Theme::default();
+  let w = version_token().chars().count() + 6 + 4;
+  let line = header_line("gwm-cli", "/tmp/x", false, true, w, &theme).line;
+  assert!(
+    plain(&line).contains(&version_token()),
+    "the version chip outlives every other chip: {:?}",
+    plain(&line)
+  );
+  assert!(display_width(&line) <= w);
 }
