@@ -3829,33 +3829,110 @@ fn settings_tui_tab_anchors_every_value_to_one_right_edge_in_the_compact_layout(
 }
 
 #[test]
-fn settings_value_column_follows_its_labels_and_not_the_frame_edge() {
-  // Issue #622's lesson, one modal over: a column pinned to the right edge of
-  // a rect the content does not fill is worse than the inline value it
-  // replaces — the eye loses the row↔value link across the gap. So the column
-  // is placed against the widest *label*, and the frame growing by 32 columns
-  // must not move it.
+fn settings_value_column_reaches_the_panel_edge_at_every_width() {
+  // The column is right-aligned against the body the panel gives it, so it
+  // ends where the panel ends rather than where the content happens to stop.
+  // The first pass anchored it to the widest label instead, which left the
+  // whole right half of the box empty beside it.
   //
-  // This is what makes the guard above non-vacuous: on its own, "every value
-  // ends in the same column" is satisfied by a column welded to the frame.
+  // This is also what makes the same-right-edge guard above non-vacuous: on
+  // its own, "every value ends in the same column" is satisfied by a block
+  // welded to the left margin.
   let (_dir, mut app) = tui_tab_app();
 
-  let mut gaps = Vec::new();
+  let mut seen = Vec::new();
   for term_w in [100u16, 200] {
     let buf = render_at(&mut app, term_w, 44);
     let rect = modal_rect(&buf).expect("the Settings modal is rendered");
     let (row, edge) = row_right_edge(&buf, rect, "sidebar layout");
     let start = first_content_col(&buf, row, rect.0, rect.0 + rect.2 - 1).expect("the row has content");
-    // The whole block: marker + the widest label + the gap + the widest value.
-    gaps.push((term_w, edge - start, rect.2));
+    // The panel's own inner right edge: the frame is a rule plus two padding
+    // columns each side, so the last cell the body may paint is three in.
+    let inner_right = rect.0 + rect.2 - 1 - 3;
+    assert_eq!(
+      edge,
+      inner_right,
+      "at {term_w} cols the value must end at the panel's inner edge ({inner_right}), not at {edge} — rows:\n{}",
+      modal_rows(&buf).join("\n")
+    );
+    seen.push((term_w, rect.2, edge - start));
   }
-  assert_eq!(
-    gaps[0].1, gaps[1].1,
-    "the value column must not stretch with the frame: {gaps:?}"
+  assert!(
+    seen[1].1 > seen[0].1,
+    "the frame must actually be wider at 200 columns, else the check is vacuous: {seen:?}"
   );
   assert!(
-    gaps[1].2 > gaps[0].2,
-    "the frame itself must actually be wider at 200 columns, else the check is vacuous: {gaps:?}"
+    seen[1].2 > seen[0].2,
+    "and the row must use that extra width rather than leave it empty: {seen:?}"
+  );
+}
+
+/// Cells between the end of `label` and the start of whatever follows it, on
+/// the modal row carrying that label. The measure the value column is made of.
+fn gap_after_label(buf: &Buffer, rect: (u16, u16, u16, u16), label: &str) -> usize {
+  let (row, _) = row_right_edge(buf, rect, label);
+  let (x0, x1) = (rect.0, rect.0 + rect.2 - 1);
+  // Searched by CHARACTER, not by byte: one buffer cell is one character, but
+  // the frame rule `│` and the value markers `‹ ›` are three bytes each, so a
+  // `str::find` offset counts cells nowhere near where it lands. That mistake
+  // is silent — it returns a plausible number — which is why it is spelled out
+  // rather than left to the reader.
+  let cells: Vec<char> = (x0..=x1)
+    .map(|c| buf[(c, row)].symbol().chars().next().unwrap_or(' '))
+    .collect();
+  let needle: Vec<char> = label.chars().collect();
+  let at = cells
+    .windows(needle.len())
+    .position(|w| w == needle.as_slice())
+    .expect("the label is on this row");
+  cells[at + needle.len()..].iter().take_while(|c| **c == ' ').count()
+}
+
+/// The tightest label-to-value gap on the TUI tab as rendered at `term_w`.
+///
+/// The minimum over the rows, not the gap of any one row: a row whose value is
+/// narrower than the widest gets the difference as extra right-alignment
+/// padding, so only the minimum is the panel's actual spacing rule.
+fn tightest_gap_at(app: &mut App, term_w: u16) -> usize {
+  let buf = render_at(app, term_w, 44);
+  let rect = modal_rect(&buf).unwrap_or_else(|| panic!("no Settings modal at {term_w} columns"));
+  TUI_TAB_PROBE_LABELS
+    .iter()
+    .map(|label| gap_after_label(&buf, rect, label))
+    .min()
+    .expect("the probe list is not empty")
+}
+
+#[test]
+fn settings_value_column_stops_shrinking_once_the_panel_is_too_narrow() {
+  // The other end of the rule above. Spending "whatever is left over" works
+  // only while there is something left: past the point where marker + label +
+  // value outgrows the body, the gap has to stop at a floor and let the line
+  // overflow into the horizontal pan that already exists, or the label and its
+  // value run into each other.
+  //
+  // Asserted as an invariance rather than against a number: below the fit
+  // threshold the spacing no longer tracks the panel, so two different narrow
+  // panels give the same gap, while a wide one gives a bigger one. A floor
+  // written as a literal here would just be this file's copy of a constant in
+  // `ui.rs`, and would still pass if the floor were removed and the two narrow
+  // cases both clipped to the same place.
+  let (_dir, mut app) = tui_tab_app();
+  let narrow = tightest_gap_at(&mut app, 40);
+  let narrower_still = tightest_gap_at(&mut app, 48);
+  let wide = tightest_gap_at(&mut app, 200);
+
+  assert_eq!(
+    narrow, narrower_still,
+    "below the fit threshold the gap must stop tracking the panel: 40 cols gave {narrow}, 48 gave {narrower_still}"
+  );
+  assert!(
+    narrow > 0,
+    "and it must never reach zero, which is the label touching its value"
+  );
+  assert!(
+    wide > narrow,
+    "a panel with room still spends it: wide {wide} must beat narrow {narrow}"
   );
 }
 
@@ -3938,8 +4015,27 @@ fn dump_the_settings_panel() {
   //
   //   GWM_DUMP_TAB=tui cargo test --test tui_modal_render_tests \
   //     dump_the_settings_panel -- --ignored --nocapture
-  use gwm::tui::SettingsTab;
+  use gwm::config::{ConfigRow, ConfigSource};
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{build_key_rows, SettingsTab};
   let (_dir, mut app) = make_app();
+  // The two dynamic tabs are empty until the event loop fills them, so seed
+  // them here or the dump shows their placeholder instead of their layout.
+  app.config_panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  app.config_panel.rows = [
+    "worktree.base",
+    "worktree.path_pattern",
+    "tui.layout",
+    "tui.sidebar_position",
+  ]
+  .iter()
+  .map(|k| ConfigRow {
+    key: (*k).to_string(),
+    value: "\"something\"".into(),
+    source: ConfigSource::Default,
+  })
+  .collect();
   app.config_panel.tab = match std::env::var("GWM_DUMP_TAB").as_deref() {
     Ok("theme") => SettingsTab::Theme,
     Ok("worktree") => SettingsTab::Worktree,

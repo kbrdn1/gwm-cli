@@ -5571,7 +5571,7 @@ fn scrollbar_reserve(area: Rect, content_len: usize) -> u16 {
 /// top-level section with a colour-coded source column (repo / user /
 /// default). The pre-#279 Configuration view, now one tab of the Settings
 /// overlay.
-fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
+fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
@@ -5582,17 +5582,25 @@ fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
     return lines;
   }
+  // Same column arithmetic as the other tabs (#623). The ` = ` that used to
+  // join the key and its value goes with it: the value now sits in a column of
+  // its own, and an `=` stranded next to a left-aligned key would point at
+  // nothing. A wide value collapses the gap to `SETTINGS_VALUE_GAP` and the
+  // row reads exactly as it did before, which is the case this tab is full of.
+  let key_w = app.config_panel.rows.iter().map(|r| cells(&r.key)).max().unwrap_or(0);
+  let value_w = app.config_panel.rows.iter().map(|r| cells(&r.value)).max().unwrap_or(0);
+  let lead_w = 2 + SETTINGS_SOURCE_W + 2 + key_w;
+  let gap = width.saturating_sub(lead_w + value_w).max(SETTINGS_VALUE_GAP);
+  let rule_w = (lead_w + gap + value_w).min(width.max(1));
+
   let mut current_section: Option<String> = None;
   for row in &app.config_panel.rows {
     let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
     if current_section.as_deref() != Some(section.as_str()) {
-      if current_section.is_some() {
-        lines.push(Line::from(String::new()));
-      }
-      lines.push(Line::from(Span::styled(
-        format!("[{section}]"),
-        help_section_style(accent),
-      )));
+      // The same labelled rule the other tabs wear since #623, in place of a
+      // bare `[table]` over a blank line: one section idiom across the panel,
+      // and it costs a row per section instead of two.
+      lines.push(settings_section_rule(&format!("[{section}]"), rule_w, accent, muted));
       current_section = Some(section);
     }
     let src_color = match row.source {
@@ -5600,12 +5608,16 @@ fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
       ConfigSource::User => app.theme.branch,
       ConfigSource::Default => muted,
     };
+    let pad = key_w.saturating_sub(cells(&row.key)) + gap + value_w.saturating_sub(cells(&row.value));
     lines.push(Line::from(vec![
       Span::raw("  "),
-      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::styled(
+        format!("{:<width$}", row.source.label(), width = SETTINGS_SOURCE_W),
+        Style::default().fg(src_color),
+      ),
       Span::raw("  "),
       Span::styled(row.key.clone(), label_style),
-      Span::styled(" = ", muted_style),
+      Span::raw(" ".repeat(pad)),
       Span::styled(row.value.clone(), Style::default().fg(Color::White)),
     ]));
   }
@@ -5638,21 +5650,95 @@ pub fn settings_value_cell(field: SettingField, cfg: &Config) -> String {
 /// Cells the selection-marker column costs (` › `).
 const SETTINGS_MARKER_W: usize = 3;
 
-/// Cells between the widest label and the value column (issue #623). Two, not
-/// a stretch to the frame: see [`settings_fields_lines`].
+/// Cells the `repo` / `user` / `default` source badge column costs.
+const SETTINGS_SOURCE_W: usize = 7;
+
+/// Smallest gap between a label and its value, for the panel too narrow to
+/// hold the full block (issue #623). Above it the gap is whatever is left.
 const SETTINGS_VALUE_GAP: usize = 2;
 
+/// Whether the selected field's edit would be shadowed by a higher-precedence
+/// layer (issue #279): editing the Global layer for a field the repo overrides
+/// will not change the effective value.
+///
+/// Its own predicate because the guidance takes a line of its own since #623,
+/// so the row counter that sizes the panel and the renderer that paints it
+/// have to agree on whether that line exists.
+fn settings_shadow_note(app: &App, fields: &[SettingField]) -> bool {
+  let panel = &app.config_panel;
+  panel.layer.source() == ConfigSource::User
+    && fields
+      .get(panel.selected)
+      .is_some_and(|f| panel.field_source(*f) == Some(ConfigSource::Repo))
+}
+
+/// Rows [`settings_fields_lines`] will produce: one per field, one per section
+/// rule, and one for the shadow guidance when it applies.
+///
+/// Split out because the two now depend on each other in a circle: the lines
+/// need the body width, which comes from the layout, which needs the row count.
+/// The count is the half that does not need the width.
+fn settings_fields_rows(app: &App, fields: &[SettingField]) -> usize {
+  let mut rows = fields.len() + usize::from(settings_shadow_note(app, fields));
+  let mut current: Option<&'static str> = None;
+  for field in fields {
+    if let Some(section) = field.section() {
+      if current != Some(section) {
+        rows += 1;
+        current = Some(section);
+      }
+    }
+  }
+  rows
+}
+
+/// Rows [`settings_all_lines`] will produce: one per resolved row, one per
+/// section rule. Same reason as [`settings_fields_rows`]: the lines need the
+/// body width, the layout needs the count.
+fn settings_all_rows(app: &App) -> usize {
+  if app.config_panel.rows.is_empty() {
+    return 1;
+  }
+  let mut rows = app.config_panel.rows.len();
+  let mut current: Option<&str> = None;
+  for row in &app.config_panel.rows {
+    let section = row.key.split(['.', '[']).next().unwrap_or("");
+    if current != Some(section) {
+      rows += 1;
+      current = Some(section);
+    }
+  }
+  rows
+}
+
+/// Rows [`settings_keys_lines`] will produce: one per binding, one per scope
+/// rule.
+fn settings_keys_rows(app: &App) -> usize {
+  if app.config_panel.key_rows.is_empty() {
+    return 1;
+  }
+  let mut rows = app.config_panel.key_rows.len();
+  let mut current: Option<&str> = None;
+  for row in &app.config_panel.key_rows {
+    if current != Some(row.scope.as_str()) {
+      rows += 1;
+      current = Some(row.scope.as_str());
+    }
+  }
+  rows
+}
+
 /// A labelled rule opening a section inside an editable tab (issue #623):
-/// `─ Sidebar ───`, drawn to the width of the row block so it frames the
-/// value column rather than running past it or stopping short of it.
+/// `─ Sidebar ───`, drawn to the body width so it rails the eye from the
+/// label across to the value column instead of stopping short of it.
 ///
 /// No blank row above it. The rule *is* the separation, and the TUI tab pays
 /// seven of them: a blank each would cost seven more rows on a tab whose box
 /// already stops at [`SETTINGS_HEIGHT_BOUNDS`]'s 32-row ceiling, tipping it
 /// into a scroll it does not otherwise need.
-fn settings_section_rule(name: &str, block_w: usize, accent: Color, muted: Color) -> Line<'static> {
+fn settings_section_rule(name: &str, width: usize, accent: Color, muted: Color) -> Line<'static> {
   let lead = format!(" ─ {name} ");
-  let tail = block_w.saturating_sub(cells(&lead));
+  let tail = width.saturating_sub(cells(&lead));
   Line::from(vec![
     Span::styled(" ─ ".to_string(), Style::default().fg(muted)),
     Span::styled(name.to_string(), help_section_style(accent)),
@@ -5661,30 +5747,27 @@ fn settings_section_rule(name: &str, block_w: usize, accent: Color, muted: Color
 }
 
 /// Build an editable-tab body: one row per [`SettingField`], grouped under the
-/// labelled rules of [`SettingField::section`], with the values in a
-/// right-aligned column (issue #623). The selected row is marked and its value
-/// reads in the accent; the field under edit shows its live buffer with a
-/// cursor; a field whose effective value is shadowed by a higher-precedence
-/// layer carries an inline guidance note (issue #279, which honours "edit both
-/// layers" without a silent dead edit).
+/// labelled rules of [`SettingField::section`], with the values right-aligned
+/// in a column of their own (issue #623). The selected row is marked and its
+/// value reads in the accent; the field under edit shows its live buffer with
+/// a cursor.
 ///
 /// Returns the line index of the selected row, the way [`settings_keys_lines`]
 /// already did. The section rules mean the field index is no longer the line
 /// index, and recovering the offset at the call site would be the placement
 /// rule computed a second time, which is the whole of #550's story.
 ///
-/// **The column is placed against the widest label, not against the frame's
-/// right edge.** That is issue #622's lesson one modal over: this panel runs to
-/// 96 columns for a block that rarely passes fifty, so a column welded to the
-/// frame would put forty cells of nothing between a row and its value and break
-/// the row-to-value link harder than the inline value it replaces. #622 made
-/// exactly this change to the Working Tree overlay, replacing #592's "pinned to
-/// the modal edge" with "a gap after the longest line".
+/// **The column is right-aligned against `width`**, the body the panel
+/// actually gives it, so the values reach the panel's edge instead of sitting
+/// in a content-sized block with the rest of the box empty beside them. The
+/// section rules span the same width, which is what keeps the row and its
+/// value visually joined across the gap the panel's own width opens up.
 ///
-/// Measured per tab, from the `fields` slice it is handed: one width shared by
-/// every tab would float the Theme tab's single row out to wherever the TUI
-/// tab's 26-character label happens to sit.
-fn settings_fields_lines(app: &App, fields: &[SettingField]) -> (Vec<Line<'static>>, Option<usize>) {
+/// The gap collapses to [`SETTINGS_VALUE_GAP`] when the block outgrows the
+/// body, which is the narrow-terminal case: the line then overflows and the
+/// existing horizontal pan reaches it, rather than the label and the value
+/// running into each other.
+fn settings_fields_lines(app: &App, fields: &[SettingField], width: usize) -> (Vec<Line<'static>>, Option<usize>) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
@@ -5712,13 +5795,16 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> (Vec<Line<'stati
   // column the moment a value stops being ASCII.
   let label_w = fields.iter().map(|f| cells(f.label())).max().unwrap_or(0);
   let value_w = values.iter().map(|v| cells(v)).max().unwrap_or(0);
-  let block_w = SETTINGS_MARKER_W + label_w + SETTINGS_VALUE_GAP + value_w;
+  let gap = width
+    .saturating_sub(SETTINGS_MARKER_W + label_w + value_w)
+    .max(SETTINGS_VALUE_GAP);
+  let rule_w = (SETTINGS_MARKER_W + label_w + gap + value_w).min(width.max(1));
 
   let mut current_section: Option<&'static str> = None;
   for ((i, field), value) in fields.iter().enumerate().zip(values.iter()) {
     if let Some(section) = field.section() {
       if current_section != Some(section) {
-        lines.push(settings_section_rule(section, block_w, accent, muted));
+        lines.push(settings_section_rule(section, rule_w, accent, muted));
         current_section = Some(section);
       }
     }
@@ -5739,21 +5825,29 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> (Vec<Line<'stati
     // The padding goes BEFORE the value, never after. A line that ends in
     // spaces widens `Line::width`, which is what publishes `max_x_scroll`, so
     // a trailing pad would buy the user a horizontal pan into empty space.
-    let pad = label_w.saturating_sub(cells(field.label())) + SETTINGS_VALUE_GAP + value_w.saturating_sub(cells(value));
-    let mut spans = vec![
+    let pad = label_w.saturating_sub(cells(field.label())) + gap + value_w.saturating_sub(cells(value));
+    lines.push(Line::from(vec![
       Span::styled(format!(" {marker} "), marker_style),
       Span::styled(field.label().to_string(), label_style),
       Span::raw(" ".repeat(pad)),
       Span::styled(value.clone(), value_style),
-    ];
-    // Shadow guidance: editing the Global layer for a field the repo
-    // overrides won't change the effective value (repo wins). Surface it
-    // rather than silently no-op or hard-disable the field.
-    if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
-    {
-      spans.push(Span::styled("  (set in .gwm.toml; switch to Project)", muted_style));
+    ]));
+    // Shadow guidance: editing the Global layer for a field the repo overrides
+    // won't change the effective value (repo wins). Surface it rather than
+    // silently no-op or hard-disable the field.
+    //
+    // On a line of its own since the value column reaches the panel's edge:
+    // trailing the value, it had nowhere left to go and would only be readable
+    // by panning sideways.
+    if selected && settings_shadow_note(app, fields) {
+      lines.push(Line::from(Span::styled(
+        format!(
+          "{}set in .gwm.toml; switch to Project to change it",
+          " ".repeat(SETTINGS_MARKER_W + 2)
+        ),
+        muted_style,
+      )));
     }
-    lines.push(Line::from(spans));
   }
   (lines, selected_line)
 }
@@ -5765,7 +5859,7 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> (Vec<Line<'stati
 /// strokes. Returns the line index of the selected row so the caller can keep
 /// it in view (this body is far taller than the viewport). Mirrors
 /// [`settings_all_lines`]'s section grouping + source colours.
-fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
+fn settings_keys_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Option<usize>) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
@@ -5779,16 +5873,31 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
     return (lines, None);
   }
 
+  // Same column arithmetic as the editable tabs (#623): the source badge and
+  // the label lead, the binding is right-aligned against the body the panel
+  // gives it. `(unbound)` and the `[ … ]` capture input are part of the
+  // measure, so arming a capture does not shift the column.
+  let label_w = panel.key_rows.iter().map(|r| cells(&r.label)).max().unwrap_or(0);
+  let key_w = panel
+    .key_rows
+    .iter()
+    .map(|r| cells(if r.keys.is_empty() { "(unbound)" } else { &r.keys }))
+    .chain(std::iter::once(cells("[ 0000000000_ ]")))
+    .max()
+    .unwrap_or(0);
+  let lead_w = SETTINGS_MARKER_W + SETTINGS_SOURCE_W + 1 + label_w;
+  let gap = width.saturating_sub(lead_w + key_w).max(SETTINGS_VALUE_GAP);
+  let rule_w = (lead_w + gap + key_w).min(width.max(1));
+
   let mut current_scope: Option<String> = None;
   for (i, row) in panel.key_rows.iter().enumerate() {
     if current_scope.as_deref() != Some(row.scope.as_str()) {
-      if current_scope.is_some() {
-        lines.push(Line::from(String::new()));
-      }
-      lines.push(Line::from(Span::styled(
-        format!("[{}]", row.scope),
-        help_section_style(accent),
-      )));
+      lines.push(settings_section_rule(
+        &format!("[{}]", row.scope),
+        rule_w,
+        accent,
+        muted,
+      ));
       current_scope = Some(row.scope.clone());
     }
 
@@ -5805,38 +5914,40 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
       ConfigSource::Default => muted,
     };
 
-    let key_span = if capturing {
+    let (shown, key_style) = if capturing {
       let pending = panel
         .capture
         .as_ref()
         .map(|c| c.pending.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" "))
         .unwrap_or_default();
-      Span::styled(
+      (
         format!("[ {pending}_ ]"),
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
       )
+    } else if row.keys.is_empty() {
+      ("(unbound)".to_string(), muted_style)
+    } else if selected {
+      (
+        row.keys.clone(),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      )
     } else {
-      let shown = if row.keys.is_empty() {
-        "(unbound)".to_string()
-      } else {
-        row.keys.clone()
-      };
-      let style = if row.keys.is_empty() {
-        muted_style
-      } else if selected {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-      } else {
-        Style::default().fg(Color::White)
-      };
-      Span::styled(shown, style)
+      (row.keys.clone(), Style::default().fg(Color::White))
     };
 
+    // Padding BEFORE the binding, so a row never ends in spaces: `Line::width`
+    // is what publishes `max_x_scroll`, and a trailing pad is a pan into void.
+    let pad = label_w.saturating_sub(cells(&row.label)) + gap + key_w.saturating_sub(cells(&shown));
     lines.push(Line::from(vec![
       Span::styled(format!(" {marker} "), marker_style),
-      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::styled(
+        format!("{:<width$}", row.source.label(), width = SETTINGS_SOURCE_W),
+        Style::default().fg(src_color),
+      ),
       Span::raw(" "),
-      Span::styled(format!("{:<24}", row.label), label_style),
-      key_span,
+      Span::styled(row.label.clone(), label_style),
+      Span::raw(" ".repeat(pad)),
+      Span::styled(shown, key_style),
     ]));
   }
   (lines, selected_line)
@@ -5880,31 +5991,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   }
   let header_lines = vec![subtitle, Line::from(String::new()), Line::from(tab_spans)];
 
-  // Body depends on the active tab. Every tab with a selection reports the line
-  // index of the selected row so the renderer can scroll it into view.
-  //
-  // This used to be Keys-only, on the reasoning that "the field tabs are short
-  // enough to never need this". That was wrong on any short terminal: the modal
-  // is 60% of the height, so 24 lines leave ~6 body rows, and the TUI tab has
-  // had more fields than that since well before #367 added an 8th. The result
-  // was a selection that walked off screen — the user cycling or editing a row
-  // they cannot see (Codex review #368 P2).
-  //
-  // `settings_fields_lines` renders exactly one line per field, so the field
-  // index *is* the line index.
-  let mut selected_line: Option<usize> = None;
-  let body_lines = match tab {
-    SettingsTab::All => settings_all_lines(app),
-    SettingsTab::Keys => {
-      let (lines, sel) = settings_keys_lines(app);
-      selected_line = sel;
-      lines
-    }
-    other => {
-      let (lines, sel) = settings_fields_lines(app, other.fields());
-      selected_line = sel;
-      lines
-    }
+  // Since #623 the body is built in two passes, because the two halves depend
+  // on each other in a circle: every tab right-aligns a column against the
+  // body width, which comes from the layout, and the layout is sized to the
+  // row count. The count is the half that does not need the width, so it goes
+  // first and the lines are built once the rect exists.
+  let body_rows = match tab {
+    SettingsTab::All => settings_all_rows(app),
+    SettingsTab::Keys => settings_keys_rows(app),
+    other => settings_fields_rows(app, other.fields()),
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
@@ -5927,7 +6022,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // Worktree, 173 for Keys), and with the floor and ceiling in place it
   // settles into two sizes rather than a continuum.
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let content_rows = header_h + body_lines.len() as u16 + 2 /* gap + footer */ + frame.rows();
+  let content_rows = header_h + body_rows as u16 + 2 /* gap + footer */ + frame.rows();
   let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
   let area = centered_content(
     60,
@@ -5948,6 +6043,35 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   .areas(inner);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // The width the lines are laid out against: the body rect, less whatever the
+  // scrollbar is about to take, less one cell of gutter so a right-aligned
+  // column does not butt straight against the thumb. `scrollbar_reserve` is
+  // the predicate `scrollable_body_area` itself uses (issue #622 split it out
+  // for exactly this), so the column cannot end up under the thumb; the gutter
+  // only exists when the thumb does.
+  let reserve = scrollbar_reserve(body_area, body_rows);
+  let text_w = body_area.width.saturating_sub(reserve + u16::from(reserve > 0)) as usize;
+
+  // Every tab with a selection reports the line index of the selected row so
+  // the renderer can scroll it into view.
+  //
+  // This used to be Keys-only, on the reasoning that "the field tabs are short
+  // enough to never need this". That was wrong on any short terminal: the modal
+  // is 60% of the height, so 24 lines leave ~6 body rows, and the TUI tab has
+  // had more fields than that since well before #367 added an 8th. The result
+  // was a selection that walked off screen — the user cycling or editing a row
+  // they cannot see (Codex review #368 P2).
+  let (body_lines, selected_line) = match tab {
+    SettingsTab::All => (settings_all_lines(app, text_w), None),
+    SettingsTab::Keys => settings_keys_lines(app, text_w),
+    other => settings_fields_lines(app, other.fields(), text_w),
+  };
+  debug_assert_eq!(
+    body_lines.len(),
+    body_rows,
+    "the row count the panel was sized to must be the number of lines built"
+  );
 
   // Publish scroll bounds against the BODY viewport only (issue #279).
   let body_viewport = body_area.height as usize;

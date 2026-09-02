@@ -21,17 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single undivided run mixing layout, sidebar, editing, open, multiplexer,
   browser and refresh knobs, and the five tabs were bare words.
 
-  Values now sit in a column of their own, and the shape carries the kind: a
-  choice reads `‹ value ›`, a boolean reads `[✓]` / `[ ]`, a typed value reads
-  plain, and an optional text field nobody has set reads `(unset)` instead of
-  leaving the column blank. The column is right-aligned against the widest
-  *label*, not against the panel's edge: this modal runs to 96 columns for a
-  block that rarely passes fifty, and a column welded to the frame would put
-  forty cells of nothing between a row and its value. That is the same call
-  [#622](https://github.com/kbrdn1/gwm-cli/issues/622) made for the Working
-  Tree overlay. The `TUI` tab groups its rows under labelled rules
+  Every tab now reads as two columns: what a row is on the left, what it is set
+  to on the right, right-aligned against the panel's own edge so its width is
+  used rather than left empty beside a content-sized block. On the editable
+  tabs the shape carries the kind: a choice reads `‹ value ›`, a boolean reads
+  `[✓]` / `[ ]`, a typed value reads plain, and an optional text field nobody
+  has set reads `(unset)` instead of leaving the column blank. `Keys` puts its
+  binding there and `All` its resolved value, dropping the ` = ` that used to
+  join a key to it. On a panel too narrow for both columns the gap falls back
+  to a minimum and the row pans sideways, as it always did.
+
+  Sections are labelled rules across every tab: the `TUI` tab gains seven
   (Appearance, Sidebar, Editing, Open, Multiplexer, Browser, Timing), which
-  reorders the fields into those runs, and each tab is led by a codicon glyph.
+  reorders its fields into those runs, and the `[global]` / `[table]` headings
+  the `Keys` and `All` tabs already had become the same rule over a blank line,
+  saving a row per section. Each tab is led by a codicon glyph.
 
   `←` / `→` now adjust the selected choice, one value back or forward. The
   issue described them as already doing this; they did not, since
