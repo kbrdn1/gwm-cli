@@ -2840,15 +2840,17 @@ fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
   app.view = View::WorkingTree;
 
   // Wide: the counts are drawn, and nothing but the border follows them.
+  // #622 adds the status letter to their right, so what trails the counts is
+  // asserted up to that letter rather than to the border directly.
   let wide = render_at(&mut app, 180, 40);
   let rows = modal_rows(&wide);
   let row = rows
     .iter()
     .find(|r| r.contains("ui.rs"))
-    .unwrap_or_else(|| panic!("no row for the file — modal was:\n{}", rows.join("\n")));
+    .unwrap_or_else(|| panic!("no row for the file. modal was:\n{}", rows.join("\n")));
   assert!(
     row.contains("+120 -34"),
-    "the counts ride the row they describe — got {row:?}"
+    "the counts ride the row they describe: got {row:?}"
   );
   let after = row.find("+120 -34").unwrap() + "+120 -34".len();
   assert!(
@@ -2871,6 +2873,128 @@ fn the_working_tree_counts_ride_the_right_edge_and_yield_to_a_narrow_name() {
   assert!(
     !row.contains("+120"),
     "the column yields before the name does — got {row:?}"
+  );
+}
+
+#[test]
+fn the_working_tree_title_counts_the_changed_files_not_the_rows() {
+  use gwm::tui::WorkingTreeCounts;
+  use ratatui::text::Line;
+
+  // Issue #622: the reference layout puts a progress counter in the header.
+  // The honest gwm equivalent is the changed-file count, and it comes from
+  // the counts rather than `lines.len()`: the rows also hold directories
+  // and the sentinels, none of which is a changed file.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![
+    Line::from("├─ src/tui/"),
+    Line::from("│  └─ ui.rs"),
+    Line::from("└─ README.md"),
+    Line::from("… 4 more"),
+  ];
+  app.working_tree.counts = WorkingTreeCounts {
+    created: 1,
+    modified: 5,
+    deleted: 1,
+  };
+  app.view = View::WorkingTree;
+
+  let rows = modal_rows(&render_at(&mut app, 180, 40));
+  let title = rows
+    .iter()
+    .find(|r| r.contains("Working Tree"))
+    .unwrap_or_else(|| panic!("no title row: modal was:\n{}", rows.join("\n")));
+  assert!(
+    title.contains("Working Tree (7)"),
+    "the title counts the changed files, not the four rendered rows: got {title:?}"
+  );
+
+  // While the worker is out the counts are zero, and `(0)` over a listing
+  // nobody has read yet is a claim rather than a count.
+  app.working_tree.begin(Some(std::path::Path::new("/tmp/whatever")));
+  assert!(app.working_tree.loading, "begin arms the loader");
+  let rows = modal_rows(&render_at(&mut app, 180, 40));
+  let title = rows
+    .iter()
+    .find(|r| r.contains("Working Tree"))
+    .unwrap_or_else(|| panic!("no title row: modal was:\n{}", rows.join("\n")));
+  assert!(
+    !title.contains('('),
+    "the loader frame withholds the count rather than claiming zero: got {title:?}"
+  );
+}
+
+#[test]
+fn the_status_letter_rides_the_right_edge_and_outlives_the_counts() {
+  use gwm::tui::MetaColumn;
+  use ratatui::text::Line;
+
+  // Issue #622: two right-hand columns, and they yield in a fixed order.
+  // `+120 -34` says how much changed, the letter says what changed. A row
+  // that no longer says what it is has lost its subject, not its detail, so
+  // the letter takes the outer slot and is the one that survives a squeeze.
+  let (_dir, mut app) = make_app();
+  app.working_tree.lines = vec![Line::from("├─ src/tui/"), Line::from("└─ ui.rs")];
+  app.working_tree.meta = MetaColumn {
+    lines: vec![Line::from(""), Line::from("+120 -34")],
+    width: 8,
+  };
+  app.working_tree.badges = MetaColumn {
+    lines: vec![Line::from(""), Line::from("M")],
+    width: 1,
+  };
+  app.view = View::WorkingTree;
+
+  // Wide: both are drawn, the letter outermost and flush against the border.
+  let rows = modal_rows(&render_at(&mut app, 180, 40));
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("no row for the file. modal was:\n{}", rows.join("\n")));
+  let counts_at = row
+    .find("+120 -34")
+    .unwrap_or_else(|| panic!("the counts are drawn: got {row:?}"));
+  let letter_at = row
+    .rfind('M')
+    .unwrap_or_else(|| panic!("the status letter is drawn: got {row:?}"));
+  assert!(letter_at > counts_at, "the letter sits outside the counts: got {row:?}");
+  assert!(
+    row[letter_at + 1..].chars().all(|c| c == ' ' || c == '│' || c == '║'),
+    "and nothing but padding and the border follows it: got {row:?}"
+  );
+
+  // Narrow enough to drop the counts, wide enough to keep the letter. The
+  // modal takes 90% of the terminal and spends two cells on its border, so
+  // 38 columns leave a 32-cell body: past the `1 + META_GAP + WT_BADGE_FLOOR`
+  // (11) the letter needs, and the 29 cells it leaves are under the
+  // `8 + META_GAP + WT_NAME_FLOOR` (34) the counts would need. 48 would NOT
+  // do: it leaves 40, which seats both, and the assertion would pass for the
+  // wrong reason.
+  let rows = modal_rows(&render_at(&mut app, 38, 40));
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("the name is never what is dropped. modal was:\n{}", rows.join("\n")));
+  assert!(
+    !row.contains("+120"),
+    "the counts are the column that yields first: got {row:?}"
+  );
+  assert!(
+    row.trim_end_matches([' ', '│', '║']).ends_with('M'),
+    "the letter survives the squeeze, still pinned right: got {row:?}"
+  );
+
+  // Narrower still: on a 22-column terminal the body is 17 cells, under the
+  // 11 + 8 both columns would need together but past what the letter alone
+  // costs. It is the last thing standing beside the name.
+  let rows = modal_rows(&render_at(&mut app, 22, 40));
+  let row = rows
+    .iter()
+    .find(|r| r.contains("ui.rs"))
+    .unwrap_or_else(|| panic!("the name survives whatever else goes. modal was:\n{}", rows.join("\n")));
+  assert!(
+    row.trim_end_matches([' ', '│', '║']).ends_with('M'),
+    "the letter is what a narrow overlay keeps: got {row:?}"
   );
 }
 

@@ -18,7 +18,7 @@ use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
-use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_OPEN_ICON};
+use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_CARET};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
 use crate::config::ConfigSource;
@@ -53,6 +53,15 @@ pub struct SidebarSections {
   pub worktree: Vec<Line<'static>>,
   /// `git status --short` lines, or `✓ clean`, or a load error.
   pub working_tree: Vec<Line<'static>>,
+  /// The `M` / `A` / `D` / `?` status letter of each Working Tree row, in
+  /// its own right-aligned column (issue #622). One entry per row, empty
+  /// on a directory and on the sentinels, so the two stay in step under
+  /// the pane's scroll.
+  pub working_tree_badges: MetaColumn,
+  /// The `+N -M` line counts of each Working Tree row, inside the letters
+  /// (issue #622). The pane reads the same two columns the full-size
+  /// overlay does, and drops this one first when it runs out of width.
+  pub working_tree_meta: MetaColumn,
   /// Per-category counts of changed files (issue #287): created / modified
   /// / deleted, driving the colour-coded nerdfont footer of the Working
   /// Tree pane.
@@ -1212,6 +1221,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         }
         super::state::sidebar::SidebarMode::Stashes => Vec::new(),
       },
+      // The loader row has no status letter and no counts, so both columns
+      // stay empty and the placeholder keeps the payload's shape.
+      working_tree_badges: MetaColumn::default(),
+      working_tree_meta: MetaColumn::default(),
       working_tree_counts: WorkingTreeCounts::default(),
       recent_commits: vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))],
     }
@@ -1394,7 +1407,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       f,
       chunks[3],
       working_tree_title,
-      SectionBody::new(&sections.working_tree),
+      SectionBody::with_meta(
+        &sections.working_tree,
+        &sections.working_tree_badges,
+        &sections.working_tree_meta,
+      ),
       chrome,
       wt_scroll,
       working_tree_footer,
@@ -1432,20 +1449,41 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 struct SectionBody<'a> {
   prefix: &'a [Line<'a>],
   lines: &'a [Line<'a>],
+  /// Right-aligned columns painted beside `lines`, one entry per row, at
+  /// the section's own scroll offset (issue #622). `None` for every section
+  /// but the Working Tree.
+  meta: Option<SectionMeta<'a>>,
 }
 
 impl<'a> SectionBody<'a> {
   /// Section body with no leading live line (Issue / PR, Working Tree,
   /// Recent Commits, and the `(nothing selected)` placeholder).
   fn new(lines: &'a [Line<'a>]) -> Self {
-    Self { prefix: &[], lines }
+    Self {
+      prefix: &[],
+      lines,
+      meta: None,
+    }
+  }
+
+  /// Section body with its right-aligned columns beside it (issue #622).
+  fn with_meta(lines: &'a [Line<'a>], badges: &'a MetaColumn, stats: &'a MetaColumn) -> Self {
+    Self {
+      prefix: &[],
+      lines,
+      meta: Some(SectionMeta { badges, stats }),
+    }
   }
 
   /// Section body whose first rows are per-frame live lines — the worktree
   /// identity block, led by the `● <name>` status-dot header (and, since
   /// issue #408, an optional agent summary line).
   fn with_prefix(prefix: &'a [Line<'a>], lines: &'a [Line<'a>]) -> Self {
-    Self { prefix, lines }
+    Self {
+      prefix,
+      lines,
+      meta: None,
+    }
   }
 }
 
@@ -1466,7 +1504,7 @@ fn render_section(
   scroll: u16,
   footer: Option<ratatui::text::Line<'static>>,
 ) {
-  let SectionBody { prefix, lines } = body;
+  let SectionBody { prefix, lines, meta } = body;
   // Pad content with one leading space per line for breathing room against
   // the left border. Each padded line BORROWS its span content from the
   // source line (`Span::styled(&str, style)` yields a `Cow::Borrowed`, zero
@@ -1497,12 +1535,10 @@ fn render_section(
       height: area.height.saturating_sub(1),
       ..area
     };
-    f.render_widget(
-      Paragraph::new(padded).style(chrome.body_style()).scroll((scroll, 0)),
-      body_area,
-    );
+    render_section_body(f, body_area, padded, meta.as_ref(), chrome.body_style(), scroll);
     return;
   }
+
   let mut block = Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
@@ -1514,11 +1550,121 @@ fn render_section(
   // `body_style` applies here too, not only on the compact path above:
   // `dim_unfocused` is about focus, not about how the pane is framed
   // (Codex review, PR #546 — the bordered sidebar was never dimmed).
-  let paragraph = Paragraph::new(padded)
-    .block(block)
-    .style(chrome.body_style())
-    .scroll((scroll, 0));
-  f.render_widget(paragraph, area);
+  // Without a right-hand column the paragraph keeps carrying its own
+  // block: `Paragraph::style` paints the whole rect, rules included, and
+  // splitting the render would move that ground off the border.
+  let Some(meta) = meta.filter(|m| m.badges.width > 0 || m.stats.width > 0) else {
+    let paragraph = Paragraph::new(padded)
+      .block(block)
+      .style(chrome.body_style())
+      .scroll((scroll, 0));
+    f.render_widget(paragraph, area);
+    return;
+  };
+  let inner = block.inner(area);
+  f.render_widget(
+    Paragraph::new(Vec::<Line<'_>>::new())
+      .block(block)
+      .style(chrome.body_style()),
+    area,
+  );
+  render_section_body(f, inner, padded, Some(&meta), chrome.body_style(), scroll);
+}
+
+/// Paint a section's rows into `area`, with its right-hand column beside
+/// them when there is one and the rect can seat it (issue #622).
+///
+/// The column is inset by whatever the scrollbar the caller draws over this
+/// same rect will claim. [`scrollbar_reserve`] is the single owner of that
+/// rule, so the letters can never end up under the thumb.
+fn render_section_body(
+  f: &mut Frame,
+  area: Rect,
+  lines: Vec<Line<'_>>,
+  meta: Option<&SectionMeta<'_>>,
+  style: Style,
+  scroll: u16,
+) {
+  let Some(meta) = meta.filter(|m| m.badges.width > 0 || m.stats.width > 0) else {
+    f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), area);
+    return;
+  };
+  // The scrollbar the caller paints over this same rect claims the right
+  // edge; the columns sit inside whatever it leaves.
+  let usable = Rect {
+    width: area.width.saturating_sub(scrollbar_reserve(area, lines.len())),
+    ..area
+  };
+  let (left, [badges, stats]) = carve_meta_columns(
+    usable,
+    [(meta.badges.width, WT_BADGE_FLOOR), (meta.stats.width, WT_NAME_FLOOR)],
+  );
+  f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), left);
+  for (rect, column) in [(badges, meta.badges), (stats, meta.stats)] {
+    if let Some(rect) = rect {
+      f.render_widget(
+        Paragraph::new(column.lines.clone())
+          .style(style)
+          .right_aligned()
+          .scroll((scroll, 0)),
+        rect,
+      );
+    }
+  }
+}
+
+/// The right-hand columns a section paints beside its rows (issue #622):
+/// the status letters outermost, the `+N -M` counts inside them. Borrowed
+/// from the sidebar cache, so a warm frame copies neither.
+#[derive(Clone, Copy)]
+struct SectionMeta<'a> {
+  badges: &'a MetaColumn,
+  stats: &'a MetaColumn,
+}
+
+/// Take `width` cells plus a [`META_GAP`] off the right of `area`, returning
+/// the content rect and the column rect.
+fn carve_right(area: Rect, width: usize) -> (Rect, Rect) {
+  let [left, _gap, right] = Layout::horizontal([
+    Constraint::Min(0),
+    Constraint::Length(META_GAP as u16),
+    Constraint::Length(width as u16),
+  ])
+  .areas(area);
+  (left, right)
+}
+
+/// Lay out up to N right-hand columns against `area`, outermost first.
+///
+/// `columns` is `(width, floor)` per column in **outside-in** order, so the
+/// Working Tree passes its status letter before its `+N -M` counts: the
+/// letter takes the outer slot, and a narrowing rect drops the counts first.
+/// Returns the rect left for the content plus one `Option<Rect>` per column,
+/// in the order given.
+///
+/// Every column is afforded against the width the terminal gave, minus what
+/// the columns already granted cost, and only then carved. Deciding against
+/// an already-carved rect would price a column twice.
+fn carve_meta_columns<const N: usize>(area: Rect, columns: [(usize, usize); N]) -> (Rect, [Option<Rect>; N]) {
+  let mut granted = [None; N];
+  let mut spent = 0usize;
+  for (i, (width, floor)) in columns.iter().enumerate() {
+    let Some(picked) = meta_pick((area.width as usize).saturating_sub(spent), &[*width], *floor) else {
+      continue;
+    };
+    granted[i] = Some(picked);
+    spent += picked + META_GAP;
+  }
+  let mut rest = area;
+  let mut rects = [None; N];
+  for (i, picked) in granted.iter().enumerate() {
+    if let Some(picked) = picked {
+      let (left, right) = carve_right(rest, *picked);
+      rest = left;
+      rects[i] = Some(right);
+    }
+  }
+  (rest, rects)
 }
 
 /// Lazygit-style header line: `● <name>` where the dot's colour tracks
@@ -1646,14 +1792,16 @@ pub fn build_sidebar_sections(
     // follow-up list; v1 ships `<ref>  <subject>` only.
     SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
-  let (working_tree, working_tree_counts) = match mode {
-    SidebarMode::Commits => working_tree_lines(w, theme),
-    SidebarMode::Stashes => (Vec::new(), WorkingTreeCounts::default()),
+  let listing = match mode {
+    SidebarMode::Commits => working_tree_listing(w, theme),
+    SidebarMode::Stashes => WorkingTreeSnapshot::default(),
   };
   SidebarSections {
     worktree: worktree_identity_lines(w, diff.as_ref(), theme, status_one_line),
-    working_tree,
-    working_tree_counts,
+    working_tree: listing.lines,
+    working_tree_badges: listing.badges,
+    working_tree_meta: listing.meta,
+    working_tree_counts: listing.counts,
     recent_commits: body,
   }
 }
@@ -1930,36 +2078,35 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-/// Build the Working Tree file-explorer rows for one worktree plus their
-/// per-category counts, from one `git status --porcelain -z` read.
-///
-/// `pub(super)` since #592: the full-size overlay snapshots the same rows
-/// the sidebar pane paints, and it is deliberately NOT routed through
-/// [`build_sidebar_sections`], which would also run `git log` / `git stash
-/// list` / the diff-vs-base stat for panes the overlay does not show.
-pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
-  // The sidebar pane paints rows only. It stops here rather than calling
-  // [`working_tree_listing`] on purpose: the column that read adds costs a
-  // second git process, and this one runs on every selection change.
-  let (lines, _, counts) = working_tree_rows(w, theme);
-  (lines, counts)
-}
-
 /// The full result of one read of the working tree: the rows, the
-/// per-category counts, and the right-hand `+N -M` column (issue #592).
+/// per-category counts, and the two right-hand columns (issues #592, #622).
 ///
-/// The counts come from `git status`, the column from a `git diff
-/// --numstat` in the same worker. Folded into one read rather than chained
-/// the way the commit listing's stats are (#593): there, the second read is
-/// a `git log --raw --numstat` over 300 commits and takes seconds, so the
-/// rows have to appear without it. Here it is a single diff against `HEAD`,
-/// far quicker than the `git status` that precedes it, so splitting would
-/// buy a flicker and cost a whole second identity to match payloads on.
+/// The counts come from `git status`, the `+N -M` column from a `git diff
+/// --numstat` in the same worker, the status letters free with the rows.
+/// Folded into one read rather than chained the way the commit listing's
+/// stats are (#593): there, the second read is a `git log --raw --numstat`
+/// over 300 commits and takes seconds, so the rows have to appear without
+/// it. Here it is a single diff against `HEAD`, far quicker than the `git
+/// status` that precedes it, so splitting would buy a flicker and cost a
+/// whole second identity to match payloads on.
+///
+/// The sidebar pane routes here too since #622. It used to stop at the rows
+/// to save that diff, because it re-reads on every selection change; the
+/// pane now shows the same two columns the overlay does, so it pays for the
+/// same read. It runs on the sidebar worker (#343), never on the render
+/// path, and it is still NOT routed through [`build_sidebar_sections`],
+/// which would also run `git log` / `git stash list` / the diff-vs-base
+/// stat for panes the overlay does not show.
 pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnapshot {
-  let (lines, paths, counts) = working_tree_rows(w, theme);
+  let rows = working_tree_rows(w, theme);
   let stats = worktree::working_tree_stats(&w.path).unwrap_or_default();
-  let meta = working_tree_meta_column(&paths, &stats, theme);
-  WorkingTreeSnapshot { lines, counts, meta }
+  let meta = working_tree_meta_column(&rows.paths, &stats, theme);
+  WorkingTreeSnapshot {
+    lines: rows.lines,
+    counts: rows.counts,
+    meta,
+    badges: meta_column(rows.badges),
+  }
 }
 
 /// Render the working tree of `w` into rows, the repo-relative path each
@@ -1968,16 +2115,12 @@ pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnaps
 /// `paths` is `None` on a directory row and on each of the three sentinels
 /// (`✓ clean`, `… N more`, a load error), so it always has exactly as many
 /// entries as there are rows.
-fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>, WorkingTreeCounts) {
+fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> WtRows {
   match worktree::git_status_short(&w.path) {
-    Ok((s, _)) if s.trim().is_empty() => (
-      vec![Line::from(Span::styled(
-        "✓ clean".to_string(),
-        Style::default().fg(theme.clean),
-      ))],
-      vec![None],
-      WorkingTreeCounts::default(),
-    ),
+    Ok((s, _)) if s.trim().is_empty() => WtRows::sentinel(Line::from(Span::styled(
+      "✓ clean".to_string(),
+      Style::default().fg(theme.clean),
+    ))),
     Ok((s, scan_truncated)) => {
       let counts = working_tree_status_counts(&s);
       let records = wt_tree::parse_status_z(&s);
@@ -1986,7 +2129,7 @@ fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Ve
       // remainder as a single muted `… N more` row, so the non-scrollable
       // section can't be sized from tens of thousands of files.
       let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
-      let (mut lines, mut paths) = working_tree_tree_lines(&tree, theme);
+      let (mut lines, mut paths, mut badges) = working_tree_tree_lines(&tree, theme);
       if overflow > 0 {
         // After a scan truncation the real remainder is unknown (git was
         // killed at the cap), so `overflow` is only a lower bound — render
@@ -1998,18 +2141,55 @@ fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Ve
         };
         lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
         paths.push(None);
+        badges.push(Line::default());
       }
-      (lines, paths, counts)
+      WtRows {
+        lines,
+        paths,
+        badges,
+        counts,
+      }
     }
-    Err(e) => (
-      vec![Line::from(Span::styled(
-        format!("! {}", e),
-        Style::default().fg(theme.prunable),
-      ))],
-      vec![None],
-      WorkingTreeCounts::default(),
-    ),
+    Err(e) => WtRows::sentinel(Line::from(Span::styled(
+      format!("! {}", e),
+      Style::default().fg(theme.prunable),
+    ))),
   }
+}
+
+/// One read of the working tree, before it is packaged for either surface:
+/// the rows, the repo-relative path each row describes, the status letter
+/// each row carries, and the per-category counts.
+///
+/// The three vectors are in lockstep by construction, since [`push_wt_nodes`]
+/// fills them in a single walk, so an entry can never slide onto the row
+/// below it. That invariant is why they are one struct rather than three
+/// return values a caller could pair up wrongly.
+struct WtRows {
+  lines: Vec<Line<'static>>,
+  paths: Vec<Option<String>>,
+  badges: Vec<Line<'static>>,
+  counts: WorkingTreeCounts,
+}
+
+impl WtRows {
+  /// The one-row shape the three sentinels share (`✓ clean`, a load error):
+  /// no path to key a diff on, no status letter, no counts.
+  fn sentinel(line: Line<'static>) -> Self {
+    Self {
+      lines: vec![line],
+      paths: vec![None],
+      badges: vec![Line::default()],
+      counts: WorkingTreeCounts::default(),
+    }
+  }
+}
+
+/// Package a set of parallel rows into a [`MetaColumn`], measuring the
+/// width once so the column cannot jump while the listing scrolls.
+fn meta_column(lines: Vec<Line<'static>>) -> MetaColumn {
+  let width = lines.iter().map(Line::width).max().unwrap_or(0);
+  MetaColumn { lines, width }
 }
 
 /// Build the right-hand `+N -M` column for a working-tree listing.
@@ -2023,17 +2203,16 @@ pub fn working_tree_meta_column(
   stats: &HashMap<String, worktree::FileStat>,
   theme: &Theme,
 ) -> MetaColumn {
-  let mut col = MetaColumn::default();
+  let mut col: Vec<Line<'static>> = Vec::with_capacity(paths.len());
   for key in paths {
     let spans = key
       .as_deref()
       .and_then(|p| stats.get(p))
       .map(|s| working_tree_stat_spans(*s, theme))
       .unwrap_or_default();
-    col.lines.push(Line::from(spans));
+    col.push(Line::from(spans));
   }
-  col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
-  col
+  meta_column(col)
 }
 
 /// One file's line counts as coloured spans: `+120 -34`.
@@ -2042,7 +2221,8 @@ pub fn working_tree_meta_column(
 /// added reads the same colour in both listings. A zero side is left out
 /// rather than printed, and a file with neither renders nothing at all:
 /// unlike a commit, whose silence would read as "not loaded yet", a row
-/// here already carries a badge saying what happened to it.
+/// here already has a status letter in the column beside it saying what
+/// happened to it.
 pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span<'static>> {
   let mut spans: Vec<Span<'static>> = Vec::new();
   if s.insertions > 0 {
@@ -2069,22 +2249,38 @@ pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span
 /// - **Connector lines**: each row is prefixed with box-drawing branches
 ///   (`├─ ` / `└─ ` with `│  ` / `   ` carried down from ancestors) in the
 ///   muted role, so the hierarchy reads like `tree(1)`.
+/// - **Directories** lead with the [`WT_DIR_CARET`] disclosure marker and no
+///   file glyph (issue #622), so a directory row and a file row are told
+///   apart by shape rather than by indentation alone. One space after it,
+///   not the two a nerd-font glyph needs: the caret is a single cell.
 /// - **Directory colour is retroactive**: a folder is painted by the
 ///   aggregate git category of its subtree — only-modified → yellow,
 ///   only-new → green, only-deleted → red, mixed (or none) → neutral
 ///   `accent`.
-/// - **Files** carry a category-coloured status badge + a nerd-font
-///   file-type icon + the leaf name, painted in the file's change-category
-///   colour so a row's colour matches the footer count it belongs to (the
-///   #287 invariant, preserved).
-/// - An **extra space** follows each nerd-font glyph: most glyphs render
-///   double-width but occupy a single terminal cell, so the pad keeps the
-///   following text from being clipped.
-fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>) {
+/// - **Files** carry a nerd-font file-type icon + the leaf name, painted in
+///   the file's change-category colour so a row's colour matches the footer
+///   count it belongs to (the #287 invariant, preserved). The status letter
+///   itself left the row in #622: it is returned as a parallel column so the
+///   renderer can pin it to a fixed offset.
+/// - An **extra space** follows each nerd-font FILE glyph: most glyphs
+///   render double-width but occupy a single terminal cell, so the pad keeps
+///   the following text from being clipped.
+type WtTreeLines = (Vec<Line<'static>>, Vec<Option<String>>, Vec<Line<'static>>);
+
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> WtTreeLines {
   let mut out = Vec::new();
   let mut paths = Vec::new();
-  push_wt_nodes(&mut out, &mut paths, nodes, String::new(), String::new(), theme);
-  (out, paths)
+  let mut badges = Vec::new();
+  push_wt_nodes(
+    &mut out,
+    &mut paths,
+    &mut badges,
+    nodes,
+    String::new(),
+    String::new(),
+    theme,
+  );
+  (out, paths, badges)
 }
 
 /// Join a path prefix and a node name the way git spells a path.
@@ -2113,6 +2309,7 @@ fn wt_join(prefix: &str, name: &str) -> String {
 fn push_wt_nodes(
   out: &mut Vec<Line<'static>>,
   paths: &mut Vec<Option<String>>,
+  badges: &mut Vec<Line<'static>>,
   nodes: &[WtNode],
   prefix: String,
   path_prefix: String,
@@ -2135,13 +2332,22 @@ fn push_wt_nodes(
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
           Span::styled(
-            format!("{}  {}", WT_DIR_OPEN_ICON, wt_tree::sanitize_name(name)),
+            format!("{} {}", WT_DIR_CARET, wt_tree::sanitize_name(name)),
             Style::default().fg(color),
           ),
         ]));
         paths.push(None);
+        badges.push(Line::default());
         let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        push_wt_nodes(out, paths, children, child_prefix, wt_join(&path_prefix, name), theme);
+        push_wt_nodes(
+          out,
+          paths,
+          badges,
+          children,
+          child_prefix,
+          wt_join(&path_prefix, name),
+          theme,
+        );
       }
       WtNode::File {
         name,
@@ -2152,13 +2358,13 @@ fn push_wt_nodes(
         let color = working_tree_category_color(*category, theme);
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
-          Span::styled(format!("{} ", badge), Style::default().fg(color)),
           Span::styled(
             format!("{}  {}", icon, wt_tree::sanitize_name(name)),
             Style::default().fg(color),
           ),
         ]));
         paths.push(Some(wt_join(&path_prefix, name)));
+        badges.push(Line::from(Span::styled(badge.to_string(), Style::default().fg(color))));
       }
     }
   }
@@ -2183,6 +2389,18 @@ impl WorkingTreeCounts {
   /// so the Working Tree footer renders nothing rather than a bare ` 0 `.
   pub fn is_empty(&self) -> bool {
     self.created == 0 && self.modified == 0 && self.deleted == 0
+  }
+
+  /// Changed files across every category, for the Working Tree overlay's
+  /// header count (issue #622).
+  ///
+  /// Derived from the counts rather than from the row vector on purpose:
+  /// the rows also hold directories, the `… N more` overflow notice and the
+  /// `✓ clean` sentinel, none of which is a changed file. Each file is
+  /// counted once, in the single category its porcelain `XY` pair falls
+  /// into, so this is the same population the footer segments add up to.
+  pub fn total(&self) -> usize {
+    self.created + self.modified + self.deleted
   }
 }
 
@@ -2380,6 +2598,20 @@ pub fn meta_pick(body_w: usize, tiers: &[usize], floor: usize) -> Option<usize> 
 /// with the nesting depth, so what a row needs cannot be derived from a
 /// constant here either — the floor states the policy instead.
 pub const WT_NAME_FLOOR: usize = 24;
+
+/// Name floor for the Working Tree's **status-letter** column (issue #622).
+///
+/// Far below [`WT_NAME_FLOOR`], and deliberately: that floor prices a
+/// `+120 -34` column, which is a detail a narrow pane can do without. The
+/// letter is the subject of the row, and before #622 it was an inline badge
+/// costing two cells that no width ever dropped. Charging it 24 cells of
+/// name would make it vanish from a side-by-side sidebar on a 60-column
+/// terminal, which is a capability the listing had and would have lost.
+///
+/// Eight cells is what a clipped leaf name still reads in (`mod.rs` behind
+/// its three-cell connector); under that the row is unreadable whether or
+/// not it says `M`.
+pub const WT_BADGE_FLOOR: usize = 8;
 
 /// Build the two right-hand metadata columns for a commit listing.
 ///
@@ -4916,9 +5148,9 @@ fn working_tree_context_line(w: Option<&WorktreeInfo>, path: Option<&std::path::
 /// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
 /// given the whole modal area.
 ///
-/// Same shell as the Command Logs overlay: a fixed title on the top rule,
-/// a scrollable body with a scrollbar when it overflows, and a fixed footer
-/// hint line. The pane's change-count line (issue #287) rides the bottom
+/// Same shell as the Command Logs overlay: a title on the top rule carrying
+/// the changed-file count (issue #622), a scrollable body with a scrollbar
+/// when it overflows, and a fixed footer hint line. The pane's change-count line (issue #287) rides the bottom
 /// rule right-aligned, exactly where the bordered sidebar pane puts it, so
 /// the two surfaces read as the same block at two sizes.
 ///
@@ -4929,10 +5161,20 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let theme = app.theme;
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), theme.accent, &theme);
+  // The changed-file count rides the title (issue #622) the way the commit
+  // listing's does (#593), and for the same reason: the top rule is clipped
+  // from the LEFT when centred, so the count sits last. It is withheld while
+  // the worker is out: the counts are zero then, and `(0)` over a listing
+  // that has not been read yet is a claim rather than a count.
+  let title = if app.working_tree.loading {
+    "Working Tree".to_string()
+  } else {
+    format!("Working Tree ({})", app.working_tree.counts.total())
+  };
   let inner = frame.render(
     f,
     area,
-    "Working Tree",
+    &title,
     working_tree_counts_footer(&app.working_tree.counts, &theme),
   );
 
@@ -4999,29 +5241,39 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
     })
     .collect();
 
-  // The counts ride their own rect on the right rather than being appended
+  // Both columns ride their own rect on the right rather than being appended
   // to each row, the shape the commit listing uses (#593): the tree is
   // hard-clipped without an ellipsis, so narrowing the left rect IS that
-  // same rule applied at a nearer edge. Both paragraphs take the same
+  // same rule applied at a nearer edge. Every paragraph takes the same
   // scroll offset, so the columns stay aligned.
-  let meta_w = meta_pick(text_area.width as usize, &[app.working_tree.meta.width], WT_NAME_FLOOR);
-  match meta_w {
-    Some(meta_w) => {
-      let [left, _gap, right] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(META_GAP as u16),
-        Constraint::Length(meta_w as u16),
-      ])
-      .areas(text_area);
-      f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), left);
+  //
+  // The status letters are carved out FIRST, which puts them at the right
+  // edge and makes the counts the column a narrowing terminal drops (issue
+  // #622). That order is the whole point: `+120 -34` says how much, the
+  // letter says what. A row that no longer says what it is has lost
+  // its subject, not its detail.
+  //
+  // Each column is afforded at its OWN floor, and the letter's is far lower
+  // than the counts': see [`WT_BADGE_FLOOR`]. The same cascade the sidebar
+  // pane runs, so the two surfaces cannot drift apart.
+  let (name_rect, [badge_rect, stats_rect]) = carve_meta_columns(
+    text_area,
+    [
+      (app.working_tree.badges.width, WT_BADGE_FLOOR),
+      (app.working_tree.meta.width, WT_NAME_FLOOR),
+    ],
+  );
+  f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), name_rect);
+  for (rect, column) in [
+    (badge_rect, &app.working_tree.badges),
+    (stats_rect, &app.working_tree.meta),
+  ] {
+    if let Some(rect) = rect {
       f.render_widget(
-        Paragraph::new(app.working_tree.meta.lines.clone())
-          .right_aligned()
-          .scroll((scroll, 0)),
-        right,
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        rect,
       );
     }
-    None => f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), text_area),
   }
 
   let footer_owned = working_tree_footer_hints(&app.modal_keymap);
@@ -5244,7 +5496,7 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
 /// theme `accent`; the track reads `muted`.
 fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
   let viewport = area.height as usize;
-  if content_len <= viewport || area.width < 2 {
+  if scrollbar_reserve(area, content_len) == 0 {
     return area;
   }
   // ratatui maps the thumb over `content_length - 1`, but our scroll offset
@@ -5265,6 +5517,20 @@ fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usi
   Rect {
     width: area.width.saturating_sub(1),
     ..area
+  }
+}
+
+/// Cells [`scrollable_body_area`] will take off the right of `area` for its
+/// thumb: `1` when the content overflows the viewport, `0` otherwise.
+///
+/// Its own function so a caller that paints inside the same rect, the
+/// Working Tree's status column (issue #622), asks the same question
+/// rather than re-deriving the predicate and drifting from it.
+fn scrollbar_reserve(area: Rect, content_len: usize) -> u16 {
+  if content_len > area.height as usize && area.width >= 2 {
+    1
+  } else {
+    0
   }
 }
 

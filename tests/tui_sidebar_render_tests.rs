@@ -260,17 +260,284 @@ fn working_tree_section_renders_file_tree_with_icons() {
   );
   assert!(text.contains("mod.rs"), "the leaf file name renders: {text}");
   assert!(
-    text.contains(gwm::tui::wt_tree::WT_DIR_OPEN_ICON),
-    "directory row carries a folder glyph: {text}"
-  );
-  assert!(
     text.contains(gwm::tui::wt_tree::WT_RUST_ICON),
     "the .rs leaf carries the Rust file-type glyph: {text}"
+  );
+  // Issue #622: the two levels are told apart by SHAPE, so the directory row
+  // leads with the disclosure marker and carries NO nerd-font glyph at all.
+  // Enumerated by construction, since every nerd-font codepoint lives in a
+  // Private Use Area, rather than by naming the two constants that happen to
+  // exist today, which a third one would walk straight past.
+  let dir_row = buffer_lines(&terminal)
+    .into_iter()
+    .find(|l| l.contains("src/app"))
+    .unwrap_or_else(|| panic!("no directory row: {text}"));
+  let marker_at = dir_row
+    .find(gwm::tui::wt_tree::WT_DIR_CARET)
+    .unwrap_or_else(|| panic!("the directory row leads with the disclosure marker: got {dir_row:?}"));
+  assert!(
+    marker_at < dir_row.find("src/app").unwrap(),
+    "the marker leads the name rather than trailing it: got {dir_row:?}"
+  );
+  assert!(
+    !dir_row.chars().any(is_private_use),
+    "and the row drops every nerd-font glyph: got {dir_row:?}"
+  );
+  // The counterpart: a FILE row still carries one, or the shape distinction
+  // would be a plain removal rather than a contrast.
+  let file_row = buffer_lines(&terminal)
+    .into_iter()
+    .find(|l| l.contains("mod.rs"))
+    .unwrap_or_else(|| panic!("no file row: {text}"));
+  assert!(
+    file_row.chars().any(is_private_use),
+    "the file row keeps its type glyph: got {file_row:?}"
   );
   assert!(
     text.contains('└') || text.contains('├'),
     "rows are drawn with tree connector lines: {text}"
   );
+}
+
+/// True for a codepoint in one of Unicode's Private Use Areas, where every
+/// nerd-font glyph lives. Lets a test say "no icon here" by construction
+/// instead of by listing the constants that exist today.
+fn is_private_use(c: char) -> bool {
+  matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+}
+
+/// The buffer as one string per terminal row, so an assertion can look at
+/// where a needle sits on its line rather than only whether it exists.
+fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+  let buffer = terminal.backend().buffer();
+  let area = *buffer.area();
+  (0..area.height)
+    .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect())
+    .collect()
+}
+
+#[test]
+fn working_tree_section_pins_the_status_letter_to_its_right_edge() {
+  // Issue #622: the sidebar pane reads the same way the full-size overlay
+  // does. The letter used to lead the name, so it sat at a different offset
+  // on every row; it now rides its own right-aligned column, inside the
+  // pane's border.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("mod.rs"))
+    .unwrap_or_else(|| panic!("no row for the untracked file: screen was:\n{}", lines.join("\n")));
+  let name_at = row.find("mod.rs").unwrap();
+  let letter_at = row
+    .rfind('?')
+    .unwrap_or_else(|| panic!("the untracked letter is drawn: got {row:?}"));
+  assert!(
+    letter_at > name_at,
+    "the letter trails the whole name instead of leading it: got {row:?}"
+  );
+  assert!(
+    row[letter_at + 1..].chars().all(|c| c == ' ' || c == '│'),
+    "and nothing but padding and the pane border follows it: got {row:?}"
+  );
+  // The gap between the two is what makes it a column rather than a suffix:
+  // a shorter name on another row must reach the same offset.
+  assert!(
+    letter_at > name_at + "mod.rs".len() + 1,
+    "the letter is right-aligned, not glued to the name: got {row:?}"
+  );
+}
+
+#[test]
+fn the_status_column_hugs_the_right_edge_at_every_width() {
+  // Issue #622, validated on the rendered pane: the letter is pinned to the
+  // pane's right edge, and it stays there as the terminal narrows. The
+  // responsive half is the point of asserting a range rather than one width,
+  // since the pane's own width is a fraction of a fraction: the sidebar
+  // split, then the section split, then whatever the scrollbar claims.
+  //
+  // 24 is the narrowest of these that still renders a Working Tree row at
+  // all; below it the section collapses and there is nothing to assert on.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  for width in [150u16, 100, 70, 46, 30, 24] {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+    let lines = buffer_lines(&terminal);
+    let row = lines
+      .iter()
+      .find(|l| l.contains("mod.rs"))
+      .unwrap_or_else(|| panic!("{width}: no row for the file. screen was:\n{}", lines.join("\n")));
+    assert!(
+      row.trim_end_matches([' ', '│']).ends_with('?'),
+      "{width}: the letter is the last thing on its row, inside the pane's edge: got {row:?}"
+    );
+    assert!(
+      row.rfind('?').unwrap() > row.find("mod.rs").unwrap() + "mod.rs".len() + 1,
+      "{width}: and it is a column rather than a suffix glued to the name: got {row:?}"
+    );
+  }
+}
+
+#[test]
+fn the_pane_carries_the_line_counts_beside_the_status_letter() {
+  // Issue #622, after seeing the built pane: the sidebar shows the same two
+  // columns the full-size overlay does. #592 had deliberately stopped the
+  // pane at the rows to save the `git diff --numstat` its counts need, since
+  // the pane re-reads on every selection change; that read now happens, on
+  // the sidebar worker rather than the render path.
+  //
+  // Without this guard the pane can lose the counts the way it did before,
+  // silently: the rows still render, and every other assertion still holds.
+  let dir = repo_with_commits(1);
+  std::fs::write(dir.path().join("file.txt"), "seed\nsecond\nthird\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("file.txt"))
+    .unwrap_or_else(|| panic!("no row for the changed file. screen was:\n{}", lines.join("\n")));
+  let counts_at = row
+    .find("+3 -1")
+    .unwrap_or_else(|| panic!("the pane carries the line counts: got {row:?}"));
+  let letter_at = row
+    .rfind('M')
+    .unwrap_or_else(|| panic!("and the status letter: got {row:?}"));
+  assert!(
+    letter_at > counts_at,
+    "the letter takes the outer slot, the counts sit inside it: got {row:?}"
+  );
+  assert!(
+    row.trim_end_matches([' ', '│']).ends_with('M'),
+    "the letter is still the last thing on the row: got {row:?}"
+  );
+}
+
+#[test]
+fn the_pane_drops_its_counts_before_its_status_letter() {
+  // The order of yield, on the surface that runs out of width first. A
+  // stacked pane is as wide as the terminal, so 34 columns leave 34 cells:
+  // past the `1 + META_GAP + WT_BADGE_FLOOR` (11) the letter needs, and the
+  // 31 it leaves are under the `4 + META_GAP + WT_NAME_FLOOR` (30)... which
+  // fits. 30 columns leave 27, and the 24 after the letter do not.
+  let dir = repo_with_commits(1);
+  std::fs::write(dir.path().join("file.txt"), "seed\nsecond\nthird\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let mut terminal = Terminal::new(TestBackend::new(30, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("file.txt"))
+    .unwrap_or_else(|| panic!("no row for the changed file. screen was:\n{}", lines.join("\n")));
+  assert!(
+    !row.contains('+'),
+    "the counts are what a narrow pane drops: got {row:?}"
+  );
+  assert!(
+    row.trim_end_matches([' ', '│']).ends_with('M'),
+    "the letter is what it keeps: got {row:?}"
+  );
+}
+
+#[test]
+fn the_status_column_survives_a_sidebar_too_narrow_for_the_counts() {
+  // Before #622 the letter was an inline badge costing two cells that no
+  // width ever dropped, so pricing its column at `WT_NAME_FLOOR` (24, the
+  // floor a `+120 -34` column pays) would have removed a capability: on a
+  // 60-column terminal forced side-by-side the pane's body is 26 cells, one
+  // short of the 27 that floor needs. The letter keeps its own, lower floor.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.orientation = gwm::tui::state::sidebar::SidebarOrientation::SideBySide;
+  let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("mod.rs"))
+    .unwrap_or_else(|| panic!("no row for the file: screen was:\n{}", lines.join("\n")));
+  assert!(
+    row.contains('?'),
+    "the letter is what a narrow pane keeps, not what it drops: got {row:?}"
+  );
+  assert!(
+    row.rfind('?').unwrap() > row.find("mod.rs").unwrap(),
+    "and it is still a trailing column rather than back inline: got {row:?}"
+  );
+}
+
+#[test]
+fn the_status_column_renders_in_both_layouts() {
+  // Issue #622 is explicit that both `[tui] layout` values keep working, and
+  // #594 made the pane frame follow that key. The bordered path is the one
+  // this change restructured, so the compact one needs its own frame rather
+  // than an assumption that a shared helper covers it.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  for layout in [TuiLayout::Bordered, TuiLayout::Compact] {
+    let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+    app.config.tui.layout = layout;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    warm_sidebar(&mut app);
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+    let lines = buffer_lines(&terminal);
+    let row = lines
+      .iter()
+      .find(|l| l.contains("mod.rs"))
+      .unwrap_or_else(|| panic!("{layout:?}: no row for the file: screen was:\n{}", lines.join("\n")));
+    let letter_at = row
+      .rfind('?')
+      .unwrap_or_else(|| panic!("{layout:?}: the letter is drawn: got {row:?}"));
+    assert!(
+      letter_at > row.find("mod.rs").unwrap() + "mod.rs".len() + 1,
+      "{layout:?}: the letter rides its own column: got {row:?}"
+    );
+    let dir_row = lines
+      .iter()
+      .find(|l| l.contains("src/app"))
+      .unwrap_or_else(|| panic!("{layout:?}: no directory row"));
+    assert!(
+      dir_row.contains(gwm::tui::wt_tree::WT_DIR_CARET),
+      "{layout:?}: the directory row keeps its disclosure marker: got {dir_row:?}"
+    );
+  }
 }
 
 #[test]
@@ -903,9 +1170,14 @@ fn dim_unfocused_dims_the_unfocused_pane_in_both_layouts() {
   // the table applies the style in both layouts, so one dimmed cell
   // always existed and the missing half went unseen (Codex review, PR
   // #546). It now names the surface it checks, on both sides of the
-  // focus, in both layouts — four assertions that cannot all hold unless
-  // the style reaches every render path.
+  // focus, in both layouts, plus the Working Tree pane, whose rows take a
+  // render path of their own since #622 (the status column splits the body
+  // into two rects instead of one paragraph carrying the block). Six
+  // assertions that cannot all hold unless the style reaches every path.
   let dir = repo_with_commits(4);
+  // A dirty file, or the pane renders the `✓ clean` sentinel: a row with no
+  // status letter, so the column would be empty and the split never taken.
+  std::fs::write(dir.path().join("dimprobe.rs"), "fn x() {}").unwrap();
   let dim_at = |terminal: &Terminal<TestBackend>, needle: &str| -> bool {
     let buffer = terminal.backend().buffer();
     let area = buffer.area;
@@ -945,8 +1217,43 @@ fn dim_unfocused_dims_the_unfocused_pane_in_both_layouts() {
         !sidebar_focused,
         "{layout:?}, sidebar_focused={sidebar_focused}: the sidebar body must be dimmed exactly when it lacks focus"
       );
+      // The Working Tree pane's own path (issue #622): the rows on one side
+      // of the split, the status letters on the other. Both carry the style
+      // or the pane reads half-focused.
+      assert_eq!(
+        dim_at(&terminal, "dimprobe.rs"),
+        !sidebar_focused,
+        "{layout:?}, sidebar_focused={sidebar_focused}: the Working Tree rows must be dimmed exactly when the pane lacks focus"
+      );
+      let letter = dim_at_last(&terminal, "dimprobe.rs", '?');
+      assert_eq!(
+        letter, !sidebar_focused,
+        "{layout:?}, sidebar_focused={sidebar_focused}: the status column must be dimmed with the rows it describes"
+      );
     }
   }
+}
+
+/// Whether the LAST `needle` character on the row carrying `row_needle` is
+/// dimmed. The status column sits at the far end of its row, so a probe on
+/// the row's own text cannot reach it.
+fn dim_at_last(terminal: &Terminal<TestBackend>, row_needle: &str, needle: char) -> bool {
+  let buffer = terminal.backend().buffer();
+  let area = buffer.area;
+  for y in area.y..area.y + area.height {
+    let line: String = (area.x..area.x + area.width).map(|x| buffer[(x, y)].symbol()).collect();
+    if !line.contains(row_needle) {
+      continue;
+    }
+    let col = line
+      .rfind(needle)
+      .unwrap_or_else(|| panic!("{needle:?} never rendered on the {row_needle:?} row: {line:?}"));
+    let col = line[..col].chars().count() as u16;
+    return buffer[(area.x + col, y)]
+      .modifier
+      .contains(ratatui::style::Modifier::DIM);
+  }
+  panic!("{row_needle:?} never rendered");
 }
 
 // --- the sidebar's `Path` row sanitises too (issue #568) --------------------
