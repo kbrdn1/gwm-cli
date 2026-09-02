@@ -12,6 +12,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Settings panel gets a value column, named sections and tab glyphs**
+  ([#623](https://github.com/kbrdn1/gwm-cli/issues/623)). The panel carries the
+  most content of any modal and showed it the most plainly: values were a span
+  glued after a fixed 24-cell label pad, so a tab of sixteen rows had sixteen
+  different value positions, and the one 26-character label overflowed the pad
+  and pushed its value two cells right of every other. The `TUI` tab was a
+  single undivided run mixing layout, sidebar, editing, open, multiplexer,
+  browser and refresh knobs, and the five tabs were bare words.
+
+  Every tab now reads as two columns: what a row is on the left, what it is set
+  to on the right, right-aligned against the panel's own edge so its width is
+  used rather than left empty beside a content-sized block. On the editable
+  tabs the shape carries the kind: a choice reads `‹ value ›`, a boolean reads
+  `[✓]` / `[ ]`, a typed value reads plain, and an optional text field nobody
+  has set reads `(unset)` instead of leaving the column blank. `Keys` puts its
+  binding there and `All` its resolved value, dropping the ` = ` that used to
+  join a key to it. On a panel too narrow for both columns the gap falls back
+  to a minimum and the row pans sideways, as it always did.
+
+  A section rule mutes its separator and not its name: the rule is chrome and
+  recedes, while the name keeps the theme role the bare heading wore before it
+  was given a rule to sit in.
+
+  The bootstrap report's `Logs` becomes a subtitle. It was a nested section
+  with its own chrome, which under `[tui] layout = "compact"` paints the same
+  full-width accent band the modal's own title rides, so the two stacked and
+  the second read as a second title.
+
+  The Keybindings overlay (`?`) gets the same treatment, which is the pass
+  #623 deferred until the Settings panel had proved it out. Its description
+  leads and its chord is the right-hand column, the order the Settings Keys
+  tab already used for the same data; its `Blank / Section / Blank` headings
+  become one blank and one labelled rule, giving back a row per section on a
+  body with a dozen of them, with the single blank kept so a section does not
+  read as a continuation of the one above it; and it is a little wider, because
+  60% of a 100-column terminal is 64 cells for a body that now wants about 73.
+
+  Forty of its descriptions were shortened to fit beside their chords, and one
+  fixed chord string with them: `Left/Right/Up/Down` was eighteen cells, and
+  being the widest in the body it set the key column for every row. At 80
+  columns nothing is truncated now, pinned by a test, so a new binding with a
+  long description fails rather than quietly shortening every other row's.
+
+  Sections are labelled rules across every tab: the `TUI` tab gains seven
+  (Appearance, Sidebar, Editing, Open, Multiplexer, Browser, Timing), which
+  reorders its fields into those runs, and the `[global]` / `[table]` headings
+  the `Keys` and `All` tabs already had become the same rule. A blank sits
+  ahead of every break and under the tab strip, so a section does not read as a
+  continuation of the one above it and the first rule opens the body rather
+  than hanging off the chrome. Each tab is led by a codicon glyph.
+
+  That spacing costs rows, so [#569](https://github.com/kbrdn1/gwm-cli/issues/569)'s
+  height bounds move from `(11, 32)` to `(12, 40)`: the `TUI` tab is 29 body
+  rows now, and at the old ceiling a form the user opened deliberately would
+  have scrolled by seven. `modal_height` still takes `term_height - 4` after
+  the ceiling, so a short terminal is unaffected and scrolls as it did.
+
+  `←` / `→` now adjust the selected choice, one value back or forward. The
+  issue described them as already doing this; they did not, since
+  `ConfigScrollLeft` / `ConfigScrollRight` were gated to the `All` tab's
+  horizontal pan and were dead everywhere else. The `‹ ›` markers are what
+  advertises them. No binding changed.
+
+  The footer gains a `j/k move` verb, and `←/→ adjust` replaces `Space cycle`
+  on a cyclable field rather than joining it: `modal_hint_line` centres its
+  spans, so naming one operation twice overflowed the line and clipped it at
+  both ends, costing the leading hint outright and leaving `Esc close` as
+  `Esc c`. Five verbs still need nine more columns than the four that came
+  before, so on a panel too narrow for them `move` drops out instead: the
+  footer keeps fitting every terminal the old one fitted, rather than trading
+  a narrow terminal's `Esc close` for a movement hint every TUI shares.
+
 - **The doc captures regenerate as one step, in the order the traps require**
   ([#631](https://github.com/kbrdn1/gwm-cli/issues/631)). Regenerating the set
   was a four-step sequence held together by a maintainer's notes: bump,

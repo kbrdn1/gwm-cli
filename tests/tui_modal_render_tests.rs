@@ -3710,3 +3710,564 @@ fn a_content_sized_modal_spends_two_rows_less_in_compact() {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Settings panel: the value column, the named sections and the tab glyphs
+// (issue #623)
+// ---------------------------------------------------------------------------
+
+/// Glyphs that are chrome rather than content: the frame's rules and corners,
+/// and the scrollbar's thumb and track.
+///
+/// The frame glyphs are excluded rather than the scan bounded short of them,
+/// because the two layouts put the modal's edge in different places: bordered
+/// paints `│`, compact paints nothing at all. Excluding the glyph makes one
+/// oracle serve both. The scrollbar pair is here because it cost a real
+/// measurement: `█` in the reserved column is the rightmost non-blank cell of
+/// every row on a body that scrolls, so a search for "where does the content
+/// end" answered "at the scrollbar" on every one of them.
+const MODAL_CHROME: [&str; 9] = [" ", "│", "╮", "╯", "╭", "╰", "─", "█", "║"];
+
+/// The rightmost column of `y` carrying content, searched inside `[x0, x1]`.
+fn last_content_col(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<u16> {
+  (x0..=x1)
+    .rev()
+    .find(|&x| !MODAL_CHROME.contains(&buf[(x, y)].symbol()) && !buf[(x, y)].symbol().is_empty())
+}
+
+/// The first column of `y` carrying content, same exclusions.
+fn first_content_col(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<u16> {
+  (x0..=x1).find(|&x| !MODAL_CHROME.contains(&buf[(x, y)].symbol()) && !buf[(x, y)].symbol().is_empty())
+}
+
+/// Locate the buffer row inside `rect` whose text contains `needle`, and
+/// return `(y, right_edge)` — the row and the column its last visible cell
+/// sits in. Panics when the label is not on screen, which every caller has a
+/// reason to expect.
+fn row_right_edge(buf: &Buffer, rect: (u16, u16, u16, u16), needle: &str) -> (u16, u16) {
+  let (x, y, w, h) = rect;
+  let (x0, x1) = (x, x + w - 1);
+  for row in y..(y + h).min(buf.area().height) {
+    let text: String = (x0..=x1).map(|c| buf[(c, row)].symbol()).collect();
+    if text.contains(needle) {
+      let edge = last_content_col(buf, row, x0, x1)
+        .unwrap_or_else(|| panic!("row {row} contains {needle:?} but has no content cell"));
+      return (row, edge);
+    }
+  }
+  panic!(
+    "label {needle:?} is not rendered inside the modal — rows:\n{}",
+    row_strings(buf).join("\n")
+  );
+}
+
+/// The Settings app on the TUI tab, which is the tab the issue names: it is
+/// the only one long enough for sections to matter, and the only one mixing
+/// every field kind (choice, bool, uint, text) in one run.
+fn tui_tab_app() -> (tempfile::TempDir, App) {
+  use gwm::tui::SettingsTab;
+  let (dir, mut app) = make_app();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.view = View::Config;
+  (dir, app)
+}
+
+/// Labels that between them cover every field kind on the TUI tab, plus the
+/// one whose label is 26 characters — two past the `{:<24}` pad the panel used
+/// before #623, so its value started two cells right of everyone else's. That
+/// row is why the column was broken and not merely loose.
+const TUI_TAB_PROBE_LABELS: [&str; 5] = [
+  "layout",                     // choice, short value
+  "sidebar layout",             // choice, the widest value on the tab
+  "dim unfocused pane",         // bool
+  "auto refresh (s)",           // uint
+  "terminal browser placed by", // choice, the 26-character label
+];
+
+#[test]
+fn settings_tui_tab_anchors_every_value_to_one_right_edge() {
+  // Issue #623 point 1: "a choice reads `‹ value ›`, a boolean reads `[✓]` /
+  // `[ ]`, both anchored to the same right edge". Before this the value was a
+  // span glued after a `{:<24}` label pad, so a tab of sixteen rows had
+  // sixteen different value positions — and the 26-character label overflowed
+  // the pad outright.
+  let (_dir, mut app) = tui_tab_app();
+  // Tall enough for the whole tab: since #623 spent rows on the section rules
+  // and their spacing, the last probe label sits past a 40-row terminal's
+  // viewport, and a guard that cannot see a row proves nothing about it.
+  let buf = render_at(&mut app, 100, 60);
+  let rect = modal_rect(&buf).expect("the Settings modal is rendered");
+
+  let edges: Vec<(&str, u16)> = TUI_TAB_PROBE_LABELS
+    .iter()
+    .map(|label| (*label, row_right_edge(&buf, rect, label).1))
+    .collect();
+  let first = edges[0].1;
+  assert!(
+    edges.iter().all(|(_, e)| *e == first),
+    "every value must end in the same column, got {edges:?} — rows:\n{}",
+    modal_rows(&buf).join("\n")
+  );
+}
+
+#[test]
+fn settings_tui_tab_anchors_every_value_to_one_right_edge_in_the_compact_layout() {
+  // Both `[tui] layout` values must keep working (issue #623, and #594 which
+  // made the modal frame follow that key). The compact frame has a different
+  // origin and a different width, so an assertion that held only under the
+  // boxed frame would be half a guard.
+  let (_dir, mut app) = tui_tab_app();
+  app.config.tui.layout = TuiLayout::Compact;
+  let buf = render_at(&mut app, 100, 60);
+  let rect = compact_modal_rect(&buf).expect("the Settings modal is rendered in the compact layout");
+
+  let edges: Vec<(&str, u16)> = TUI_TAB_PROBE_LABELS
+    .iter()
+    .map(|label| (*label, row_right_edge(&buf, rect, label).1))
+    .collect();
+  let first = edges[0].1;
+  assert!(
+    edges.iter().all(|(_, e)| *e == first),
+    "compact layout: every value must end in the same column, got {edges:?} — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn settings_value_column_reaches_the_panel_edge_at_every_width() {
+  // The column is right-aligned against the body the panel gives it, so it
+  // ends where the panel ends rather than where the content happens to stop.
+  // The first pass anchored it to the widest label instead, which left the
+  // whole right half of the box empty beside it.
+  //
+  // This is also what makes the same-right-edge guard above non-vacuous: on
+  // its own, "every value ends in the same column" is satisfied by a block
+  // welded to the left margin.
+  let (_dir, mut app) = tui_tab_app();
+
+  let mut seen = Vec::new();
+  for term_w in [100u16, 200] {
+    let buf = render_at(&mut app, term_w, 44);
+    let rect = modal_rect(&buf).expect("the Settings modal is rendered");
+    let (row, edge) = row_right_edge(&buf, rect, "sidebar layout");
+    let start = first_content_col(&buf, row, rect.0, rect.0 + rect.2 - 1).expect("the row has content");
+    // The panel's own inner right edge: the frame is a rule plus two padding
+    // columns each side, so the last cell the body may paint is three in.
+    let inner_right = rect.0 + rect.2 - 1 - 3;
+    assert_eq!(
+      edge,
+      inner_right,
+      "at {term_w} cols the value must end at the panel's inner edge ({inner_right}), not at {edge} — rows:\n{}",
+      modal_rows(&buf).join("\n")
+    );
+    seen.push((term_w, rect.2, edge - start));
+  }
+  assert!(
+    seen[1].1 > seen[0].1,
+    "the frame must actually be wider at 200 columns, else the check is vacuous: {seen:?}"
+  );
+  assert!(
+    seen[1].2 > seen[0].2,
+    "and the row must use that extra width rather than leave it empty: {seen:?}"
+  );
+}
+
+/// Cells between the end of `label` and the start of whatever follows it, on
+/// the modal row carrying that label. The measure the value column is made of.
+fn gap_after_label(buf: &Buffer, rect: (u16, u16, u16, u16), label: &str) -> usize {
+  let (row, _) = row_right_edge(buf, rect, label);
+  let (x0, x1) = (rect.0, rect.0 + rect.2 - 1);
+  // Searched by CHARACTER, not by byte: one buffer cell is one character, but
+  // the frame rule `│` and the value markers `‹ ›` are three bytes each, so a
+  // `str::find` offset counts cells nowhere near where it lands. That mistake
+  // is silent — it returns a plausible number — which is why it is spelled out
+  // rather than left to the reader.
+  let cells: Vec<char> = (x0..=x1)
+    .map(|c| buf[(c, row)].symbol().chars().next().unwrap_or(' '))
+    .collect();
+  let needle: Vec<char> = label.chars().collect();
+  let at = cells
+    .windows(needle.len())
+    .position(|w| w == needle.as_slice())
+    .expect("the label is on this row");
+  cells[at + needle.len()..].iter().take_while(|c| **c == ' ').count()
+}
+
+/// The tightest label-to-value gap on the TUI tab as rendered at `term_w`.
+///
+/// The minimum over the rows, not the gap of any one row: a row whose value is
+/// narrower than the widest gets the difference as extra right-alignment
+/// padding, so only the minimum is the panel's actual spacing rule.
+fn tightest_gap_at(app: &mut App, term_w: u16) -> usize {
+  let buf = render_at(app, term_w, 44);
+  let rect = modal_rect(&buf).unwrap_or_else(|| panic!("no Settings modal at {term_w} columns"));
+  TUI_TAB_PROBE_LABELS
+    .iter()
+    .map(|label| gap_after_label(&buf, rect, label))
+    .min()
+    .expect("the probe list is not empty")
+}
+
+#[test]
+fn settings_value_column_stops_shrinking_once_the_panel_is_too_narrow() {
+  // The other end of the rule above. Spending "whatever is left over" works
+  // only while there is something left: past the point where marker + label +
+  // value outgrows the body, the gap has to stop at a floor and let the line
+  // overflow into the horizontal pan that already exists, or the label and its
+  // value run into each other.
+  //
+  // Asserted as an invariance rather than against a number: below the fit
+  // threshold the spacing no longer tracks the panel, so two different narrow
+  // panels give the same gap, while a wide one gives a bigger one. A floor
+  // written as a literal here would just be this file's copy of a constant in
+  // `ui.rs`, and would still pass if the floor were removed and the two narrow
+  // cases both clipped to the same place.
+  let (_dir, mut app) = tui_tab_app();
+  let narrow = tightest_gap_at(&mut app, 40);
+  let narrower_still = tightest_gap_at(&mut app, 48);
+  let wide = tightest_gap_at(&mut app, 200);
+
+  assert_eq!(
+    narrow, narrower_still,
+    "below the fit threshold the gap must stop tracking the panel: 40 cols gave {narrow}, 48 gave {narrower_still}"
+  );
+  assert!(
+    narrow > 0,
+    "and it must never reach zero, which is the label touching its value"
+  );
+  assert!(
+    wide > narrow,
+    "a panel with room still spends it: wide {wide} must beat narrow {narrow}"
+  );
+}
+
+#[test]
+fn settings_tui_tab_rules_off_its_named_sections() {
+  // Issue #623 point 2: the TUI tab mixes layout, sidebar, mux, clipboard,
+  // browser and refresh knobs in one undivided run. A labelled rule groups
+  // them.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render_at(&mut app, 100, 60);
+  let rows = modal_rows(&buf).join("\n");
+  for section in ["Appearance", "Sidebar", "Multiplexer", "Browser"] {
+    assert!(
+      rows.contains(section),
+      "the TUI tab must rule off a {section:?} section — rows:\n{rows}"
+    );
+  }
+  assert!(
+    rows.contains("─ Sidebar "),
+    "a section reads as a labelled rule, not a bare word — rows:\n{rows}"
+  );
+}
+
+#[test]
+fn settings_tab_strip_carries_one_glyph_per_tab() {
+  // Issue #623 point 3: the tab strip is the first thing read, and five bare
+  // words give the eye nothing to land on.
+  use gwm::tui::SettingsTab;
+  let (_dir, mut app) = make_app();
+  app.view = View::Config;
+  let buf = render(&mut app);
+  let rows = modal_rows(&buf).join("\n");
+  for tab in SettingsTab::ALL {
+    let glyph = tab.glyph();
+    assert!(
+      !glyph.is_empty(),
+      "{:?} must carry a glyph in the tab strip",
+      tab.label()
+    );
+    assert!(
+      rows.contains(&format!("{glyph} {}", tab.label())),
+      "the strip must read {glyph:?} then {:?} — rows:\n{rows}",
+      tab.label()
+    );
+  }
+  // Every glyph is distinct, or the strip orients nothing.
+  let mut seen: Vec<&str> = SettingsTab::ALL.iter().map(|t| t.glyph()).collect();
+  seen.sort_unstable();
+  let before = seen.len();
+  seen.dedup();
+  assert_eq!(before, seen.len(), "the tab glyphs must all differ, got {seen:?}");
+}
+
+#[test]
+fn settings_footer_names_the_move_and_adjust_verbs_on_an_editable_tab() {
+  // Issue #623 point 4. The footer has existed since #279, but on an editable
+  // tab it named `cycle`, `section`, `layer` and `close` — nothing about
+  // moving between rows, and nothing about the arrows the `‹ ›` marker
+  // advertises.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render(&mut app);
+  let rows = modal_rows(&buf).join("\n");
+  assert!(
+    rows.contains("move"),
+    "the footer must name the move verb — rows:\n{rows}"
+  );
+  assert!(
+    rows.contains("adjust"),
+    "the footer must name the adjust verb — rows:\n{rows}"
+  );
+}
+
+#[test]
+#[ignore = "not an assertion: prints the Settings panel so a human can look at it"]
+fn dump_the_settings_panel() {
+  // Issue #623 is a layout change, and a column, a rule and a glyph strip are
+  // only really judged by eye. `GWM_DUMP_TAB` picks the tab (`theme`,
+  // `worktree`, `tui`, `keys`, `all`; default `tui`), `GWM_DUMP_COMPACT=1`
+  // flips the frame:
+  //
+  //   GWM_DUMP_TAB=tui cargo test --test tui_modal_render_tests \
+  //     dump_the_settings_panel -- --ignored --nocapture
+  use gwm::config::{ConfigRow, ConfigSource};
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{build_key_rows, SettingsTab};
+  let (_dir, mut app) = make_app();
+  // The two dynamic tabs are empty until the event loop fills them, so seed
+  // them here or the dump shows their placeholder instead of their layout.
+  app.config_panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  app.config_panel.rows = [
+    "worktree.base",
+    "worktree.path_pattern",
+    "tui.layout",
+    "tui.sidebar_position",
+  ]
+  .iter()
+  .map(|k| ConfigRow {
+    key: (*k).to_string(),
+    value: "\"something\"".into(),
+    source: ConfigSource::Default,
+  })
+  .collect();
+  app.config_panel.tab = match std::env::var("GWM_DUMP_TAB").as_deref() {
+    Ok("theme") => SettingsTab::Theme,
+    Ok("worktree") => SettingsTab::Worktree,
+    Ok("keys") => SettingsTab::Keys,
+    Ok("all") => SettingsTab::All,
+    _ => SettingsTab::Tui,
+  };
+  if std::env::var_os("GWM_DUMP_COMPACT").is_some() {
+    app.config.tui.layout = TuiLayout::Compact;
+  }
+  app.view = View::Config;
+  let buf = render(&mut app);
+  for row in row_strings(&buf) {
+    println!("{row}");
+  }
+}
+
+#[test]
+#[ignore = "not an assertion: prints the Keybindings overlay so a human can look at it"]
+fn dump_the_help_overlay() {
+  // Same reason as `dump_the_settings_panel`: #623 gave this overlay a chord
+  // column and section rules, and a column is judged by eye.
+  //
+  //   cargo test --test tui_modal_render_tests dump_the_help_overlay \
+  //     -- --ignored --nocapture
+  let (_dir, mut app) = make_app();
+  if std::env::var_os("GWM_DUMP_COMPACT").is_some() {
+    app.config.tui.layout = TuiLayout::Compact;
+  }
+  app.view = View::Help;
+  let buf = render(&mut app);
+  for row in row_strings(&buf) {
+    println!("{row}");
+  }
+}
+
+#[test]
+fn the_keybindings_overlay_fits_every_label_beside_its_chords_at_eighty_columns() {
+  // Issue #623 gave this overlay two columns, which put its labels and its
+  // chords in competition for one width for the first time. The chords win
+  // when they collide: `help_entry_line` truncates the label, because a keys
+  // reference that shows no keys is not one.
+  //
+  // Truncating is the fallback, not the plan. The labels were cut to fit
+  // instead, and this is what holds them there: at 80 columns, the narrowest
+  // terminal the panel is really used on, nothing wears an ellipsis. A new
+  // binding whose description runs long fails here rather than quietly
+  // shortening every other row's label along with its own.
+  //
+  // 200 rows tall so the whole body is on screen at once: the overlay takes
+  // 60% of the height, and a short terminal would scroll most of the labels
+  // out of the assertion's reach.
+  let (_dir, mut app) = make_app();
+  app.view = View::Help;
+  let buf = render_at(&mut app, 80, 200);
+  let rows = modal_rows(&buf);
+
+  // Not vacuous: the body has to have actually painted its entries.
+  let entries = rows
+    .iter()
+    .filter(|r| r.contains(" quit ") || r.contains("worktree"))
+    .count();
+  assert!(
+    entries > 5,
+    "the overlay must have rendered its body, got {entries} recognisable rows:\n{}",
+    rows.join("\n")
+  );
+  let cut: Vec<&String> = rows.iter().filter(|r| r.contains('…')).collect();
+  assert!(
+    cut.is_empty(),
+    "no label may need truncating at 80 columns, got {}:\n{}",
+    cut.len(),
+    cut.iter().map(|r| r.trim()).collect::<Vec<_>>().join("\n")
+  );
+}
+
+#[test]
+fn the_keybindings_overlay_pins_its_chords_to_one_right_edge() {
+  // The other half of #623 here: the chords are a column, not a run trailing
+  // whatever the label happened to be. Measured on rows whose labels differ in
+  // width by a dozen cells, so a shared right edge cannot be a coincidence.
+  let (_dir, mut app) = make_app();
+  app.view = View::Help;
+  let buf = render_at(&mut app, 100, 60);
+  let rect = modal_rect(&buf).expect("the Keybindings overlay is rendered");
+
+  let edges: Vec<(&str, u16)> = ["jump to first worktree", "bootstrap selected", "new worktree"]
+    .iter()
+    .map(|label| (*label, row_right_edge(&buf, rect, label).1))
+    .collect();
+  let first = edges[0].1;
+  assert!(
+    edges.iter().all(|(_, e)| *e == first),
+    "every chord group must end in the same column, got {edges:?} — rows:\n{}",
+    modal_rows(&buf).join("\n")
+  );
+
+  // And that edge follows the overlay, not the widest label: the frame's own
+  // inner right edge, three cells in from the rule plus its padding.
+  // The frame costs a rule plus two padding columns, then the scrollbar takes
+  // one and leaves a gutter: five cells in from the right border.
+  assert_eq!(
+    first,
+    rect.0 + rect.2 - 1 - 5,
+    "the chord column sits at the overlay's inner edge, less the scrollbar and its gutter"
+  );
+}
+
+#[test]
+#[ignore = "not an assertion: prints the bootstrap report so a human can look at it"]
+fn dump_the_bootstrap_report() {
+  // `GWM_DUMP_COMPACT=1` flips the frame.
+  let (_dir, mut app) = make_app();
+  if std::env::var_os("GWM_DUMP_COMPACT").is_some() {
+    app.config.tui.layout = TuiLayout::Compact;
+  }
+  app.report = Some(BootstrapReport {
+    steps: vec![
+      StepResult::skipped("no-symlink target", "real directory, ok"),
+      StepResult::ok("run direnv allow"),
+      StepResult::ok("run cargo fetch"),
+    ],
+  });
+  app.view = View::Report;
+  let buf = render(&mut app);
+  for row in row_strings(&buf) {
+    println!("{row}");
+  }
+}
+
+#[test]
+fn the_keybindings_overlay_breathes_between_its_sections() {
+  // A rule is the separation, but back to back with the row above it a section
+  // reads as a continuation of the one before. One blank ahead of each break,
+  // and one under the subtitle so the first rule opens the body rather than
+  // hanging off the context label.
+  //
+  // One, not the two the pre-#623 body spent above and below every heading:
+  // on a dozen sections that was two dozen rows of nothing.
+  let (_dir, mut app) = make_app();
+  app.view = View::Help;
+  let buf = render_at(&mut app, 100, 200);
+  let rows = modal_rows(&buf);
+
+  let blank = |r: &String| r.trim_matches(['│', '║', '█', ' ']).is_empty();
+  let rule_at: Vec<usize> = rows
+    .iter()
+    .enumerate()
+    .filter(|(_, r)| r.contains("─ ") && !r.contains("╭") && !r.contains("╰"))
+    .map(|(i, _)| i)
+    .collect();
+  assert!(
+    rule_at.len() > 5,
+    "the body must have rendered its sections: {rule_at:?}"
+  );
+
+  for i in &rule_at {
+    assert!(
+      blank(&rows[i - 1]),
+      "row {} above the rule {:?} must be blank:\n{}",
+      i - 1,
+      rows[*i].trim(),
+      rows[i.saturating_sub(2)..(i + 1).min(rows.len())].join("\n")
+    );
+    assert!(
+      !blank(&rows[i + 1]),
+      "and the row under it must not be, or the rule floats: {:?}",
+      rows[i + 1].trim()
+    );
+  }
+}
+
+#[test]
+fn the_settings_tabs_breathe_between_their_sections() {
+  // The Keybindings guard's twin, one modal over: a blank ahead of every
+  // section break, and one under the tab strip so the first rule opens the
+  // body rather than hanging off the chrome.
+  //
+  // Rendered tall enough for the whole TUI tab, which is what the height
+  // bounds were raised for: at 40 rows the panel is 36 and the tab wants 39,
+  // so a shorter terminal scrolls and the assertion would only ever see the
+  // first few sections.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render_at(&mut app, 100, 60);
+  let rows = modal_rows(&buf);
+
+  let blank = |r: &String| r.trim_matches(['│', '║', '█', ' ']).is_empty();
+  let rule_at: Vec<usize> = rows
+    .iter()
+    .enumerate()
+    .filter(|(_, r)| r.contains("─ ") && !r.contains('╭') && !r.contains('╰'))
+    .map(|(i, _)| i)
+    .collect();
+  assert_eq!(
+    rule_at.len(),
+    7,
+    "the TUI tab rules off seven sections, got {}:\n{}",
+    rule_at.len(),
+    rows.join("\n")
+  );
+
+  for i in &rule_at {
+    assert!(
+      blank(&rows[i - 1]),
+      "row {} above the rule {:?} must be blank:\n{}",
+      i - 1,
+      rows[*i].trim(),
+      rows[i.saturating_sub(2)..(i + 1).min(rows.len())].join("\n")
+    );
+    assert!(
+      !blank(&rows[i + 1]),
+      "and the row under it must not be, or the rule floats: {:?}",
+      rows[i + 1].trim()
+    );
+  }
+}
+
+#[test]
+fn the_settings_tui_tab_fits_its_box_on_a_terminal_with_the_room() {
+  // #623 spent rows on the section rules and their spacing, and #569's ceiling
+  // was set before either existed. This is the number that justifies moving
+  // it: the whole TUI tab, last row included, on a terminal tall enough to
+  // hold the box the bounds now allow. Without the raise it scrolls, and a
+  // form the user opened deliberately is the worst surface to hide a row in.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render_at(&mut app, 100, 60);
+  let rows = modal_rows(&buf).join("\n");
+  assert!(rows.contains("Timing"), "the last section must be on screen:\n{rows}");
+  assert!(rows.contains("auto refresh (s)"), "and so must its last field:\n{rows}");
+}

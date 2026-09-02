@@ -17737,3 +17737,48 @@ fn a_cached_issue_prefills_without_waiting_for_a_message() {
   assert_eq!(app.create_form.desc, "modal-layout");
   assert_eq!(app.create_form.awaiting_issue, None, "nothing is being waited for");
 }
+
+#[test]
+fn the_arrows_cycle_a_settings_choice_in_both_directions() {
+  // Issue #623 says the `‹ ›` markers "double as a hint that the value cycles,
+  // which is what `←`/`→` already do". They did not: `ConfigScrollRight` /
+  // `ConfigScrollLeft` were gated `if on_all`, so on an editable tab both keys
+  // were dead. The markers are what makes that gap visible, so the wiring
+  // ships with them.
+  use gwm::tui::{SettingField, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  let field = SettingField::SidebarOrientation;
+  app.config_panel.selected = SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == field)
+    .expect("sidebar orientation is on the TUI tab");
+
+  let start = field.current(&app.config);
+  assert!(
+    !app.handle_config_nav_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+    "adjusting must not close the panel"
+  );
+  let forward = field.current(&app.config);
+  assert_ne!(start, forward, "→ must move the value, status: {:?}", app.status);
+
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+  assert_eq!(
+    field.current(&app.config),
+    start,
+    "← must undo what → did, status: {:?}",
+    app.status
+  );
+
+  // The `All` tab keeps the arrows for its horizontal pan — that is what the
+  // `on_all` gate was protecting, and adjusting has no meaning on a read-only
+  // view.
+  app.config_panel.tab = SettingsTab::All;
+  app.config_panel.max_x_scroll = 10;
+  app.config_panel.x_scroll = 0;
+  assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+  assert_eq!(app.config_panel.x_scroll, 1, "the All tab still pans");
+}

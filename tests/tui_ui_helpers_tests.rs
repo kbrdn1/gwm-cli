@@ -245,11 +245,14 @@ fn badge_group_width_unbound_is_the_bare_placeholder_width() {
 fn help_entry_line_renders_flat_accent_chords_not_badges() {
   // Issue #279: the keybindings body drops the reverse-video chord badge
   // for flat accent-bold glyphs (herdr-style). The label stays readable.
+  //
+  // Since #623 the label leads and the chords are the right-hand column, the
+  // order the Settings panel's Keys tab already used for the same data.
   let theme = Theme {
     accent: Color::Magenta,
     ..Theme::default()
   };
-  let line = help_entry_line("j, Down", "next", 10, &theme);
+  let line = help_entry_line("next", "j, Down", 10, 8, 2, &theme);
   let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(text.contains("next"), "label missing: {text:?}");
   // The first chord renders as a bare `j` accent-bold span — no padding box.
@@ -1054,7 +1057,7 @@ fn config_nav_footer_hints_track_rebinding() {
   use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
   use gwm::tui::{FieldKind, SettingsTab};
 
-  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None);
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None, 200);
   assert_eq!(
     all[0],
     ("j/k".to_string(), "scroll".to_string()),
@@ -1064,16 +1067,23 @@ fn config_nav_footer_hints_track_rebinding() {
   assert!(all.iter().any(|(k, l)| k == "L" && l == "layer"));
   assert!(all.iter().any(|(k, l)| k == "Esc" && l == "close"));
 
-  // An editable field advertises `edit`; a Choice field advertises `cycle`.
-  let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
+  // A typed field advertises `edit` on the resolved activate key. A Choice
+  // field advertises `adjust` on the arrows instead: since #623 they walk the
+  // same list activate does, and naming one operation twice overflowed a
+  // centred line that then clipped at both ends.
+  let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text), 200);
   assert!(
     editable.iter().any(|(_, l)| l == "edit"),
     "editable field footer: {editable:?}"
   );
-  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice), 200);
   assert!(
-    choice.iter().any(|(_, l)| l == "cycle"),
+    choice.iter().any(|(_, l)| l == "adjust"),
     "choice field footer: {choice:?}"
+  );
+  assert!(
+    !choice.iter().any(|(_, l)| l == "edit"),
+    "a cyclable field must not offer the typed-edit verb: {choice:?}"
   );
 
   // Rebinding close + next_tab shows through.
@@ -1084,7 +1094,7 @@ fn config_nav_footer_hints_track_rebinding() {
   modal
     .apply_override(ModalAction::ConfigNextTab, vec![parse_single("n").unwrap()])
     .unwrap();
-  let rebound = config_nav_footer_hints(&modal, SettingsTab::All, None);
+  let rebound = config_nav_footer_hints(&modal, SettingsTab::All, None, 200);
   assert!(
     rebound.iter().any(|(k, l)| k == "x" && l == "close"),
     "rebound close: {rebound:?}"
@@ -1099,7 +1109,7 @@ fn config_nav_footer_hints_track_rebinding() {
   );
 
   // Keys tab (issue #294): `activate` advertises `rebind`, not `edit`/`cycle`.
-  let keys = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Keys, None);
+  let keys = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Keys, None, 200);
   assert!(
     keys.iter().any(|(_, l)| l == "rebind"),
     "Keys tab footer advertises rebind: {keys:?}"
@@ -1917,4 +1927,221 @@ fn the_metadata_roles_resolve_to_the_status_panes_own_colours() {
   ] {
     assert_eq!(fg(role), issue_badge_color(state, &theme), "{state:?}");
   }
+}
+
+#[test]
+fn settings_value_cell_marks_what_cycles_and_what_toggles() {
+  // Issue #623 point 1: the value's *shape* carries its kind. A choice reads
+  // `‹ value ›`, and the markers double as the hint that it cycles — which is
+  // what the arrows do since this issue wired them. A bool reads as a
+  // checkbox, so a screenful of `true` / `false` becomes a column the eye
+  // scans in one pass.
+  use gwm::config::Config;
+  use gwm::tui::{settings_value_cell, SettingField};
+
+  let mut cfg = Config::default();
+  cfg.tui.dim_unfocused = true;
+  assert_eq!(settings_value_cell(SettingField::DimUnfocused, &cfg), "[✓]");
+  cfg.tui.dim_unfocused = false;
+  assert_eq!(settings_value_cell(SettingField::DimUnfocused, &cfg), "[ ]");
+
+  assert_eq!(
+    settings_value_cell(SettingField::Layout, &cfg),
+    format!("‹ {} ›", cfg.tui.layout.label()),
+    "a choice wears the cycle markers"
+  );
+
+  // Uint and text are typed, not cycled, so they wear no marker.
+  let secs = settings_value_cell(SettingField::AutoRefreshSecs, &cfg);
+  assert_eq!(secs, cfg.tui.auto_refresh_secs.to_string());
+  assert!(!secs.contains('‹'), "a typed value must not claim to cycle: {secs:?}");
+
+  // An unset optional text field is the reason the column needed a word: three
+  // of them default to empty, and a right-aligned column of blanks reads as a
+  // rendering bug rather than as "nothing configured". Mirrors the Keys tab's
+  // own `(unbound)`.
+  cfg.tui.open.shell_cmd = None;
+  assert_eq!(settings_value_cell(SettingField::OpenShellCmd, &cfg), "(unset)");
+  cfg.tui.open.shell_cmd = Some("/bin/zsh".into());
+  assert_eq!(settings_value_cell(SettingField::OpenShellCmd, &cfg), "/bin/zsh");
+}
+
+#[test]
+fn config_nav_footer_hints_name_move_and_adjust_on_an_editable_tab() {
+  // Issue #623 point 4: the footer existed, but on an editable tab it named
+  // `cycle` / `section` / `layer` / `close` and nothing else — no way to learn
+  // that rows move, and nothing about the arrows.
+  //
+  // Both pairs stay literal, the same rule the `All` tab's `j/k` already
+  // follows: no single resolved key captures a movement pair.
+  use gwm::tui::config_nav_footer_hints;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{FieldKind, SettingsTab};
+
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice), 200);
+  assert!(
+    choice.iter().any(|(k, l)| k == "j/k" && l == "move"),
+    "an editable tab names the move pair: {choice:?}"
+  );
+  assert!(
+    choice.iter().any(|(k, l)| k == "←/→" && l == "adjust"),
+    "a cyclable field names the arrows: {choice:?}"
+  );
+
+  // A typed field has nothing to adjust — the arrows do not cycle text.
+  let text = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text), 200);
+  assert!(
+    text.iter().any(|(k, l)| k == "j/k" && l == "move"),
+    "a typed field still moves: {text:?}"
+  );
+  assert!(
+    !text.iter().any(|(_, l)| l == "adjust"),
+    "a typed field must not advertise an adjust it cannot do: {text:?}"
+  );
+
+  // The `All` tab scrolls; it has no selection to move and no value to adjust.
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None, 200);
+  assert!(
+    !all.iter().any(|(_, l)| l == "move" || l == "adjust"),
+    "the read-only tab advertises neither: {all:?}"
+  );
+}
+
+#[test]
+fn the_settings_nav_footer_fits_every_panel_the_width_policy_draws() {
+  // `modal_hint_line` centres its spans, so an overflowing footer does not
+  // wrap: it is clipped at BOTH ends, which costs the first hint outright and
+  // leaves the last one mid-word (`Esc c`). Adding the #623 verbs did exactly
+  // that until the builder learned to drop `move` instead.
+  //
+  // Swept across the width policy rather than pinned at one terminal size,
+  // because the interesting widths are the narrow ones: `modal_width` floors
+  // the panel at 64 columns but then takes `.min(term_width - 4)`, so a narrow
+  // terminal walks the budget back down under the floor.
+  //
+  // 55 is where the sweep starts because that is where the *pre-#623* footer
+  // stopped fitting: its widest set was the Keys tab's `Space rebind` +
+  // section + layer + close, 45 cells, and a 55-column terminal draws a
+  // 51-column panel with exactly 45 to spend. Below that the footer was
+  // already clipping and this change does not make it worse. Above it, the
+  // capability is preserved rather than narrowed by nine columns.
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{config_nav_footer_hints, hint_line_cells, modal_width, FieldKind, SettingsTab};
+
+  let modal = ModalKeymap::defaults();
+  let mut dropped_somewhere = false;
+  let mut kept_somewhere = false;
+  for term_w in 55u16..=200 {
+    // The boxed frame is the expensive one: two rules plus four padding
+    // columns, against the compact frame's two.
+    let budget = modal_width(term_w, 60, 64, 96).saturating_sub(6);
+    for (tab, kind) in [
+      (SettingsTab::All, None),
+      (SettingsTab::Keys, None),
+      (SettingsTab::Theme, Some(FieldKind::Choice)),
+      (SettingsTab::Tui, Some(FieldKind::Choice)),
+      (SettingsTab::Tui, Some(FieldKind::Bool)),
+      (SettingsTab::Tui, Some(FieldKind::Uint)),
+      (SettingsTab::Tui, Some(FieldKind::Text)),
+      (SettingsTab::Worktree, Some(FieldKind::Text)),
+    ] {
+      let hints = config_nav_footer_hints(&modal, tab, kind, budget);
+      let width = hint_line_cells(&hints);
+      assert!(
+        width <= budget as usize,
+        "{term_w} cols, {tab:?} / {kind:?}: the footer needs {width} cells of {budget} and would be clipped: {hints:?}"
+      );
+      if tab == SettingsTab::Tui && kind == Some(FieldKind::Choice) {
+        if hints.iter().any(|(_, l)| l == "move") {
+          kept_somewhere = true;
+        } else {
+          dropped_somewhere = true;
+        }
+      }
+      // Whatever else goes, the way out of the panel never does.
+      assert!(
+        hints.iter().any(|(_, l)| l == "close"),
+        "{term_w} cols, {tab:?}: `close` must survive the trim: {hints:?}"
+      );
+    }
+  }
+  // Both halves of the trim are exercised, or the sweep proves only one.
+  assert!(kept_somewhere, "a wide panel must keep the move verb");
+  assert!(dropped_somewhere, "a narrow panel must drop it rather than be clipped");
+}
+
+#[test]
+fn help_entry_line_puts_the_label_first_and_right_aligns_the_chords() {
+  // Issue #623 applied to the Keybindings overlay: two columns, the chords
+  // pinned to a common right edge so the eye finds them without scanning a
+  // ragged margin. Both halves are padded from the widths measured over the
+  // whole body, so a short label and a short chord group land in the same
+  // columns as the widest ones.
+  use gwm::tui::{cells, help_entry_line};
+  let theme = Theme::default();
+  let line = help_entry_line("next", "j, Down", 12, 9, 3, &theme);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    text.starts_with("  next"),
+    "the label leads, after the body indent: {text:?}"
+  );
+  assert!(
+    text.trim_end().ends_with("j Down"),
+    "the chords close the row: {text:?}"
+  );
+
+  // A narrower label and a narrower chord group produce a line of the same
+  // width, which is what "one column" means.
+  let short = help_entry_line("up", "k", 12, 9, 3, &theme);
+  let short_text: String = short.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert_eq!(
+    cells(&text),
+    cells(&short_text),
+    "every row measures the same: {text:?} vs {short_text:?}"
+  );
+  assert!(
+    !short_text.ends_with(' '),
+    "the padding goes before the chords, so no row ends in spaces: {short_text:?}"
+  );
+}
+
+#[test]
+fn a_modal_section_rule_mutes_its_separator_and_not_its_name() {
+  // Issue #623, on Kylian's read of the rendered panel: the rule is chrome and
+  // recedes, the name is the one thing on the row meant to be read and keeps
+  // the theme role the bare headings wore before they were given a rule to sit
+  // in. The first pass muted both, which sank the name into the separator.
+  use gwm::tui::modal_section_rule;
+  use ratatui::style::{Color, Modifier};
+
+  let line = modal_section_rule("Sidebar", 40, Color::Magenta, Color::DarkGray);
+  let name = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "Sidebar")
+    .expect("the rule carries its name");
+  assert_eq!(name.style.fg, Some(Color::Magenta), "the name keeps the chosen colour");
+  assert!(
+    name.style.add_modifier.contains(Modifier::BOLD),
+    "and stays bold, so it reads as a heading: {name:?}"
+  );
+  assert!(
+    line
+      .spans
+      .iter()
+      .filter(|s| s.content.as_ref() != "Sidebar")
+      .all(|s| s.style.fg == Some(Color::DarkGray)),
+    "every span but the name is the muted separator: {:?}",
+    line
+      .spans
+      .iter()
+      .map(|s| (s.content.as_ref(), s.style.fg))
+      .collect::<Vec<_>>()
+  );
+  // Drawn to the width it was given, so it frames the column beside it rather
+  // than stopping short of it or running past.
+  assert_eq!(
+    gwm::tui::cells(&line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
+    40
+  );
 }

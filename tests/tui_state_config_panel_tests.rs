@@ -156,35 +156,52 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → layout / dim unfocused / status one line / note vim / mux
-  // opens in / mux pane side / sidebar position / sidebar layout / clipboard / open / countdown
-  // / auto refresh in order. `layout` leads since #545: it is the structural
-  // choice the rest of the tab refines, and the boolean knobs (#545, #547,
-  // #557) sit right under it.
+
+  // TUI tab, in the section runs #623 filed the fields under. `layout` still
+  // leads (#545): it is the structural choice the rest of the tab refines, and
+  // the boolean knobs (#545, #547) sit right under it. The whole list is
+  // walked, unlike the pre-#623 version which stopped at the twelfth of
+  // sixteen and so said nothing about the four that followed.
   panel.tab = SettingsTab::Tui;
-  assert_eq!(panel.selected_field(), Some(SettingField::Layout));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::DimUnfocused));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::StatusOneLine));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::NoteVim));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::MuxOpenIn));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::MuxPaneDirection));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::SidebarOrientation));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::Clipboard));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::OpenMode));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::ConfirmCountdown));
-  panel.select_next();
-  assert_eq!(panel.selected_field(), Some(SettingField::AutoRefreshSecs));
+  let expected = [
+    (SettingField::Layout, "Appearance"),
+    (SettingField::DimUnfocused, "Appearance"),
+    (SettingField::StatusOneLine, "Appearance"),
+    (SettingField::SidebarPosition, "Sidebar"),
+    (SettingField::SidebarOrientation, "Sidebar"),
+    (SettingField::NoteVim, "Editing"),
+    (SettingField::Clipboard, "Editing"),
+    (SettingField::OpenMode, "Open"),
+    (SettingField::OpenShellCmd, "Open"),
+    (SettingField::OpenEditorCmd, "Open"),
+    (SettingField::MuxOpenIn, "Multiplexer"),
+    (SettingField::MuxPaneDirection, "Multiplexer"),
+    (SettingField::TerminalBrowser, "Browser"),
+    (SettingField::TerminalBrowserOpenIn, "Browser"),
+    (SettingField::ConfirmCountdown, "Timing"),
+    (SettingField::AutoRefreshSecs, "Timing"),
+  ];
+  assert_eq!(
+    expected.len(),
+    SettingsTab::Tui.fields().len(),
+    "a field was added to the TUI tab without being placed in this order"
+  );
+  for (i, (field, section)) in expected.iter().enumerate() {
+    assert_eq!(panel.selected_field(), Some(*field), "row {i}");
+    assert_eq!(
+      field.section(),
+      Some(*section),
+      "{} must be filed under {section}",
+      field.key_path()
+    );
+    panel.select_next();
+  }
+  assert_eq!(
+    panel.selected_field(),
+    Some(SettingField::AutoRefreshSecs),
+    "the last select_next clamps rather than wrapping"
+  );
+
   // All tab is read-only → no editable field.
   panel.tab = SettingsTab::All;
   panel.selected = 0;
@@ -782,4 +799,93 @@ fn the_tui_tab_reaches_the_terminal_browser_setting() {
   assert_eq!(SettingField::TerminalBrowser.current(&cfg), "w3m {url}");
   // And the row is addressable by lookup, not by a literal index.
   let _ = tui_idx(SettingField::TerminalBrowser);
+}
+
+#[test]
+fn every_tui_field_belongs_to_a_named_section() {
+  // Issue #623 point 2. Enumerated from the tab rather than hand-listed: a
+  // field added without a section would otherwise render under whichever rule
+  // happens to precede it, which is the undivided run the issue is about.
+  for field in SettingsTab::Tui.fields() {
+    assert!(
+      field.section().is_some(),
+      "{} sits under no section in the TUI tab",
+      field.key_path()
+    );
+  }
+  // The sections come out in runs, never interleaved: the renderer emits a
+  // rule when the section *changes*, so a field filed out of order would
+  // print its section's rule twice.
+  let mut seen: Vec<&str> = Vec::new();
+  let mut current: Option<&str> = None;
+  for field in SettingsTab::Tui.fields() {
+    let section = field.section().unwrap();
+    if current != Some(section) {
+      assert!(
+        !seen.contains(&section),
+        "section {section:?} is split into two runs by {}",
+        field.key_path()
+      );
+      seen.push(section);
+      current = Some(section);
+    }
+  }
+  assert!(seen.len() > 1, "the TUI tab must actually be divided, got {seen:?}");
+
+  // The short tabs stay undivided: a rule over one field is noise.
+  for tab in [SettingsTab::Theme, SettingsTab::Worktree] {
+    for field in tab.fields() {
+      assert!(
+        field.section().is_none(),
+        "{} must not be sectioned on the {} tab",
+        field.key_path(),
+        tab.label()
+      );
+    }
+  }
+}
+
+#[test]
+fn prev_choice_walks_the_list_backwards_and_wraps() {
+  // Issue #623: `→` cycles forward (what Space/Enter already did) and `←`
+  // cycles back, which needs the other half of the walk. Wrapping matters at
+  // the first element — that is where a `saturating_sub` would sit still and
+  // make the key look dead.
+  let cfg = Config::default();
+  let field = SettingField::SidebarOrientation;
+  let choices = field.choices();
+  assert!(choices.len() > 2, "the field under test must have a real list");
+
+  // Walk the whole list backwards from the default and land back on it.
+  let mut cursor = field.current(&cfg);
+  let mut walked = vec![cursor.clone()];
+  for _ in 0..choices.len() {
+    let mut c = Config::default();
+    // Re-resolve against a config pinned to the cursor value, the way the
+    // panel does between two keystrokes.
+    c.tui.sidebar_orientation = choices
+      .iter()
+      .position(|x| *x == cursor)
+      .map(|i| match i {
+        0 => gwm::config::SidebarOrientation::Stacked,
+        1 => gwm::config::SidebarOrientation::SideBySide,
+        _ => gwm::config::SidebarOrientation::Auto,
+      })
+      .unwrap();
+    cursor = field.prev_choice(&c).expect("a choice field walks backwards");
+    walked.push(cursor.clone());
+  }
+  assert_eq!(
+    walked.first(),
+    walked.last(),
+    "walking back through every choice returns to the start: {walked:?}"
+  );
+  assert_eq!(
+    walked.len() - 1,
+    choices.len(),
+    "no choice is visited twice on the way round: {walked:?}"
+  );
+
+  // A typed field has nothing to walk.
+  assert!(SettingField::AutoRefreshSecs.prev_choice(&cfg).is_none());
 }
