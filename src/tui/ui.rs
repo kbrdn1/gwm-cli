@@ -1,7 +1,7 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
-use super::mouse::{MouseMap, PaneId, RowList, Spot};
+use super::mouse::{MouseMap, PaneId, RowList, SidebarPane, Spot};
 use super::state::async_task::TaskKind;
 use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
@@ -1585,6 +1585,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
     0,
     None,
   );
+  push_section_title(map, chunks[1], SidebarPane::IssuePr);
   if !agent_lines.is_empty() {
     render_section(
       f,
@@ -1595,6 +1596,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
       0,
       None,
     );
+    push_section_title(map, chunks[2], SidebarPane::Agents);
   }
   if !sections.working_tree.is_empty() {
     render_section(
@@ -1619,6 +1621,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
     if inner.height > 0 {
       let _ = scrollable_body_area(f, inner, wt_scroll, working_tree_len, &theme);
     }
+    push_section_title(map, chunks[3], SidebarPane::WorkingTree);
   }
   render_section(
     f,
@@ -1629,6 +1632,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
     scroll,
     panel_footer.map(ratatui::text::Line::from),
   );
+  push_section_title(map, commits_area, SidebarPane::Commits);
 }
 
 /// Borrowed content for one [`render_section`] block (issue #238).
@@ -1679,6 +1683,24 @@ impl<'a> SectionBody<'a> {
       meta: None,
     }
   }
+}
+
+/// Publish a sidebar section's title row as a click target (user feedback on
+/// issue #624).
+///
+/// The title row is the first line of the section's rect in both layouts —
+/// the top rule when bordered, the header band when compact — and the whole
+/// row is taken, not just the label: a five-cell word is a hard thing to hit,
+/// and the rest of the row carries nothing a click could mean instead.
+///
+/// A zero-height section (the responsive split collapses one when the column
+/// is short) publishes nothing, so a title that is not on screen cannot be
+/// clicked.
+fn push_section_title(map: &mut MouseMap, area: Rect, pane: SidebarPane) {
+  if area.height == 0 {
+    return;
+  }
+  map.push_spot(Rect { height: 1, ..area }, Spot::SidebarSection(pane));
 }
 
 fn render_section(
@@ -6558,21 +6580,26 @@ fn form_field_lines(
   type_desc: &str,
   value_w: usize,
   label_w: usize,
-) -> (Vec<Line<'static>>, Option<usize>) {
+) -> (Vec<Line<'static>>, Option<usize>, Vec<Option<usize>>) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let surface = app.theme.selection_bg;
   let label = |s: &str| format!("{:<label_w$}", s);
 
   let mut lines: Vec<Line<'static>> = Vec::new();
+  // Field index per body line, for the click map (user feedback on #624).
+  // The form spaces its rows out, so line N is not field N.
+  let mut rows: Vec<Option<usize>> = Vec::new();
   let mut focused_row = None;
-  for field in app.create_form.fields() {
+  for (i, field) in app.create_form.fields().iter().enumerate() {
     if !lines.is_empty() {
       lines.push(Line::from(String::new()));
+      rows.push(None);
     }
     if *field == app.create_form.field {
       focused_row = Some(lines.len());
     }
+    rows.push(Some(i));
     lines.push(match field {
       Field::Type => type_selector_line(
         &label("Type"),
@@ -6601,10 +6628,13 @@ fn form_field_lines(
         surface,
       ),
       // `Name` belongs to free-form mode, which never reaches this list.
-      Field::Name => continue,
+      Field::Name => {
+        rows.pop();
+        continue;
+      }
     });
   }
-  (lines, focused_row)
+  (lines, focused_row, rows)
 }
 
 /// The vertical scroll that keeps line `focus` inside a `height`-row viewport,
@@ -6700,6 +6730,10 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // Which row carries the focused input, so a form taller than the terminal
   // can scroll it into view rather than lose it off the bottom (issue #553).
   let focused_row;
+  // Field index per body line for the click map — empty in the one-input
+  // modes, where the single field already holds the focus and a click on it
+  // would change nothing (user feedback on issue #624).
+  let mut field_rows: Vec<Option<usize>> = Vec::new();
   if from_issue {
     // One input, whatever the patterns carry: the number is fetched, not
     // written, so a `{type}/{desc}` repo still has an issue to read.
@@ -6726,8 +6760,10 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
     ));
   } else {
     let base = lines.len();
-    let (fields, focused) = form_field_lines(app, type_str, type_desc, value_w, label_w);
+    let (fields, focused, rows) = form_field_lines(app, type_str, type_desc, value_w, label_w);
     focused_row = focused.map(|row| base + row);
+    // Offset into the whole body: the preview rows above are not fields.
+    field_rows = std::iter::repeat_n(None, base).chain(rows).collect();
     lines.extend(fields);
   }
 
@@ -6745,7 +6781,8 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
     ])
     .split(content);
 
-  render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  let body = render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  push_form_targets(map, &body, &field_rows, app, type_str, label_w);
 
   if app.is_create_worktree_loading() {
     f.render_widget(
@@ -6790,11 +6827,94 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
 /// The scrollbar comes from the Settings panel's helper, which paints nothing
 /// while the content fits, so a form that did not have to scroll looks exactly
 /// as it did and one that did says so instead of truncating in silence.
-fn render_form_body(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, focused_row: Option<usize>, theme: &Theme) {
+/// Publish the structured create / rename form's click targets (user feedback
+/// on issue #624).
+///
+/// `field_rows` is the field index per body line, produced by the same pass
+/// that built the lines. Empty in the one-input modes, where the single field
+/// already holds the focus and a click on it would change nothing.
+fn push_form_targets(
+  map: &mut MouseMap,
+  body: &FormBody,
+  field_rows: &[Option<usize>],
+  app: &App,
+  type_str: &str,
+  label_w: usize,
+) {
+  if field_rows.is_empty() {
+    return;
+  }
+  let count = field_rows.iter().flatten().copied().max().map_or(0, |m| m + 1);
+  map.push_mapped_rows(
+    body.rect,
+    RowList::CreateForm,
+    body.offset as usize,
+    count,
+    field_rows.to_vec(),
+  );
+
+  // The two chevrons of the branch-type selector. They read as controls — the
+  // value sits between them as a chip — so they get their own targets rather
+  // than making the whole row cycle, which a click meant only to focus the
+  // field would then trip.
+  let Some(line) = app
+    .create_form
+    .fields()
+    .iter()
+    .position(|f| *f == Field::Type)
+    .and_then(|idx| field_rows.iter().position(|r| *r == Some(idx)))
+  else {
+    return;
+  };
+  // The row may be scrolled off the top of the viewport (issue #553), in
+  // which case it published nothing this frame.
+  let Some(row) = line.checked_sub(body.offset as usize) else {
+    return;
+  };
+  if row >= body.rect.height as usize {
+    return;
+  }
+  // Column arithmetic mirrored from `type_selector_line`: two indent cells,
+  // the label column, two gap cells, then `‹ `, the padded value, and ` ›`.
+  let gutter = 2 + label_w + 2;
+  let left = body.rect.x.saturating_add(gutter as u16);
+  let right = left.saturating_add(2 + cells(type_str) as u16 + 2);
+  for (x, forward) in [(left, false), (right, true)] {
+    map.push_spot(
+      Rect {
+        x,
+        y: body.rect.y.saturating_add(row as u16),
+        width: 2,
+        height: 1,
+      },
+      Spot::TypeChevron { forward },
+    );
+  }
+}
+
+/// Where [`render_form_body`] put the body, so the caller can publish click
+/// targets against the rect it actually drew into and the scroll it applied
+/// (issue #624).
+struct FormBody {
+  rect: Rect,
+  offset: u16,
+}
+
+fn render_form_body(
+  f: &mut Frame,
+  area: Rect,
+  lines: Vec<Line<'static>>,
+  focused_row: Option<usize>,
+  theme: &Theme,
+) -> FormBody {
   let total = lines.len();
   let offset = focused_row.map_or(0, |row| form_field_scroll(row, area.height));
   let text_area = scrollable_body_area(f, area, offset, total, theme);
   f.render_widget(Paragraph::new(lines).scroll((offset, 0)), text_area);
+  FormBody {
+    rect: text_area,
+    offset,
+  }
 }
 
 /// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).
@@ -7314,6 +7434,7 @@ fn draw_confirm_merge(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[2],
     );
+    push_confirm_buttons(map, inner[2]);
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
         // The merge's own verbs (validation feedback): `delete branch`
@@ -7513,6 +7634,7 @@ fn draw_confirm(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[2],
     );
+    push_confirm_buttons(map, inner[2]);
 
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
@@ -7533,6 +7655,42 @@ fn draw_confirm(f: &mut Frame, app: &App, map: &mut MouseMap) {
 /// defaults to Cancel, so the destructive button is never the one a stray
 /// `Enter` lands on. Pure so the chip contract is pinned by
 /// `tests/tui_ui_helpers_tests.rs`.
+/// Publish the confirmation modal's two buttons (user feedback on issue
+/// #624).
+///
+/// The row is centre-aligned, so the columns come from the line's own widths
+/// rather than from the rect: ` Confirm `, three spaces, ` Cancel `, centred
+/// in `area`. Kept beside [`confirm_buttons_line`], which owns those widths,
+/// so the two cannot drift.
+fn push_confirm_buttons(map: &mut MouseMap, area: Rect) {
+  const CONFIRM: u16 = 9; // " Confirm "
+  const GAP: u16 = 3;
+  const CANCEL: u16 = 8; // " Cancel "
+  let total = CONFIRM + GAP + CANCEL;
+  if area.height == 0 || area.width < total {
+    return;
+  }
+  let start = area.x + (area.width - total) / 2;
+  map.push_spot(
+    Rect {
+      x: start,
+      y: area.y,
+      width: CONFIRM,
+      height: 1,
+    },
+    Spot::ConfirmButton { confirm: true },
+  );
+  map.push_spot(
+    Rect {
+      x: start + CONFIRM + GAP,
+      y: area.y,
+      width: CANCEL,
+      height: 1,
+    },
+    Spot::ConfirmButton { confirm: false },
+  );
+}
+
 pub fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
   let focused = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
@@ -9269,6 +9427,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // here in the first place was that these rows did not exist. Which rows the
   // structured side needs comes from the patterns (#418).
   let focused_row;
+  let mut field_rows: Vec<Option<usize>> = Vec::new();
   if freeform {
     focused_row = Some(lines.len());
     lines.push(field_input_line(
@@ -9282,8 +9441,9 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
     ));
   } else {
     let base = lines.len();
-    let (fields, focused) = form_field_lines(app, type_str, type_desc, value_w, label_w);
+    let (fields, focused, rows) = form_field_lines(app, type_str, type_desc, value_w, label_w);
     focused_row = focused.map(|row| base + row);
+    field_rows = std::iter::repeat_n(None, base).chain(rows).collect();
     lines.extend(fields);
   }
 
@@ -9301,7 +9461,8 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
     ])
     .split(content);
 
-  render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  let body = render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  push_form_targets(map, &body, &field_rows, app, type_str, label_w);
 
   if app.is_edit_worktree_loading() {
     f.render_widget(

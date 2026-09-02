@@ -8,8 +8,8 @@ mod common;
 
 use common::init_repo;
 use gwm::tui::keymap::Action;
-use gwm::tui::mouse::{MouseKind, PaneId, RowList, Spot};
-use gwm::tui::{App, LinkTarget, MouseOutcome, SettingsTab, View};
+use gwm::tui::mouse::{MouseKind, PaneId, RowList, SidebarPane, Spot};
+use gwm::tui::{App, ConfirmButton, LinkTarget, MouseOutcome, SettingsTab, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::layout::Rect;
 use std::path::PathBuf;
@@ -359,4 +359,105 @@ fn the_detail_prompt_cursor_stays_inside_the_filtered_list() {
     app.detail_overlay.input_selected, 0,
     "the wheel must clamp against the candidate list, not run off it"
   );
+}
+
+// ---- Sidebar section titles, form fields, confirm buttons ------------------
+
+/// A pane's title says what the pane is, so it is where "show me more of
+/// this" belongs — and it fires the modal that pane's key opens, through the
+/// same dispatcher.
+#[test]
+fn clicking_a_sidebar_section_title_opens_that_section_full_size() {
+  let (_d, mut app) = app_with_rows(3);
+  for (n, (pane, action)) in [
+    (SidebarPane::IssuePr, Action::RichView),
+    (SidebarPane::Agents, Action::AgentSessions),
+    (SidebarPane::WorkingTree, Action::WorkingTree),
+    (SidebarPane::Commits, Action::Commits),
+  ]
+  .into_iter()
+  .enumerate()
+  {
+    let y = 10 + n as u16;
+    app.mouse.push_spot(rect(0, y, 40, 1), Spot::SidebarSection(pane));
+    assert_eq!(
+      app.handle_mouse(MouseKind::Click, 10, y),
+      MouseOutcome::Action(action),
+      "{pane:?} title should open {action:?}"
+    );
+  }
+}
+
+#[test]
+fn clicking_a_form_field_focuses_it() {
+  let (_d, mut app) = app_with_rows(2);
+  app.enter_create();
+  let fields = app.create_form.fields().to_vec();
+  assert!(fields.len() > 1, "the fixture repo has to render a multi-field form");
+  // One line per field with a blank between, the shape `form_field_lines`
+  // builds.
+  let rows: Vec<Option<usize>> = (0..fields.len()).flat_map(|i| [Some(i), None]).collect();
+  app.mouse.push_mapped_rows(
+    rect(4, 6, 60, rows.len() as u16),
+    RowList::CreateForm,
+    0,
+    fields.len(),
+    rows,
+  );
+
+  // The last field, two lines per field.
+  let last = fields.len() - 1;
+  app.handle_mouse(MouseKind::Click, 10, 6 + (last as u16 * 2));
+  assert_eq!(app.create_form.field, fields[last]);
+
+  app.handle_mouse(MouseKind::Click, 10, 7);
+  assert_eq!(
+    app.create_form.field, fields[last],
+    "a blank between two fields is not a field"
+  );
+}
+
+#[test]
+fn the_type_chevrons_step_the_selector_both_ways() {
+  let (_d, mut app) = app_with_rows(2);
+  app.enter_create();
+  assert!(app.branch_types.len() > 1, "the fixture needs several branch types");
+  app
+    .mouse
+    .push_spot(rect(10, 6, 2, 1), Spot::TypeChevron { forward: false });
+  app
+    .mouse
+    .push_spot(rect(30, 6, 2, 1), Spot::TypeChevron { forward: true });
+
+  let start = app.create_form.type_index;
+  app.handle_mouse(MouseKind::Click, 30, 6);
+  assert_ne!(app.create_form.type_index, start, "the right chevron steps forward");
+  app.handle_mouse(MouseKind::Click, 10, 6);
+  assert_eq!(app.create_form.type_index, start, "and the left one steps back");
+}
+
+/// The button moves the focus and then asks the event loop to press the key,
+/// so a rebound `activate` reaches it too — and the countdown / arm-fire
+/// semantics stay on the one path that owns them.
+#[test]
+fn clicking_a_confirm_button_focuses_it_and_asks_for_the_activate_key() {
+  let (_d, mut app) = app_with_rows(2);
+  app
+    .mouse
+    .push_spot(rect(20, 10, 9, 1), Spot::ConfirmButton { confirm: true });
+  app
+    .mouse
+    .push_spot(rect(32, 10, 8, 1), Spot::ConfirmButton { confirm: false });
+
+  assert_eq!(
+    app.handle_mouse(MouseKind::Click, 22, 10),
+    MouseOutcome::ConfirmButton { confirm: true }
+  );
+  assert_eq!(app.confirm.focused_button(), ConfirmButton::Confirm);
+
+  assert_eq!(
+    app.handle_mouse(MouseKind::Click, 34, 10),
+    MouseOutcome::ConfirmButton { confirm: false }
+  );
+  assert_eq!(app.confirm.focused_button(), ConfirmButton::Cancel);
 }

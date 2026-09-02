@@ -1,6 +1,6 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
-use super::mouse::{Hit, MouseKind, PaneId, RowList, Spot};
+use super::mouse::{Hit, MouseKind, PaneId, RowList, SidebarPane, Spot};
 use super::palette::PaletteState;
 use super::state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
@@ -145,6 +145,9 @@ pub enum MouseOutcome {
   /// Close the modal that is open — routed through the `Esc` path so the
   /// button and the key cannot drift.
   CloseModal,
+  /// A confirmation button was clicked: run the `y` (`confirm`) or `n` path,
+  /// which the event loop owns for the same reason it owns `Esc`.
+  ConfirmButton { confirm: bool },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -2526,11 +2529,42 @@ impl App {
       Hit::Spot(Spot::CommandLogs) => MouseOutcome::Action(Action::CommandLogs),
       Hit::Spot(Spot::Settings) => MouseOutcome::Action(Action::ConfigPanel),
       Hit::Spot(Spot::CloseModal) => MouseOutcome::CloseModal,
+      // Through the form's own steppers, which own the wrap.
+      Hit::Spot(Spot::TypeChevron { forward }) => {
+        let len = self.branch_types.len();
+        self.create_form.field = Field::Type;
+        if forward {
+          self.create_form.next_type(len);
+        } else {
+          self.create_form.prev_type(len);
+        }
+        MouseOutcome::Handled
+      }
+      // The button is a second way to press `y` / `n`, so it goes through the
+      // same keys rather than reaching for `confirm_delete` — the countdown,
+      // the arm/fire semantics and the merge-vs-delete routing all live there.
+      Hit::Spot(Spot::ConfirmButton { confirm }) => {
+        if confirm {
+          self.confirm.focus_confirm();
+        } else {
+          self.confirm.focus_cancel();
+        }
+        MouseOutcome::ConfirmButton { confirm }
+      }
       Hit::Spot(Spot::ConfigTab(tab)) => {
         self.config_panel.set_tab(tab);
         MouseOutcome::Handled
       }
       Hit::Spot(Spot::WtCounts) => MouseOutcome::Action(Action::WorkingTree),
+      // A pane's title is where it says what it is, so it is where "show me
+      // more of this" belongs — the same modal its key opens, through the one
+      // dispatcher (user feedback on #624).
+      Hit::Spot(Spot::SidebarSection(pane)) => MouseOutcome::Action(match pane {
+        SidebarPane::IssuePr => Action::RichView,
+        SidebarPane::Agents => Action::AgentSessions,
+        SidebarPane::WorkingTree => Action::WorkingTree,
+        SidebarPane::Commits => Action::Commits,
+      }),
       Hit::Pane(PaneId::Worktrees) => {
         self.focus_worktrees();
         MouseOutcome::Handled
@@ -2576,6 +2610,11 @@ impl App {
         0 => LinkTarget::Issue,
         _ => LinkTarget::Pr,
       }),
+      RowList::CreateForm => {
+        if let Some(field) = self.create_form.fields().get(index).copied() {
+          self.create_form.field = field;
+        }
+      }
       RowList::Palette => self.palette.select_index(index),
       RowList::Detail => self.detail_overlay.select_index(index),
       RowList::DetailInput => {
@@ -2666,6 +2705,9 @@ impl App {
       }
       RowList::OpenMenu => self.open_menu_toggle_selection(),
       RowList::LinkPrompt => self.link_prompt.toggle_selection(),
+      // A form is not a list: rolling over it moves the focus the way `Tab`
+      // does, which is the only ordering its fields have.
+      RowList::CreateForm => self.create_form.next_field(),
       RowList::Palette => {
         if down {
           self.palette_cycle_down();

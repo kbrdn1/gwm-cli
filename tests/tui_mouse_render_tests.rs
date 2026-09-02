@@ -7,7 +7,7 @@
 //! asking the map what is at that cell. The two answers come from different
 //! places, which is the only reason the agreement means anything.
 
-use gwm::tui::mouse::{Hit, RowList, Spot};
+use gwm::tui::mouse::{Hit, RowList, SidebarPane, Spot};
 use gwm::tui::{draw, App, SettingsTab, View, CLOSE_ICON, COMMAND_LOGS_ICON, SETTINGS_ICON};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{backend::TestBackend, Terminal};
@@ -280,5 +280,34 @@ fn the_settings_tab_strip_is_clickable_where_it_is_painted() {
       Some(Hit::Spot(Spot::ConfigTab(tab))),
       "{tab:?}: the strip cell at ({x},{y}) is not that tab"
     );
+  }
+}
+
+/// Section titles, against the frame that painted them. The sidebar's
+/// sections are laid out by a responsive solver whose heights move with the
+/// content, so where a title lands is exactly the kind of thing a hand-pushed
+/// zone would get wrong.
+#[test]
+fn a_sidebar_section_title_is_clickable_where_it_is_painted() {
+  for compact in [false, true] {
+    let (_d, mut app) = app_with(4, compact);
+    app.sidebar.open = true;
+    let lines = render(&mut app, 140, 44);
+
+    for (label, pane) in [
+      ("Issue / PR", SidebarPane::IssuePr),
+      ("Working Tree", SidebarPane::WorkingTree),
+      ("Recent Commits", SidebarPane::Commits),
+    ] {
+      let Some((y, x)) = find_cell(&lines, label) else {
+        continue; // a section the layout collapsed on this size
+      };
+      assert_eq!(
+        app.mouse.hit(x, y),
+        Some(Hit::Spot(Spot::SidebarSection(pane))),
+        "compact={compact}: the {label:?} title at ({x},{y}) is not a target:\n{}",
+        lines.join("\n")
+      );
+    }
   }
 }

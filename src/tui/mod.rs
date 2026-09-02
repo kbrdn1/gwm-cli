@@ -177,7 +177,8 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   // stay free of alt-screen / ANSI frames (the fzf/skim pattern). stderr is the
   // tty in an interactive session, so the UI still draws (Codex review #292).
   let mut stderr = io::stderr();
-  execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+  execute!(stderr, EnterAlternateScreen)?;
+  enable_mouse(&mut stderr)?;
   Ok(Terminal::new(CrosstermBackend::new(stderr))?)
 }
 
@@ -220,10 +221,36 @@ pub fn clear_without_cursor_query<B: ratatui::backend::Backend>(
 /// a release the user asked for. The guard belongs where all three converge.
 fn set_mouse_capture(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, on: bool) -> Result<()> {
   if on {
-    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    enable_mouse(terminal.backend_mut())
   } else {
     execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    Ok(())
   }
+}
+
+/// Ask the terminal for the mouse events gwm reads, and only those.
+///
+/// `EnableMouseCapture` bundles five modes: normal tracking (`1000`),
+/// button-event tracking (`1002`), any-event tracking (`1003`) and the two
+/// coordinate encodings. gwm reads a left press and the wheel — `1002` and
+/// `1003` exist to report drags and pointer motion, neither of which it looks
+/// at, and between them they put an event on the wire for every cell the
+/// pointer crosses.
+///
+/// So the two are switched back off immediately after. Asking for less than
+/// is read would be a bug; asking for more is a stream nothing consumes, and
+/// a terminal deciding how much of the mouse the application wants is reading
+/// exactly these modes. Turning them off is what gwm can do about
+/// `Shift`-drag never reaching the terminal's own selection — whether it is
+/// enough is the terminal's call, which is why the release key exists.
+///
+/// Layered on `EnableMouseCapture` rather than written from scratch so the
+/// winapi path it carries for legacy Windows consoles is kept; the two
+/// disables are inert there.
+fn enable_mouse<W: io::Write>(w: &mut W) -> Result<()> {
+  execute!(w, EnableMouseCapture)?;
+  write!(w, "\x1b[?1003l\x1b[?1002l")?;
+  w.flush()?;
   Ok(())
 }
 
@@ -1049,6 +1076,18 @@ fn handle_mouse_event(
       Ok(None)
     }
     MouseOutcome::CloseModal => Ok(Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+    // A button click is the `activate` verb, resolved through the modal
+    // keymap rather than hard-coded to `Enter`: `[tui.keys.modal.confirm]`
+    // can rebind it, and a button that ignored the rebind would be a second
+    // implementation of the same decision. `App` already moved the focus, so
+    // the key acts on the button that was clicked.
+    MouseOutcome::ConfirmButton { .. } => {
+      let stroke = app
+        .modal_keymap
+        .primary_stroke(ModalAction::ConfirmActivate)
+        .unwrap_or_else(|| crate::tui::keymap::KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE));
+      Ok(Some(KeyEvent::new(stroke.code, stroke.modifiers)))
+    }
   }
 }
 

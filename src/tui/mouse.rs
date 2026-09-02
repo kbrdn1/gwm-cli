@@ -64,6 +64,8 @@ pub enum RowList {
   OpenMenu,
   /// The link prompt's first stage, which picks the same two targets.
   LinkPrompt,
+  /// The create / rename form's fields, indexed into `CreateForm::fields()`.
+  CreateForm,
   /// The command palette candidate list (issue #32).
   Palette,
   /// The generic detail overlay — agent sessions and the rich PR/issue view
@@ -97,6 +99,11 @@ pub enum Spot {
   Settings,
   /// One tab of the Settings panel's tab strip.
   ConfigTab(SettingsTab),
+  /// A sidebar section's title row — opens the modal that section has, the
+  /// same one its key opens (user feedback on issue #624). The title is
+  /// where a pane says what it is, so it is where a click asking for more of
+  /// it belongs; the body stays a focus target.
+  SidebarSection(SidebarPane),
   /// The sidebar's Working Tree counts footer — opens the full-size Working
   /// Tree listing, the same thing `W` opens.
   ///
@@ -109,6 +116,28 @@ pub enum Spot {
   WtCounts,
   /// The `✕` in a modal's top-right corner — closes it, same as `Esc`.
   CloseModal,
+  /// A chevron of the create form's branch-type selector. `forward` is the
+  /// `›` on the right (user feedback on issue #624 — the selector looked
+  /// clickable and was not).
+  TypeChevron { forward: bool },
+  /// A button of the confirmation modal.
+  ConfirmButton { confirm: bool },
+}
+
+/// A sidebar section whose title opens something.
+///
+/// Only the sections that HAVE a full-size counterpart: the identity card at
+/// the top has none, so its title is not a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarPane {
+  /// Issue / PR → the rich view (`I`).
+  IssuePr,
+  /// Agents → the agent-session overlay (`a`).
+  Agents,
+  /// Working Tree → the full-size listing (`W`).
+  WorkingTree,
+  /// Recent Commits → the full-size log (`c`).
+  Commits,
 }
 
 /// What a click at a given cell resolves to.

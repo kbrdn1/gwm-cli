@@ -46,6 +46,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   way back. `Shift`+drag reaches the same selection without giving anything up
   on the terminals that implement it, which is most of them.
 
+  The pointer reaches more than the issue listed, on feedback from using it:
+  a sidebar section's **title** opens that section full size (`Issue / PR`,
+  `Agents`, `Working Tree`, `Recent Commits` — the same modals `I`, `a`, `W`
+  and `c` open), the create and rename forms focus a field on click and step
+  the branch-type selector from its `‹` / `›`, and the confirmation modal's
+  buttons are buttons. The `✕` and the buttons both fire by handing the event
+  loop the key the user would have pressed — `Esc` and the modal keymap's
+  `activate` — so a rebind reaches the mouse and no modal grows a second copy
+  of its own teardown.
+
+  gwm asks the terminal for only the two mouse modes it reads. `EnableMouseCapture`
+  bundles drag and motion reporting on top, which nothing here consumes and
+  which is what a terminal reads to decide the application wants the whole
+  mouse. Whether `Shift`+drag then reaches the terminal's own selection is
+  still the terminal's call — Ghostty 1.3.1 says no — which is what the
+  release key is for.
+
   The PTY overlay still drops mouse events, exactly as it did before: nothing
   ever forwarded them to the child, so this is the status quo rather than a
   regression. Real forwarding needs SGR re-encoding against the overlay's
