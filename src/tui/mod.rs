@@ -19,10 +19,12 @@ use crate::error::Result;
 use crate::tui::keymap::Action;
 use crate::tui::modal_keymap::{KeyContext, ModalAction};
 use crate::tui::mouse::MouseKind;
+#[cfg(windows)]
+use crossterm::event::EnableMouseCapture;
 use crossterm::{
   event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
   },
   execute,
   terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -230,27 +232,40 @@ fn set_mouse_capture(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, on: 
 
 /// Ask the terminal for the mouse events gwm reads, and only those.
 ///
-/// `EnableMouseCapture` bundles five modes: normal tracking (`1000`),
+/// `EnableMouseCapture` sets five modes: normal tracking (`1000`),
 /// button-event tracking (`1002`), any-event tracking (`1003`) and the two
-/// coordinate encodings. gwm reads a left press and the wheel — `1002` and
-/// `1003` exist to report drags and pointer motion, neither of which it looks
-/// at, and between them they put an event on the wire for every cell the
-/// pointer crosses.
+/// coordinate encodings. gwm reads a left press and the wheel; `1002` and
+/// `1003` exist to report drags and pointer motion, which nothing here
+/// consumes, and which between them put an event on the wire for every cell
+/// the pointer crosses. They are also what a terminal reads to decide the
+/// application wants the whole mouse, so with them on a drag never reaches
+/// the terminal's own text selection.
 ///
-/// So the two are switched back off immediately after. Asking for less than
-/// is read would be a bug; asking for more is a stream nothing consumes, and
-/// a terminal deciding how much of the mouse the application wants is reading
-/// exactly these modes. Turning them off is what gwm can do about
-/// `Shift`-drag never reaching the terminal's own selection — whether it is
-/// enough is the terminal's call, which is why the release key exists.
+/// **The three cannot be layered.** They are not independent switches: a
+/// terminal keeps one tracking mode, and `1003h` supersedes `1002h`
+/// supersedes `1000h`. Setting all three and then clearing the top two —
+/// which is the obvious way to trim `EnableMouseCapture` down — turns
+/// tracking OFF entirely rather than falling back to `1000`, because the
+/// clear applies to the mode in effect and nothing restores the one under it.
+/// Measured on Ghostty 1.3.1: drag came back and the click stopped arriving.
+/// So `1000` is set on its own, never after the others.
 ///
-/// Layered on `EnableMouseCapture` rather than written from scratch so the
-/// winapi path it carries for legacy Windows consoles is kept; the two
-/// disables are inert there.
-fn enable_mouse<W: io::Write>(w: &mut W) -> Result<()> {
-  execute!(w, EnableMouseCapture)?;
-  write!(w, "\x1b[?1003l\x1b[?1002l")?;
-  w.flush()?;
+/// Windows keeps the crossterm command: it carries a winapi path for consoles
+/// with no VT support, which no escape sequence can stand in for.
+#[doc(hidden)]
+pub fn enable_mouse<W: io::Write>(w: &mut W) -> Result<()> {
+  #[cfg(windows)]
+  {
+    execute!(w, EnableMouseCapture)?;
+  }
+  #[cfg(not(windows))]
+  {
+    // 1000: report press and release, and nothing between them.
+    // 1015 / 1006: coordinate encodings that survive past column 223, the
+    // same pair `EnableMouseCapture` sets, SGR (1006) last so it wins.
+    write!(w, "\x1b[?1000h\x1b[?1015h\x1b[?1006h")?;
+    w.flush()?;
+  }
   Ok(())
 }
 

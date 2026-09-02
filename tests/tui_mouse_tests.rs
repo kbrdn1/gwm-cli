@@ -229,3 +229,36 @@ fn clear_drops_every_zone_so_a_surface_that_left_the_screen_stops_being_clickabl
   assert!(map.is_empty());
   assert_eq!(map.hit(10, 4), None);
 }
+
+// ---- What gwm asks the terminal for ---------------------------------------
+
+/// The lesson that cost a round of feedback: the three tracking modes are not
+/// independent switches. A terminal keeps ONE, and `1003h` supersedes `1002h`
+/// supersedes `1000h`, so setting all three and clearing the top two — the
+/// obvious way to trim `EnableMouseCapture` down — leaves tracking off
+/// entirely instead of falling back to `1000`. Measured on Ghostty 1.3.1: the
+/// drag came back and the click stopped arriving.
+///
+/// So the sequence has to SET `1000` and never mention the other two, which
+/// is a property of the bytes rather than of anything observable from a test
+/// terminal — hence a byte assertion.
+#[cfg(not(windows))]
+#[test]
+fn gwm_asks_for_press_tracking_and_nothing_that_reports_motion() {
+  let mut out: Vec<u8> = Vec::new();
+  gwm::tui::enable_mouse(&mut out).unwrap();
+  let seq = String::from_utf8(out).unwrap();
+
+  assert!(seq.contains("\u{1b}[?1000h"), "press tracking must be set: {seq:?}");
+  assert!(
+    seq.contains("\u{1b}[?1006h"),
+    "SGR coordinates must be set, or a click past column 223 is unreadable: {seq:?}"
+  );
+  for mode in ["1002", "1003"] {
+    assert!(
+      !seq.contains(mode),
+      "mode {mode} must not be mentioned at all — setting it and clearing it \
+       leaves tracking OFF, and gwm reads neither drags nor motion: {seq:?}"
+    );
+  }
+}
