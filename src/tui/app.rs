@@ -3161,6 +3161,13 @@ impl App {
       }
       Some(ModalAction::ConfigScrollRight) if on_all => self.config_panel.scroll_right(),
       Some(ModalAction::ConfigScrollLeft) if on_all => self.config_panel.scroll_left(),
+      // Off the `All` tab there is nothing to pan, and issue #623 gave the
+      // arrows the job the value column advertises: `‹ value ›` says the value
+      // cycles, and these are the keys that say which way. `→` is the forward
+      // walk `activate` already did; `←` is the walk back, which had no key at
+      // all. Both were dead here before, swallowed by the `on_all` gate.
+      Some(ModalAction::ConfigScrollRight) => self.adjust_selected_setting(true),
+      Some(ModalAction::ConfigScrollLeft) => self.adjust_selected_setting(false),
       Some(ModalAction::ConfigScrollTop) if on_all => self.config_panel.scroll_to_top(),
       Some(ModalAction::ConfigScrollBottom) if on_all => self.config_panel.scroll_to_bottom(),
       _ => {}
@@ -5076,6 +5083,31 @@ impl App {
         let current = field.current(&self.config);
         self.config_panel.begin_edit(&current);
       }
+    }
+  }
+
+  /// Step the selected choice one value forward or back and persist it
+  /// (issue #623) — what `→` / `←` do on an editable tab.
+  ///
+  /// Deliberately narrower than [`Self::activate_selected_setting`]: a typed
+  /// field is left alone rather than opening its edit buffer. An arrow that
+  /// silently dropped the user into a text input would be a second, unnamed
+  /// way to start editing, and the footer only offers `adjust` where a value
+  /// actually cycles.
+  pub fn adjust_selected_setting(&mut self, forward: bool) {
+    let Some(field) = self.config_panel.selected_field() else {
+      return;
+    };
+    if !matches!(field.kind(), FieldKind::Choice | FieldKind::Bool) {
+      return;
+    }
+    let stepped = if forward {
+      field.next_choice(&self.config)
+    } else {
+      field.prev_choice(&self.config)
+    };
+    if let Some(value) = stepped {
+      self.apply_setting(field, &value);
     }
   }
 

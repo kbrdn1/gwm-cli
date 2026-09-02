@@ -3910,6 +3910,25 @@ fn settings_tab_strip_carries_one_glyph_per_tab() {
 }
 
 #[test]
+fn settings_footer_names_the_move_and_adjust_verbs_on_an_editable_tab() {
+  // Issue #623 point 4. The footer has existed since #279, but on an editable
+  // tab it named `cycle`, `section`, `layer` and `close` — nothing about
+  // moving between rows, and nothing about the arrows the `‹ ›` marker
+  // advertises.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render(&mut app);
+  let rows = modal_rows(&buf).join("\n");
+  assert!(
+    rows.contains("move"),
+    "the footer must name the move verb — rows:\n{rows}"
+  );
+  assert!(
+    rows.contains("adjust"),
+    "the footer must name the adjust verb — rows:\n{rows}"
+  );
+}
+
+#[test]
 #[ignore = "not an assertion: prints the Settings panel so a human can look at it"]
 fn dump_the_settings_panel() {
   // Issue #623 is a layout change, and a column, a rule and a glyph strip are

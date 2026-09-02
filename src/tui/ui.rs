@@ -3890,15 +3890,22 @@ pub fn config_nav_footer_hints(
   if tab == SettingsTab::All {
     hints.push(("j/k".to_string(), "scroll".to_string()));
   } else {
-    let label = if tab == SettingsTab::Keys {
-      "rebind"
-    } else if matches!(selected_kind, Some(FieldKind::Choice | FieldKind::Bool)) {
-      "cycle"
-    } else {
-      "edit"
-    };
-    if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
-      hints.push((k, label.to_string()));
+    // Movement first (issue #623). It stays a literal pair, the same rule the
+    // `All` tab's `j/k` already follows: no single resolved key captures a
+    // movement pair.
+    hints.push(("j/k".to_string(), "move".to_string()));
+    if matches!(selected_kind, Some(FieldKind::Choice | FieldKind::Bool)) {
+      // On a cyclable field the arrows ARE the activate verb, walking the same
+      // list in both directions (#623 wired them; before that they were dead
+      // off the `All` tab). Naming both `←/→ adjust` and `Space cycle` would
+      // spend twelve cells saying one thing twice, and this line is centred:
+      // overflow clips it at BOTH ends, so the cost is not a wrap but a
+      // truncated `Esc close` and a vanished leading hint.
+      hints.push(("←/→".to_string(), "adjust".to_string()));
+    } else if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
+      // Everywhere else `activate` does something the arrows cannot, so it
+      // keeps its resolved key and a verb of its own.
+      hints.push((k, if tab == SettingsTab::Keys { "rebind" } else { "edit" }.to_string()));
     }
   }
   for (action, label) in [

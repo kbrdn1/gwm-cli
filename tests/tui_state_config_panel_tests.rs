@@ -844,3 +844,48 @@ fn every_tui_field_belongs_to_a_named_section() {
     }
   }
 }
+
+#[test]
+fn prev_choice_walks_the_list_backwards_and_wraps() {
+  // Issue #623: `→` cycles forward (what Space/Enter already did) and `←`
+  // cycles back, which needs the other half of the walk. Wrapping matters at
+  // the first element — that is where a `saturating_sub` would sit still and
+  // make the key look dead.
+  let cfg = Config::default();
+  let field = SettingField::SidebarOrientation;
+  let choices = field.choices();
+  assert!(choices.len() > 2, "the field under test must have a real list");
+
+  // Walk the whole list backwards from the default and land back on it.
+  let mut cursor = field.current(&cfg);
+  let mut walked = vec![cursor.clone()];
+  for _ in 0..choices.len() {
+    let mut c = Config::default();
+    // Re-resolve against a config pinned to the cursor value, the way the
+    // panel does between two keystrokes.
+    c.tui.sidebar_orientation = choices
+      .iter()
+      .position(|x| *x == cursor)
+      .map(|i| match i {
+        0 => gwm::config::SidebarOrientation::Stacked,
+        1 => gwm::config::SidebarOrientation::SideBySide,
+        _ => gwm::config::SidebarOrientation::Auto,
+      })
+      .unwrap();
+    cursor = field.prev_choice(&c).expect("a choice field walks backwards");
+    walked.push(cursor.clone());
+  }
+  assert_eq!(
+    walked.first(),
+    walked.last(),
+    "walking back through every choice returns to the start: {walked:?}"
+  );
+  assert_eq!(
+    walked.len() - 1,
+    choices.len(),
+    "no choice is visited twice on the way round: {walked:?}"
+  );
+
+  // A typed field has nothing to walk.
+  assert!(SettingField::AutoRefreshSecs.prev_choice(&cfg).is_none());
+}

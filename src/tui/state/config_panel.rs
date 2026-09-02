@@ -544,17 +544,31 @@ impl SettingField {
   /// not one of the choices (e.g. theme preset is `None`/"default"), the
   /// first choice is returned. `None` for `Uint` fields.
   pub fn next_choice(self, cfg: &Config) -> Option<String> {
+    self.choice_step(cfg, 1)
+  }
+
+  /// The previous value for a `Choice` field, wrapping, which is what `←`
+  /// writes since issue #623 gave the arrows the cycle the `‹ ›` markers
+  /// advertise. Same fallback as [`Self::next_choice`] for a value that is not
+  /// in the list, and `None` for a field that is typed rather than cycled.
+  pub fn prev_choice(self, cfg: &Config) -> Option<String> {
+    self.choice_step(cfg, -1)
+  }
+
+  /// One step around the choice list, wrapping in either direction. The two
+  /// public walks go through this rather than each doing the modular
+  /// arithmetic, so `next` then `prev` is the identity by construction.
+  fn choice_step(self, cfg: &Config, delta: isize) -> Option<String> {
     let choices = self.choices();
     if choices.is_empty() {
       return None;
     }
-    let current = self.current(cfg);
-    let idx = choices.iter().position(|c| *c == current);
-    let next = match idx {
-      Some(i) => choices[(i + 1) % choices.len()],
+    let len = choices.len();
+    let picked = match choices.iter().position(|c| *c == self.current(cfg)) {
+      Some(i) => choices[(i as isize + delta).rem_euclid(len as isize) as usize],
       None => choices[0],
     };
-    Some(next.to_string())
+    Some(picked.to_string())
   }
 }
 

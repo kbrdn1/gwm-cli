@@ -1064,7 +1064,10 @@ fn config_nav_footer_hints_track_rebinding() {
   assert!(all.iter().any(|(k, l)| k == "L" && l == "layer"));
   assert!(all.iter().any(|(k, l)| k == "Esc" && l == "close"));
 
-  // An editable field advertises `edit`; a Choice field advertises `cycle`.
+  // A typed field advertises `edit` on the resolved activate key. A Choice
+  // field advertises `adjust` on the arrows instead: since #623 they walk the
+  // same list activate does, and naming one operation twice overflowed a
+  // centred line that then clipped at both ends.
   let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
   assert!(
     editable.iter().any(|(_, l)| l == "edit"),
@@ -1072,8 +1075,12 @@ fn config_nav_footer_hints_track_rebinding() {
   );
   let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
   assert!(
-    choice.iter().any(|(_, l)| l == "cycle"),
+    choice.iter().any(|(_, l)| l == "adjust"),
     "choice field footer: {choice:?}"
+  );
+  assert!(
+    !choice.iter().any(|(_, l)| l == "edit"),
+    "a cyclable field must not offer the typed-edit verb: {choice:?}"
   );
 
   // Rebinding close + next_tab shows through.
@@ -1954,4 +1961,83 @@ fn settings_value_cell_marks_what_cycles_and_what_toggles() {
   assert_eq!(settings_value_cell(SettingField::OpenShellCmd, &cfg), "(unset)");
   cfg.tui.open.shell_cmd = Some("/bin/zsh".into());
   assert_eq!(settings_value_cell(SettingField::OpenShellCmd, &cfg), "/bin/zsh");
+}
+
+#[test]
+fn config_nav_footer_hints_name_move_and_adjust_on_an_editable_tab() {
+  // Issue #623 point 4: the footer existed, but on an editable tab it named
+  // `cycle` / `section` / `layer` / `close` and nothing else — no way to learn
+  // that rows move, and nothing about the arrows.
+  //
+  // Both pairs stay literal, the same rule the `All` tab's `j/k` already
+  // follows: no single resolved key captures a movement pair.
+  use gwm::tui::config_nav_footer_hints;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{FieldKind, SettingsTab};
+
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
+  assert!(
+    choice.iter().any(|(k, l)| k == "j/k" && l == "move"),
+    "an editable tab names the move pair: {choice:?}"
+  );
+  assert!(
+    choice.iter().any(|(k, l)| k == "←/→" && l == "adjust"),
+    "a cyclable field names the arrows: {choice:?}"
+  );
+
+  // A typed field has nothing to adjust — the arrows do not cycle text.
+  let text = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
+  assert!(
+    text.iter().any(|(k, l)| k == "j/k" && l == "move"),
+    "a typed field still moves: {text:?}"
+  );
+  assert!(
+    !text.iter().any(|(_, l)| l == "adjust"),
+    "a typed field must not advertise an adjust it cannot do: {text:?}"
+  );
+
+  // The `All` tab scrolls; it has no selection to move and no value to adjust.
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None);
+  assert!(
+    !all.iter().any(|(_, l)| l == "move" || l == "adjust"),
+    "the read-only tab advertises neither: {all:?}"
+  );
+}
+
+#[test]
+fn the_settings_nav_footer_fits_the_narrowest_panel() {
+  // `modal_hint_line` centres its spans, so an overflowing footer does not
+  // wrap: it is clipped at BOTH ends, which costs the first hint outright and
+  // leaves the last one mid-word (`Esc c`). Adding the #623 verbs did exactly
+  // that until `adjust` replaced `cycle` rather than joining it.
+  //
+  // The budget is the panel at the floor of its width policy — the Settings
+  // modal is `modal_width(w, 60, 64, 96)`, so 64 columns is the narrowest box
+  // it ever draws on a terminal wide enough for one, and the boxed frame costs
+  // six of those.
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{cells, config_nav_footer_hints, modal_width, FieldKind, SettingsTab};
+
+  let budget = modal_width(80, 60, 64, 96) as usize - 6;
+  let modal = ModalKeymap::defaults();
+  for (tab, kind) in [
+    (SettingsTab::All, None),
+    (SettingsTab::Keys, None),
+    (SettingsTab::Theme, Some(FieldKind::Choice)),
+    (SettingsTab::Tui, Some(FieldKind::Choice)),
+    (SettingsTab::Tui, Some(FieldKind::Bool)),
+    (SettingsTab::Tui, Some(FieldKind::Uint)),
+    (SettingsTab::Tui, Some(FieldKind::Text)),
+    (SettingsTab::Worktree, Some(FieldKind::Text)),
+  ] {
+    let hints = config_nav_footer_hints(&modal, tab, kind);
+    // Rendered the way `modal_hint_line` lays it out: `key label`, two spaces
+    // between pairs.
+    let width: usize =
+      hints.iter().map(|(k, l)| cells(k) + 1 + cells(l)).sum::<usize>() + 2 * hints.len().saturating_sub(1);
+    assert!(
+      width <= budget,
+      "{tab:?} / {kind:?}: the footer needs {width} cells of {budget} and would be clipped: {hints:?}"
+    );
+  }
 }
