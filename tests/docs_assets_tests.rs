@@ -1,6 +1,6 @@
 //! Guards for the doc captures referenced from `docs/**` (issue #524).
 //!
-//! Three failure modes, all of which ship green and break at publish time,
+//! Five failure modes, all of which ship green and break at publish time,
 //! which is why they are pinned here rather than left to review:
 //!
 //! 1. **A reference resolves to nothing.** A renamed or never-generated
@@ -21,6 +21,11 @@
 //!    again, so anything rendered at terminal scale is upscaled before a reader
 //!    ever sees it. Nothing downstream fails: the image resolves, the build is
 //!    green, the text is simply soft.
+//! 5. **A capture advertises the previous version** (issue #631). The TUI
+//!    header paints a `gwm X.Y.Z` chip, so a set regenerated before the bump
+//!    documents a release that is not the one being cut. Its sibling is the
+//!    order `generate.sh` runs in, which is three ordering constraints and was
+//!    prose until they had each bitten once.
 //!
 //! Parsing note: image references are read outside fenced code blocks only.
 //! `docs/6.development/3.stability.md` documents `#![doc(hidden)]`, which a
@@ -293,6 +298,10 @@ const MIN_CAPTURE_WIDTH: u32 = 1580;
 /// 103x31 columns at 1x against 104x32 at 2x) and doubles the output.
 const RETINA_FONT_SIZE: &str = "Set FontSize 30";
 
+/// The provenance file `generate.sh` writes next to the tapes: the verbatim
+/// `gwm --version` of the binary vhs drove for that run.
+const CAPTURED_VERSION_STAMP: &str = "captured-version.txt";
+
 /// Every capture ships at 2x so the site has pixels to paint with.
 ///
 /// Reads the width out of the file header rather than trusting the tape: the
@@ -346,6 +355,160 @@ fn every_tape_renders_at_retina_density() {
      site (#581):\n  {}",
     stale.join("\n  ")
   );
+}
+
+/// The captures ship the version they advertise (issue #631).
+///
+/// 17 of the 24 tapes photograph the TUI, whose header paints a `gwm X.Y.Z`
+/// chip out of `CARGO_PKG_VERSION`. Regenerate the set before the version bump
+/// and the whole thing advertises the previous release for the life of this
+/// one, green everywhere else: the files exist, the widths pass, `vhs` exits 0.
+/// Learned on v1.8.0, hit again on v1.10.0.
+///
+/// Reading the chip back out of the pixels would need OCR. `generate.sh`
+/// instead has `version-stamp.tape` print `gwm --version` **through vhs**,
+/// from the same shell and the same `PATH` every other tape resolves `gwm`
+/// through, and commits the answer beside the captures. This compares that
+/// answer to the manifest: the two part company exactly when a bump landed
+/// with no regeneration behind it.
+///
+/// The division of labour, since two builds of the same version answer the
+/// version identically (the v1.10.0 near miss was 175 commits behind at the
+/// same number): the *run* separates them, because the tape also reports the
+/// path `gwm` resolved to and `generate.sh` refuses to continue unless it is
+/// the file cargo just built. What reaches this guard is the version alone,
+/// because the committed stamp is one line and holds no machine path. So this
+/// asserts the bump, and `tests/capture_pipeline_tests.rs` asserts the
+/// binary.
+#[test]
+fn captures_were_generated_at_the_manifest_version() {
+  let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  let manifest_path = root.join("Cargo.toml");
+  let raw = fs::read_to_string(&manifest_path)
+    .unwrap_or_else(|err| panic!("{} must be readable: {err}", manifest_path.display()));
+  let manifest: toml::Value = toml::from_str(&raw).expect("Cargo.toml is valid TOML");
+  let version = manifest
+    .get("package")
+    .and_then(|p| p.get("version"))
+    .and_then(|v| v.as_str())
+    .expect("Cargo.toml declares [package] version");
+
+  let stamp_path = root.join("docs").join("_capture").join(CAPTURED_VERSION_STAMP);
+  let stamp = fs::read_to_string(&stamp_path).unwrap_or_else(|err| {
+    panic!(
+      "{} must exist: it is the provenance of the doc captures, written by \
+       docs/_capture/generate.sh through version-stamp.tape ({err})",
+      stamp_path.display()
+    )
+  });
+
+  // `trim_end` rather than `trim`: it also absorbs the `\r` a Windows runner
+  // checks the file out with, and the leading edge carries no whitespace.
+  assert_eq!(
+    stamp.trim_end(),
+    format!("gwm {version}"),
+    "the doc captures were taken by `{}` while Cargo.toml says {version}, so every TUI capture \
+     paints the wrong version chip. Regenerate with docs/_capture/generate.sh (after the \
+     bump, never before) and commit the captures with it",
+    stamp.trim_end()
+  );
+}
+
+/// `generate.sh` runs its phases in the one order that works (issue #631).
+///
+/// The order is three constraints, and every one of them was invisible until
+/// it bit:
+///
+/// 1. the `gwm` the tapes drive is **built from this tree** and put first on
+///    `PATH`, because the TUI header paints its version chip from whatever
+///    binary the shell resolves;
+/// 2. `github-linking.tape` runs **before** anything else writes under
+///    `docs/`, and only on a clean tree, because it opens the TUI on this repo
+///    and its Working Tree pane photographs whatever is uncommitted;
+/// 3. `demo.tape` runs **last**, because it creates and deletes a worktree and
+///    drops `.git/gwm/notes` in the fixture the other tapes read.
+///
+/// Written down in three places and enforced by none, which is the state #631
+/// found them in. Moving `demo.tape` into the loop, or the github-linking
+/// block below it, breaks nothing visibly: every asset is still produced, at
+/// the right size, and `vhs` still exits 0. So the order is asserted here, by
+/// position, and a missing anchor is a failure rather than a skip.
+#[test]
+fn the_capture_run_keeps_its_order() {
+  let script_path = docs_root().join("_capture").join("generate.sh");
+  let script = fs::read_to_string(&script_path)
+    .unwrap_or_else(|err| panic!("{} must be readable: {err}", script_path.display()))
+    .replace("\r\n", "\n");
+
+  let at = |needle: &str| -> usize {
+    script.find(needle).unwrap_or_else(|| {
+      panic!(
+        "docs/_capture/generate.sh no longer contains `{needle}`, so the phase order this guard \
+         pins cannot be read. Re-anchor the guard on whatever replaced it rather than dropping \
+         it: the order is three constraints (#631), not a preference"
+      )
+    })
+  };
+
+  let build = at("cargo build --release");
+  let path = at("export PATH=\"$BIN_DIR:");
+  let stamp = at("vhs \"$CAP/version-stamp.tape\"");
+  let clean = at("status --porcelain");
+  let linking = at("run_checked github-linking.tape");
+  // `\nfor t in `, not the first tape in the list: reordering the list is
+  // allowed, dropping the loop is not, and an anchor that moves with an
+  // edit turns a real check into a re-anchor message.
+  let demo_loop = at("\nfor t in ");
+  let demo = at("run_checked demo.tape");
+
+  assert!(
+    build < path,
+    "the release build must come before `target/release` is put on PATH"
+  );
+  assert!(
+    path < stamp,
+    "version-stamp.tape has to run after the PATH is set, or it stamps the wrong binary"
+  );
+  assert!(
+    stamp < linking,
+    "the run must stop on a version mismatch before it spends 20 minutes capturing"
+  );
+  assert!(
+    clean < linking,
+    "the clean-tree check has to gate github-linking.tape, not follow it: the tape photographs \
+     the working tree, so a dirty one is in the shot"
+  );
+  assert!(
+    linking < demo_loop,
+    "github-linking.tape must run before the loop writes under docs/, or the captures this run \
+     rewrites are in its Working Tree pane"
+  );
+  assert!(
+    demo_loop < demo,
+    "demo.tape must run after the loop: it creates and deletes a worktree and drops \
+     .git/gwm/notes in the fixture the other tapes read"
+  );
+
+  // The loop's own list, continuations joined. The two ordered tapes may not
+  // reappear in it, and `hero` must: an unreadable list would otherwise let
+  // the two exclusions below pass over nothing at all.
+  let tail = &script[demo_loop..];
+  let end = tail
+    .find("; do")
+    .expect("the tape loop in generate.sh ends in `; do`, and this guard reads the list between");
+  let list = tail[..end].replace("\\\n", " ");
+  let names: Vec<&str> = list.split_whitespace().map(|w| w.trim_end_matches(';')).collect();
+  assert!(
+    names.contains(&"hero"),
+    "the tape loop no longer lists `hero`, so this guard is reading the wrong text: {names:?}"
+  );
+  for ordered in ["github-linking", "demo"] {
+    assert!(
+      !names.contains(&ordered),
+      "`{ordered}` is ordered around the loop, not inside it, and putting it back in the list \
+       drops the constraint that put it there (#631): {names:?}"
+    );
+  }
 }
 
 /// Every `.png` / `.gif` under `docs/`, repo-relative, sorted.
