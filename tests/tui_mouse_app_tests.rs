@@ -461,3 +461,21 @@ fn clicking_a_confirm_button_focuses_it_and_asks_for_the_activate_key() {
   );
   assert_eq!(app.confirm.focused_button(), ConfirmButton::Cancel);
 }
+
+/// The knob decides the starting state, and `M` moves from there. Without
+/// this the setting would be a field nothing reads.
+#[test]
+fn the_tui_mouse_knob_sets_the_state_the_session_opens_in() {
+  let (dir, _) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbase = \"/tmp/wt\"\n\n[tui]\nmouse = false\n",
+  )
+  .unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  assert!(!app.mouse_capture, "[tui] mouse = false must open with it released");
+
+  let (dir2, _) = init_repo();
+  let on = App::new_at_layered(Some(dir2.path()), None).unwrap();
+  assert!(on.mouse_capture, "and the default is to read the mouse");
+}

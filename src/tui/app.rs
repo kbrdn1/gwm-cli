@@ -909,6 +909,8 @@ impl App {
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_layered(&workdir, global_path)?;
     let branch_types = config.resolved_branch_types().types;
+    // Read before `config` is moved into the struct below (issue #624).
+    let mouse_capture = config.tui.mouse;
     // Resolve the keymap once at construction. Config::load_for_repo
     // already validated the overrides, so this should not surface a
     // fresh error — but we re-`?` it rather than `.expect()` so a
@@ -1016,7 +1018,7 @@ impl App {
       edit_original_branch: None,
       edit_original_path: None,
       edit_failure: None,
-      mouse_capture: true,
+      mouse_capture,
       mouse: crate::tui::mouse::MouseMap::new(),
     };
     out.apply_sidebar_config();

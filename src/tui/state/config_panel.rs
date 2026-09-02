@@ -107,6 +107,7 @@ impl SettingsTab {
         SettingField::Layout,
         SettingField::DimUnfocused,
         SettingField::StatusOneLine,
+        SettingField::Mouse,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::NoteVim,
@@ -355,6 +356,8 @@ pub enum SettingField {
   Layout,
   /// `tui.dim_unfocused` — dim the pane without focus (issue #545).
   DimUnfocused,
+  /// `[tui] mouse` — whether the TUI reads mouse events (issue #624).
+  Mouse,
   /// `tui.status_one_line` — fold the sidebar Status block (issue #547).
   StatusOneLine,
   /// `tui.note_vim` — the note editor's vim normal mode (issue #557).
@@ -396,6 +399,7 @@ impl SettingField {
       SettingField::SidebarPosition => "sidebar position",
       SettingField::Layout => "layout",
       SettingField::DimUnfocused => "dim unfocused pane",
+      SettingField::Mouse => "mouse",
       SettingField::StatusOneLine => "status on one line",
       SettingField::NoteVim => "note vim mode",
       SettingField::MuxOpenIn => "mux opens in",
@@ -421,7 +425,9 @@ impl SettingField {
   /// [`SettingsTab::fields`] follows these runs.
   pub fn section(self) -> Option<&'static str> {
     Some(match self {
-      SettingField::Layout | SettingField::DimUnfocused | SettingField::StatusOneLine => "Appearance",
+      SettingField::Layout | SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::Mouse => {
+        "Appearance"
+      }
       SettingField::SidebarPosition | SettingField::SidebarOrientation => "Sidebar",
       SettingField::NoteVim | SettingField::Clipboard => "Editing",
       SettingField::OpenMode | SettingField::OpenShellCmd | SettingField::OpenEditorCmd => "Open",
@@ -445,6 +451,7 @@ impl SettingField {
       SettingField::SidebarPosition => "tui.sidebar_position",
       SettingField::Layout => "tui.layout",
       SettingField::DimUnfocused => "tui.dim_unfocused",
+      SettingField::Mouse => "tui.mouse",
       SettingField::StatusOneLine => "tui.status_one_line",
       SettingField::NoteVim => "tui.note_vim",
       SettingField::MuxOpenIn => "tui.mux_open_in",
@@ -473,7 +480,9 @@ impl SettingField {
       | SettingField::MuxPaneDirection
       | SettingField::TerminalBrowserOpenIn
       | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => FieldKind::Bool,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim | SettingField::Mouse => {
+        FieldKind::Bool
+      }
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
@@ -499,7 +508,9 @@ impl SettingField {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
       SettingField::Layout => LAYOUT_CHOICES,
-      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => BOOL_CHOICES,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim | SettingField::Mouse => {
+        BOOL_CHOICES
+      }
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::MuxOpenIn => MUX_OPEN_IN_CHOICES,
       SettingField::MuxPaneDirection => MUX_PANE_DIRECTION_CHOICES,
@@ -520,6 +531,7 @@ impl SettingField {
       SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
       SettingField::Layout => cfg.tui.layout.label().into(),
       SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
+      SettingField::Mouse => cfg.tui.mouse.to_string(),
       SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
       SettingField::NoteVim => cfg.tui.note_vim.to_string(),
       SettingField::MuxOpenIn => cfg.tui.mux_open_in.label().into(),

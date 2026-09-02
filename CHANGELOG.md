@@ -56,10 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `activate` — so a rebind reaches the mouse and no modal grows a second copy
   of its own teardown.
 
-  Reading the mouse and letting the terminal select text are mutually
-  exclusive — while gwm is reading, a drag belongs to gwm — so `M` switches
-  between the two, and the header carries a ` mouse off · M ` chip while it is
-  off — a mode with no sign on screen is one you get stuck in, with every
+  `[tui] mouse` decides whether any of this is on, defaulting to `true` and
+  editable live from the Settings panel's TUI tab. Reading the mouse and
+  letting the terminal select text are mutually exclusive — while gwm is reading, a drag belongs to gwm — so `M` switches
+  between the two for a session, `[tui] mouse = false` starts every session on
+  the other side of it, and the header carries a ` mouse off · M ` chip while
+  it is off — a mode with no sign on screen is one you get stuck in, with every
   click doing nothing reading as a broken build rather than as a switch you
   threw. gwm keeps
   its side of that trade as small as it can: it asks for press tracking

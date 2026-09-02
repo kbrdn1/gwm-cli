@@ -125,7 +125,7 @@ pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   // decision as `gwm create` / `gwm bootstrap` — closes the bypass
   // flagged in PR #113 review (issue #95).
   let app = App::new()?.with_trust_mode(trust_mode);
-  let mut terminal = enter_terminal()?;
+  let mut terminal = enter_terminal(app.mouse_capture)?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
   // #290: ExitToWorktree prints the selected path to stdout so a shell
@@ -144,7 +144,7 @@ pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
 pub fn run_workspace(root: &Path, trust_mode: crate::trust::TrustMode) -> Result<()> {
   let app =
     App::new_workspace_at_layered(root, crate::config::global_config_path().as_deref())?.with_trust_mode(trust_mode);
-  let mut terminal = enter_terminal()?;
+  let mut terminal = enter_terminal(app.mouse_capture)?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
   if let Some(path) = result? {
@@ -163,7 +163,7 @@ pub fn run_picker() -> Result<Option<PathBuf>> {
   // `App::new_picker_at` (repo discovery, config load) bubbles up with the
   // terminal still in cooked mode.
   let app = App::new_picker_at(None)?;
-  let mut terminal = enter_terminal()?;
+  let mut terminal = enter_terminal(app.mouse_capture)?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
   result
@@ -172,7 +172,7 @@ pub fn run_picker() -> Result<Option<PathBuf>> {
 /// Enable raw mode + alternate screen + mouse capture and hand back a
 /// configured `Terminal`. Centralised so `run` and `run_picker` cannot
 /// drift on the setup recipe.
-fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
+fn enter_terminal(mouse: bool) -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   enable_raw_mode()?;
   // Render the TUI to STDERR, not stdout: `exit_to_worktree` (#290) prints the
   // selected path to stdout for the `cd "$(gwm)"` shell wrapper, so stdout must
@@ -180,7 +180,12 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   // tty in an interactive session, so the UI still draws (Codex review #292).
   let mut stderr = io::stderr();
   execute!(stderr, EnterAlternateScreen)?;
-  enable_mouse(&mut stderr)?;
+  // `[tui] mouse` decides whether the very first frame reads the mouse
+  // (issue #624), so a user who turned it off never sees a frame that took
+  // the terminal's text selection away.
+  if mouse {
+    enable_mouse(&mut stderr)?;
+  }
   Ok(Terminal::new(CrosstermBackend::new(stderr))?)
 }
 
