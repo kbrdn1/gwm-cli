@@ -1054,7 +1054,7 @@ fn config_nav_footer_hints_track_rebinding() {
   use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
   use gwm::tui::{FieldKind, SettingsTab};
 
-  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None);
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None, 200);
   assert_eq!(
     all[0],
     ("j/k".to_string(), "scroll".to_string()),
@@ -1068,12 +1068,12 @@ fn config_nav_footer_hints_track_rebinding() {
   // field advertises `adjust` on the arrows instead: since #623 they walk the
   // same list activate does, and naming one operation twice overflowed a
   // centred line that then clipped at both ends.
-  let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
+  let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text), 200);
   assert!(
     editable.iter().any(|(_, l)| l == "edit"),
     "editable field footer: {editable:?}"
   );
-  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice), 200);
   assert!(
     choice.iter().any(|(_, l)| l == "adjust"),
     "choice field footer: {choice:?}"
@@ -1091,7 +1091,7 @@ fn config_nav_footer_hints_track_rebinding() {
   modal
     .apply_override(ModalAction::ConfigNextTab, vec![parse_single("n").unwrap()])
     .unwrap();
-  let rebound = config_nav_footer_hints(&modal, SettingsTab::All, None);
+  let rebound = config_nav_footer_hints(&modal, SettingsTab::All, None, 200);
   assert!(
     rebound.iter().any(|(k, l)| k == "x" && l == "close"),
     "rebound close: {rebound:?}"
@@ -1106,7 +1106,7 @@ fn config_nav_footer_hints_track_rebinding() {
   );
 
   // Keys tab (issue #294): `activate` advertises `rebind`, not `edit`/`cycle`.
-  let keys = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Keys, None);
+  let keys = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Keys, None, 200);
   assert!(
     keys.iter().any(|(_, l)| l == "rebind"),
     "Keys tab footer advertises rebind: {keys:?}"
@@ -1975,7 +1975,7 @@ fn config_nav_footer_hints_name_move_and_adjust_on_an_editable_tab() {
   use gwm::tui::modal_keymap::ModalKeymap;
   use gwm::tui::{FieldKind, SettingsTab};
 
-  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice), 200);
   assert!(
     choice.iter().any(|(k, l)| k == "j/k" && l == "move"),
     "an editable tab names the move pair: {choice:?}"
@@ -1986,7 +1986,7 @@ fn config_nav_footer_hints_name_move_and_adjust_on_an_editable_tab() {
   );
 
   // A typed field has nothing to adjust — the arrows do not cycle text.
-  let text = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
+  let text = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text), 200);
   assert!(
     text.iter().any(|(k, l)| k == "j/k" && l == "move"),
     "a typed field still moves: {text:?}"
@@ -1997,7 +1997,7 @@ fn config_nav_footer_hints_name_move_and_adjust_on_an_editable_tab() {
   );
 
   // The `All` tab scrolls; it has no selection to move and no value to adjust.
-  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None);
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None, 200);
   assert!(
     !all.iter().any(|(_, l)| l == "move" || l == "adjust"),
     "the read-only tab advertises neither: {all:?}"
@@ -2005,39 +2005,64 @@ fn config_nav_footer_hints_name_move_and_adjust_on_an_editable_tab() {
 }
 
 #[test]
-fn the_settings_nav_footer_fits_the_narrowest_panel() {
+fn the_settings_nav_footer_fits_every_panel_the_width_policy_draws() {
   // `modal_hint_line` centres its spans, so an overflowing footer does not
   // wrap: it is clipped at BOTH ends, which costs the first hint outright and
   // leaves the last one mid-word (`Esc c`). Adding the #623 verbs did exactly
-  // that until `adjust` replaced `cycle` rather than joining it.
+  // that until the builder learned to drop `move` instead.
   //
-  // The budget is the panel at the floor of its width policy — the Settings
-  // modal is `modal_width(w, 60, 64, 96)`, so 64 columns is the narrowest box
-  // it ever draws on a terminal wide enough for one, and the boxed frame costs
-  // six of those.
+  // Swept across the width policy rather than pinned at one terminal size,
+  // because the interesting widths are the narrow ones: `modal_width` floors
+  // the panel at 64 columns but then takes `.min(term_width - 4)`, so a narrow
+  // terminal walks the budget back down under the floor.
+  //
+  // 55 is where the sweep starts because that is where the *pre-#623* footer
+  // stopped fitting: its widest set was the Keys tab's `Space rebind` +
+  // section + layer + close, 45 cells, and a 55-column terminal draws a
+  // 51-column panel with exactly 45 to spend. Below that the footer was
+  // already clipping and this change does not make it worse. Above it, the
+  // capability is preserved rather than narrowed by nine columns.
   use gwm::tui::modal_keymap::ModalKeymap;
-  use gwm::tui::{cells, config_nav_footer_hints, modal_width, FieldKind, SettingsTab};
+  use gwm::tui::{config_nav_footer_hints, hint_line_cells, modal_width, FieldKind, SettingsTab};
 
-  let budget = modal_width(80, 60, 64, 96) as usize - 6;
   let modal = ModalKeymap::defaults();
-  for (tab, kind) in [
-    (SettingsTab::All, None),
-    (SettingsTab::Keys, None),
-    (SettingsTab::Theme, Some(FieldKind::Choice)),
-    (SettingsTab::Tui, Some(FieldKind::Choice)),
-    (SettingsTab::Tui, Some(FieldKind::Bool)),
-    (SettingsTab::Tui, Some(FieldKind::Uint)),
-    (SettingsTab::Tui, Some(FieldKind::Text)),
-    (SettingsTab::Worktree, Some(FieldKind::Text)),
-  ] {
-    let hints = config_nav_footer_hints(&modal, tab, kind);
-    // Rendered the way `modal_hint_line` lays it out: `key label`, two spaces
-    // between pairs.
-    let width: usize =
-      hints.iter().map(|(k, l)| cells(k) + 1 + cells(l)).sum::<usize>() + 2 * hints.len().saturating_sub(1);
-    assert!(
-      width <= budget,
-      "{tab:?} / {kind:?}: the footer needs {width} cells of {budget} and would be clipped: {hints:?}"
-    );
+  let mut dropped_somewhere = false;
+  let mut kept_somewhere = false;
+  for term_w in 55u16..=200 {
+    // The boxed frame is the expensive one: two rules plus four padding
+    // columns, against the compact frame's two.
+    let budget = modal_width(term_w, 60, 64, 96).saturating_sub(6);
+    for (tab, kind) in [
+      (SettingsTab::All, None),
+      (SettingsTab::Keys, None),
+      (SettingsTab::Theme, Some(FieldKind::Choice)),
+      (SettingsTab::Tui, Some(FieldKind::Choice)),
+      (SettingsTab::Tui, Some(FieldKind::Bool)),
+      (SettingsTab::Tui, Some(FieldKind::Uint)),
+      (SettingsTab::Tui, Some(FieldKind::Text)),
+      (SettingsTab::Worktree, Some(FieldKind::Text)),
+    ] {
+      let hints = config_nav_footer_hints(&modal, tab, kind, budget);
+      let width = hint_line_cells(&hints);
+      assert!(
+        width <= budget as usize,
+        "{term_w} cols, {tab:?} / {kind:?}: the footer needs {width} cells of {budget} and would be clipped: {hints:?}"
+      );
+      if tab == SettingsTab::Tui && kind == Some(FieldKind::Choice) {
+        if hints.iter().any(|(_, l)| l == "move") {
+          kept_somewhere = true;
+        } else {
+          dropped_somewhere = true;
+        }
+      }
+      // Whatever else goes, the way out of the panel never does.
+      assert!(
+        hints.iter().any(|(_, l)| l == "close"),
+        "{term_w} cols, {tab:?}: `close` must survive the trim: {hints:?}"
+      );
+    }
   }
+  // Both halves of the trim are exercised, or the sweep proves only one.
+  assert!(kept_somewhere, "a wide panel must keep the move verb");
+  assert!(dropped_somewhere, "a narrow panel must drop it rather than be clipped");
 }

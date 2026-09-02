@@ -43,7 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on a cyclable field rather than joining it: `modal_hint_line` centres its
   spans, so naming one operation twice overflowed the line and clipped it at
   both ends, costing the leading hint outright and leaving `Esc close` as
-  `Esc c`.
+  `Esc c`. Five verbs still need nine more columns than the four that came
+  before, so on a panel too narrow for them `move` drops out instead: the
+  footer keeps fitting every terminal the old one fitted, rather than trading
+  a narrow terminal's `Esc close` for a movement hint every TUI shares.
 
 - **The doc captures regenerate as one step, in the order the traps require**
   ([#631](https://github.com/kbrdn1/gwm-cli/issues/631)). Regenerating the set

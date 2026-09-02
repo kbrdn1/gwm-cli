@@ -3843,6 +3843,17 @@ pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap, compact: bool
   pane_title(compact, label, &action_chord(keymap, Action::LazyGitFullscreen, "l"))
 }
 
+/// Cells [`modal_hint_line`] spends on `hints`: `key label` per pair, two
+/// spaces between pairs. Shared with the callers that have to decide whether a
+/// footer fits, so the budget and the layout cannot drift apart.
+pub fn hint_line_cells<K: AsRef<str>, L: AsRef<str>>(hints: &[(K, L)]) -> usize {
+  hints
+    .iter()
+    .map(|(k, l)| cells(k.as_ref()) + 1 + cells(l.as_ref()))
+    .sum::<usize>()
+    + 2 * hints.len().saturating_sub(1)
+}
+
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
   let key_style = hint_key_style(theme);
   let label_style = hint_label_style(theme);
@@ -3885,6 +3896,7 @@ pub fn config_nav_footer_hints(
   modal: &ModalKeymap,
   tab: SettingsTab,
   selected_kind: Option<FieldKind>,
+  cols: u16,
 ) -> Vec<(String, String)> {
   let mut hints: Vec<(String, String)> = Vec::new();
   if tab == SettingsTab::All {
@@ -3916,6 +3928,20 @@ pub fn config_nav_footer_hints(
     if let Some(k) = modal.primary_key(action) {
       hints.push((k, label.to_string()));
     }
+  }
+  // `modal_hint_line` centres its spans and the frame hard-clips them, so an
+  // overflowing footer does not wrap: it loses its FIRST and LAST hints, which
+  // costs the leading verb outright and leaves `Esc close` as `Esc c`.
+  //
+  // The pre-#623 four verbs needed 44 cells and so fitted down to a 54-column
+  // terminal; five need 53 and would have fitted only from 63. Rather than
+  // narrow that by nine columns, `move` drops out when the line will not fit:
+  // `↑` / `↓` moving a selection is the one convention a user does not need
+  // told, while `adjust` is the affordance this panel just gained and `close`
+  // is the way out. The `All` tab's `j/k scroll` is not touched, since it is
+  // that tab's only movement verb and dropping it would leave none.
+  if hint_line_cells(&hints) > cols as usize {
+    hints.retain(|(_, label)| label != "move");
   }
   hints
 }
@@ -5887,14 +5913,6 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // review) so a rebind of `[tui.keys.modal.config(.edit)]` shows through
   // instead of literal keys.
   let capture_single = app.config_panel.capture.as_ref().map(|c| c.single_only);
-  let footer_owned = if let Some(single) = capture_single {
-    config_capture_footer_hints(&app.modal_keymap, single)
-  } else if editing {
-    config_edit_footer_hints(&app.modal_keymap)
-  } else {
-    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind)
-  };
-  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
   let header_h = header_lines.len() as u16;
 
@@ -5953,6 +5971,18 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
   let x_scroll = app.config_panel.x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+
+  // Resolved against the rect the line actually renders into, not against a
+  // width recomputed from the frame: #550 is the story of a second copy of a
+  // sizing rule, and the nav footer drops a verb rather than be clipped.
+  let footer_owned = if let Some(single) = capture_single {
+    config_capture_footer_hints(&app.modal_keymap, single)
+  } else if editing {
+    config_edit_footer_hints(&app.modal_keymap)
+  } else {
+    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind, footer_area.width)
+  };
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
