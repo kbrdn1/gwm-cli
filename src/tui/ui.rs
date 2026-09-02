@@ -5063,10 +5063,11 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   let gap = text_w.saturating_sub(lead_w + key_w).max(MODAL_VALUE_GAP);
   let rule_w = (lead_w + gap + key_w).min(text_w.max(1));
 
+  let section_color = help_body_section_color(&app.theme);
   let body_lines: Vec<Line<'static>> = body
     .into_iter()
     .map(|row| match row {
-      HelpRow::Section(t) => modal_section_rule(&t, rule_w, muted),
+      HelpRow::Section(t) => modal_section_rule(&t, rule_w, section_color, muted),
       HelpRow::Entry { keys, label } => help_entry_line(&label, &keys, label_w, key_w, gap, &app.theme),
       // Filtered out above; the arm exists so a new variant fails to compile
       // here rather than rendering as nothing.
@@ -5570,6 +5571,7 @@ fn scrollbar_reserve(area: Rect, content_len: usize) -> u16 {
 /// default). The pre-#279 Configuration view, now one tab of the Settings
 /// overlay.
 fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
@@ -5597,7 +5599,7 @@ fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
       // The same labelled rule the other tabs wear since #623, in place of a
       // bare `[table]` over a blank line: one section idiom across the panel,
       // and it costs a row per section instead of two.
-      lines.push(modal_section_rule(&format!("[{section}]"), rule_w, muted));
+      lines.push(modal_section_rule(&format!("[{section}]"), rule_w, accent, muted));
       current_section = Some(section);
     }
     let src_color = match row.source {
@@ -5733,18 +5735,17 @@ fn settings_keys_rows(app: &App) -> usize {
 /// wear it pay for every one: the Settings TUI tab has seven sections and the
 /// Keybindings overlay a dozen, which used to spend a blank line on each side
 /// of every heading.
-pub fn modal_section_rule(name: &str, width: usize, muted: Color) -> Line<'static> {
+pub fn modal_section_rule(name: &str, width: usize, section: Color, muted: Color) -> Line<'static> {
   let lead = format!(" ─ {name} ");
   let tail = width.saturating_sub(cells(&lead));
   let rule = Style::default().fg(muted);
   Line::from(vec![
+    // The separator is muted and the name is not. The rule is chrome, so it
+    // recedes; the name is the one thing on the row that is meant to be read,
+    // so it keeps the theme role the bare headings wore before #623 gave them
+    // a rule to sit in.
     Span::styled(" ─ ".to_string(), rule),
-    // Muted, not the accent the bare headings used to wear. A section rule
-    // marks where a group starts; it is not something to read, and every row
-    // under it already spends the accent on the half that is: the selected
-    // value, the chord, the footer verbs. Bold is what keeps it a heading
-    // rather than body text at the same weight.
-    Span::styled(name.to_string(), rule.add_modifier(Modifier::BOLD)),
+    Span::styled(name.to_string(), help_section_style(section)),
     Span::styled(format!(" {}", "─".repeat(tail)), rule),
   ])
 }
@@ -5807,7 +5808,7 @@ fn settings_fields_lines(app: &App, fields: &[SettingField], width: usize) -> (V
   for ((i, field), value) in fields.iter().enumerate().zip(values.iter()) {
     if let Some(section) = field.section() {
       if current_section != Some(section) {
-        lines.push(modal_section_rule(section, rule_w, muted));
+        lines.push(modal_section_rule(section, rule_w, accent, muted));
         current_section = Some(section);
       }
     }
@@ -5895,7 +5896,7 @@ fn settings_keys_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Option<u
   let mut current_scope: Option<String> = None;
   for (i, row) in panel.key_rows.iter().enumerate() {
     if current_scope.as_deref() != Some(row.scope.as_str()) {
-      lines.push(modal_section_rule(&format!("[{}]", row.scope), rule_w, muted));
+      lines.push(modal_section_rule(&format!("[{}]", row.scope), rule_w, accent, muted));
       current_scope = Some(row.scope.clone());
     }
 

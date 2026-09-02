@@ -31,9 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   join a key to it. On a panel too narrow for both columns the gap falls back
   to a minimum and the row pans sideways, as it always did.
 
-  The section rules are muted, name included, rather than wearing the accent
-  the bare headings used to: a rule marks where a group starts, and every row
-  under it already spends the accent on the half that is meant to be read.
+  A section rule mutes its separator and not its name: the rule is chrome and
+  recedes, while the name keeps the theme role the bare heading wore before it
+  was given a rule to sit in.
 
   The bootstrap report's `Logs` becomes a subtitle. It was a nested section
   with its own chrome, which under `[tui] layout = "compact"` paints the same

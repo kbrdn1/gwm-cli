@@ -2106,33 +2106,37 @@ fn help_entry_line_puts_the_label_first_and_right_aligns_the_chords() {
 }
 
 #[test]
-fn a_modal_section_rule_is_muted_end_to_end() {
-  // Issue #623 follow-up, on Kylian's read of the first render: a section rule
-  // marks where a group starts, it is not something to read. Every row under
-  // it already spends the accent on the half that is (the selected value, the
-  // chord, the footer verbs), so the rule takes none of it, name included.
-  // Bold is what keeps the name a heading rather than body text.
+fn a_modal_section_rule_mutes_its_separator_and_not_its_name() {
+  // Issue #623, on Kylian's read of the rendered panel: the rule is chrome and
+  // recedes, the name is the one thing on the row meant to be read and keeps
+  // the theme role the bare headings wore before they were given a rule to sit
+  // in. The first pass muted both, which sank the name into the separator.
   use gwm::tui::modal_section_rule;
   use ratatui::style::{Color, Modifier};
 
-  let line = modal_section_rule("Sidebar", 40, Color::DarkGray);
-  assert!(
-    line.spans.iter().all(|s| s.style.fg == Some(Color::DarkGray)),
-    "every span of the rule is muted, the name included: {:?}",
-    line
-      .spans
-      .iter()
-      .map(|s| (s.content.as_ref(), s.style.fg))
-      .collect::<Vec<_>>()
-  );
+  let line = modal_section_rule("Sidebar", 40, Color::Magenta, Color::DarkGray);
   let name = line
     .spans
     .iter()
     .find(|s| s.content.as_ref() == "Sidebar")
     .expect("the rule carries its name");
+  assert_eq!(name.style.fg, Some(Color::Magenta), "the name keeps the chosen colour");
   assert!(
     name.style.add_modifier.contains(Modifier::BOLD),
-    "the name stays bold so the rule reads as a heading: {name:?}"
+    "and stays bold, so it reads as a heading: {name:?}"
+  );
+  assert!(
+    line
+      .spans
+      .iter()
+      .filter(|s| s.content.as_ref() != "Sidebar")
+      .all(|s| s.style.fg == Some(Color::DarkGray)),
+    "every span but the name is the muted separator: {:?}",
+    line
+      .spans
+      .iter()
+      .map(|s| (s.content.as_ref(), s.style.fg))
+      .collect::<Vec<_>>()
   );
   // Drawn to the width it was given, so it frames the column beside it rather
   // than stopping short of it or running past.
