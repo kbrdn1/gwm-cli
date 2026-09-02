@@ -3658,11 +3658,13 @@ impl HintContext {
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "normal mode"),
       ],
-      HintContext::Help => &[
-        Hint::Lit("j/k", "scroll"),
-        Hint::Lit("h/l", "pan"),
-        Hint::Modal(ModalAction::HelpClose, "close"),
-      ],
+      // No `h/l pan` since #623: every row of this overlay is now laid out to
+      // the body width exactly, so `help_max_x_scroll` is zero whatever the
+      // terminal, and the hint named a key that could not move anything. The
+      // `help.scroll_left` / `scroll_right` verbs stay bound rather than being
+      // deleted, so a config that rebound them still loads; removing them is a
+      // separate call about the keymap contract.
+      HintContext::Help => &[Hint::Lit("j/k", "scroll"), Hint::Modal(ModalAction::HelpClose, "close")],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
       // #325: pick a profile then run it in a PTY. The j/k movement pair
       // stays literal (no single resolved key captures it), matching the
@@ -4486,15 +4488,15 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     HelpRow::Blank,
     HelpRow::Section("Global".to_string()),
     HelpRow::Blank,
-    entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
+    entry(Action::Quit, "quit (Esc too, when the filter is clear)"),
     fixed("Ctrl-C", "quit (hard-coded escape hatch)"),
     HelpRow::Blank,
     HelpRow::Section("List View".to_string()),
     HelpRow::Blank,
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
-    entry(Action::WtScrollDown, "scroll the Working Tree pane down (status focus)"),
-    entry(Action::WtScrollUp, "scroll the Working Tree pane up (status focus)"),
+    entry(Action::WtScrollDown, "scroll the Working Tree pane down"),
+    entry(Action::WtScrollUp, "scroll the Working Tree pane up"),
     entry(Action::Top, "jump to first worktree"),
     entry(Action::Bottom, "jump to last worktree"),
   ];
@@ -4502,27 +4504,15 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
   } else {
     rows.push(entry(Action::Create, "new worktree"));
-    rows.push(entry(
-      Action::CreateFromIssue,
-      "new worktree from an existing issue (derives type + slug)",
-    ));
+    rows.push(entry(Action::CreateFromIssue, "new worktree from an existing issue"));
     // #484: the mark set is what `d` acts on when it is non-empty.
-    rows.push(entry(
-      Action::ToggleSelect,
-      "mark / unmark this worktree for a bulk delete",
-    ));
-    rows.push(entry(
-      Action::DeleteConfirm,
-      "delete the marked worktrees (or this one)",
-    ));
+    rows.push(entry(Action::ToggleSelect, "mark / unmark for a bulk delete"));
+    rows.push(entry(Action::DeleteConfirm, "delete the marked worktrees, or this one"));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
-  rows.push(entry(
-    Action::TerminalFullscreen,
-    "open per [tui.open]: shell / editor / finder",
-  ));
-  rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
-  rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
+  rows.push(entry(Action::TerminalFullscreen, "open per [tui.open]"));
+  rows.push(entry(Action::TerminalPty, "open $SHELL in a PTY overlay"));
+  rows.push(entry(Action::OpenDocs, "open the gwm docs in the browser"));
   rows.push(entry(Action::YankPath, "yank selected worktree path to clipboard"));
   rows.push(entry(Action::YankBranchName, "yank selected branch name to clipboard"));
   rows.push(entry(
@@ -4536,73 +4526,43 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     Action::ToggleSidebarMode,
     "cycle sidebar mode (commits / stashes)",
   ));
-  rows.push(entry(
-    Action::CycleSidebarLayout,
-    "cycle sidebar layout (auto / side-by-side / stacked)",
-  ));
+  rows.push(entry(Action::CycleSidebarLayout, "cycle sidebar layout"));
   rows.push(entry(
     Action::ToggleSidebarPosition,
     "toggle sidebar position (left / right)",
   ));
-  rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
+  rows.push(entry(Action::FocusSwap, "swap focus between list and sidebar"));
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
   rows.push(entry(Action::MergePr, "merge the linked PR (asks first)"));
-  rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
+  rows.push(entry(Action::FocusStatus, "focus the status pane (opens if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
-  rows.push(entry(Action::WorkingTree, "show the working tree listing at full size"));
-  rows.push(entry(
-    Action::Commits,
-    "show the commit listing full size, with load-more",
-  ));
+  rows.push(entry(Action::WorkingTree, "show the working tree at full size"));
+  rows.push(entry(Action::Commits, "show the commit listing full size"));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
-    rows.push(entry(
-      Action::ExecOverlay,
-      "pick an [exec.profiles] profile and run it in a PTY",
-    ));
-    rows.push(entry(
-      Action::CleanOverlay,
-      "preview and reclaim build artifacts (with confirm)",
-    ));
-    rows.push(entry(
-      Action::AgentSessions,
-      "show the agent sessions attached to this worktree",
-    ));
-    rows.push(entry(
-      Action::CiChecks,
-      "list the linked PR's CI checks (also `c` with status focus)",
-    ));
-    rows.push(entry(
-      Action::RichView,
-      "open the linked PR/issue: description, checks, reviews, comments",
-    ));
+    rows.push(entry(Action::ExecOverlay, "pick an [exec.profiles] profile to run"));
+    rows.push(entry(Action::CleanOverlay, "preview and reclaim build artifacts"));
+    rows.push(entry(Action::AgentSessions, "show this worktree's agent sessions"));
+    rows.push(entry(Action::CiChecks, "list the linked PR's CI checks"));
+    rows.push(entry(Action::RichView, "open the linked PR/issue in full"));
   }
-  rows.push(entry(
-    Action::Filter,
-    "open fuzzy filter bar (enter: sticky, esc: clear)",
-  ));
+  rows.push(entry(Action::Filter, "fuzzy filter (enter sticky, esc clear)"));
   rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
-    rows.push(entry(Action::Sync, "sync selected worktree onto its upstream (rebase)"));
-    rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
-    rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
+    rows.push(entry(Action::Sync, "sync onto its upstream (rebase)"));
+    rows.push(entry(Action::Pull, "pull the branch from upstream"));
+    rows.push(entry(Action::Push, "push the branch to remote"));
     rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
     rows.push(entry(Action::EditNote, "edit the selected worktree's note"));
-    rows.push(entry(
-      Action::ExitToWorktree,
-      "quit TUI and print selected path to stdout",
-    ));
-    rows.push(entry(Action::MuxPane, "open selected worktree in new mux pane/tab"));
+    rows.push(entry(Action::ExitToWorktree, "quit and print the path to stdout"));
+    rows.push(entry(Action::MuxPane, "open in a new mux pane / tab"));
     rows.push(entry(Action::Macro1, "run [tui.macro1] command"));
     rows.push(entry(Action::Macro2, "run [tui.macro2] command"));
     rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
     rows.push(entry(Action::ReviewFullscreen, "run [review] launcher fullscreen"));
-    rows.push(entry(
-      Action::ReviewPty,
-      "run [review] launcher in embedded PTY overlay",
-    ));
+    rows.push(entry(Action::ReviewPty, "run [review] in a PTY overlay"));
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
@@ -4646,7 +4606,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       parts.push(format!("or {}", picks.join("/")));
     }
     parts.push("then digits".to_string());
-    rows.push(entry(Action::LinkPrompt, &format!("link prompt: {}", parts.join(", "))));
+    rows.push(entry(Action::LinkPrompt, &format!("link: {}", parts.join(", "))));
   }
   rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
@@ -4662,15 +4622,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreateNextField, "next field"),
       modal_entry(ModalAction::CreatePrevField, "previous field"),
       modal_entry(ModalAction::CreateSubmit, "submit (on the last field) / next field"),
-      modal_entry(
-        ModalAction::CreateToggleMode,
-        "toggle structured fields ↔ free-form name",
-      ),
+      modal_entry(ModalAction::CreateToggleMode, "toggle structured / free-form naming"),
       modal_entry(ModalAction::CreateCancel, "cancel"),
-      fixed(
-        "0-9",
-        "type into the issue field, where the patterns ask for one (digits only)",
-      ),
+      fixed("0-9", "type into the issue field (digits only)"),
       fixed("any char", "type into the focused text field"),
       fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
@@ -4679,16 +4633,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfirmFocusConfirm, "focus the Confirm button"),
       modal_entry(ModalAction::ConfirmFocusCancel, "focus the Cancel button"),
       modal_entry(ModalAction::ConfirmToggleFocus, "toggle the focused button"),
-      modal_entry(
-        ModalAction::ConfirmActivate,
-        "activate the focused button (defaults to Cancel)",
-      ),
+      modal_entry(ModalAction::ConfirmActivate, "activate the focused button"),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
-      modal_entry(
-        ModalAction::ConfirmCycleMethod,
-        "cycle merge / squash / rebase (merge confirmations only)",
-      ),
+      modal_entry(ModalAction::ConfirmCycleMethod, "cycle merge / squash / rebase"),
     ]);
     // #453: one section per modal context, in workflow order, every verb
     // resolved live against the modal keymap so rebinds show through (and
@@ -4704,10 +4652,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Section("Browse Links".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::OpenMenuToggle, "toggle issue / pull request"),
-      modal_entry(
-        ModalAction::OpenMenuAccept,
-        "open the highlighted target in the browser",
-      ),
+      modal_entry(ModalAction::OpenMenuAccept, "open the highlighted target"),
       modal_entry(ModalAction::OpenMenuIssue, "open the linked issue directly"),
       modal_entry(ModalAction::OpenMenuPr, "open the linked pull request directly"),
       modal_entry(ModalAction::OpenMenuClose, "close"),
@@ -4746,22 +4691,19 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::DetailAttach, "attach to the selected session"),
       modal_entry(ModalAction::DetailDetach, "detach the selected session"),
       modal_entry(ModalAction::DetailInput, "attach by id (palette-style prompt)"),
-      modal_entry(
-        ModalAction::DetailOpenPane,
-        "resume the selected session in a multiplexer pane",
-      ),
-      fixed("any char", "attach prompt: type to filter the session ids"),
-      fixed("Backspace", "attach prompt: delete the last character"),
-      fixed("Up/Down", "attach prompt: move the highlight"),
-      fixed("enter", "attach prompt: attach the highlighted session"),
-      fixed("Esc", "attach prompt: back to the list"),
+      modal_entry(ModalAction::DetailOpenPane, "resume the session in a mux pane"),
+      fixed("any char", "attach: filter the session ids"),
+      fixed("Backspace", "attach: delete the last character"),
+      fixed("Up/Down", "attach: move the highlight"),
+      fixed("enter", "attach: the highlighted session"),
+      fixed("Esc", "attach: back to the list"),
       modal_entry(ModalAction::DetailClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("CI Checks".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::CiChecksNext, "next check"),
       modal_entry(ModalAction::CiChecksPrev, "previous check"),
-      modal_entry(ModalAction::CiChecksOpen, "open the check's details URL in the browser"),
+      modal_entry(ModalAction::CiChecksOpen, "open the check's URL in the browser"),
       modal_entry(ModalAction::CiChecksFilter, "filter the checks by name"),
       modal_entry(ModalAction::CiChecksRefresh, "re-fetch the PR and refresh the rows"),
       fixed("any char", "filter: type to narrow the checks"),
@@ -4792,17 +4734,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       HelpRow::Section("Note Editor".to_string()),
       HelpRow::Blank,
-      fixed("Left/Right/Up/Down", "move the cursor"),
+      fixed("←/→/↑/↓", "move the cursor"),
       fixed("Home/End", "start / end of line"),
       fixed("PgUp/PgDn", "page through the note"),
       modal_entry(
         ModalAction::NoteToggleBullet,
         "make the line a list item, or plain again",
       ),
-      modal_entry(
-        ModalAction::NoteToggleCheckbox,
-        "tick the box on the line, spawning one first",
-      ),
+      modal_entry(ModalAction::NoteToggleCheckbox, "tick the box, spawning one first"),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
       modal_entry(ModalAction::NoteClose, "save and close (empty it to delete)"),
       HelpRow::Blank,
@@ -4820,12 +4759,12 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Section("Note Editor · normal mode ([tui] note_vim, on by default)".to_string()),
       HelpRow::Blank,
       fixed("h j k l", "move"),
-      fixed("w b e", "word forward / back / end (W B E: blank-separated)"),
+      fixed("w b e", "word forward / back / end (W B E: blank)"),
       fixed("0 ^ $", "first column / first non-blank / last char"),
       fixed("gg G", "first / last line"),
       fixed("x dd", "delete the char under the caret / the line"),
-      fixed("i I a A o O", "enter insert (o / O open a line, carrying the marker)"),
-      fixed("Esc", "insert to normal; from normal, save and close"),
+      fixed("i I a A o O", "enter insert (o / O open a line)"),
+      fixed("Esc", "to normal, or save and close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -4845,7 +4784,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CommandPaletteNext, "next command"),
       modal_entry(ModalAction::CommandPalettePrev, "previous command"),
       modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
-      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
+      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase)"),
       fixed("Backspace", "delete the last filter character"),
       modal_entry(ModalAction::CommandPaletteClose, "close"),
       HelpRow::Blank,
@@ -4890,37 +4829,22 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
       modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
       modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
-      modal_entry(
-        ModalAction::ConfigActivate,
-        "toggle / edit the selected setting (Keys tab: start a key capture; a modal verb commits on its first stroke)",
-      ),
+      modal_entry(ModalAction::ConfigActivate, "toggle / edit the value, or capture a key"),
       modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
       modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
       modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
       modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
-      modal_entry(
-        ModalAction::ConfigEditSubmit,
-        "commit the edited value / the captured global chord",
-      ),
+      modal_entry(ModalAction::ConfigEditSubmit, "commit the value or the captured chord"),
       modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
-      fixed(
-        "any char",
-        "type the value: free text for text fields, digits for numeric ones",
-      ),
-      fixed(
-        "Backspace",
-        "erase the last character / drop the last stroke of a global capture",
-      ),
-      fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
-      fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
+      fixed("any char", "type the value (digits on numeric fields)"),
+      fixed("Backspace", "erase the last character or stroke"),
+      fixed("enter", "capture: commit the global chord"),
+      fixed("Esc", "capture: cancel"),
       modal_entry(ModalAction::ConfigClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("PTY Overlay".to_string()),
       HelpRow::Blank,
-      fixed(
-        "Esc",
-        "close the overlay; other keys pass through (any key but Ctrl-C closes a finished exec run)",
-      ),
+      fixed("Esc", "close; other keys pass through to the run"),
     ]);
     rows.extend([
       HelpRow::Blank,
@@ -4982,16 +4906,46 @@ pub fn badge_group_width(keys: &str) -> usize {
   glyphs + chords.len().saturating_sub(1)
 }
 
-/// One documented-binding row for the Keybindings overlay (issue #279):
-/// the chord(s) as flat accent-bold glyphs (no reverse-video badge),
-/// padded to `max_group_w` so every label lines up in one column, then the
-/// human label. An unbound action reads as a muted `(unbound)` placeholder.
-/// Extracted as a pure builder so the de-badged treatment is pinned by
+/// Cells the Keybindings body indents its rows by, under its section rules.
+const HELP_ROW_INDENT: usize = 2;
+
+/// One documented-binding row for the Keybindings overlay: the human label,
+/// then the chord(s) as flat accent-bold glyphs (no reverse-video badge, issue
+/// #279) right-aligned in a column of their own. An unbound action reads as a
+/// muted `(unbound)` placeholder.
+///
+/// Label first since #623, which is the order the Settings panel's Keys tab
+/// already used for the same data — that tab is this overlay's editable twin,
+/// and the two disagreeing on which half leads made them read as unrelated
+/// lists. `label_w` and `key_w` are the widest of each over the whole body and
+/// `gap` is what the panel has left between them, so the caller measures once
+/// rather than every row asking the same question.
+///
+/// Extracted as a pure builder so the treatment is pinned by
 /// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
-pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Theme) -> Line<'static> {
+pub fn help_entry_line(
+  label: &str,
+  keys: &str,
+  label_w: usize,
+  key_w: usize,
+  gap: usize,
+  theme: &Theme,
+) -> Line<'static> {
   let key_style = hint_key_style(theme);
   let muted_style = Style::default().fg(theme.muted);
-  let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+  // Truncated to its column rather than allowed to push the chords out of the
+  // overlay: the chord is what the reader came for, the label is the gloss. A
+  // hard clip at the frame would take the chords AND say nothing about it, so
+  // the cut is explicit and cell-accurate.
+  let label = trunc(label, label_w);
+  let mut spans: Vec<Span<'static>> = vec![
+    Span::raw(" ".repeat(HELP_ROW_INDENT)),
+    Span::styled(label.clone(), help_label_style(theme)),
+  ];
+  // Padding BEFORE the chords, never after: a line that ends in spaces widens
+  // `Line::width`, which is what publishes the overlay's `max_x_scroll`.
+  let pad = label_w.saturating_sub(cells(&label)) + gap + key_w.saturating_sub(badge_group_width(keys));
+  spans.push(Span::raw(" ".repeat(pad)));
   if keys.is_empty() || keys == "(unbound)" {
     spans.push(Span::styled("(unbound)", muted_style));
   } else {
@@ -5002,14 +4956,15 @@ pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Them
       spans.push(Span::styled(chord.to_string(), key_style));
     }
   }
-  let pad = max_group_w.saturating_sub(badge_group_width(keys)) + 1;
-  spans.push(Span::raw(" ".repeat(pad)));
-  spans.push(Span::styled(label.to_string(), help_label_style(theme)));
   Line::from(spans)
 }
 
 fn draw_help(f: &mut Frame, app: &mut App) {
-  let area = centered_viewport(60, 64, 96, 60, f.area());
+  // Wider than the 60% every prompt-shaped modal takes (issue #623): this one
+  // is a reference, and since its labels and its chords are two columns rather
+  // than one run, 60% of a 100-column terminal is 64 cells for a body that
+  // wants ~73. The ceiling is unchanged, so nothing grows on a wide terminal.
+  let area = centered_viewport(78, 64, 96, 60, f.area());
   // Use the underlying pane context, not the view-priority `hint_context`
   // (which would be `Help` while this overlay is up) — `?` documents the
   // pane you opened it from, and the picker gating depends on it.
@@ -5018,52 +4973,42 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
   let accent = app.theme.accent;
+  let muted = app.theme.muted;
 
   // Subtitle reads in a distinct accent hue (the theme's branch colour) +
   // italic, so the context name is clearly a different colour from both the
   // bold title and the muted key labels (issue #217 follow-up).
   let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
-  // Align every label to the same column: pad each chord *group* out to the
-  // widest one so the descriptions line up under one another.
-  let max_group_w = rows
-    .iter()
-    .filter_map(|r| match r {
-      HelpRow::Entry { keys, .. } => Some(badge_group_width(keys)),
-      _ => None,
-    })
-    .max()
-    .unwrap_or(0);
-
   // Issue #279: split the overlay into a FIXED header (title + subtitle), a
   // SCROLLABLE body (sections + entries), and a FIXED footer hint. Pre-#279
   // the whole content scrolled in one `Paragraph`, so the title and the
   // close hint rolled off the top/bottom as soon as the body outgrew the
   // modal. Title/subtitle are the leading rows; everything else is body.
-  let mut header_lines: Vec<Line<'static>> = Vec::new();
-  let mut body_lines: Vec<Line<'static>> = Vec::new();
+  //
+  // The body is sorted before it is rendered, because since #623 its rows are
+  // laid out against the overlay's width and the overlay is laid out against
+  // the row count. Sorting is the half that needs neither.
+  //
   // `HelpRow::Title` no longer renders as a row: since #549 it rides the
   // modal's top rule, so it is captured here rather than pushed. The
   // subtitle stays a header row — it is live context (the active view),
-  // not the modal's name.
+  // not the modal's name. `HelpRow::Blank` stops rendering entirely: the
+  // section rules are the separation now, and the body carried two blanks per
+  // heading, which on a dozen sections is two dozen rows of nothing.
+  let mut header_lines: Vec<Line<'static>> = Vec::new();
+  let mut body: Vec<HelpRow> = Vec::new();
   let mut modal_title = String::new();
   for row in rows {
     match row {
       HelpRow::Title(t) => modal_title = t,
       // The subtitle is centred (issue #217) and pinned in the header.
       HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
-      // Section headers stay left-aligned so they anchor their groups
-      // lazygit-style.
-      HelpRow::Section(t) => body_lines.push(Line::from(Span::styled(
-        t,
-        help_section_style(help_body_section_color(&app.theme)),
-      ))),
-      HelpRow::Blank => body_lines.push(Line::from(String::new())),
-      HelpRow::Entry { keys, label } => {
-        body_lines.push(help_entry_line(&keys, &label, max_group_w, &app.theme));
-      }
+      HelpRow::Blank => {}
+      other => body.push(other),
     }
   }
+  let body_rows = body.len();
 
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
   let inner_area = frame.render(f, area, &modal_title, None);
@@ -5081,6 +5026,59 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   .areas(inner_area);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // The width the rows are laid out against: the body rect, less what the
+  // scrollbar is about to take, less a cell of gutter so the chord column does
+  // not butt against the thumb. `scrollbar_reserve` is the predicate
+  // `scrollable_body_area` itself uses (#622 split it out for this).
+  let reserve = scrollbar_reserve(body_area, body_rows);
+  let text_w = body_area.width.saturating_sub(reserve + u16::from(reserve > 0)) as usize;
+
+  // The chords sit in a column of their own, right-aligned against that width,
+  // the way every Settings tab does since #623. Both halves are measured over
+  // the whole body so a short section does not get its own alignment.
+  let label_w = body
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { label, .. } => Some(cells(label)),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0);
+  let key_w = body
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } => Some(badge_group_width(keys)),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0);
+  // Capped so the chord column always survives. The labels here are prose and
+  // run past fifty cells; left uncapped, the widest of them pushes the chords
+  // off the right edge and the overlay shows a page of descriptions and not
+  // one key, which is the opposite of what it is for. A label that does not
+  // fit is truncated with an ellipsis instead, by `help_entry_line`.
+  let label_w = label_w.min(text_w.saturating_sub(HELP_ROW_INDENT + MODAL_VALUE_GAP + key_w));
+  let lead_w = HELP_ROW_INDENT + label_w;
+  let gap = text_w.saturating_sub(lead_w + key_w).max(MODAL_VALUE_GAP);
+  let rule_w = (lead_w + gap + key_w).min(text_w.max(1));
+
+  let body_lines: Vec<Line<'static>> = body
+    .into_iter()
+    .map(|row| match row {
+      HelpRow::Section(t) => modal_section_rule(&t, rule_w, muted),
+      HelpRow::Entry { keys, label } => help_entry_line(&label, &keys, label_w, key_w, gap, &app.theme),
+      // Filtered out above; the arm exists so a new variant fails to compile
+      // here rather than rendering as nothing.
+      HelpRow::Title(t) | HelpRow::Subtitle(t) => Line::from(t),
+      HelpRow::Blank => Line::from(String::new()),
+    })
+    .collect();
+  debug_assert_eq!(
+    body_lines.len(),
+    body_rows,
+    "the row count the overlay was sized to must be the number of lines built"
+  );
 
   // Publish the scroll bounds against the BODY viewport only (issue #279) —
   // not the whole inner height — so the clamp matches what actually scrolls
@@ -5572,7 +5570,6 @@ fn scrollbar_reserve(area: Rect, content_len: usize) -> u16 {
 /// default). The pre-#279 Configuration view, now one tab of the Settings
 /// overlay.
 fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
-  let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
@@ -5585,12 +5582,12 @@ fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
   // Same column arithmetic as the other tabs (#623). The ` = ` that used to
   // join the key and its value goes with it: the value now sits in a column of
   // its own, and an `=` stranded next to a left-aligned key would point at
-  // nothing. A wide value collapses the gap to `SETTINGS_VALUE_GAP` and the
+  // nothing. A wide value collapses the gap to `MODAL_VALUE_GAP` and the
   // row reads exactly as it did before, which is the case this tab is full of.
   let key_w = app.config_panel.rows.iter().map(|r| cells(&r.key)).max().unwrap_or(0);
   let value_w = app.config_panel.rows.iter().map(|r| cells(&r.value)).max().unwrap_or(0);
   let lead_w = 2 + SETTINGS_SOURCE_W + 2 + key_w;
-  let gap = width.saturating_sub(lead_w + value_w).max(SETTINGS_VALUE_GAP);
+  let gap = width.saturating_sub(lead_w + value_w).max(MODAL_VALUE_GAP);
   let rule_w = (lead_w + gap + value_w).min(width.max(1));
 
   let mut current_section: Option<String> = None;
@@ -5600,7 +5597,7 @@ fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
       // The same labelled rule the other tabs wear since #623, in place of a
       // bare `[table]` over a blank line: one section idiom across the panel,
       // and it costs a row per section instead of two.
-      lines.push(settings_section_rule(&format!("[{section}]"), rule_w, accent, muted));
+      lines.push(modal_section_rule(&format!("[{section}]"), rule_w, muted));
       current_section = Some(section);
     }
     let src_color = match row.source {
@@ -5655,7 +5652,7 @@ const SETTINGS_SOURCE_W: usize = 7;
 
 /// Smallest gap between a label and its value, for the panel too narrow to
 /// hold the full block (issue #623). Above it the gap is whatever is left.
-const SETTINGS_VALUE_GAP: usize = 2;
+const MODAL_VALUE_GAP: usize = 2;
 
 /// Whether the selected field's edit would be shadowed by a higher-precedence
 /// layer (issue #279): editing the Global layer for a field the repo overrides
@@ -5728,21 +5725,27 @@ fn settings_keys_rows(app: &App) -> usize {
   rows
 }
 
-/// A labelled rule opening a section inside an editable tab (issue #623):
+/// A labelled rule opening a section inside a modal body (issue #623):
 /// `─ Sidebar ───`, drawn to the body width so it rails the eye from the
 /// label across to the value column instead of stopping short of it.
 ///
-/// No blank row above it. The rule *is* the separation, and the TUI tab pays
-/// seven of them: a blank each would cost seven more rows on a tab whose box
-/// already stops at [`SETTINGS_HEIGHT_BOUNDS`]'s 32-row ceiling, tipping it
-/// into a scroll it does not otherwise need.
-fn settings_section_rule(name: &str, width: usize, accent: Color, muted: Color) -> Line<'static> {
+/// No blank row above it. The rule *is* the separation, and the surfaces that
+/// wear it pay for every one: the Settings TUI tab has seven sections and the
+/// Keybindings overlay a dozen, which used to spend a blank line on each side
+/// of every heading.
+pub fn modal_section_rule(name: &str, width: usize, muted: Color) -> Line<'static> {
   let lead = format!(" ─ {name} ");
   let tail = width.saturating_sub(cells(&lead));
+  let rule = Style::default().fg(muted);
   Line::from(vec![
-    Span::styled(" ─ ".to_string(), Style::default().fg(muted)),
-    Span::styled(name.to_string(), help_section_style(accent)),
-    Span::styled(format!(" {}", "─".repeat(tail)), Style::default().fg(muted)),
+    Span::styled(" ─ ".to_string(), rule),
+    // Muted, not the accent the bare headings used to wear. A section rule
+    // marks where a group starts; it is not something to read, and every row
+    // under it already spends the accent on the half that is: the selected
+    // value, the chord, the footer verbs. Bold is what keeps it a heading
+    // rather than body text at the same weight.
+    Span::styled(name.to_string(), rule.add_modifier(Modifier::BOLD)),
+    Span::styled(format!(" {}", "─".repeat(tail)), rule),
   ])
 }
 
@@ -5763,7 +5766,7 @@ fn settings_section_rule(name: &str, width: usize, accent: Color, muted: Color) 
 /// section rules span the same width, which is what keeps the row and its
 /// value visually joined across the gap the panel's own width opens up.
 ///
-/// The gap collapses to [`SETTINGS_VALUE_GAP`] when the block outgrows the
+/// The gap collapses to [`MODAL_VALUE_GAP`] when the block outgrows the
 /// body, which is the narrow-terminal case: the line then overflows and the
 /// existing horizontal pan reaches it, rather than the label and the value
 /// running into each other.
@@ -5797,14 +5800,14 @@ fn settings_fields_lines(app: &App, fields: &[SettingField], width: usize) -> (V
   let value_w = values.iter().map(|v| cells(v)).max().unwrap_or(0);
   let gap = width
     .saturating_sub(SETTINGS_MARKER_W + label_w + value_w)
-    .max(SETTINGS_VALUE_GAP);
+    .max(MODAL_VALUE_GAP);
   let rule_w = (SETTINGS_MARKER_W + label_w + gap + value_w).min(width.max(1));
 
   let mut current_section: Option<&'static str> = None;
   for ((i, field), value) in fields.iter().enumerate().zip(values.iter()) {
     if let Some(section) = field.section() {
       if current_section != Some(section) {
-        lines.push(settings_section_rule(section, rule_w, accent, muted));
+        lines.push(modal_section_rule(section, rule_w, muted));
         current_section = Some(section);
       }
     }
@@ -5886,18 +5889,13 @@ fn settings_keys_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Option<u
     .max()
     .unwrap_or(0);
   let lead_w = SETTINGS_MARKER_W + SETTINGS_SOURCE_W + 1 + label_w;
-  let gap = width.saturating_sub(lead_w + key_w).max(SETTINGS_VALUE_GAP);
+  let gap = width.saturating_sub(lead_w + key_w).max(MODAL_VALUE_GAP);
   let rule_w = (lead_w + gap + key_w).min(width.max(1));
 
   let mut current_scope: Option<String> = None;
   for (i, row) in panel.key_rows.iter().enumerate() {
     if current_scope.as_deref() != Some(row.scope.as_str()) {
-      lines.push(settings_section_rule(
-        &format!("[{}]", row.scope),
-        rule_w,
-        accent,
-        muted,
-      ));
+      lines.push(modal_section_rule(&format!("[{}]", row.scope), rule_w, muted));
       current_scope = Some(row.scope.clone());
     }
 
@@ -7290,14 +7288,16 @@ fn draw_report(f: &mut Frame, app: &App) {
   // screen so a long report stays on-screen rather than a fixed 80%-tall
   // box (#187).
   let term = f.area();
-  // The nested ` Logs ` pane follows `[tui] layout` like every other
-  // section (issue #594): boxed it costs two rows, compact one.
-  let logs_chrome = Chrome::resolve(app.config.tui.layout.is_compact(), true, false, &app.theme);
-  let logs_height = (logs.len() as u16 + logs_chrome.rows()).max(3);
-  // Two rows shorter than pre-#549: the title and its spacer row moved
-  // into the top rule.
+  // `Logs` is the subtitle, not a nested pane (issue #623). It used to be a
+  // `render_section` with its own chrome, which under `[tui] layout =
+  // "compact"` paints the same full-width accent band the modal's own title
+  // rides: two identical bars stacked, the second reading as a second title
+  // rather than as a label for what is under it. The other overlays put their
+  // live context on one centred subtitle row, so this one does too.
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let height = (logs_height + 2 /* gap + hint */ + frame.rows()).min(term.height.saturating_mul(80) / 100);
+  let height = (logs.len() as u16 + 1 /* subtitle */ + 2 /* gap + hint */ + frame.rows())
+    .max(6)
+    .min(term.height.saturating_mul(80) / 100);
   // A text canvas, so a bare percentage rather than the bounded
   // [`modal_width`] policy (issue #550) — the same call the PTY overlay, the
   // command-log transcript and the note editor make, and for the same
@@ -7312,19 +7312,27 @@ fn draw_report(f: &mut Frame, app: &App) {
   // off it at 200 columns. No defect ever motivated the cap.
   let area = centered_abs(term.width.saturating_mul(80) / 100, height, term);
   let inner = frame.render(f, area, "Bootstrap Report", None);
-  let layout = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([
-      Constraint::Min(3),    // logs pane
-      Constraint::Length(1), // hint gap
-      Constraint::Length(1), // hint
-    ])
-    .split(inner);
-  // The nested ` Logs ` pane keeps its own rules whatever the modal frame
-  // spends: it is a section *inside* a surface, the way the sidebar's are,
-  // and the modal has already spent the layout's chrome budget for the
-  // frame around it.
-  render_section(f, layout[0], " Logs ", SectionBody::new(&logs), logs_chrome, 0, None);
+  let [subtitle_area, body_area, _gap, hint_area] = Layout::vertical([
+    Constraint::Length(1), // subtitle
+    Constraint::Min(1),    // the steps
+    Constraint::Length(1), // hint gap
+    Constraint::Length(1), // hint
+  ])
+  .areas(inner);
+  // The same subtitle treatment the Settings panel and the Keybindings overlay
+  // wear: the branch hue, italic, centred, so it reads as a label for the body
+  // rather than as the surface's name.
+  f.render_widget(
+    Paragraph::new(
+      Line::from(Span::styled(
+        "Logs",
+        Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC),
+      ))
+      .centered(),
+    ),
+    subtitle_area,
+  );
+  f.render_widget(Paragraph::new(logs), body_area);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::Report,
@@ -7332,7 +7340,7 @@ fn draw_report(f: &mut Frame, app: &App) {
       &app.modal_keymap,
       &app.theme,
     )),
-    layout[2],
+    hint_area,
   );
 }
 

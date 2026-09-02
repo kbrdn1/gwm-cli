@@ -245,11 +245,14 @@ fn badge_group_width_unbound_is_the_bare_placeholder_width() {
 fn help_entry_line_renders_flat_accent_chords_not_badges() {
   // Issue #279: the keybindings body drops the reverse-video chord badge
   // for flat accent-bold glyphs (herdr-style). The label stays readable.
+  //
+  // Since #623 the label leads and the chords are the right-hand column, the
+  // order the Settings panel's Keys tab already used for the same data.
   let theme = Theme {
     accent: Color::Magenta,
     ..Theme::default()
   };
-  let line = help_entry_line("j, Down", "next", 10, &theme);
+  let line = help_entry_line("next", "j, Down", 10, 8, 2, &theme);
   let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(text.contains("next"), "label missing: {text:?}");
   // The first chord renders as a bare `j` accent-bold span — no padding box.
@@ -2065,4 +2068,76 @@ fn the_settings_nav_footer_fits_every_panel_the_width_policy_draws() {
   // Both halves of the trim are exercised, or the sweep proves only one.
   assert!(kept_somewhere, "a wide panel must keep the move verb");
   assert!(dropped_somewhere, "a narrow panel must drop it rather than be clipped");
+}
+
+#[test]
+fn help_entry_line_puts_the_label_first_and_right_aligns_the_chords() {
+  // Issue #623 applied to the Keybindings overlay: two columns, the chords
+  // pinned to a common right edge so the eye finds them without scanning a
+  // ragged margin. Both halves are padded from the widths measured over the
+  // whole body, so a short label and a short chord group land in the same
+  // columns as the widest ones.
+  use gwm::tui::{cells, help_entry_line};
+  let theme = Theme::default();
+  let line = help_entry_line("next", "j, Down", 12, 9, 3, &theme);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    text.starts_with("  next"),
+    "the label leads, after the body indent: {text:?}"
+  );
+  assert!(
+    text.trim_end().ends_with("j Down"),
+    "the chords close the row: {text:?}"
+  );
+
+  // A narrower label and a narrower chord group produce a line of the same
+  // width, which is what "one column" means.
+  let short = help_entry_line("up", "k", 12, 9, 3, &theme);
+  let short_text: String = short.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert_eq!(
+    cells(&text),
+    cells(&short_text),
+    "every row measures the same: {text:?} vs {short_text:?}"
+  );
+  assert!(
+    !short_text.ends_with(' '),
+    "the padding goes before the chords, so no row ends in spaces: {short_text:?}"
+  );
+}
+
+#[test]
+fn a_modal_section_rule_is_muted_end_to_end() {
+  // Issue #623 follow-up, on Kylian's read of the first render: a section rule
+  // marks where a group starts, it is not something to read. Every row under
+  // it already spends the accent on the half that is (the selected value, the
+  // chord, the footer verbs), so the rule takes none of it, name included.
+  // Bold is what keeps the name a heading rather than body text.
+  use gwm::tui::modal_section_rule;
+  use ratatui::style::{Color, Modifier};
+
+  let line = modal_section_rule("Sidebar", 40, Color::DarkGray);
+  assert!(
+    line.spans.iter().all(|s| s.style.fg == Some(Color::DarkGray)),
+    "every span of the rule is muted, the name included: {:?}",
+    line
+      .spans
+      .iter()
+      .map(|s| (s.content.as_ref(), s.style.fg))
+      .collect::<Vec<_>>()
+  );
+  let name = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "Sidebar")
+    .expect("the rule carries its name");
+  assert!(
+    name.style.add_modifier.contains(Modifier::BOLD),
+    "the name stays bold so the rule reads as a heading: {name:?}"
+  );
+  // Drawn to the width it was given, so it frames the column beside it rather
+  // than stopping short of it or running past.
+  assert_eq!(
+    gwm::tui::cells(&line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
+    40
+  );
 }

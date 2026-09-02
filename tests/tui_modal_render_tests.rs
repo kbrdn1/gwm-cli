@@ -3716,26 +3716,28 @@ fn a_content_sized_modal_spends_two_rows_less_in_compact() {
 // (issue #623)
 // ---------------------------------------------------------------------------
 
-/// The rightmost column of `y` carrying something other than blank space or a
-/// frame rule, searched inside `[x0, x1]`.
+/// Glyphs that are chrome rather than content: the frame's rules and corners,
+/// and the scrollbar's thumb and track.
 ///
 /// The frame glyphs are excluded rather than the scan bounded short of them,
 /// because the two layouts put the modal's edge in different places: bordered
 /// paints `│`, compact paints nothing at all. Excluding the glyph makes one
-/// oracle serve both.
+/// oracle serve both. The scrollbar pair is here because it cost a real
+/// measurement: `█` in the reserved column is the rightmost non-blank cell of
+/// every row on a body that scrolls, so a search for "where does the content
+/// end" answered "at the scrollbar" on every one of them.
+const MODAL_CHROME: [&str; 9] = [" ", "│", "╮", "╯", "╭", "╰", "─", "█", "║"];
+
+/// The rightmost column of `y` carrying content, searched inside `[x0, x1]`.
 fn last_content_col(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<u16> {
-  (x0..=x1).rev().find(|&x| {
-    let s = buf[(x, y)].symbol();
-    !matches!(s, " " | "│" | "╮" | "╯" | "╭" | "╰" | "─" | "")
-  })
+  (x0..=x1)
+    .rev()
+    .find(|&x| !MODAL_CHROME.contains(&buf[(x, y)].symbol()) && !buf[(x, y)].symbol().is_empty())
 }
 
 /// The first column of `y` carrying content, same exclusions.
 fn first_content_col(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<u16> {
-  (x0..=x1).find(|&x| {
-    let s = buf[(x, y)].symbol();
-    !matches!(s, " " | "│" | "╮" | "╯" | "╭" | "╰" | "─" | "")
-  })
+  (x0..=x1).find(|&x| !MODAL_CHROME.contains(&buf[(x, y)].symbol()) && !buf[(x, y)].symbol().is_empty())
 }
 
 /// Locate the buffer row inside `rect` whose text contains `needle`, and
@@ -4047,6 +4049,119 @@ fn dump_the_settings_panel() {
     app.config.tui.layout = TuiLayout::Compact;
   }
   app.view = View::Config;
+  let buf = render(&mut app);
+  for row in row_strings(&buf) {
+    println!("{row}");
+  }
+}
+
+#[test]
+#[ignore = "not an assertion: prints the Keybindings overlay so a human can look at it"]
+fn dump_the_help_overlay() {
+  // Same reason as `dump_the_settings_panel`: #623 gave this overlay a chord
+  // column and section rules, and a column is judged by eye.
+  //
+  //   cargo test --test tui_modal_render_tests dump_the_help_overlay \
+  //     -- --ignored --nocapture
+  let (_dir, mut app) = make_app();
+  if std::env::var_os("GWM_DUMP_COMPACT").is_some() {
+    app.config.tui.layout = TuiLayout::Compact;
+  }
+  app.view = View::Help;
+  let buf = render(&mut app);
+  for row in row_strings(&buf) {
+    println!("{row}");
+  }
+}
+
+#[test]
+fn the_keybindings_overlay_fits_every_label_beside_its_chords_at_eighty_columns() {
+  // Issue #623 gave this overlay two columns, which put its labels and its
+  // chords in competition for one width for the first time. The chords win
+  // when they collide: `help_entry_line` truncates the label, because a keys
+  // reference that shows no keys is not one.
+  //
+  // Truncating is the fallback, not the plan. The labels were cut to fit
+  // instead, and this is what holds them there: at 80 columns, the narrowest
+  // terminal the panel is really used on, nothing wears an ellipsis. A new
+  // binding whose description runs long fails here rather than quietly
+  // shortening every other row's label along with its own.
+  //
+  // 200 rows tall so the whole body is on screen at once: the overlay takes
+  // 60% of the height, and a short terminal would scroll most of the labels
+  // out of the assertion's reach.
+  let (_dir, mut app) = make_app();
+  app.view = View::Help;
+  let buf = render_at(&mut app, 80, 200);
+  let rows = modal_rows(&buf);
+
+  // Not vacuous: the body has to have actually painted its entries.
+  let entries = rows
+    .iter()
+    .filter(|r| r.contains(" quit ") || r.contains("worktree"))
+    .count();
+  assert!(
+    entries > 5,
+    "the overlay must have rendered its body, got {entries} recognisable rows:\n{}",
+    rows.join("\n")
+  );
+  let cut: Vec<&String> = rows.iter().filter(|r| r.contains('…')).collect();
+  assert!(
+    cut.is_empty(),
+    "no label may need truncating at 80 columns, got {}:\n{}",
+    cut.len(),
+    cut.iter().map(|r| r.trim()).collect::<Vec<_>>().join("\n")
+  );
+}
+
+#[test]
+fn the_keybindings_overlay_pins_its_chords_to_one_right_edge() {
+  // The other half of #623 here: the chords are a column, not a run trailing
+  // whatever the label happened to be. Measured on rows whose labels differ in
+  // width by a dozen cells, so a shared right edge cannot be a coincidence.
+  let (_dir, mut app) = make_app();
+  app.view = View::Help;
+  let buf = render_at(&mut app, 100, 60);
+  let rect = modal_rect(&buf).expect("the Keybindings overlay is rendered");
+
+  let edges: Vec<(&str, u16)> = ["jump to first worktree", "bootstrap selected", "new worktree"]
+    .iter()
+    .map(|label| (*label, row_right_edge(&buf, rect, label).1))
+    .collect();
+  let first = edges[0].1;
+  assert!(
+    edges.iter().all(|(_, e)| *e == first),
+    "every chord group must end in the same column, got {edges:?} — rows:\n{}",
+    modal_rows(&buf).join("\n")
+  );
+
+  // And that edge follows the overlay, not the widest label: the frame's own
+  // inner right edge, three cells in from the rule plus its padding.
+  // The frame costs a rule plus two padding columns, then the scrollbar takes
+  // one and leaves a gutter: five cells in from the right border.
+  assert_eq!(
+    first,
+    rect.0 + rect.2 - 1 - 5,
+    "the chord column sits at the overlay's inner edge, less the scrollbar and its gutter"
+  );
+}
+
+#[test]
+#[ignore = "not an assertion: prints the bootstrap report so a human can look at it"]
+fn dump_the_bootstrap_report() {
+  // `GWM_DUMP_COMPACT=1` flips the frame.
+  let (_dir, mut app) = make_app();
+  if std::env::var_os("GWM_DUMP_COMPACT").is_some() {
+    app.config.tui.layout = TuiLayout::Compact;
+  }
+  app.report = Some(BootstrapReport {
+    steps: vec![
+      StepResult::skipped("no-symlink target", "real directory, ok"),
+      StepResult::ok("run direnv allow"),
+      StepResult::ok("run cargo fetch"),
+    ],
+  });
+  app.view = View::Report;
   let buf = render(&mut app);
   for row in row_strings(&buf) {
     println!("{row}");

@@ -31,6 +31,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   join a key to it. On a panel too narrow for both columns the gap falls back
   to a minimum and the row pans sideways, as it always did.
 
+  The section rules are muted, name included, rather than wearing the accent
+  the bare headings used to: a rule marks where a group starts, and every row
+  under it already spends the accent on the half that is meant to be read.
+
+  The bootstrap report's `Logs` becomes a subtitle. It was a nested section
+  with its own chrome, which under `[tui] layout = "compact"` paints the same
+  full-width accent band the modal's own title rides, so the two stacked and
+  the second read as a second title.
+
+  The Keybindings overlay (`?`) gets the same treatment, which is the pass
+  #623 deferred until the Settings panel had proved it out. Its description
+  leads and its chord is the right-hand column, the order the Settings Keys
+  tab already used for the same data; its `Blank / Section / Blank` headings
+  become one labelled rule, giving back two rows per section on a body with a
+  dozen of them; and it is a little wider, because 60% of a 100-column terminal
+  is 64 cells for a body that now wants about 73.
+
+  Forty of its descriptions were shortened to fit beside their chords, and one
+  fixed chord string with them: `Left/Right/Up/Down` was eighteen cells, and
+  being the widest in the body it set the key column for every row. At 80
+  columns nothing is truncated now, pinned by a test, so a new binding with a
+  long description fails rather than quietly shortening every other row's.
+
   Sections are labelled rules across every tab: the `TUI` tab gains seven
   (Appearance, Sidebar, Editing, Open, Multiplexer, Browser, Timing), which
   reorders its fields into those runs, and the `[global]` / `[table]` headings
