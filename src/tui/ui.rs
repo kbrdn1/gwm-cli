@@ -208,6 +208,62 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   }
 }
 
+/// The header affordance that opens the Command Logs panel (issue #624) —
+/// U+25A4 SQUARE WITH HORIZONTAL FILL, a stack of lines standing for the
+/// transcript.
+///
+/// Not a nerd-font codicon like the Settings tab strip uses: those live in the
+/// private use area and render as tofu everywhere the glyph is quoted outside
+/// the TUI (#595). This one and [`SETTINGS_ICON`] are ordinary BMP symbols, so
+/// the README and the changelog can name them.
+pub const COMMAND_LOGS_ICON: &str = "\u{25a4}";
+
+/// The header affordance that opens the Settings panel (issue #624) — U+2699
+/// GEAR.
+pub const SETTINGS_ICON: &str = "\u{2699}";
+
+/// Cells one affordance is given: the glyph plus a trailing pad.
+///
+/// Both glyphs are East-Asian-Ambiguous, so `cells` reports 1 while a good
+/// number of terminals paint 2. Reserving the pad makes the row's arithmetic
+/// right either way — the glyph either fills both cells or fills one and
+/// leaves a space — which is the same trick `NOTE_ICON` and the Settings tab
+/// strip already use.
+const AFFORDANCE_W: usize = 2;
+
+/// Cells the affordance group costs the row: a leading gap, both affordances,
+/// and a gap between them.
+const AFFORDANCES_W: usize = 1 + AFFORDANCE_W + 1 + AFFORDANCE_W;
+
+/// The header row plus where its two clickable affordances landed (issue
+/// #624).
+///
+/// The column ranges are produced by the same pass that lays the glyphs out,
+/// which is the whole point: recomputing them at click time would drift the
+/// first time the truncation priority changes, and the priority has changed
+/// twice already (#185, #563).
+#[derive(Debug, Clone)]
+pub struct Header {
+  /// The row itself.
+  pub line: Line<'static>,
+  /// Columns the [`COMMAND_LOGS_ICON`] occupies, `None` when the row was too
+  /// narrow to carry the affordances at all.
+  pub logs: Option<std::ops::Range<u16>>,
+  /// Columns the [`SETTINGS_ICON`] occupies.
+  pub settings: Option<std::ops::Range<u16>>,
+}
+
+impl Header {
+  /// A row with no affordances — every width too narrow to fit them.
+  fn bare(line: Line<'static>) -> Self {
+    Self {
+      line,
+      logs: None,
+      settings: None,
+    }
+  }
+}
+
 /// Styled, width-driven header builder (issue #185). Replaces the flat
 /// header-title string in the rendered TUI with a clear visual hierarchy
 /// that mirrors the #180 footer's chip language:
@@ -233,17 +289,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// user can make wide, and an undercount there pushes the pinned version chip
 /// past the row. Tracked as #563 with the rest of the row arithmetic; the
 /// three truncators it calls into measure cells since #554 / #560 / #562.
-pub fn header_line(
-  repo_name: &str,
-  workdir_display: &str,
-  picker_mode: bool,
-  width: usize,
-  theme: &Theme,
-) -> Line<'static> {
+pub fn header_line(repo_name: &str, workdir_display: &str, picker_mode: bool, width: usize, theme: &Theme) -> Header {
   // A zero-width row can hold nothing — return an empty line rather than let
   // `trunc` floor a 1-column `…` into existence.
   if width == 0 {
-    return Line::default();
+    return Header::bare(Line::default());
   }
 
   // `sanitise_for_terminal`, not a local `is_control` pass: that one is `Cc`
@@ -271,7 +321,7 @@ pub fn header_line(
   // Priority floor: if even the right-pinned version chip cannot fit, show it
   // clipped alone — never an empty header.
   if width < version_w {
-    return Line::from(Span::styled(trunc(&version_text, width), version_style));
+    return Header::bare(Line::from(Span::styled(trunc(&version_text, width), version_style)));
   }
 
   let mut spans: Vec<Span<'static>> = Vec::new();
@@ -302,12 +352,24 @@ pub fn header_line(
     }
   }
 
+  // Affordances — reserved BEFORE the path is measured, which is what puts
+  // them ahead of it in the sacrifice order (issue #624). The path is
+  // secondary context and the row has always dropped it first; these two are
+  // the only thing on screen saying the Command Logs and Settings panels
+  // exist, so they outlive it. Everything still yields to the pinned version
+  // chip and to the current-directory badge.
+  let aff_w = if used + AFFORDANCES_W + version_w <= width {
+    AFFORDANCES_W
+  } else {
+    0
+  };
+
   // Path — dimmed secondary context. It stays immediately after the current
   // directory badge and is dropped/truncated under pressure; the version chip
   // remains pinned at the end of the row.
   let path_gap = 2usize;
-  if used + path_gap + version_w < width {
-    let avail = width - used - path_gap - version_w;
+  if used + path_gap + aff_w + version_w < width {
+    let avail = width - used - path_gap - aff_w - version_w;
     let path_disp = trunc(&path, avail);
     if !path_disp.is_empty() {
       let w = cells(&path_disp);
@@ -317,13 +379,39 @@ pub fn header_line(
     }
   }
 
-  let pad = width.saturating_sub(used + version_w);
+  let pad = width.saturating_sub(used + aff_w + version_w);
   if pad > 0 {
     spans.push(Span::raw(" ".repeat(pad)));
   }
+
+  // The group is flush against the version chip, so its columns are known
+  // from the right edge rather than from `used`: whatever the padding above
+  // worked out to, the chip is pinned and the affordances sit immediately
+  // left of it. Reported from this same arithmetic — see [`Header`].
+  let (logs, settings) = if aff_w > 0 {
+    let start = (width - aff_w - version_w) as u16;
+    let logs = start + 1;
+    let settings = logs + AFFORDANCE_W as u16 + 1;
+    let affordance_style = Style::default().fg(theme.accent);
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(format!("{} ", COMMAND_LOGS_ICON), affordance_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(format!("{} ", SETTINGS_ICON), affordance_style));
+    (
+      Some(logs..logs + AFFORDANCE_W as u16),
+      Some(settings..settings + AFFORDANCE_W as u16),
+    )
+  } else {
+    (None, None)
+  };
+
   spans.push(Span::styled(version_text, version_style));
 
-  Line::from(spans)
+  Header {
+    line: Line::from(spans),
+    logs,
+    settings,
+  }
 }
 
 /// Lay out the worktree table and the optional preview sidebar for the
@@ -459,7 +547,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     area.width as usize,
     &app.theme,
   );
-  f.render_widget(Paragraph::new(line), area);
+  f.render_widget(Paragraph::new(line.line), area);
 }
 
 /// Border colour for a focus-swappable panel (worktree list ↔ sidebar,

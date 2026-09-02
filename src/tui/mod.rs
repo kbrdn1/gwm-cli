@@ -92,9 +92,10 @@ pub use ui::{
   skip_cells, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
   working_tree_counts_footer, working_tree_listing, working_tree_meta_column, working_tree_pane_title,
   working_tree_stat_spans, working_tree_status_counts, working_tree_status_line, worktree_name_style,
-  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts, CI_FAILING_ICON,
-  CI_PASSING_ICON, CI_RUNNING_ICON, COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON,
-  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON, WT_NAME_FLOOR,
+  worktree_path_style, worktrees_pane_title, Header, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
+  CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMAND_LOGS_ICON, COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN,
+  ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, SETTINGS_ICON, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
