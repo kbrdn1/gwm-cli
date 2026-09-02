@@ -453,17 +453,50 @@ When `dev` is ready to be exercised by early adopters before promotion:
 Once the rc is validated and promoted to `main`:
 
 1. **Step 0 first** — see above.
-2. Update `Cargo.toml` `version`.
-3. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
-4. Open a PR from `dev` to `main`, wait for the required checks, then merge it with a **merge commit** (never squash; see [Merge strategy](#merge-strategy)). `main` is [protected](#branch-protection): a local `git push origin main` is rejected, including for the maintainer, so there is no direct-merge path.
+2. Update `Cargo.toml` `version`, then regenerate the lock, which carries the root package's version too:
 
    ```bash
+   cargo update --workspace --offline   # rewrites only the workspace entry
+   ```
+
+   Skipping it costs the next two steps: `git add Cargo.lock` adds nothing, and the capture run's `cargo build --release --locked` refuses to start (`cannot update the lock file ... because --locked was passed`).
+3. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
+4. **Commit the bump, then open the PR.** Name the files: `git commit -am` will not pick up `changelogs/<version>.md`, which step 3 has just created and git does not track yet, and `release.yml` hard-fails at tag time without it (see the release-notes rule above). The PR comes before the captures because the capture run needs it open, see step 5.
+
+   ```bash
+   git add Cargo.toml Cargo.lock CHANGELOG.md changelogs/
+   git commit -m "🔖 chore(release): vX.Y.Z"
+   git push
    gh pr create --base main --head dev --title "Release v0.x.y" --body "…"
+   ```
+
+5. **Regenerate the doc captures**, in the checkout the release is cut from, with step 4 committed and its PR open:
+
+   ```bash
+   ./docs/_capture/generate.sh
+   git add docs && git commit -m "📸 docs(release): regenerate the captures for vX.Y.Z" && git push
+   ```
+
+   One entry point, and the order inside it is three constraints rather than a preference ([#631](https://github.com/kbrdn1/gwm-cli/issues/631)):
+
+   - **The bump comes first.** 17 of the 24 tapes open the TUI, whose header paints a `gwm X.Y.Z` chip from `CARGO_PKG_VERSION`. A set regenerated before the bump advertises the previous version for the whole life of the release. v1.8.0 shipped that way and v1.10.0 nearly did.
+   - **The binary comes from the tree, not from `PATH`.** The script builds it and puts `target/release` first. Without that, a `gwm` left over from another worktree renders captures that exist, size correctly and show the wrong UI: v1.10.0 came within a commit of publishing a set 175 commits stale. `version-stamp.tape` checks that it took: it asks vhs what it actually resolved, both the version and the path, and aborts unless the file is the one cargo just built. The path is the half that matters, since a stale build carrying the same version number answers the version check perfectly.
+   - **`github-linking.tape` photographs a real checkout of this repo.** The TUI pane follows the selected row, and that row is the repo's **main checkout** wherever the tape was launched from (measured: run from a clean linked worktree, the capture came back showing the trunk's branch and the trunk's uncommitted files). So the tape is pointed at the trunk, it runs first, and it runs only when the trunk is clean and its branch has an **open PR**. That is the whole reason step 4 opens the PR before this step runs: with the steps the other way round, the trunk has no open PR at capture time, the script skips the tape and the published capture silently stays on the previous release. A skip is announced, not silent, but the run still ends on a tick. The corollary is that this capture documents the trunk, which is one more reason to cut the release there rather than in a worktree.
+
+   This stays a local step: `vhs`, the Nerd Font and the demo fixture are not on a CI runner, and a workflow committing binaries into the release PR buys nothing over the preflight below.
+
+   The preflight is `cargo test --test docs_assets_tests`. The run writes the `gwm --version` it captured with to `docs/_capture/captured-version.txt`, and `captures_were_generated_at_the_manifest_version` fails as soon as that stops matching `Cargo.toml`; `the_capture_run_keeps_its_order` pins the sequence above, which was prose until each constraint had bitten once. Both run in CI on the release PR, so the tag cannot be cut from a set that documents another version.
+
+   If the machine cutting the release has no `vhs`, no Nerd Font or no demo fixture, that preflight is a hard block on a protected branch. The escape hatch is to edit `docs/_capture/captured-version.txt` by hand and say so in the PR: it is one line, it shows up in the diff, and it is the release note admitting the captures still show the previous version.
+
+6. Wait for the required checks on the PR from step 4, then merge it with a **merge commit** (never squash; see [Merge strategy](#merge-strategy)). `main` is [protected](#branch-protection): a local `git push origin main` is rejected, including for the maintainer, so there is no direct-merge path.
+
+   ```bash
    gh pr merge <num> --merge   # once the 7 checks are green
    ```
 
-5. Tag the merge commit on `main`: `git checkout main && git pull && git tag -a v0.x.y -m "v0.x.y" && git push --tags`. Tags are not covered by the branch protection, so this push goes through as-is.
-6. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
+7. Tag the merge commit on `main`: `git checkout main && git pull && git tag -a v0.x.y -m "v0.x.y" && git push --tags`. Tags are not covered by the branch protection, so this push goes through as-is.
+8. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
 
 > ⚠️ **Finalise the crate identity _before_ the tag.** Any change to the
 > crates.io package identity — the `[package] name`, or a `version` bump — must
