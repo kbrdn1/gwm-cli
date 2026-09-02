@@ -325,3 +325,38 @@ fn the_mouse_starts_captured_and_the_toggle_flips_it_both_ways() {
   app.toggle_mouse_capture();
   assert!(app.mouse_capture);
 }
+
+#[test]
+fn clicking_a_link_prompt_target_points_the_picker_at_it() {
+  let (_d, mut app) = app_with_rows(2);
+  app.enter_link_prompt();
+  app.mouse.push_rows(rect(4, 8, 60, 2), RowList::LinkPrompt, 0, 2);
+
+  app.handle_mouse(MouseKind::Click, 10, 9);
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Pr);
+
+  app.handle_mouse(MouseKind::Click, 10, 8);
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue);
+}
+
+/// The prompt's cursor indexes a *filtered* candidate list, so a click has to
+/// be bounded by what is on screen rather than by `rows.len()` — and a wheel
+/// notch has to go through the movers that already know the difference.
+#[test]
+fn the_detail_prompt_cursor_stays_inside_the_filtered_list() {
+  let (_d, mut app) = app_with_rows(2);
+  app.mouse.push_rows(rect(4, 8, 60, 6), RowList::DetailInput, 0, 6);
+
+  // No candidates at all: every row of the published strip is empty, and the
+  // cursor must not walk into one.
+  app.handle_mouse(MouseKind::Click, 10, 11);
+  assert_eq!(app.detail_overlay.input_selected, 0);
+
+  for _ in 0..5 {
+    app.handle_mouse(MouseKind::WheelDown, 10, 9);
+  }
+  assert_eq!(
+    app.detail_overlay.input_selected, 0,
+    "the wheel must clamp against the candidate list, not run off it"
+  );
+}

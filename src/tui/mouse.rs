@@ -62,11 +62,16 @@ pub enum RowList {
   CleanPicker,
   /// The browse-links menu.
   OpenMenu,
+  /// The link prompt's first stage, which picks the same two targets.
+  LinkPrompt,
   /// The command palette candidate list (issue #32).
   Palette,
   /// The generic detail overlay — agent sessions and the rich PR/issue view
   /// (issues #408 / #420).
   Detail,
+  /// The detail overlay's filter / attach prompt, which highlights a row of
+  /// its own filtered candidate list rather than of `rows`.
+  DetailInput,
 }
 
 /// A focusable or scrollable region.

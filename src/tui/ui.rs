@@ -8442,13 +8442,18 @@ fn draw_link_prompt(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // top rule now, so it is resolved alongside the lines rather than
   // prepended to them.
   let mut title = String::from("Link");
+  // Body line the two target rows start on, for the click map — `None` in the
+  // number stage, which has no rows to pick (issue #624).
+  let mut first_target: Option<usize> = None;
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => {
       // A vertical selectable list (#217): j/k move the highlight, Enter
       // links the highlighted row, i/p stay direct picks. The highlighted
       // row reads in the accent.
       let selected = app.link_prompt_selected();
-      link_open_modal_lines(app, "Link", Some(selected))
+      let (lines, first) = link_open_modal_body(app, "Link", Some(selected));
+      first_target = Some(first);
+      lines
     }
     LinkPromptStage::InputNumber => {
       let label = match app.link_prompt_target() {
@@ -8476,6 +8481,18 @@ fn draw_link_prompt(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let area = centered_abs(width, height, term);
   let content = frame.render(f, map, area, &title, None);
   f.render_widget(Paragraph::new(lines), content);
+  if let Some(first) = first_target {
+    map.push_rows(
+      Rect {
+        y: content.y.saturating_add(first as u16),
+        height: 2,
+        ..content
+      },
+      RowList::LinkPrompt,
+      0,
+      2,
+    );
+  }
 }
 
 /// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
@@ -8716,6 +8733,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
     .intersection(area);
     if list_rect.height > 0 {
       let _ = scrollable_body_area(f, list_rect, start as u16, matches.len(), &app.theme);
+      map.push_rows(list_rect, RowList::DetailInput, start, matches.len());
     }
     return;
   }
@@ -8803,6 +8821,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
     .intersection(area);
     if list_rect.height > 0 {
       let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
+      map.push_rows(list_rect, RowList::DetailInput, start, candidates.len());
     }
     return;
   }

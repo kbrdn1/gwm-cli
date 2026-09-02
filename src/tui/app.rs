@@ -13,6 +13,7 @@ use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field, Mode};
+use super::state::detail_overlay::DetailKind;
 use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
@@ -2571,8 +2572,17 @@ impl App {
           _ => LinkTarget::Pr,
         }
       }
+      RowList::LinkPrompt => self.link_prompt.select_target(match index {
+        0 => LinkTarget::Issue,
+        _ => LinkTarget::Pr,
+      }),
       RowList::Palette => self.palette.select_index(index),
       RowList::Detail => self.detail_overlay.select_index(index),
+      RowList::DetailInput => {
+        if index < self.detail_input_len() {
+          self.detail_overlay.input_selected = index;
+        }
+      }
     }
     MouseOutcome::Handled
   }
@@ -2655,6 +2665,7 @@ impl App {
         }
       }
       RowList::OpenMenu => self.open_menu_toggle_selection(),
+      RowList::LinkPrompt => self.link_prompt.toggle_selection(),
       RowList::Palette => {
         if down {
           self.palette_cycle_down();
@@ -2669,6 +2680,15 @@ impl App {
           self.detail_overlay.select_prev();
         }
       }
+      // Through the same movers the arrow keys use: the candidate list is
+      // filtered, so its length is neither `rows.len()` nor something this
+      // arm should recompute.
+      RowList::DetailInput => match (self.detail_overlay.kind, down) {
+        (DetailKind::CiChecks, true) => self.ci_input_next(),
+        (DetailKind::CiChecks, false) => self.ci_input_prev(),
+        (_, true) => self.agent_input_next(),
+        (_, false) => self.agent_input_prev(),
+      },
     }
   }
 
@@ -4809,6 +4829,16 @@ impl App {
   /// Indices of the rows matching the live query, in row order.
   pub fn ci_input_matches(&self) -> Vec<usize> {
     crate::tui::state::detail_overlay::filter_rows(&self.detail_overlay.rows, &self.detail_overlay.input)
+  }
+
+  /// How many rows the open input prompt is showing (issue #624). The two
+  /// prompts filter different lists, so a click has to be bounded by the one
+  /// actually on screen.
+  fn detail_input_len(&self) -> usize {
+    match self.detail_overlay.kind {
+      DetailKind::CiChecks => self.ci_input_matches().len(),
+      _ => self.agent_input_candidates().len(),
+    }
   }
 
   pub fn ci_input_next(&mut self) {
