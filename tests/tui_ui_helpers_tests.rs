@@ -1918,3 +1918,40 @@ fn the_metadata_roles_resolve_to_the_status_panes_own_colours() {
     assert_eq!(fg(role), issue_badge_color(state, &theme), "{state:?}");
   }
 }
+
+#[test]
+fn settings_value_cell_marks_what_cycles_and_what_toggles() {
+  // Issue #623 point 1: the value's *shape* carries its kind. A choice reads
+  // `‹ value ›`, and the markers double as the hint that it cycles — which is
+  // what the arrows do since this issue wired them. A bool reads as a
+  // checkbox, so a screenful of `true` / `false` becomes a column the eye
+  // scans in one pass.
+  use gwm::config::Config;
+  use gwm::tui::{settings_value_cell, SettingField};
+
+  let mut cfg = Config::default();
+  cfg.tui.dim_unfocused = true;
+  assert_eq!(settings_value_cell(SettingField::DimUnfocused, &cfg), "[✓]");
+  cfg.tui.dim_unfocused = false;
+  assert_eq!(settings_value_cell(SettingField::DimUnfocused, &cfg), "[ ]");
+
+  assert_eq!(
+    settings_value_cell(SettingField::Layout, &cfg),
+    format!("‹ {} ›", cfg.tui.layout.label()),
+    "a choice wears the cycle markers"
+  );
+
+  // Uint and text are typed, not cycled, so they wear no marker.
+  let secs = settings_value_cell(SettingField::AutoRefreshSecs, &cfg);
+  assert_eq!(secs, cfg.tui.auto_refresh_secs.to_string());
+  assert!(!secs.contains('‹'), "a typed value must not claim to cycle: {secs:?}");
+
+  // An unset optional text field is the reason the column needed a word: three
+  // of them default to empty, and a right-aligned column of blanks reads as a
+  // rendering bug rather than as "nothing configured". Mirrors the Keys tab's
+  // own `(unbound)`.
+  cfg.tui.open.shell_cmd = None;
+  assert_eq!(settings_value_cell(SettingField::OpenShellCmd, &cfg), "(unset)");
+  cfg.tui.open.shell_cmd = Some("/bin/zsh".into());
+  assert_eq!(settings_value_cell(SettingField::OpenShellCmd, &cfg), "/bin/zsh");
+}

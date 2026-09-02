@@ -21,7 +21,7 @@ use super::theme::Theme;
 use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_CARET};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
-use crate::config::ConfigSource;
+use crate::config::{Config, ConfigSource};
 use crate::github::{CiState, IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
@@ -5579,27 +5579,123 @@ fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
   lines
 }
 
-/// Build an editable-tab body: one row per [`SettingField`], the selected
-/// row marked and its value in the accent. The `Uint` field under edit
-/// shows its live buffer with a cursor; a field whose effective value is
-/// shadowed by a higher-precedence layer carries an inline guidance note
-/// (issue #279 — honours "edit both layers" without a silent dead edit).
-fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static>> {
+/// The value as it is painted in the Settings value column (issue #623).
+///
+/// The shape carries the kind, which is the whole point of giving the values a
+/// column of their own: a choice wears `\u{2039} \u{203a}`, and those markers double as
+/// the hint that it cycles \u{2014} which is what the arrows do since #623 wired
+/// them. A bool becomes a checkbox, so sixteen rows of `true` / `false` turn
+/// into a column the eye reads in one pass. A typed value wears nothing, since
+/// claiming it cycles would be a lie about which keys work on it.
+///
+/// An unset optional text field reads `(unset)` rather than empty. Three of
+/// them default to `None`, and in a right-aligned column three blank rows read
+/// as a rendering bug instead of as "nothing configured"; the Keys tab already
+/// solved the same problem with `(unbound)`.
+pub fn settings_value_cell(field: SettingField, cfg: &Config) -> String {
+  let raw = field.current(cfg);
+  match field.kind() {
+    FieldKind::Bool => if raw == "true" { "[\u{2713}]" } else { "[ ]" }.to_string(),
+    FieldKind::Choice => format!("\u{2039} {raw} \u{203a}"),
+    FieldKind::Text | FieldKind::Uint if raw.is_empty() => "(unset)".to_string(),
+    FieldKind::Text | FieldKind::Uint => raw,
+  }
+}
+
+/// Cells the selection-marker column costs (` › `).
+const SETTINGS_MARKER_W: usize = 3;
+
+/// Cells between the widest label and the value column (issue #623). Two, not
+/// a stretch to the frame: see [`settings_fields_lines`].
+const SETTINGS_VALUE_GAP: usize = 2;
+
+/// A labelled rule opening a section inside an editable tab (issue #623):
+/// `─ Sidebar ───`, drawn to the width of the row block so it frames the
+/// value column rather than running past it or stopping short of it.
+///
+/// No blank row above it. The rule *is* the separation, and the TUI tab pays
+/// seven of them: a blank each would cost seven more rows on a tab whose box
+/// already stops at [`SETTINGS_HEIGHT_BOUNDS`]'s 32-row ceiling, tipping it
+/// into a scroll it does not otherwise need.
+fn settings_section_rule(name: &str, block_w: usize, accent: Color, muted: Color) -> Line<'static> {
+  let lead = format!(" ─ {name} ");
+  let tail = block_w.saturating_sub(cells(&lead));
+  Line::from(vec![
+    Span::styled(" ─ ".to_string(), Style::default().fg(muted)),
+    Span::styled(name.to_string(), help_section_style(accent)),
+    Span::styled(format!(" {}", "─".repeat(tail)), Style::default().fg(muted)),
+  ])
+}
+
+/// Build an editable-tab body: one row per [`SettingField`], grouped under the
+/// labelled rules of [`SettingField::section`], with the values in a
+/// right-aligned column (issue #623). The selected row is marked and its value
+/// reads in the accent; the field under edit shows its live buffer with a
+/// cursor; a field whose effective value is shadowed by a higher-precedence
+/// layer carries an inline guidance note (issue #279, which honours "edit both
+/// layers" without a silent dead edit).
+///
+/// Returns the line index of the selected row, the way [`settings_keys_lines`]
+/// already did. The section rules mean the field index is no longer the line
+/// index, and recovering the offset at the call site would be the placement
+/// rule computed a second time, which is the whole of #550's story.
+///
+/// **The column is placed against the widest label, not against the frame's
+/// right edge.** That is issue #622's lesson one modal over: this panel runs to
+/// 96 columns for a block that rarely passes fifty, so a column welded to the
+/// frame would put forty cells of nothing between a row and its value and break
+/// the row-to-value link harder than the inline value it replaces. #622 made
+/// exactly this change to the Working Tree overlay, replacing #592's "pinned to
+/// the modal edge" with "a gap after the longest line".
+///
+/// Measured per tab, from the `fields` slice it is handed: one width shared by
+/// every tab would float the Theme tab's single row out to wherever the TUI
+/// tab's 26-character label happens to sit.
+fn settings_fields_lines(app: &App, fields: &[SettingField]) -> (Vec<Line<'static>>, Option<usize>) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
   let panel = &app.config_panel;
   let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut selected_line: Option<usize> = None;
 
-  for (i, field) in fields.iter().enumerate() {
+  // Every value is rendered before a single line is built: the column is as
+  // wide as the widest of them, and the edit buffer of the selected row is one
+  // of them, so the column does not shift a cell as the user types.
+  let values: Vec<String> = fields
+    .iter()
+    .enumerate()
+    .map(|(i, field)| {
+      if i == panel.selected && panel.editing.is_some() {
+        format!("{}_", panel.editing.as_deref().unwrap_or(""))
+      } else {
+        settings_value_cell(*field, &app.config)
+      }
+    })
+    .collect();
+  // Widths in CELLS, through the renderer's own measure. Not `{:>w$}`, which
+  // pads to a count of `char`s: #554 is the story of what that does to a
+  // column the moment a value stops being ASCII.
+  let label_w = fields.iter().map(|f| cells(f.label())).max().unwrap_or(0);
+  let value_w = values.iter().map(|v| cells(v)).max().unwrap_or(0);
+  let block_w = SETTINGS_MARKER_W + label_w + SETTINGS_VALUE_GAP + value_w;
+
+  let mut current_section: Option<&'static str> = None;
+  for ((i, field), value) in fields.iter().enumerate().zip(values.iter()) {
+    if let Some(section) = field.section() {
+      if current_section != Some(section) {
+        lines.push(settings_section_rule(section, block_w, accent, muted));
+        current_section = Some(section);
+      }
+    }
     let selected = i == panel.selected;
-    let editing = selected && panel.editing.is_some();
-    let value = if editing {
-      format!("{}_", panel.editing.as_deref().unwrap_or(""))
-    } else {
-      field.current(&app.config)
-    };
+    // Recorded as the row is pushed, never as `selected + sections_so_far`:
+    // that second form is the placement rule re-derived, and it goes wrong the
+    // day a tab sections only half its fields.
+    if selected {
+      selected_line = Some(lines.len());
+    }
     let marker = if selected { "›" } else { " " };
     let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let value_style = if selected {
@@ -5607,10 +5703,15 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
     } else {
       Style::default().fg(Color::White)
     };
+    // The padding goes BEFORE the value, never after. A line that ends in
+    // spaces widens `Line::width`, which is what publishes `max_x_scroll`, so
+    // a trailing pad would buy the user a horizontal pan into empty space.
+    let pad = label_w.saturating_sub(cells(field.label())) + SETTINGS_VALUE_GAP + value_w.saturating_sub(cells(value));
     let mut spans = vec![
       Span::styled(format!(" {marker} "), marker_style),
-      Span::styled(format!("{:<24}", field.label()), label_style),
-      Span::styled(value, value_style),
+      Span::styled(field.label().to_string(), label_style),
+      Span::raw(" ".repeat(pad)),
+      Span::styled(value.clone(), value_style),
     ];
     // Shadow guidance: editing the Global layer for a field the repo
     // overrides won't change the effective value (repo wins). Surface it
@@ -5621,7 +5722,7 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
     }
     lines.push(Line::from(spans));
   }
-  lines
+  (lines, selected_line)
 }
 
 /// Build the Keys-tab body (issue #294): the rebindable bindings grouped by
@@ -5739,7 +5840,10 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
       tab_spans.push(Span::raw("  "));
     }
     let style = if *t == tab { chip_style(accent) } else { muted_style };
-    tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
+    // The glyph leads, then a space: most nerd-font glyphs render two cells
+    // wide while measuring one, which is the repo-wide convention for spacing
+    // them (see `NOTE_ICON`).
+    tab_spans.push(Span::styled(format!(" {} {} ", t.glyph(), t.label()), style));
   }
   let header_lines = vec![subtitle, Line::from(String::new()), Line::from(tab_spans)];
 
@@ -5764,11 +5868,9 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
       lines
     }
     other => {
-      let fields = other.fields();
-      if !fields.is_empty() {
-        selected_line = Some(app.config_panel.selected.min(fields.len().saturating_sub(1)));
-      }
-      settings_fields_lines(app, fields)
+      let (lines, sel) = settings_fields_lines(app, other.fields());
+      selected_line = sel;
+      lines
     }
   };
 

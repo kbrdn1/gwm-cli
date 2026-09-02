@@ -69,6 +69,26 @@ impl SettingsTab {
     }
   }
 
+  /// Nerd-font glyph leading the tab in the header strip (issue #623). The
+  /// strip is the first thing read, and five bare words give the eye nothing
+  /// to land on.
+  ///
+  /// One family (VS Code codicons) so the five read as a set rather than as
+  /// five borrowed icons, and no ASCII fallback: the TUI already requires a
+  /// nerd font outright for the file tree, the Working Tree counts and the
+  /// note column, so a font that renders these as tofu is already rendering
+  /// tofu two panes over. Adding a degradation path here alone would be a
+  /// mechanism this repo does not have.
+  pub fn glyph(self) -> &'static str {
+    match self {
+      SettingsTab::Theme => "\u{eb5c}",    // cod-symbol_color
+      SettingsTab::Worktree => "\u{ea63}", // cod-repo_forked
+      SettingsTab::Tui => "\u{ebeb}",      // cod-layout
+      SettingsTab::Keys => "\u{ea65}",     // cod-record_keys
+      SettingsTab::All => "\u{eb17}",      // cod-list_unordered
+    }
+  }
+
   /// The editable fields under this tab, in display order. `All` has none
   /// (it is the read-only resolved view).
   pub fn fields(self) -> &'static [SettingField] {
@@ -79,23 +99,27 @@ impl SettingsTab {
         SettingField::WorktreePathPattern,
         SettingField::WorktreeBranchPattern,
       ],
+      // Ordered by [`SettingField::section`] (issue #623): the renderer rules
+      // off a section when it *changes*, so a field filed out of its run would
+      // print its own heading twice. Pinned by
+      // `every_tui_field_belongs_to_a_named_section`.
       SettingsTab::Tui => &[
         SettingField::Layout,
         SettingField::DimUnfocused,
         SettingField::StatusOneLine,
-        SettingField::NoteVim,
-        SettingField::MuxOpenIn,
-        SettingField::MuxPaneDirection,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
+        SettingField::NoteVim,
         SettingField::Clipboard,
         SettingField::OpenMode,
-        SettingField::ConfirmCountdown,
-        SettingField::AutoRefreshSecs,
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
+        SettingField::MuxOpenIn,
+        SettingField::MuxPaneDirection,
         SettingField::TerminalBrowser,
         SettingField::TerminalBrowserOpenIn,
+        SettingField::ConfirmCountdown,
+        SettingField::AutoRefreshSecs,
       ],
       // The Keys tab edits dynamic [`KeyRow`]s, not static fields, and `All`
       // is read-only.
@@ -386,6 +410,29 @@ impl SettingField {
       SettingField::TerminalBrowser => "terminal browser",
       SettingField::TerminalBrowserOpenIn => "terminal browser placed by",
     }
+  }
+
+  /// The named group this field is filed under inside its tab (issue #623),
+  /// or `None` where the tab is one short list and a rule over it is noise.
+  ///
+  /// Only the TUI tab is divided: it is the one that mixes appearance,
+  /// sidebar, editing, open, multiplexer, browser and timing knobs in a single
+  /// sixteen-row run, with nothing between them. The order of
+  /// [`SettingsTab::fields`] follows these runs.
+  pub fn section(self) -> Option<&'static str> {
+    Some(match self {
+      SettingField::Layout | SettingField::DimUnfocused | SettingField::StatusOneLine => "Appearance",
+      SettingField::SidebarPosition | SettingField::SidebarOrientation => "Sidebar",
+      SettingField::NoteVim | SettingField::Clipboard => "Editing",
+      SettingField::OpenMode | SettingField::OpenShellCmd | SettingField::OpenEditorCmd => "Open",
+      SettingField::MuxOpenIn | SettingField::MuxPaneDirection => "Multiplexer",
+      SettingField::TerminalBrowser | SettingField::TerminalBrowserOpenIn => "Browser",
+      SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => "Timing",
+      SettingField::ThemePreset
+      | SettingField::WorktreeBase
+      | SettingField::WorktreePathPattern
+      | SettingField::WorktreeBranchPattern => return None,
+    })
   }
 
   /// Dotted config key path the edit writes (`config_cli::set_value_at`).

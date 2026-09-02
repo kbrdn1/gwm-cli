@@ -3710,3 +3710,230 @@ fn a_content_sized_modal_spends_two_rows_less_in_compact() {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Settings panel: the value column, the named sections and the tab glyphs
+// (issue #623)
+// ---------------------------------------------------------------------------
+
+/// The rightmost column of `y` carrying something other than blank space or a
+/// frame rule, searched inside `[x0, x1]`.
+///
+/// The frame glyphs are excluded rather than the scan bounded short of them,
+/// because the two layouts put the modal's edge in different places: bordered
+/// paints `│`, compact paints nothing at all. Excluding the glyph makes one
+/// oracle serve both.
+fn last_content_col(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<u16> {
+  (x0..=x1).rev().find(|&x| {
+    let s = buf[(x, y)].symbol();
+    !matches!(s, " " | "│" | "╮" | "╯" | "╭" | "╰" | "─" | "")
+  })
+}
+
+/// The first column of `y` carrying content, same exclusions.
+fn first_content_col(buf: &Buffer, y: u16, x0: u16, x1: u16) -> Option<u16> {
+  (x0..=x1).find(|&x| {
+    let s = buf[(x, y)].symbol();
+    !matches!(s, " " | "│" | "╮" | "╯" | "╭" | "╰" | "─" | "")
+  })
+}
+
+/// Locate the buffer row inside `rect` whose text contains `needle`, and
+/// return `(y, right_edge)` — the row and the column its last visible cell
+/// sits in. Panics when the label is not on screen, which every caller has a
+/// reason to expect.
+fn row_right_edge(buf: &Buffer, rect: (u16, u16, u16, u16), needle: &str) -> (u16, u16) {
+  let (x, y, w, h) = rect;
+  let (x0, x1) = (x, x + w - 1);
+  for row in y..(y + h).min(buf.area().height) {
+    let text: String = (x0..=x1).map(|c| buf[(c, row)].symbol()).collect();
+    if text.contains(needle) {
+      let edge = last_content_col(buf, row, x0, x1)
+        .unwrap_or_else(|| panic!("row {row} contains {needle:?} but has no content cell"));
+      return (row, edge);
+    }
+  }
+  panic!(
+    "label {needle:?} is not rendered inside the modal — rows:\n{}",
+    row_strings(buf).join("\n")
+  );
+}
+
+/// The Settings app on the TUI tab, which is the tab the issue names: it is
+/// the only one long enough for sections to matter, and the only one mixing
+/// every field kind (choice, bool, uint, text) in one run.
+fn tui_tab_app() -> (tempfile::TempDir, App) {
+  use gwm::tui::SettingsTab;
+  let (dir, mut app) = make_app();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.view = View::Config;
+  (dir, app)
+}
+
+/// Labels that between them cover every field kind on the TUI tab, plus the
+/// one whose label is 26 characters — two past the `{:<24}` pad the panel used
+/// before #623, so its value started two cells right of everyone else's. That
+/// row is why the column was broken and not merely loose.
+const TUI_TAB_PROBE_LABELS: [&str; 5] = [
+  "layout",                     // choice, short value
+  "sidebar layout",             // choice, the widest value on the tab
+  "dim unfocused pane",         // bool
+  "auto refresh (s)",           // uint
+  "terminal browser placed by", // choice, the 26-character label
+];
+
+#[test]
+fn settings_tui_tab_anchors_every_value_to_one_right_edge() {
+  // Issue #623 point 1: "a choice reads `‹ value ›`, a boolean reads `[✓]` /
+  // `[ ]`, both anchored to the same right edge". Before this the value was a
+  // span glued after a `{:<24}` label pad, so a tab of sixteen rows had
+  // sixteen different value positions — and the 26-character label overflowed
+  // the pad outright.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render(&mut app);
+  let rect = modal_rect(&buf).expect("the Settings modal is rendered");
+
+  let edges: Vec<(&str, u16)> = TUI_TAB_PROBE_LABELS
+    .iter()
+    .map(|label| (*label, row_right_edge(&buf, rect, label).1))
+    .collect();
+  let first = edges[0].1;
+  assert!(
+    edges.iter().all(|(_, e)| *e == first),
+    "every value must end in the same column, got {edges:?} — rows:\n{}",
+    modal_rows(&buf).join("\n")
+  );
+}
+
+#[test]
+fn settings_tui_tab_anchors_every_value_to_one_right_edge_in_the_compact_layout() {
+  // Both `[tui] layout` values must keep working (issue #623, and #594 which
+  // made the modal frame follow that key). The compact frame has a different
+  // origin and a different width, so an assertion that held only under the
+  // boxed frame would be half a guard.
+  let (_dir, mut app) = tui_tab_app();
+  app.config.tui.layout = TuiLayout::Compact;
+  let buf = render(&mut app);
+  let rect = compact_modal_rect(&buf).expect("the Settings modal is rendered in the compact layout");
+
+  let edges: Vec<(&str, u16)> = TUI_TAB_PROBE_LABELS
+    .iter()
+    .map(|label| (*label, row_right_edge(&buf, rect, label).1))
+    .collect();
+  let first = edges[0].1;
+  assert!(
+    edges.iter().all(|(_, e)| *e == first),
+    "compact layout: every value must end in the same column, got {edges:?} — rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+#[test]
+fn settings_value_column_follows_its_labels_and_not_the_frame_edge() {
+  // Issue #622's lesson, one modal over: a column pinned to the right edge of
+  // a rect the content does not fill is worse than the inline value it
+  // replaces — the eye loses the row↔value link across the gap. So the column
+  // is placed against the widest *label*, and the frame growing by 32 columns
+  // must not move it.
+  //
+  // This is what makes the guard above non-vacuous: on its own, "every value
+  // ends in the same column" is satisfied by a column welded to the frame.
+  let (_dir, mut app) = tui_tab_app();
+
+  let mut gaps = Vec::new();
+  for term_w in [100u16, 200] {
+    let buf = render_at(&mut app, term_w, 44);
+    let rect = modal_rect(&buf).expect("the Settings modal is rendered");
+    let (row, edge) = row_right_edge(&buf, rect, "sidebar layout");
+    let start = first_content_col(&buf, row, rect.0, rect.0 + rect.2 - 1).expect("the row has content");
+    // The whole block: marker + the widest label + the gap + the widest value.
+    gaps.push((term_w, edge - start, rect.2));
+  }
+  assert_eq!(
+    gaps[0].1, gaps[1].1,
+    "the value column must not stretch with the frame: {gaps:?}"
+  );
+  assert!(
+    gaps[1].2 > gaps[0].2,
+    "the frame itself must actually be wider at 200 columns, else the check is vacuous: {gaps:?}"
+  );
+}
+
+#[test]
+fn settings_tui_tab_rules_off_its_named_sections() {
+  // Issue #623 point 2: the TUI tab mixes layout, sidebar, mux, clipboard,
+  // browser and refresh knobs in one undivided run. A labelled rule groups
+  // them.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render(&mut app);
+  let rows = modal_rows(&buf).join("\n");
+  for section in ["Appearance", "Sidebar", "Multiplexer", "Browser"] {
+    assert!(
+      rows.contains(section),
+      "the TUI tab must rule off a {section:?} section — rows:\n{rows}"
+    );
+  }
+  assert!(
+    rows.contains("─ Sidebar "),
+    "a section reads as a labelled rule, not a bare word — rows:\n{rows}"
+  );
+}
+
+#[test]
+fn settings_tab_strip_carries_one_glyph_per_tab() {
+  // Issue #623 point 3: the tab strip is the first thing read, and five bare
+  // words give the eye nothing to land on.
+  use gwm::tui::SettingsTab;
+  let (_dir, mut app) = make_app();
+  app.view = View::Config;
+  let buf = render(&mut app);
+  let rows = modal_rows(&buf).join("\n");
+  for tab in SettingsTab::ALL {
+    let glyph = tab.glyph();
+    assert!(
+      !glyph.is_empty(),
+      "{:?} must carry a glyph in the tab strip",
+      tab.label()
+    );
+    assert!(
+      rows.contains(&format!("{glyph} {}", tab.label())),
+      "the strip must read {glyph:?} then {:?} — rows:\n{rows}",
+      tab.label()
+    );
+  }
+  // Every glyph is distinct, or the strip orients nothing.
+  let mut seen: Vec<&str> = SettingsTab::ALL.iter().map(|t| t.glyph()).collect();
+  seen.sort_unstable();
+  let before = seen.len();
+  seen.dedup();
+  assert_eq!(before, seen.len(), "the tab glyphs must all differ, got {seen:?}");
+}
+
+#[test]
+#[ignore = "not an assertion: prints the Settings panel so a human can look at it"]
+fn dump_the_settings_panel() {
+  // Issue #623 is a layout change, and a column, a rule and a glyph strip are
+  // only really judged by eye. `GWM_DUMP_TAB` picks the tab (`theme`,
+  // `worktree`, `tui`, `keys`, `all`; default `tui`), `GWM_DUMP_COMPACT=1`
+  // flips the frame:
+  //
+  //   GWM_DUMP_TAB=tui cargo test --test tui_modal_render_tests \
+  //     dump_the_settings_panel -- --ignored --nocapture
+  use gwm::tui::SettingsTab;
+  let (_dir, mut app) = make_app();
+  app.config_panel.tab = match std::env::var("GWM_DUMP_TAB").as_deref() {
+    Ok("theme") => SettingsTab::Theme,
+    Ok("worktree") => SettingsTab::Worktree,
+    Ok("keys") => SettingsTab::Keys,
+    Ok("all") => SettingsTab::All,
+    _ => SettingsTab::Tui,
+  };
+  if std::env::var_os("GWM_DUMP_COMPACT").is_some() {
+    app.config.tui.layout = TuiLayout::Compact;
+  }
+  app.view = View::Config;
+  let buf = render(&mut app);
+  for row in row_strings(&buf) {
+    println!("{row}");
+  }
+}
