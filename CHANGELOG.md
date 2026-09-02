@@ -26,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so charging it the counts' floor would have lost a capability rather than
   yielded a column.
 
-  In the overlay the letter shares the right end of the row with those counts,
+  The `+N -M` line counts from #592 now ride the sidebar pane too, inside
+  the letters. That pane had deliberately stopped at the rows to save the
+  `git diff --numstat` they need, since it re-reads on every selection
+  change; it pays for that read now, on the sidebar worker rather than the
+  render path.
+
+  In both surfaces the letter shares the right end of the row with those counts,
   and the two yield in a fixed order: the letter is carved out first, so a
   narrowing terminal drops the counts and never the letter. `+N -M` says how
   much a file changed, the letter says what happened to it, and a row that no

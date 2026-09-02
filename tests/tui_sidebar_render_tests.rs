@@ -396,6 +396,77 @@ fn the_status_column_hugs_the_right_edge_at_every_width() {
 }
 
 #[test]
+fn the_pane_carries_the_line_counts_beside_the_status_letter() {
+  // Issue #622, after seeing the built pane: the sidebar shows the same two
+  // columns the full-size overlay does. #592 had deliberately stopped the
+  // pane at the rows to save the `git diff --numstat` its counts need, since
+  // the pane re-reads on every selection change; that read now happens, on
+  // the sidebar worker rather than the render path.
+  //
+  // Without this guard the pane can lose the counts the way it did before,
+  // silently: the rows still render, and every other assertion still holds.
+  let dir = repo_with_commits(1);
+  std::fs::write(dir.path().join("file.txt"), "seed\nsecond\nthird\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("file.txt"))
+    .unwrap_or_else(|| panic!("no row for the changed file. screen was:\n{}", lines.join("\n")));
+  let counts_at = row
+    .find("+3 -1")
+    .unwrap_or_else(|| panic!("the pane carries the line counts: got {row:?}"));
+  let letter_at = row
+    .rfind('M')
+    .unwrap_or_else(|| panic!("and the status letter: got {row:?}"));
+  assert!(
+    letter_at > counts_at,
+    "the letter takes the outer slot, the counts sit inside it: got {row:?}"
+  );
+  assert!(
+    row.trim_end_matches([' ', '│']).ends_with('M'),
+    "the letter is still the last thing on the row: got {row:?}"
+  );
+}
+
+#[test]
+fn the_pane_drops_its_counts_before_its_status_letter() {
+  // The order of yield, on the surface that runs out of width first. A
+  // stacked pane is as wide as the terminal, so 34 columns leave 34 cells:
+  // past the `1 + META_GAP + WT_BADGE_FLOOR` (11) the letter needs, and the
+  // 31 it leaves are under the `4 + META_GAP + WT_NAME_FLOOR` (30)... which
+  // fits. 30 columns leave 27, and the 24 after the letter do not.
+  let dir = repo_with_commits(1);
+  std::fs::write(dir.path().join("file.txt"), "seed\nsecond\nthird\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let mut terminal = Terminal::new(TestBackend::new(30, 40)).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let lines = buffer_lines(&terminal);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("file.txt"))
+    .unwrap_or_else(|| panic!("no row for the changed file. screen was:\n{}", lines.join("\n")));
+  assert!(
+    !row.contains('+'),
+    "the counts are what a narrow pane drops: got {row:?}"
+  );
+  assert!(
+    row.trim_end_matches([' ', '│']).ends_with('M'),
+    "the letter is what it keeps: got {row:?}"
+  );
+}
+
+#[test]
 fn the_status_column_survives_a_sidebar_too_narrow_for_the_counts() {
   // Before #622 the letter was an inline badge costing two cells that no
   // width ever dropped, so pricing its column at `WT_NAME_FLOOR` (24, the

@@ -58,6 +58,10 @@ pub struct SidebarSections {
   /// on a directory and on the sentinels, so the two stay in step under
   /// the pane's scroll.
   pub working_tree_badges: MetaColumn,
+  /// The `+N -M` line counts of each Working Tree row, inside the letters
+  /// (issue #622). The pane reads the same two columns the full-size
+  /// overlay does, and drops this one first when it runs out of width.
+  pub working_tree_meta: MetaColumn,
   /// Per-category counts of changed files (issue #287): created / modified
   /// / deleted, driving the colour-coded nerdfont footer of the Working
   /// Tree pane.
@@ -1217,9 +1221,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         }
         super::state::sidebar::SidebarMode::Stashes => Vec::new(),
       },
-      // The loader row has no status letter, so the column stays empty and
-      // the placeholder keeps the payload's shape.
+      // The loader row has no status letter and no counts, so both columns
+      // stay empty and the placeholder keeps the payload's shape.
       working_tree_badges: MetaColumn::default(),
+      working_tree_meta: MetaColumn::default(),
       working_tree_counts: WorkingTreeCounts::default(),
       recent_commits: vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))],
     }
@@ -1402,7 +1407,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       f,
       chunks[3],
       working_tree_title,
-      SectionBody::with_meta(&sections.working_tree, &sections.working_tree_badges),
+      SectionBody::with_meta(
+        &sections.working_tree,
+        &sections.working_tree_badges,
+        &sections.working_tree_meta,
+      ),
       chrome,
       wt_scroll,
       working_tree_footer,
@@ -1440,11 +1449,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 struct SectionBody<'a> {
   prefix: &'a [Line<'a>],
   lines: &'a [Line<'a>],
-  /// Right-aligned column painted beside `lines`, one entry per row, at the
-  /// section's own scroll offset (issue #622). Empty for every section but
-  /// the Working Tree, whose status letters read as a column only if they
-  /// sit at a fixed offset.
-  meta: Option<&'a MetaColumn>,
+  /// Right-aligned columns painted beside `lines`, one entry per row, at
+  /// the section's own scroll offset (issue #622). `None` for every section
+  /// but the Working Tree.
+  meta: Option<SectionMeta<'a>>,
 }
 
 impl<'a> SectionBody<'a> {
@@ -1458,12 +1466,12 @@ impl<'a> SectionBody<'a> {
     }
   }
 
-  /// Section body with a right-aligned column beside it (issue #622).
-  fn with_meta(lines: &'a [Line<'a>], meta: &'a MetaColumn) -> Self {
+  /// Section body with its right-aligned columns beside it (issue #622).
+  fn with_meta(lines: &'a [Line<'a>], badges: &'a MetaColumn, stats: &'a MetaColumn) -> Self {
     Self {
       prefix: &[],
       lines,
-      meta: Some(meta),
+      meta: Some(SectionMeta { badges, stats }),
     }
   }
 
@@ -1527,7 +1535,7 @@ fn render_section(
       height: area.height.saturating_sub(1),
       ..area
     };
-    render_section_body(f, body_area, padded, meta, chrome.body_style(), scroll);
+    render_section_body(f, body_area, padded, meta.as_ref(), chrome.body_style(), scroll);
     return;
   }
 
@@ -1545,7 +1553,7 @@ fn render_section(
   // Without a right-hand column the paragraph keeps carrying its own
   // block: `Paragraph::style` paints the whole rect, rules included, and
   // splitting the render would move that ground off the border.
-  let Some(meta) = meta.filter(|m| m.width > 0) else {
+  let Some(meta) = meta.filter(|m| m.badges.width > 0 || m.stats.width > 0) else {
     let paragraph = Paragraph::new(padded)
       .block(block)
       .style(chrome.body_style())
@@ -1560,7 +1568,7 @@ fn render_section(
       .style(chrome.body_style()),
     area,
   );
-  render_section_body(f, inner, padded, Some(meta), chrome.body_style(), scroll);
+  render_section_body(f, inner, padded, Some(&meta), chrome.body_style(), scroll);
 }
 
 /// Paint a section's rows into `area`, with its right-hand column beside
@@ -1573,44 +1581,49 @@ fn render_section_body(
   f: &mut Frame,
   area: Rect,
   lines: Vec<Line<'_>>,
-  meta: Option<&MetaColumn>,
+  meta: Option<&SectionMeta<'_>>,
   style: Style,
   scroll: u16,
 ) {
-  let split = meta.filter(|m| m.width > 0).and_then(|m| {
-    // The scrollbar the caller paints over this same rect claims the right
-    // edge; the column sits inside whatever it leaves.
-    let usable = Rect {
-      width: area.width.saturating_sub(scrollbar_reserve(area, lines.len())),
-      ..area
-    };
-    let picked = meta_pick(usable.width as usize, &[m.width], WT_BADGE_FLOOR)?;
-    let (left, right) = carve_right(usable, picked);
-    Some((left, right, m))
-  });
-  match split {
-    Some((left, right, m)) => {
-      f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), left);
+  let Some(meta) = meta.filter(|m| m.badges.width > 0 || m.stats.width > 0) else {
+    f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), area);
+    return;
+  };
+  // The scrollbar the caller paints over this same rect claims the right
+  // edge; the columns sit inside whatever it leaves.
+  let usable = Rect {
+    width: area.width.saturating_sub(scrollbar_reserve(area, lines.len())),
+    ..area
+  };
+  let (left, [badges, stats]) = carve_meta_columns(
+    usable,
+    [(meta.badges.width, WT_BADGE_FLOOR), (meta.stats.width, WT_NAME_FLOOR)],
+  );
+  f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), left);
+  for (rect, column) in [(badges, meta.badges), (stats, meta.stats)] {
+    if let Some(rect) = rect {
       f.render_widget(
-        Paragraph::new(m.lines.clone())
+        Paragraph::new(column.lines.clone())
           .style(style)
           .right_aligned()
           .scroll((scroll, 0)),
-        right,
+        rect,
       );
     }
-    None => f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), area),
   }
+}
+
+/// The right-hand columns a section paints beside its rows (issue #622):
+/// the status letters outermost, the `+N -M` counts inside them. Borrowed
+/// from the sidebar cache, so a warm frame copies neither.
+#[derive(Clone, Copy)]
+struct SectionMeta<'a> {
+  badges: &'a MetaColumn,
+  stats: &'a MetaColumn,
 }
 
 /// Take `width` cells plus a [`META_GAP`] off the right of `area`, returning
 /// the content rect and the column rect.
-///
-/// The placement half of the pair whose decision half is [`meta_pick`], kept
-/// apart from it so the cascade of two columns can afford them both against
-/// the same untouched width before carving either: pricing the second one
-/// against a rect the first has already narrowed would drop it for the wrong
-/// reason.
 fn carve_right(area: Rect, width: usize) -> (Rect, Rect) {
   let [left, _gap, right] = Layout::horizontal([
     Constraint::Min(0),
@@ -1619,6 +1632,39 @@ fn carve_right(area: Rect, width: usize) -> (Rect, Rect) {
   ])
   .areas(area);
   (left, right)
+}
+
+/// Lay out up to N right-hand columns against `area`, outermost first.
+///
+/// `columns` is `(width, floor)` per column in **outside-in** order, so the
+/// Working Tree passes its status letter before its `+N -M` counts: the
+/// letter takes the outer slot, and a narrowing rect drops the counts first.
+/// Returns the rect left for the content plus one `Option<Rect>` per column,
+/// in the order given.
+///
+/// Every column is afforded against the width the terminal gave, minus what
+/// the columns already granted cost, and only then carved. Deciding against
+/// an already-carved rect would price a column twice.
+fn carve_meta_columns<const N: usize>(area: Rect, columns: [(usize, usize); N]) -> (Rect, [Option<Rect>; N]) {
+  let mut granted = [None; N];
+  let mut spent = 0usize;
+  for (i, (width, floor)) in columns.iter().enumerate() {
+    let Some(picked) = meta_pick((area.width as usize).saturating_sub(spent), &[*width], *floor) else {
+      continue;
+    };
+    granted[i] = Some(picked);
+    spent += picked + META_GAP;
+  }
+  let mut rest = area;
+  let mut rects = [None; N];
+  for (i, picked) in granted.iter().enumerate() {
+    if let Some(picked) = picked {
+      let (left, right) = carve_right(rest, *picked);
+      rest = left;
+      rects[i] = Some(right);
+    }
+  }
+  (rest, rects)
 }
 
 /// Lazygit-style header line: `● <name>` where the dot's colour tracks
@@ -1746,15 +1792,16 @@ pub fn build_sidebar_sections(
     // follow-up list; v1 ships `<ref>  <subject>` only.
     SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
-  let (working_tree, working_tree_badges, working_tree_counts) = match mode {
-    SidebarMode::Commits => working_tree_lines(w, theme),
-    SidebarMode::Stashes => (Vec::new(), MetaColumn::default(), WorkingTreeCounts::default()),
+  let listing = match mode {
+    SidebarMode::Commits => working_tree_listing(w, theme),
+    SidebarMode::Stashes => WorkingTreeSnapshot::default(),
   };
   SidebarSections {
     worktree: worktree_identity_lines(w, diff.as_ref(), theme, status_one_line),
-    working_tree,
-    working_tree_badges,
-    working_tree_counts,
+    working_tree: listing.lines,
+    working_tree_badges: listing.badges,
+    working_tree_meta: listing.meta,
+    working_tree_counts: listing.counts,
     recent_commits: body,
   }
 }
@@ -2031,35 +2078,25 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-/// Build the Working Tree file-explorer rows for one worktree plus their
-/// per-category counts, from one `git status --porcelain -z` read.
-///
-/// `pub(super)` since #592: the full-size overlay snapshots the same rows
-/// the sidebar pane paints, and it is deliberately NOT routed through
-/// [`build_sidebar_sections`], which would also run `git log` / `git stash
-/// list` / the diff-vs-base stat for panes the overlay does not show.
-pub(super) fn working_tree_lines(
-  w: &WorktreeInfo,
-  theme: &Theme,
-) -> (Vec<Line<'static>>, MetaColumn, WorkingTreeCounts) {
-  // The sidebar pane paints rows plus the status column. It stops here
-  // rather than calling [`working_tree_listing`] on purpose: the `+N -M`
-  // column that read adds costs a second git process, and this one runs on
-  // every selection change. The status letters come free with the rows.
-  let rows = working_tree_rows(w, theme);
-  (rows.lines, meta_column(rows.badges), rows.counts)
-}
-
 /// The full result of one read of the working tree: the rows, the
-/// per-category counts, and the right-hand `+N -M` column (issue #592).
+/// per-category counts, and the two right-hand columns (issues #592, #622).
 ///
-/// The counts come from `git status`, the column from a `git diff
-/// --numstat` in the same worker. Folded into one read rather than chained
-/// the way the commit listing's stats are (#593): there, the second read is
-/// a `git log --raw --numstat` over 300 commits and takes seconds, so the
-/// rows have to appear without it. Here it is a single diff against `HEAD`,
-/// far quicker than the `git status` that precedes it, so splitting would
-/// buy a flicker and cost a whole second identity to match payloads on.
+/// The counts come from `git status`, the `+N -M` column from a `git diff
+/// --numstat` in the same worker, the status letters free with the rows.
+/// Folded into one read rather than chained the way the commit listing's
+/// stats are (#593): there, the second read is a `git log --raw --numstat`
+/// over 300 commits and takes seconds, so the rows have to appear without
+/// it. Here it is a single diff against `HEAD`, far quicker than the `git
+/// status` that precedes it, so splitting would buy a flicker and cost a
+/// whole second identity to match payloads on.
+///
+/// The sidebar pane routes here too since #622. It used to stop at the rows
+/// to save that diff, because it re-reads on every selection change; the
+/// pane now shows the same two columns the overlay does, so it pays for the
+/// same read. It runs on the sidebar worker (#343), never on the render
+/// path, and it is still NOT routed through [`build_sidebar_sections`],
+/// which would also run `git log` / `git stash list` / the diff-vs-base
+/// stat for panes the overlay does not show.
 pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnapshot {
   let rows = working_tree_rows(w, theme);
   let stats = worktree::working_tree_stats(&w.path).unwrap_or_default();
@@ -5217,44 +5254,26 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
   // its subject, not its detail.
   //
   // Each column is afforded at its OWN floor, and the letter's is far lower
-  // than the counts': see [`WT_BADGE_FLOOR`].
-  let avail = text_area.width as usize;
-  let badge_w = meta_pick(avail, &[app.working_tree.badges.width], WT_BADGE_FLOOR);
-  let stats_w = meta_pick(
-    avail.saturating_sub(badge_w.map_or(0, |w| w + META_GAP)),
-    &[app.working_tree.meta.width],
-    WT_NAME_FLOOR,
+  // than the counts': see [`WT_BADGE_FLOOR`]. The same cascade the sidebar
+  // pane runs, so the two surfaces cannot drift apart.
+  let (name_rect, [badge_rect, stats_rect]) = carve_meta_columns(
+    text_area,
+    [
+      (app.working_tree.badges.width, WT_BADGE_FLOOR),
+      (app.working_tree.meta.width, WT_NAME_FLOOR),
+    ],
   );
-  let (rest, badge_rect) = match badge_w {
-    Some(w) => {
-      let (left, right) = carve_right(text_area, w);
-      (left, Some(right))
-    }
-    None => (text_area, None),
-  };
-  let (name_rect, stats_rect) = match stats_w {
-    Some(w) => {
-      let (left, right) = carve_right(rest, w);
-      (left, Some(right))
-    }
-    None => (rest, None),
-  };
   f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), name_rect);
-  if let Some(rect) = stats_rect {
-    f.render_widget(
-      Paragraph::new(app.working_tree.meta.lines.clone())
-        .right_aligned()
-        .scroll((scroll, 0)),
-      rect,
-    );
-  }
-  if let Some(rect) = badge_rect {
-    f.render_widget(
-      Paragraph::new(app.working_tree.badges.lines.clone())
-        .right_aligned()
-        .scroll((scroll, 0)),
-      rect,
-    );
+  for (rect, column) in [
+    (badge_rect, &app.working_tree.badges),
+    (stats_rect, &app.working_tree.meta),
+  ] {
+    if let Some(rect) = rect {
+      f.render_widget(
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        rect,
+      );
+    }
   }
 
   let footer_owned = working_tree_footer_hints(&app.modal_keymap);
