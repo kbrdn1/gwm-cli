@@ -118,6 +118,17 @@ impl CleanOverlay {
   /// `false` and leaves an armed countdown untouched, so a stray `j` with
   /// only the `(default)` choice can't silently cancel a pending reclaim
   /// (Codex #333 review).
+  /// Point the highlight straight at `index` (issue #624). Reports whether
+  /// the choice changed, the same contract [`Self::select_next`] has: the
+  /// caller re-scans on a change and does nothing otherwise.
+  pub fn select_index(&mut self, index: usize) -> bool {
+    if index >= self.choices.len() || index == self.selected {
+      return false;
+    }
+    self.selected = index;
+    true
+  }
+
   pub fn select_next(&mut self) -> bool {
     if self.choices.len() < 2 {
       return false;

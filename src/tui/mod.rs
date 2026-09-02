@@ -18,8 +18,12 @@ pub mod wt_tree;
 use crate::error::Result;
 use crate::tui::keymap::Action;
 use crate::tui::modal_keymap::{KeyContext, ModalAction};
+use crate::tui::mouse::MouseKind;
 use crossterm::{
-  event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+  event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
+  },
   execute,
   terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -31,8 +35,8 @@ use std::time::{Duration, Instant};
 pub use app::{
   agent_pane_status, detached_browser_status, mux_pane_status, plan_agent_pane, plan_terminal_browser,
   read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey,
-  LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, ToggleStroke,
-  View, WorkspaceState,
+  LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, MouseOutcome, NoteKey, OpenTarget, PendingMerge, RepoMeta,
+  ToggleStroke, View, WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -93,9 +97,9 @@ pub use ui::{
   working_tree_counts_footer, working_tree_listing, working_tree_meta_column, working_tree_pane_title,
   working_tree_stat_spans, working_tree_status_counts, working_tree_status_line, worktree_name_style,
   worktree_path_style, worktrees_pane_title, Header, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
-  CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMAND_LOGS_ICON, COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN,
-  ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, SETTINGS_ICON, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON, WT_NAME_FLOOR,
+  CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, CLOSE_ICON, COMMAND_LOGS_ICON, COMMITS_SUBJECT_FLOOR,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, SETTINGS_ICON, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -204,6 +208,23 @@ pub fn clear_without_cursor_query<B: ratatui::backend::Backend>(
 ) -> std::result::Result<(), B::Error> {
   let area = terminal.size()?.into();
   terminal.resize(area)
+}
+
+/// Turn the terminal's mouse reporting on or off (issue #624).
+///
+/// Every path that re-enters the alternate screen goes through this rather
+/// than through a bare `EnableMouseCapture`, and passes `app.mouse_capture`:
+/// the three enable sites are all *restores* after a child program ran
+/// fullscreen, and a restore that ignores the flag hands the mouse back to
+/// gwm after every lazygit, `exec` run and review launcher — silently undoing
+/// a release the user asked for. The guard belongs where all three converge.
+fn set_mouse_capture(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, on: bool) -> Result<()> {
+  if on {
+    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+  } else {
+    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+  }
+  Ok(())
 }
 
 /// Inverse of `enter_terminal`. Always called from the same scope as
@@ -409,7 +430,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       clear_without_cursor_query(terminal)?;
       continue;
     }
-    let Event::Key(key) = ev else { continue };
+    // Issue #624: gwm has captured the mouse since its first frame and never
+    // read an event. `handle_mouse_event` is that half. It hands back a
+    // synthesised `Esc` when the click landed on a modal's `✕`, so the button
+    // and the key share one teardown instead of growing a second copy of it.
+    let key = match ev {
+      Event::Key(k) => k,
+      Event::Mouse(m) => match handle_mouse_event(terminal, &mut app, m)? {
+        Some(k) => k,
+        None => continue,
+      },
+      _ => continue,
+    };
     if key.kind != KeyEventKind::Press {
       continue;
     }
@@ -976,6 +1008,50 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
 /// honour it from any caller and defer the actual exit while a mutating
 /// worker is still in flight. The loop checks the flag at the top and
 /// bottom of every iteration.
+/// Route one mouse event into the state machine (issue #624).
+///
+/// Returns `Some(Esc)` when the click landed on a modal's close button: the
+/// per-view teardown already lives on the `Esc` path, and reproducing it here
+/// would be a second copy that drifts the first time a modal grows a
+/// close-time side effect (the note editor writes its buffer, the clean
+/// overlay disarms its countdown).
+fn handle_mouse_event(
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+  app: &mut App,
+  m: MouseEvent,
+) -> Result<Option<KeyEvent>> {
+  // `EnableMouseCapture` sends `?1003h` — any-event tracking — so the
+  // terminal reports a motion event for every cell the pointer crosses.
+  // Narrowing the stream here, before any lookup, is what keeps that free:
+  // it was free before only because nothing read the events at all.
+  let kind = match m.kind {
+    MouseEventKind::Down(MouseButton::Left) => MouseKind::Click,
+    MouseEventKind::ScrollUp => MouseKind::WheelUp,
+    MouseEventKind::ScrollDown => MouseKind::WheelDown,
+    _ => return Ok(None),
+  };
+  // The PTY overlay forwards every key to the child, and the mouse belongs to
+  // the child for the same reason — lazygit, a shell and an `exec` run all
+  // want it. Nothing forwards it today: `PtyOverlay` has a `write_key` and no
+  // mouse write path, so the event was already being dropped one branch
+  // earlier. Dropping it here is the status quo, not a regression; real
+  // forwarding needs SGR re-encoding against the overlay's inset origin and
+  // the child's own DECSET state, which is its own piece of work.
+  if app.view == View::Pty {
+    return Ok(None);
+  }
+  match app.handle_mouse(kind, m.column, m.row) {
+    MouseOutcome::Ignored | MouseOutcome::Handled => Ok(None),
+    // The header affordances open the panels their digits open, through the
+    // one dispatcher that owns every action's side effects.
+    MouseOutcome::Action(action) => {
+      run_action(terminal, app, action)?;
+      Ok(None)
+    }
+    MouseOutcome::CloseModal => Ok(Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+  }
+}
+
 fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, action: Action) -> Result<()> {
   // Issue #304: in workspace mode, block repo-mutating actions while the
   // selected row's repo could not be activated (moved/deleted/corrupt since
@@ -1011,6 +1087,12 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::FocusSwap => app.toggle_focus(),
     Action::FocusWorktrees => app.focus_worktrees(),
     Action::FocusStatus => app.focus_status(),
+    // #624: the flag flips on `App`, the escape sequence goes out here — the
+    // event loop is the half that holds the terminal.
+    Action::ToggleMouse => {
+      app.toggle_mouse_capture();
+      set_mouse_capture(terminal, app.mouse_capture)?;
+    }
     Action::Filter => app.enter_filter(),
     // Issue #231: the user-initiated refresh runs off-thread so a large
     // repo / slow filesystem no longer freezes the TUI. A failed re-list
@@ -1270,7 +1352,8 @@ fn run_launcher(
     let spawn = cmd.status();
 
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    set_mouse_capture(terminal, app.mouse_capture)?;
     clear_without_cursor_query(terminal)?;
 
     match spawn {
@@ -1348,7 +1431,8 @@ fn run_subshell(
 
   // Always restore the TUI, even if the child failed to spawn or exited non-zero.
   enable_raw_mode()?;
-  execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+  execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+  set_mouse_capture(terminal, app.mouse_capture)?;
   clear_without_cursor_query(terminal)?;
 
   match spawn {

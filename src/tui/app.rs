@@ -1,5 +1,6 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
+use super::mouse::{Hit, MouseKind, PaneId, RowList, Spot};
 use super::palette::PaletteState;
 use super::state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
@@ -122,6 +123,27 @@ pub enum ToggleStroke {
   Pending,
   /// Nothing to do with the toggle. Fall through to the modal verbs.
   Unclaimed,
+}
+
+/// What the event loop should do after [`App::handle_mouse`] (issue #624).
+///
+/// The two side-effecting outcomes are deliberately not performed inside
+/// `App`: firing an [`Action`] needs the terminal, since several of them
+/// suspend the TUI, and closing a modal is a per-view teardown the event loop
+/// already owns for `Esc`. Handing them back keeps `handle_mouse` a pure state
+/// transition the state-machine tests can drive with no terminal at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseOutcome {
+  /// Nothing under the pointer, or nothing this gesture does there.
+  Ignored,
+  /// The transition is done; redraw and carry on.
+  Handled,
+  /// Run this action through the normal dispatcher, exactly as if its key
+  /// had been pressed.
+  Action(Action),
+  /// Close the modal that is open — routed through the `Esc` path so the
+  /// button and the key cannot drift.
+  CloseModal,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -837,6 +859,29 @@ pub struct App {
   /// [`Self::create_failure`]) so the user can correct and retry without
   /// losing the form. Cleared when the modal reopens.
   pub edit_failure: Option<String>,
+
+  /// Whether the terminal's mouse reporting is on (issue #624).
+  ///
+  /// gwm reads mouse events, and reading them costs the terminal's own
+  /// drag-to-select: while reporting is on, a drag goes to gwm rather than to
+  /// the selection. Most terminals let `Shift`+drag through anyway, but that
+  /// is a terminal convention rather than a guarantee, so there is a key that
+  /// turns reporting off outright.
+  ///
+  /// The event loop owns the escape sequence — it is the half that has the
+  /// terminal — and reads this flag on every path that re-enters the
+  /// alternate screen, so returning from lazygit, an `exec` run or a review
+  /// launcher cannot re-enable a capture the user switched off.
+  pub mouse_capture: bool,
+
+  /// Where the last frame put every click target (issue #624).
+  ///
+  /// Stamped by [`super::ui::draw`] at the end of each frame and read by
+  /// [`Self::handle_mouse`]. The renderer is the only thing that knows the
+  /// layout — it is rebuilt from scratch every frame — so the geometry is
+  /// published rather than re-derived; see [`super::mouse`] for why that
+  /// matters.
+  pub mouse: crate::tui::mouse::MouseMap,
 }
 
 impl App {
@@ -967,6 +1012,8 @@ impl App {
       edit_original_branch: None,
       edit_original_path: None,
       edit_failure: None,
+      mouse_capture: true,
+      mouse: crate::tui::mouse::MouseMap::new(),
     };
     out.apply_sidebar_config();
     out.apply_create_form_fields();
@@ -2431,12 +2478,278 @@ impl App {
     self.refresh_link();
   }
 
-  pub fn next(&mut self) {
-    // Route navigation to the sidebar when it's focused; otherwise move the list.
-    if self.sidebar.open && self.sidebar.focused {
-      self.sidebar_scroll_down();
+  /// Resolve a mouse gesture against the geometry the last frame published.
+  ///
+  /// Every target comes from [`Self::mouse`], which the renderer rebuilds each
+  /// frame, so this never re-derives a rect and never branches on
+  /// [`Self::view`]: a surface that is not on screen published no zone.
+  ///
+  /// The wheel acts on the surface **under the pointer**, not on the focused
+  /// one. That is the deviation from what issue #624 asked for, and it is
+  /// deliberate: pointing at a pane is how a pointer says which pane it means,
+  /// and every terminal file manager and editor behaves this way. Focus stays
+  /// what `Tab` and the digits set.
+  pub fn handle_mouse(&mut self, kind: MouseKind, col: u16, row: u16) -> MouseOutcome {
+    let Some(hit) = self.mouse.hit(col, row) else {
+      return MouseOutcome::Ignored;
+    };
+    match kind {
+      MouseKind::Click => self.mouse_click(hit),
+      MouseKind::WheelDown => self.mouse_wheel(hit, true),
+      MouseKind::WheelUp => self.mouse_wheel(hit, false),
+    }
+  }
+
+  /// Flip mouse reporting and say so on the status bar.
+  ///
+  /// Pure: the escape sequence is the event loop's, which is the only place
+  /// that holds the terminal. Returns nothing — the caller reads
+  /// [`Self::mouse_capture`] and tells the terminal.
+  pub fn toggle_mouse_capture(&mut self) {
+    self.mouse_capture = !self.mouse_capture;
+    self.status = if self.mouse_capture {
+      "mouse on: click to select, wheel to scroll".into()
+    } else {
+      format!(
+        "mouse off: drag to select text · {} to re-enable",
+        self.keymap.keys_display(Action::ToggleMouse)
+      )
+    };
+  }
+
+  fn mouse_click(&mut self, hit: Hit) -> MouseOutcome {
+    match hit {
+      // The header affordances open the very panels their digits open, so
+      // they hand back the action rather than reaching for `enter_*`: one
+      // dispatcher, one set of side effects.
+      Hit::Spot(Spot::CommandLogs) => MouseOutcome::Action(Action::CommandLogs),
+      Hit::Spot(Spot::Settings) => MouseOutcome::Action(Action::ConfigPanel),
+      Hit::Spot(Spot::CloseModal) => MouseOutcome::CloseModal,
+      Hit::Spot(Spot::ConfigTab(tab)) => {
+        self.config_panel.set_tab(tab);
+        MouseOutcome::Handled
+      }
+      Hit::Spot(Spot::WtCounts) => MouseOutcome::Action(Action::WorkingTree),
+      Hit::Pane(PaneId::Worktrees) => {
+        self.focus_worktrees();
+        MouseOutcome::Handled
+      }
+      Hit::Pane(PaneId::Status | PaneId::WorkingTree) => {
+        self.focus_status();
+        MouseOutcome::Handled
+      }
+      // A modal is a lid: clicking its chrome must not fall through to the
+      // list, and must not close it either — that is what the `✕` is for.
+      Hit::Pane(PaneId::Modal) => MouseOutcome::Handled,
+      Hit::Row { list, index } => self.mouse_select(list, index),
+    }
+  }
+
+  /// Point the named listing's cursor at `index`.
+  fn mouse_select(&mut self, list: RowList, index: usize) -> MouseOutcome {
+    match list {
+      RowList::Worktrees => {
+        // Clicking a row is also a statement about which pane is meant, the
+        // same one `1` makes: leaving the sidebar focused would send the
+        // next `j` to the preview instead of the row just picked.
+        self.focus_worktrees();
+        self.select_row(index);
+      }
+      RowList::Config => self.config_panel.select_index(index),
+      RowList::ExecPicker => self.exec_picker.select_index(index),
+      RowList::CleanPicker => {
+        // A choice change re-scans, the contract `clean_overlay_next` has.
+        if self.clean_overlay.select_index(index) {
+          if let Err(e) = self.clean_overlay_rescan() {
+            self.status = format!("clean: {e}");
+          }
+        }
+      }
+      RowList::OpenMenu => {
+        self.open_menu_selected = match index {
+          0 => LinkTarget::Issue,
+          _ => LinkTarget::Pr,
+        }
+      }
+      RowList::Palette => self.palette.select_index(index),
+      RowList::Detail => self.detail_overlay.select_index(index),
+    }
+    MouseOutcome::Handled
+  }
+
+  /// One wheel notch over `hit`.
+  ///
+  /// A listing moves its cursor, because in a listing the cursor *is* the
+  /// position; a pane that only scrolls moves its offset.
+  fn mouse_wheel(&mut self, hit: Hit, down: bool) -> MouseOutcome {
+    match hit {
+      Hit::Row { list, .. } => {
+        self.mouse_wheel_list(list, down);
+        MouseOutcome::Handled
+      }
+      Hit::Pane(PaneId::Worktrees) => {
+        if down {
+          self.list_next();
+        } else {
+          self.list_prev();
+        }
+        MouseOutcome::Handled
+      }
+      Hit::Pane(PaneId::Status) => {
+        if down {
+          self.sidebar_scroll_down();
+        } else {
+          self.sidebar_scroll_up();
+        }
+        MouseOutcome::Handled
+      }
+      Hit::Pane(PaneId::WorkingTree) => {
+        // Straight to the section, not through `wt_scroll_down`, which gates
+        // on the sidebar holding the focus. That gate exists to disambiguate
+        // `J` / `K` — a key has to guess which surface is meant. A pointer
+        // over the section has already said so.
+        if down {
+          self.sidebar.wt_scroll_down();
+        } else {
+          self.sidebar.wt_scroll_up();
+        }
+        MouseOutcome::Handled
+      }
+      Hit::Pane(PaneId::Modal) => {
+        self.modal_scroll(down);
+        MouseOutcome::Handled
+      }
+      // A button is a point, not a surface: rolling over it does nothing.
+      Hit::Spot(_) => MouseOutcome::Ignored,
+    }
+  }
+
+  fn mouse_wheel_list(&mut self, list: RowList, down: bool) {
+    match list {
+      RowList::Worktrees => {
+        if down {
+          self.list_next();
+        } else {
+          self.list_prev();
+        }
+      }
+      RowList::Config => {
+        if down {
+          self.config_panel.select_next();
+        } else {
+          self.config_panel.select_prev();
+        }
+      }
+      RowList::ExecPicker => {
+        if down {
+          self.exec_picker.next();
+        } else {
+          self.exec_picker.prev();
+        }
+      }
+      RowList::CleanPicker => {
+        if down {
+          self.clean_overlay_next();
+        } else {
+          self.clean_overlay_prev();
+        }
+      }
+      RowList::OpenMenu => self.open_menu_toggle_selection(),
+      RowList::Palette => {
+        if down {
+          self.palette_cycle_down();
+        } else {
+          self.palette_cycle_up();
+        }
+      }
+      RowList::Detail => {
+        if down {
+          self.detail_overlay.select_next();
+        } else {
+          self.detail_overlay.select_prev();
+        }
+      }
+    }
+  }
+
+  /// Scroll whichever scroll-only modal is open by one row.
+  ///
+  /// Matched on the view rather than published per-modal because the *body*
+  /// zone is published once, by `ModalFrame::render`, for every modal there
+  /// is — which is also what stops a modal added later from silently having
+  /// an inert wheel.
+  fn modal_scroll(&mut self, down: bool) {
+    match self.view {
+      View::Help => {
+        if down {
+          self.help_scroll_down()
+        } else {
+          self.help_scroll_up()
+        }
+      }
+      View::CommandLogs => {
+        if down {
+          self.command_logs.scroll_down()
+        } else {
+          self.command_logs.scroll_up()
+        }
+      }
+      View::WorkingTree => {
+        if down {
+          self.working_tree.scroll_down()
+        } else {
+          self.working_tree.scroll_up()
+        }
+      }
+      View::Commits => {
+        if down {
+          self.commits.scroll_down()
+        } else {
+          self.commits.scroll_up()
+        }
+      }
+      View::Config => {
+        if down {
+          self.config_panel.scroll_down()
+        } else {
+          self.config_panel.scroll_up()
+        }
+      }
+      // Every other modal is either a form, a prompt or a listing whose rows
+      // publish their own zone above this one.
+      _ => {}
+    }
+  }
+
+  /// Put the list cursor on `index`, the move `j` and `k` make.
+  ///
+  /// The one entry point for a selection change, because
+  /// [`Self::on_navigation`] is what invalidates the sidebar's cached git
+  /// preview and re-resolves the issue/PR link: a cursor that moved without
+  /// it leaves the sidebar painting the *previous* worktree, and in
+  /// workspace mode leaves `sync_active_repo` resolving against a selection
+  /// that moved by a path the bookkeeping never saw.
+  ///
+  /// A click (issue #624) lands on an arbitrary row rather than one step
+  /// away, which is why this takes an index instead of a direction — and why
+  /// `next` / `prev` route through it, so the mouse and the keyboard are
+  /// provably the same transition.
+  ///
+  /// Out of range is a no-op: the caller is reporting where the user
+  /// clicked, and a click below the last row picked nothing.
+  pub fn select_row(&mut self, index: usize) {
+    if index >= self.filtered_indices().len() {
       return;
     }
+    self.list_state.select(Some(index));
+    self.on_navigation();
+  }
+
+  /// Move the list cursor down one, wrapping — without the sidebar
+  /// redirection [`Self::next`] applies. The wheel over the table moves the
+  /// table whatever holds the focus: the pointer says which surface it means,
+  /// which is the whole difference between a wheel and a key.
+  pub fn list_next(&mut self) {
     let len = self.filtered_indices().len();
     if len == 0 {
       return;
@@ -2445,15 +2758,11 @@ impl App {
       Some(i) => (i + 1) % len,
       None => 0,
     };
-    self.list_state.select(Some(i));
-    self.on_navigation();
+    self.select_row(i);
   }
 
-  pub fn prev(&mut self) {
-    if self.sidebar.open && self.sidebar.focused {
-      self.sidebar_scroll_up();
-      return;
-    }
+  /// Wrapping counterpart of [`Self::list_next`].
+  pub fn list_prev(&mut self) {
     let len = self.filtered_indices().len();
     if len == 0 {
       return;
@@ -2462,8 +2771,24 @@ impl App {
       Some(0) | None => len - 1,
       Some(i) => i - 1,
     };
-    self.list_state.select(Some(i));
-    self.on_navigation();
+    self.select_row(i);
+  }
+
+  pub fn next(&mut self) {
+    // Route navigation to the sidebar when it's focused; otherwise move the list.
+    if self.sidebar.open && self.sidebar.focused {
+      self.sidebar_scroll_down();
+      return;
+    }
+    self.list_next();
+  }
+
+  pub fn prev(&mut self) {
+    if self.sidebar.open && self.sidebar.focused {
+      self.sidebar_scroll_up();
+      return;
+    }
+    self.list_prev();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------

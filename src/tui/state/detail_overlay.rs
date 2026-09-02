@@ -149,6 +149,13 @@ impl DetailOverlay {
       .min(filter_rows(&self.rows, &self.input).len().saturating_sub(1));
   }
 
+  /// Point the selection straight at `index` (issue #624).
+  pub fn select_index(&mut self, index: usize) {
+    if index < self.rows.len() {
+      self.selected = index;
+    }
+  }
+
   pub fn select_next(&mut self) {
     self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
   }

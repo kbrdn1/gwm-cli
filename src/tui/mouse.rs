@@ -23,7 +23,6 @@
 //! is the first thing hit — the same rule the screen itself follows.
 
 use super::state::config_panel::SettingsTab;
-use super::wt_tree::WtCategory;
 use ratatui::layout::Rect;
 
 /// The three mouse gestures gwm acts on.
@@ -93,9 +92,18 @@ pub enum Spot {
   Settings,
   /// One tab of the Settings panel's tab strip.
   ConfigTab(SettingsTab),
-  /// One letter of the Working Tree counts footer — scrolls the pane to the
-  /// first row of that category.
-  WtCategory(WtCategory),
+  /// The sidebar's Working Tree counts footer — opens the full-size Working
+  /// Tree listing, the same thing `W` opens.
+  ///
+  /// Not "jump to the first file of that category", which is what a counts
+  /// row suggests and what the issue's wording implies: the pane paints a
+  /// **tree**, ordered by path, so a category's files are scattered through
+  /// it and its "first row" is an arbitrary place to land. Wanting more of
+  /// the change set than two rows at a time is what a click on the counts
+  /// actually means, and that is a surface which already exists.
+  WtCounts,
+  /// The `✕` in a modal's top-right corner — closes it, same as `Esc`.
+  CloseModal,
 }
 
 /// What a click at a given cell resolves to.

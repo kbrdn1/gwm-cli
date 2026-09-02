@@ -5,7 +5,6 @@
 //! piece every click and wheel event in the TUI goes through.
 
 use gwm::tui::mouse::{Hit, MouseMap, PaneId, RowList, Spot};
-use gwm::tui::wt_tree::WtCategory;
 use gwm::tui::SettingsTab;
 use ratatui::layout::Rect;
 
@@ -179,7 +178,7 @@ fn panes_and_spots_resolve_to_themselves() {
   map.push_spot(rect(70, 0, 3, 1), Spot::CommandLogs);
   map.push_spot(rect(73, 0, 3, 1), Spot::Settings);
   map.push_spot(rect(5, 3, 8, 1), Spot::ConfigTab(SettingsTab::Keys));
-  map.push_spot(rect(20, 17, 2, 1), Spot::WtCategory(WtCategory::Modified));
+  map.push_spot(rect(20, 17, 12, 1), Spot::WtCounts);
 
   assert_eq!(map.hit(40, 11), Some(Hit::Pane(PaneId::Status)));
   assert_eq!(
@@ -190,7 +189,7 @@ fn panes_and_spots_resolve_to_themselves() {
   assert_eq!(map.hit(71, 0), Some(Hit::Spot(Spot::CommandLogs)));
   assert_eq!(map.hit(74, 0), Some(Hit::Spot(Spot::Settings)));
   assert_eq!(map.hit(6, 3), Some(Hit::Spot(Spot::ConfigTab(SettingsTab::Keys))));
-  assert_eq!(map.hit(21, 17), Some(Hit::Spot(Spot::WtCategory(WtCategory::Modified))));
+  assert_eq!(map.hit(21, 17), Some(Hit::Spot(Spot::WtCounts)));
 }
 
 #[test]

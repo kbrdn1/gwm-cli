@@ -111,6 +111,8 @@ define_actions! {
   CycleSidebarLayout => "cycle_sidebar_layout",
   ToggleSidebarPosition => "toggle_sidebar_position",
   FocusSwap         => "focus_swap",
+  // #624: hand the terminal's own text selection back, on demand.
+  ToggleMouse       => "toggle_mouse",
   FocusWorktrees    => "focus_worktrees",
   FocusStatus       => "focus_status",
   // Filter
@@ -528,6 +530,9 @@ impl Keymap {
       def(Action::CycleSidebarLayout, &["z"]),
       def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
+      // #624: `M` for mouse. `m` is MergePr, and the pairing reads the way
+      // the other case-pairs in this map do.
+      def(Action::ToggleMouse, &["M"]),
       def(Action::FocusWorktrees, &["1"]),
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
