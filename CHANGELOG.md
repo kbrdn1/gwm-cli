@@ -12,6 +12,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Settings panel gets a value column, named sections and tab glyphs**
+  ([#623](https://github.com/kbrdn1/gwm-cli/issues/623)). The panel carries the
+  most content of any modal and showed it the most plainly: values were a span
+  glued after a fixed 24-cell label pad, so a tab of sixteen rows had sixteen
+  different value positions, and the one 26-character label overflowed the pad
+  and pushed its value two cells right of every other. The `TUI` tab was a
+  single undivided run mixing layout, sidebar, editing, open, multiplexer,
+  browser and refresh knobs, and the five tabs were bare words.
+
+  Values now sit in a column of their own, and the shape carries the kind: a
+  choice reads `‹ value ›`, a boolean reads `[✓]` / `[ ]`, a typed value reads
+  plain, and an optional text field nobody has set reads `(unset)` instead of
+  leaving the column blank. The column is right-aligned against the widest
+  *label*, not against the panel's edge: this modal runs to 96 columns for a
+  block that rarely passes fifty, and a column welded to the frame would put
+  forty cells of nothing between a row and its value. That is the same call
+  [#622](https://github.com/kbrdn1/gwm-cli/issues/622) made for the Working
+  Tree overlay. The `TUI` tab groups its rows under labelled rules
+  (Appearance, Sidebar, Editing, Open, Multiplexer, Browser, Timing), which
+  reorders the fields into those runs, and each tab is led by a codicon glyph.
+
+  `←` / `→` now adjust the selected choice, one value back or forward. The
+  issue described them as already doing this; they did not, since
+  `ConfigScrollLeft` / `ConfigScrollRight` were gated to the `All` tab's
+  horizontal pan and were dead everywhere else. The `‹ ›` markers are what
+  advertises them. No binding changed.
+
+  The footer gains a `j/k move` verb, and `←/→ adjust` replaces `Space cycle`
+  on a cyclable field rather than joining it: `modal_hint_line` centres its
+  spans, so naming one operation twice overflowed the line and clipped it at
+  both ends, costing the leading hint outright and leaving `Esc close` as
+  `Esc c`.
+
 - **The doc captures regenerate as one step, in the order the traps require**
   ([#631](https://github.com/kbrdn1/gwm-cli/issues/631)). Regenerating the set
   was a four-step sequence held together by a maintainer's notes: bump,
