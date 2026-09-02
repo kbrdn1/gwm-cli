@@ -44,9 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #623 deferred until the Settings panel had proved it out. Its description
   leads and its chord is the right-hand column, the order the Settings Keys
   tab already used for the same data; its `Blank / Section / Blank` headings
-  become one labelled rule, giving back two rows per section on a body with a
-  dozen of them; and it is a little wider, because 60% of a 100-column terminal
-  is 64 cells for a body that now wants about 73.
+  become one blank and one labelled rule, giving back a row per section on a
+  body with a dozen of them, with the single blank kept so a section does not
+  read as a continuation of the one above it; and it is a little wider, because
+  60% of a 100-column terminal is 64 cells for a body that now wants about 73.
 
   Forty of its descriptions were shortened to fit beside their chords, and one
   fixed chord string with them: `Left/Right/Up/Down` was eighteen cells, and
@@ -57,8 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sections are labelled rules across every tab: the `TUI` tab gains seven
   (Appearance, Sidebar, Editing, Open, Multiplexer, Browser, Timing), which
   reorders its fields into those runs, and the `[global]` / `[table]` headings
-  the `Keys` and `All` tabs already had become the same rule over a blank line,
-  saving a row per section. Each tab is led by a codicon glyph.
+  the `Keys` and `All` tabs already had become the same rule. A blank sits
+  ahead of every break and under the tab strip, so a section does not read as a
+  continuation of the one above it and the first rule opens the body rather
+  than hanging off the chrome. Each tab is led by a codicon glyph.
+
+  That spacing costs rows, so [#569](https://github.com/kbrdn1/gwm-cli/issues/569)'s
+  height bounds move from `(11, 32)` to `(12, 40)`: the `TUI` tab is 29 body
+  rows now, and at the old ceiling a form the user opened deliberately would
+  have scrolled by seven. `modal_height` still takes `term_height - 4` after
+  the ceiling, so a short terminal is unaffected and scrolls as it did.
 
   `←` / `→` now adjust the selected choice, one value back or forward. The
   issue described them as already doing this; they did not, since

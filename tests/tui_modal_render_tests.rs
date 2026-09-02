@@ -3792,7 +3792,10 @@ fn settings_tui_tab_anchors_every_value_to_one_right_edge() {
   // sixteen different value positions — and the 26-character label overflowed
   // the pad outright.
   let (_dir, mut app) = tui_tab_app();
-  let buf = render(&mut app);
+  // Tall enough for the whole tab: since #623 spent rows on the section rules
+  // and their spacing, the last probe label sits past a 40-row terminal's
+  // viewport, and a guard that cannot see a row proves nothing about it.
+  let buf = render_at(&mut app, 100, 60);
   let rect = modal_rect(&buf).expect("the Settings modal is rendered");
 
   let edges: Vec<(&str, u16)> = TUI_TAB_PROBE_LABELS
@@ -3815,7 +3818,7 @@ fn settings_tui_tab_anchors_every_value_to_one_right_edge_in_the_compact_layout(
   // boxed frame would be half a guard.
   let (_dir, mut app) = tui_tab_app();
   app.config.tui.layout = TuiLayout::Compact;
-  let buf = render(&mut app);
+  let buf = render_at(&mut app, 100, 60);
   let rect = compact_modal_rect(&buf).expect("the Settings modal is rendered in the compact layout");
 
   let edges: Vec<(&str, u16)> = TUI_TAB_PROBE_LABELS
@@ -3944,7 +3947,7 @@ fn settings_tui_tab_rules_off_its_named_sections() {
   // browser and refresh knobs in one undivided run. A labelled rule groups
   // them.
   let (_dir, mut app) = tui_tab_app();
-  let buf = render(&mut app);
+  let buf = render_at(&mut app, 100, 60);
   let rows = modal_rows(&buf).join("\n");
   for section in ["Appearance", "Sidebar", "Multiplexer", "Browser"] {
     assert!(
@@ -4166,4 +4169,105 @@ fn dump_the_bootstrap_report() {
   for row in row_strings(&buf) {
     println!("{row}");
   }
+}
+
+#[test]
+fn the_keybindings_overlay_breathes_between_its_sections() {
+  // A rule is the separation, but back to back with the row above it a section
+  // reads as a continuation of the one before. One blank ahead of each break,
+  // and one under the subtitle so the first rule opens the body rather than
+  // hanging off the context label.
+  //
+  // One, not the two the pre-#623 body spent above and below every heading:
+  // on a dozen sections that was two dozen rows of nothing.
+  let (_dir, mut app) = make_app();
+  app.view = View::Help;
+  let buf = render_at(&mut app, 100, 200);
+  let rows = modal_rows(&buf);
+
+  let blank = |r: &String| r.trim_matches(['│', '║', '█', ' ']).is_empty();
+  let rule_at: Vec<usize> = rows
+    .iter()
+    .enumerate()
+    .filter(|(_, r)| r.contains("─ ") && !r.contains("╭") && !r.contains("╰"))
+    .map(|(i, _)| i)
+    .collect();
+  assert!(
+    rule_at.len() > 5,
+    "the body must have rendered its sections: {rule_at:?}"
+  );
+
+  for i in &rule_at {
+    assert!(
+      blank(&rows[i - 1]),
+      "row {} above the rule {:?} must be blank:\n{}",
+      i - 1,
+      rows[*i].trim(),
+      rows[i.saturating_sub(2)..(i + 1).min(rows.len())].join("\n")
+    );
+    assert!(
+      !blank(&rows[i + 1]),
+      "and the row under it must not be, or the rule floats: {:?}",
+      rows[i + 1].trim()
+    );
+  }
+}
+
+#[test]
+fn the_settings_tabs_breathe_between_their_sections() {
+  // The Keybindings guard's twin, one modal over: a blank ahead of every
+  // section break, and one under the tab strip so the first rule opens the
+  // body rather than hanging off the chrome.
+  //
+  // Rendered tall enough for the whole TUI tab, which is what the height
+  // bounds were raised for: at 40 rows the panel is 36 and the tab wants 39,
+  // so a shorter terminal scrolls and the assertion would only ever see the
+  // first few sections.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render_at(&mut app, 100, 60);
+  let rows = modal_rows(&buf);
+
+  let blank = |r: &String| r.trim_matches(['│', '║', '█', ' ']).is_empty();
+  let rule_at: Vec<usize> = rows
+    .iter()
+    .enumerate()
+    .filter(|(_, r)| r.contains("─ ") && !r.contains('╭') && !r.contains('╰'))
+    .map(|(i, _)| i)
+    .collect();
+  assert_eq!(
+    rule_at.len(),
+    7,
+    "the TUI tab rules off seven sections, got {}:\n{}",
+    rule_at.len(),
+    rows.join("\n")
+  );
+
+  for i in &rule_at {
+    assert!(
+      blank(&rows[i - 1]),
+      "row {} above the rule {:?} must be blank:\n{}",
+      i - 1,
+      rows[*i].trim(),
+      rows[i.saturating_sub(2)..(i + 1).min(rows.len())].join("\n")
+    );
+    assert!(
+      !blank(&rows[i + 1]),
+      "and the row under it must not be, or the rule floats: {:?}",
+      rows[i + 1].trim()
+    );
+  }
+}
+
+#[test]
+fn the_settings_tui_tab_fits_its_box_on_a_terminal_with_the_room() {
+  // #623 spent rows on the section rules and their spacing, and #569's ceiling
+  // was set before either existed. This is the number that justifies moving
+  // it: the whole TUI tab, last row included, on a terminal tall enough to
+  // hold the box the bounds now allow. Without the raise it scrolls, and a
+  // form the user opened deliberately is the worst surface to hide a row in.
+  let (_dir, mut app) = tui_tab_app();
+  let buf = render_at(&mut app, 100, 60);
+  let rows = modal_rows(&buf).join("\n");
+  assert!(rows.contains("Timing"), "the last section must be on screen:\n{rows}");
+  assert!(rows.contains("auto refresh (s)"), "and so must its last field:\n{rows}");
 }

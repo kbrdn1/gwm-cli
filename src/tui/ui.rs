@@ -4993,9 +4993,15 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // `HelpRow::Title` no longer renders as a row: since #549 it rides the
   // modal's top rule, so it is captured here rather than pushed. The
   // subtitle stays a header row — it is live context (the active view),
-  // not the modal's name. `HelpRow::Blank` stops rendering entirely: the
-  // section rules are the separation now, and the body carried two blanks per
-  // heading, which on a dozen sections is two dozen rows of nothing.
+  // not the modal's name.
+  //
+  // The body's own blanks are dropped and one is put back per section break:
+  // it carried two per heading, above and below, which on a dozen sections is
+  // two dozen rows of nothing. The rule is the separation, and the single
+  // blank ahead of it is the breathing room that keeps a section from reading
+  // as a continuation of the one before. None ahead of the first, which would
+  // only be a gap under the subtitle, and none after the last, where the
+  // footer's own gap row already sits.
   let mut header_lines: Vec<Line<'static>> = Vec::new();
   let mut body: Vec<HelpRow> = Vec::new();
   let mut modal_title = String::new();
@@ -5003,8 +5009,21 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     match row {
       HelpRow::Title(t) => modal_title = t,
       // The subtitle is centred (issue #217) and pinned in the header.
-      HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
+      HelpRow::Subtitle(t) => {
+        header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
+        // A spacer under it, the way the Settings header has had one between
+        // its subtitle and its tab strip since #279: the subtitle names the
+        // context, and without a gap the first section rule reads as belonging
+        // to it rather than opening the body.
+        header_lines.push(Line::from(String::new()));
+      }
       HelpRow::Blank => {}
+      HelpRow::Section(t) => {
+        if !body.is_empty() {
+          body.push(HelpRow::Blank);
+        }
+        body.push(HelpRow::Section(t));
+      }
       other => body.push(other),
     }
   }
@@ -5597,8 +5616,11 @@ fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
     if current_section.as_deref() != Some(section.as_str()) {
       // The same labelled rule the other tabs wear since #623, in place of a
-      // bare `[table]` over a blank line: one section idiom across the panel,
-      // and it costs a row per section instead of two.
+      // bare `[table]`, with the blank moved from above the heading to ahead
+      // of the break.
+      if current_section.is_some() {
+        lines.push(Line::from(String::new()));
+      }
       lines.push(modal_section_rule(&format!("[{section}]"), rule_w, accent, muted));
       current_section = Some(section);
     }
@@ -5683,7 +5705,7 @@ fn settings_fields_rows(app: &App, fields: &[SettingField]) -> usize {
   for field in fields {
     if let Some(section) = field.section() {
       if current != Some(section) {
-        rows += 1;
+        rows += if current.is_none() { 1 } else { 2 };
         current = Some(section);
       }
     }
@@ -5703,7 +5725,7 @@ fn settings_all_rows(app: &App) -> usize {
   for row in &app.config_panel.rows {
     let section = row.key.split(['.', '[']).next().unwrap_or("");
     if current != Some(section) {
-      rows += 1;
+      rows += if current.is_none() { 1 } else { 2 };
       current = Some(section);
     }
   }
@@ -5720,7 +5742,7 @@ fn settings_keys_rows(app: &App) -> usize {
   let mut current: Option<&str> = None;
   for row in &app.config_panel.key_rows {
     if current != Some(row.scope.as_str()) {
-      rows += 1;
+      rows += if current.is_none() { 1 } else { 2 };
       current = Some(row.scope.as_str());
     }
   }
@@ -5808,6 +5830,13 @@ fn settings_fields_lines(app: &App, fields: &[SettingField], width: usize) -> (V
   for ((i, field), value) in fields.iter().enumerate().zip(values.iter()) {
     if let Some(section) = field.section() {
       if current_section != Some(section) {
+        // A blank ahead of every break but the first: the rule is the
+        // separation, and the blank is what stops a section reading as a
+        // continuation of the one above it. Counted by
+        // [`settings_fields_rows`], which the panel is sized against.
+        if current_section.is_some() {
+          lines.push(Line::from(String::new()));
+        }
         lines.push(modal_section_rule(section, rule_w, accent, muted));
         current_section = Some(section);
       }
@@ -5896,6 +5925,9 @@ fn settings_keys_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Option<u
   let mut current_scope: Option<String> = None;
   for (i, row) in panel.key_rows.iter().enumerate() {
     if current_scope.as_deref() != Some(row.scope.as_str()) {
+      if current_scope.is_some() {
+        lines.push(Line::from(String::new()));
+      }
       lines.push(modal_section_rule(&format!("[{}]", row.scope), rule_w, accent, muted));
       current_scope = Some(row.scope.clone());
     }
@@ -5988,7 +6020,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     // them (see `NOTE_ICON`).
     tab_spans.push(Span::styled(format!(" {} {} ", t.glyph(), t.label()), style));
   }
-  let header_lines = vec![subtitle, Line::from(String::new()), Line::from(tab_spans)];
+  // Subtitle, spacer, tab strip, spacer: the trailing one so the first section
+  // rule opens the body rather than hanging off the strip, matching what the
+  // Keybindings overlay does under its own subtitle.
+  let header_lines = vec![
+    subtitle,
+    Line::from(String::new()),
+    Line::from(tab_spans),
+    Line::from(String::new()),
+  ];
 
   // Since #623 the body is built in two passes, because the two halves depend
   // on each other in a circle: every tab right-aligns a column against the
@@ -6638,13 +6678,19 @@ pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows
 /// Height bounds for the Settings panel (issue #569).
 ///
 /// The floor is the shortest tab that carries a real form: Worktree, whose
-/// three fields make an 11-row box. Only Theme is shorter (one row), and it
+/// three fields make a 12-row box. Only Theme is shorter (one row), and it
 /// gains two blank rows rather than shrinking to a sliver. The ceiling leaves
-/// about 25 rows of body, which covers the resolved-config tab outright and
+/// about 32 rows of body, which covers the resolved-config tab outright and
 /// gives the 173-row Keys tab a scroll window worth having without the panel
 /// swallowing the terminal. Both tabs scrolled before this change (#279), so
 /// a ceiling costs nothing they did not already handle.
-const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (11, 32);
+///
+/// Both moved by one and eight in #623, which is what the section rules and
+/// the blank ahead of each break cost: the TUI tab is 29 body rows now, and at
+/// the old 32-row ceiling a form the user opened deliberately would have
+/// scrolled by seven. The ceiling is still a ceiling, and `modal_height` takes
+/// `term_height - 4` after it, so a short terminal is unaffected.
+const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (12, 40);
 
 /// Modal width for the Link / Open prompts: wide enough for an issue or PR
 /// summary, capped so it stays a prompt rather than a page.
@@ -7296,7 +7342,7 @@ fn draw_report(f: &mut Frame, app: &App) {
   // rather than as a label for what is under it. The other overlays put their
   // live context on one centred subtitle row, so this one does too.
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let height = (logs.len() as u16 + 1 /* subtitle */ + 2 /* gap + hint */ + frame.rows())
+  let height = (logs.len() as u16 + 2 /* subtitle + spacer */ + 2 /* gap + hint */ + frame.rows())
     .max(6)
     .min(term.height.saturating_mul(80) / 100);
   // A text canvas, so a bare percentage rather than the bounded
@@ -7314,7 +7360,7 @@ fn draw_report(f: &mut Frame, app: &App) {
   let area = centered_abs(term.width.saturating_mul(80) / 100, height, term);
   let inner = frame.render(f, area, "Bootstrap Report", None);
   let [subtitle_area, body_area, _gap, hint_area] = Layout::vertical([
-    Constraint::Length(1), // subtitle
+    Constraint::Length(2), // subtitle + its spacer
     Constraint::Min(1),    // the steps
     Constraint::Length(1), // hint gap
     Constraint::Length(1), // hint
