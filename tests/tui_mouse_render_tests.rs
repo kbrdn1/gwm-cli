@@ -367,3 +367,71 @@ fn a_modal_taking_typed_input_draws_no_close_button() {
     lines.join("\n")
   );
 }
+
+/// The sidebar's bottom pane is the commit log in one mode and the stash list
+/// in the other. Its title is a click target only where there is something
+/// full-size to open — pointing "Stashes" at the commit log would open what
+/// the reader is not looking at.
+#[test]
+fn the_stashes_title_is_not_a_door_to_the_commit_log() {
+  let (_d, mut app) = app_with(4, false);
+  app.sidebar.open = true;
+
+  let lines = render(&mut app, 140, 44);
+  let (y, x) = find_cell(&lines, "Recent Commits").expect("commits title painted");
+  assert_eq!(
+    app.mouse.hit(x, y),
+    Some(Hit::Spot(Spot::SidebarSection(SidebarPane::Commits)))
+  );
+
+  app.cycle_sidebar_mode();
+  let lines = render(&mut app, 140, 44);
+  // Asserted, not `if let`: a title that stopped being painted would make the
+  // check below pass without checking anything.
+  let (y, x) = find_cell(&lines, "Stashes").unwrap_or_else(|| {
+    panic!("the pane has to be in stashes mode:\n{}", lines.join("\n"));
+  });
+  assert!(
+    !matches!(app.mouse.hit(x, y), Some(Hit::Spot(Spot::SidebarSection(_)))),
+    "the Stashes title must not open the commit log"
+  );
+}
+
+/// While a create or rename is in flight the event loop ignores the keyboard
+/// on that view. The pointer has to agree: the worker runs against the values
+/// captured at submit, so a chevron that still moved the type would leave a
+/// failure naming a branch type other than the one it failed on.
+#[test]
+fn a_form_in_flight_publishes_nothing_clickable() {
+  let (_d, mut app) = app_with(3, false);
+  app.enter_create();
+  let lines = render(&mut app, 120, 40);
+  let before = app.mouse.clone();
+  assert!(
+    find_cell(&lines, "Type").is_some(),
+    "the fixture has to render the structured form"
+  );
+  assert!(
+    (0..40u16).any(|y| (0..120u16).any(|x| matches!(
+      before.hit(x, y),
+      Some(Hit::Row {
+        list: RowList::CreateForm,
+        ..
+      })
+    ))),
+    "the idle form publishes its fields"
+  );
+
+  app.tasks.request(gwm::tui::TaskKind::CreateWorktree).unwrap();
+  let _ = render(&mut app, 120, 40);
+  assert!(
+    !(0..40u16).any(|y| (0..120u16).any(|x| matches!(
+      app.mouse.hit(x, y),
+      Some(Hit::Row {
+        list: RowList::CreateForm,
+        ..
+      }) | Some(Hit::Spot(Spot::TypeChevron { .. }))
+    ))),
+    "and the in-flight one publishes none of them"
+  );
+}

@@ -1705,7 +1705,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
     scroll,
     panel_footer.map(ratatui::text::Line::from),
   );
-  push_section_title(map, commits_area, SidebarPane::Commits);
+  // Only in `Commits` mode: the same pane reads "Stashes" in the other one,
+  // and a title that opened the full commit log from there would open
+  // something the reader is not looking at (Codex review on #624). The
+  // stashes view has no full-size counterpart to open.
+  if active_mode == super::state::sidebar::SidebarMode::Commits {
+    push_section_title(map, commits_area, SidebarPane::Commits);
+  }
 }
 
 /// Borrowed content for one [`render_section`] block (issue #238).
@@ -6855,7 +6861,14 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
     .split(content);
 
   let body = render_form_body(f, inner[0], lines, focused_row, &app.theme);
-  push_form_targets(map, &body, &field_rows, app, type_str, label_w);
+  // Nothing clickable while the create is in flight: the event loop already
+  // ignores the keyboard on this view, and the worker runs against the values
+  // captured at submit. A chevron that still moved `type_index` would leave a
+  // failure showing a branch type other than the one it failed on (Codex
+  // review on #624).
+  if !app.is_create_worktree_loading() {
+    push_form_targets(map, &body, &field_rows, app, type_str, label_w);
+  }
 
   if app.is_create_worktree_loading() {
     f.render_widget(
@@ -9565,7 +9578,11 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
     .split(content);
 
   let body = render_form_body(f, inner[0], lines, focused_row, &app.theme);
-  push_form_targets(map, &body, &field_rows, app, type_str, label_w);
+  // Same load lock as the create form: the rename worker runs against the
+  // values captured at submit.
+  if !app.is_edit_worktree_loading() {
+    push_form_targets(map, &body, &field_rows, app, type_str, label_w);
+  }
 
   if app.is_edit_worktree_loading() {
     f.render_widget(
