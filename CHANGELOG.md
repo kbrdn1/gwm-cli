@@ -245,6 +245,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tapes as living outside the script
   ([#631](https://github.com/kbrdn1/gwm-cli/issues/631)).
 
+- The five `:::` callouts under `docs/` are GFM alerts
+  ([#641](https://github.com/kbrdn1/gwm-cli/issues/641)). Container syntax is
+  markdown-it / Nuxt Content, and this tree is read by neither: GitHub emitted
+  the directive as literal text in a paragraph, and Starlight wants
+  `:::caution[title]` with the colons glued to one of four names it knows,
+  which `::: warning` is not. So the security callout on the GitLab page, the
+  one explaining that a bare `forge` key authorises nothing, was raw
+  punctuation in both places. The one that carried a title keeps it as a bold
+  first line inside the quote, since a GFM alert has no title slot.
+  `docs/fr/5.integrations/1.github-linking.md` gains the multi-forge callout
+  its English half already had. `tests/docs_callout_tests.rs` rejects the whole
+  `:::` prefix rather than the spaced form the tree happened to carry:
+  `:::note` is valid Starlight and would render on the site while staying
+  literal on GitHub, which is the same defect seen from the other side. Astro
+  does not implement GFM alerts natively, so the matching half, folding them
+  back into Starlight asides, lives in
+  [kbrdn1/kbrdn-docs#81](https://github.com/kbrdn1/kbrdn-docs/issues/81).
+
 
 ## Past releases
 
