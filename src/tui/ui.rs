@@ -190,6 +190,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     shade_background(f.buffer_mut());
   }
 
+  // A modal makes the whole background inert, not just the rectangle it
+  // covers (Codex review on #624). The header sits outside every modal's
+  // rect, so its `⚙` stayed clickable underneath one — and clicking it from
+  // the note editor swapped `View::Note` for `View::Config` without going
+  // through the editor's teardown, putting an unsaved note out of reach. One
+  // `clear` rather than a per-surface guard: what a modal covers is not the
+  // question, what it is over is.
+  if app.view != View::List {
+    map.clear();
+  }
+
   match app.view {
     View::Help => draw_help(f, app, map),
     View::Create => draw_create(f, app, map),
@@ -406,7 +417,15 @@ pub fn header_line(
   // like a broken build rather than a switch they threw. The status bar says
   // it once, at the moment of the toggle, and the next message overwrites it.
   if mouse_released {
-    let chip = format!(" mouse off · {} ", release_key);
+    // The key is named only when it can be pressed. The picker's filter bar
+    // captures every `Char` so a query can contain `q` / `?` / `/`, which
+    // swallows the toggle too — naming it there would promise a way back that
+    // types an `M` into the query instead (Codex review on #624).
+    let chip = if release_key.is_empty() {
+      " mouse off ".to_string()
+    } else {
+      format!(" mouse off · {} ", release_key)
+    };
     let need = 1 + cells(&chip);
     // `aff_w` is reserved further down but has to be counted HERE: at a width
     // where the chip and the affordances each fit alone but not together
@@ -602,7 +621,15 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, map: &mut MouseMap) {
   // guarantees one visual line clipped to `width`.
   // Resolved from the live keymap, not hard-coded: a `[tui.keys]
   // toggle_mouse` override has to reach the chip that names it.
-  let release_key = (!app.mouse_capture).then(|| app.keymap.keys_display(Action::ToggleMouse));
+  // Empty while the filter bar is up: it consumes every `Char`, so the chord
+  // is not reachable and the chip drops it rather than promise it.
+  let release_key = (!app.mouse_capture).then(|| {
+    if app.filter.active {
+      String::new()
+    } else {
+      app.keymap.keys_display(Action::ToggleMouse)
+    }
+  });
   let header = header_line(
     // The workspace label, which is what the user is looking at; `repo_name` is
     // the naming name and can be the same string in a workspace of one (#480).
@@ -5292,7 +5319,7 @@ fn draw_help(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   }
   let body_rows = body.len();
 
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let inner_area = frame.render(f, map, area, &modal_title, None);
 
   // header (fixed) | body (scrollable) | footer hint (fixed). The header is
@@ -5629,7 +5656,7 @@ fn draw_commits(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   // read too: `can_load_more` is false then only because the read is out.
   let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
   let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let inner = frame.render(f, map, area, &title, None);
 
   // The branch this log was walked on, pinned above the scroll region
@@ -5721,7 +5748,7 @@ fn draw_command_logs(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
 
   // Scrollable body / fixed footer hint (issue #279) —
   // the title and the close hint stay pinned while the transcript scrolls.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let inner = frame.render(f, map, area, "Command Logs", None);
 
   // The title rides the top rule since #549, so the fixed header row it
@@ -6383,7 +6410,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   // deliberate trade: the tabs are genuinely different lengths (3 rows for
   // Worktree, 173 for Keys), and with the floor and ceiling in place it
   // settles into two sizes rather than a continuum.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let content_rows = header_h + body_rows as u16 + 2 /* gap + footer */ + frame.rows();
   let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
   let area = centered_content(
@@ -6722,7 +6749,7 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
     Mode::FromIssue => "New Worktree (from issue)",
     Mode::Structured => "New Worktree",
   };
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
+  let frame = ModalFrame::resolve_for(app, clean);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
   let inner_w = frame.inner(outer).width as usize;
@@ -7420,7 +7447,7 @@ fn draw_confirm_merge(f: &mut Frame, app: &App, map: &mut MouseMap) {
     Style::default().fg(muted),
   )));
 
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
+  let frame = ModalFrame::resolve_for(app, danger);
   let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + frame.rows();
   let area = centered_content(62, 56, 80, height, f.area());
   let inner = Layout::default()
@@ -7515,7 +7542,7 @@ fn draw_confirm(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // #484: the overlay is about the batch snapshotted when it opened, not
   // about wherever the cursor sits now.
   let targets = app.pending_delete();
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
+  let frame = ModalFrame::resolve_for(app, danger);
   if targets.is_empty() {
     let lines: Vec<Line<'static>> = vec![Line::from("nothing selected").centered()];
     let height = lines.len() as u16 + frame.rows();
@@ -7851,7 +7878,7 @@ fn draw_report(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // rides: two identical bars stacked, the second reading as a second title
   // rather than as a label for what is under it. The other overlays put their
   // live context on one centred subtitle row, so this one does too.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let height = (logs.len() as u16 + 2 /* subtitle + spacer */ + 2 /* gap + hint */ + frame.rows())
     .max(6)
     .min(term.height.saturating_mul(80) / 100);
@@ -7940,7 +7967,7 @@ fn draw_note_editor(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   };
   // Already rode the top rule before #549; routed through the shared
   // helper so it picks up the same bold accent as every other modal.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, app.theme.accent);
   let inner = frame.render(f, map, area, &title, None);
 
   // #557: the modal carries its own mode line on its last row. The
@@ -8040,7 +8067,7 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   // so the event loop drops the event before the hit test and a painted `✕`
   // would advertise a way out that does not work. `Esc` is the way out, and
   // the footer hint says so.
-  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme)
+  let inner = ModalFrame::resolve_for(app, app.theme.accent)
     .without_footer()
     .without_close()
     .render(f, map, area, title, None);
@@ -8271,6 +8298,18 @@ impl ModalFrame {
   /// colour (`theme.accent` for most, `theme.prunable` for the destructive
   /// ones), and it drives the rules in one layout and the header band in
   /// the other.
+  /// [`Self::resolve`], with the close button dropped while the modal is
+  /// taking typed input (Codex review on #624) — see
+  /// [`App::modal_is_typing`].
+  pub fn resolve_for(app: &App, accent: Color) -> Self {
+    let frame = Self::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+    if app.modal_is_typing() {
+      frame.without_close()
+    } else {
+      frame
+    }
+  }
+
   pub fn resolve(compact: bool, accent: Color, theme: &Theme) -> Self {
     Self {
       compact,
@@ -8637,7 +8676,7 @@ fn draw_open_menu(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let title = "Open in Browser";
   let (lines, first_target) = link_open_modal_body(app, title, Some(app.open_menu_selected));
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
@@ -8696,7 +8735,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App, map: &mut MouseMap) {
       lines
     }
   };
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
@@ -8825,7 +8864,7 @@ fn draw_exec_picker(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let inner = width.saturating_sub(frame.cols()) as usize;
   let mut lines: Vec<Line<'static>> = Vec::new();
   // Leave room for the title + hint + borders; the picker scrolls past that.
@@ -8884,7 +8923,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // width and painting at another either ellipsises the tail of every line
   // or leaves a column of dead space down the right edge.
   let width = detail_overlay_width(app.detail_overlay.kind, term.width);
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let inner = width.saturating_sub(frame.cols()) as usize;
   let ov = &app.detail_overlay;
 
@@ -9284,7 +9323,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let border = if armed { danger } else { accent };
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), border, &app.theme);
+  let frame = ModalFrame::resolve_for(app, border);
   let inner = width.saturating_sub(frame.cols()) as usize;
 
   let mut lines: Vec<Line<'static>> = Vec::new();
@@ -9442,7 +9481,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
     .unwrap_or(("", "(no branch types configured)"));
 
   let title = "Rename Worktree";
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
+  let frame = ModalFrame::resolve_for(app, clean);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
   let inner_w = frame.inner(outer).width as usize;
@@ -9569,13 +9608,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
 fn draw_command_palette(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let area = centered_viewport(60, 64, 96, 50, f.area());
   let accent = app.theme.accent;
-  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme).render(
-    f,
-    map,
-    area,
-    "Command Palette",
-    None,
-  );
+  let inner = ModalFrame::resolve_for(app, accent).render(f, map, area, "Command Palette", None);
 
   // Input-first layout (issue #262): the `:` input field
   // (background-filled, mirroring the New Worktree modal's

@@ -311,3 +311,59 @@ fn a_sidebar_section_title_is_clickable_where_it_is_painted() {
     }
   }
 }
+
+/// The whole background goes inert while a modal is up, not just the
+/// rectangle the modal covers. The header sits outside every modal's rect, so
+/// its `⚙` stayed clickable underneath one — and from the note editor that
+/// swapped the view without the editor's teardown, putting an unsaved note
+/// out of reach.
+#[test]
+fn an_open_modal_makes_the_header_inert_too() {
+  let (_d, mut app) = app_with(4, false);
+  let lines = render(&mut app, 120, 40);
+  let (y, x) = find_cell(&lines, SETTINGS_ICON).expect("affordance painted");
+  assert_eq!(
+    app.mouse.hit(x, y),
+    Some(Hit::Spot(Spot::Settings)),
+    "clickable on the list view"
+  );
+
+  app.enter_command_logs();
+  let _ = render(&mut app, 120, 40);
+  assert!(
+    !matches!(app.mouse.hit(x, y), Some(Hit::Spot(Spot::Settings))),
+    "and inert under a modal"
+  );
+}
+
+/// No close button while a modal is taking typed input: firing its verb means
+/// pressing the key bound to it, and inside a sub-mode that key goes to the
+/// sub-mode's router — cancelling the edit, or typing itself into the field.
+#[test]
+fn a_modal_taking_typed_input_draws_no_close_button() {
+  let (_d, mut app) = app_with(3, false);
+  app.enter_config_panel();
+  let lines = render(&mut app, 120, 44);
+  assert!(
+    find_cell(&lines, CLOSE_ICON).is_some(),
+    "the panel has a close button while it is only navigating"
+  );
+
+  // A field that actually takes typed input: `begin_edit` is a no-op on a
+  // choice field, which is what the tab opens on.
+  app.config_panel.set_tab(SettingsTab::Tui);
+  let numeric = SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| f.kind() == gwm::tui::FieldKind::Uint)
+    .expect("the TUI tab has a numeric field");
+  app.config_panel.select_index(numeric);
+  app.config_panel.begin_edit("3");
+  assert!(app.modal_is_typing(), "the fixture has to actually be editing");
+  let lines = render(&mut app, 120, 44);
+  assert!(
+    find_cell(&lines, CLOSE_ICON).is_none(),
+    "and drops it while an edit is in flight:\n{}",
+    lines.join("\n")
+  );
+}

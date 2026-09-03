@@ -2510,6 +2510,29 @@ impl App {
     }
   }
 
+  /// Whether the open modal is taking typed input — a Settings edit or key
+  /// capture, a detail-overlay filter, the note editor's insert mode (Codex
+  /// review on #624).
+  ///
+  /// While it is, the `✕` is not drawn. Firing its verb means handing the
+  /// event loop the key bound to that verb, and inside a typing sub-mode that
+  /// key goes to the sub-mode's router instead: with the default `Esc` the
+  /// button would cancel the edit rather than close the modal, and with a
+  /// binding like `config.close = ["x"]` the click would type an `x` into the
+  /// field. A button that is not drawn cannot do either, and `Esc` — which is
+  /// what the footer hints — still gets out of the sub-mode first.
+  pub fn modal_is_typing(&self) -> bool {
+    match self.view {
+      View::Config => self.config_panel.editing.is_some() || self.config_panel.capture.is_some(),
+      View::DetailOverlay => self.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input,
+      View::Note => self
+        .note_editor
+        .as_ref()
+        .is_some_and(|n| n.mode == crate::tui::state::note_editor::NoteMode::Insert),
+      _ => false,
+    }
+  }
+
   /// The `close` verb of whichever modal is open (issue #624).
   ///
   /// Exhaustive over [`View`] rather than a `_` arm: a view added later has
@@ -2761,9 +2784,16 @@ impl App {
       }
       RowList::OpenMenu => self.open_menu_toggle_selection(),
       RowList::LinkPrompt => self.link_prompt.toggle_selection(),
-      // A form is not a list: rolling over it moves the focus the way `Tab`
-      // does, which is the only ordering its fields have.
-      RowList::CreateForm => self.create_form.next_field(),
+      // A form is not a list, but its fields are still ordered, so the wheel
+      // keeps its direction: both notches called `next_field` in the first
+      // cut, which made rolling up advance the focus (Codex review).
+      RowList::CreateForm => {
+        if down {
+          self.create_form.next_field()
+        } else {
+          self.create_form.prev_field()
+        }
+      }
       RowList::Palette => {
         if down {
           self.palette_cycle_down();
@@ -5650,13 +5680,16 @@ impl App {
     }
     self.apply_sidebar_config();
     // `[tui] mouse` is state the terminal holds, not just a value the render
-    // reads, so a Settings edit has to move it (issue #624). Unconditional
-    // rather than gated on the field: every other field leaves the value
-    // alone, so this is a no-op for them, and a gate is one more place to
-    // forget. The escape sequence is the event loop's — it reconciles
-    // `mouse_capture` against what it last put on the wire, which is also
-    // what makes `M` and this path the same mechanism.
-    self.mouse_capture = self.config.tui.mouse;
+    // reads, so editing THAT field has to move it (issue #624).
+    //
+    // Gated on the field, which the first cut was not: `M` releases the mouse
+    // for the session while the persisted value still says `true`, so
+    // re-reading the config after *any* setting silently recaptured it and
+    // broke the "until pressed again" contract (Codex review). Only an edit
+    // of this field is a statement about the mouse.
+    if field == SettingField::Mouse {
+      self.mouse_capture = self.config.tui.mouse;
+    }
     // The sidebar payload is *built* from the config and the theme, not
     // merely styled by them — `status_one_line` picks its shape (#547) and
     // the theme colours every span in it. Both live in a cache keyed by

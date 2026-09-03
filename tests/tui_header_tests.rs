@@ -496,3 +496,18 @@ fn the_mouse_chip_names_the_configured_key() {
     "the chip must carry the resolved chord: {text:?}"
   );
 }
+
+/// The chip promises a key only when that key can be pressed. The picker's
+/// filter bar captures every `Char` — so naming the toggle there would offer
+/// a way back that types an `M` into the query instead.
+#[test]
+fn the_mouse_chip_drops_the_key_when_it_cannot_be_reached() {
+  let theme = Theme::default();
+  let line = header_line("gwm-cli", "/tmp/x", true, Some(""), 120, &theme).line;
+  let text = plain(&line);
+  assert!(text.contains("mouse off"), "the mode is still shown: {text:?}");
+  assert!(
+    !text.contains("mouse off ·"),
+    "but no key is named when none is reachable: {text:?}"
+  );
+}
