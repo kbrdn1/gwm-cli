@@ -8276,15 +8276,18 @@ fn doctor_fix_purges_orphan_branch_config_and_spares_the_rest() {
   cfg.set_str("branch.feat/#2-dead.gwm-pr", "22").unwrap();
   cfg.set_str("branch.feat/#2-dead.remote", "origin").unwrap();
 
-  // Plain `doctor` reports the orphans (exit 1 = at least one warning)
-  // and must not touch the config.
+  // Plain `doctor` reports the orphans and must not touch the config.
+  // The exit code is deliberately not asserted: a runner without
+  // `lazygit` fails the binaries check and exits 2 for reasons that have
+  // nothing to do with this one (the 0/1/2 mapping is covered in
+  // `doctor_tests.rs`). What is asserted is the sigil, which is this
+  // check's own verdict.
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .arg("doctor")
     .assert()
-    .code(1)
-    .stdout(predicate::str::contains("no orphan branch config"))
+    .stdout(predicate::str::contains("! no orphan branch config"))
     .stdout(predicate::str::contains("feat/#2-dead"));
   assert_eq!(
     repo

@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gwm doctor` reports the config a deleted branch left behind, and
+  `--fix` drops it**
+  ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). `gwm create`
+  writes about seven `branch.<name>.gwm-*` keys per branch and nothing
+  removes them when the branch goes away, so `.git/config` only grows. That
+  is not cosmetic: libgit2 reparses the file on every `Repository::open`,
+  and `statuses()` and `branch.upstream()` each take a config snapshot that
+  duplicates every entry, so `gwm list` pays the file's size once per
+  worktree, several times over. With 8 worktrees held constant and the
+  config as the only variable, the listing goes from 45 ms at 13 lines to
+  184 ms at 1434.
+
+  The sweep matches the `branch.<name>.gwm-` **prefix** rather than a list
+  of known key names, so a key added in a later release is covered without
+  anyone having to remember. Keys git itself writes (`remote`, `merge`, …)
+  are never touched, on a live branch or a dead one.
+
+  `--fix` is opt-in because it edits `.git/config`; a plain `gwm doctor`
+  stays read-only. It works on the local config level alone, since deleting
+  through the merged view would let git resolve the key up to
+  `~/.gitconfig`. It leaves the empty `[branch "…"]` header behind, because
+  libgit2 removes keys and not sections: on a repo grafted to 1434 lines,
+  purging 869 keys brought the file to 561, not to 13.
+
 - **The mouse gwm was already capturing now does something, and two hidden
   panels get a place on the header**
   ([#624](https://github.com/kbrdn1/gwm-cli/issues/624)). `EnableMouseCapture`
@@ -78,6 +102,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inset origin and the child's own DECSET state.
 
 ### Changed
+
+- **`gwm list` scans its worktrees in parallel**
+  ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens
+  its own `Repository`, runs `statuses()` over that worktree and walks its
+  branch age; nothing in that body touches the main repo, and it is where
+  a listing's time goes. It now runs on up to `available_parallelism()`
+  workers, work-stealing off an atomic cursor, the same shape
+  `gwm exec` has used for its fan-out since #313.
+
+  Row order is unchanged and guarded: `repo.worktrees()` is not sorted and
+  the table renders what it returns, so results are written into per-index
+  slots rather than collected as they complete. Everything read off the
+  main repo stays on the calling thread, `&Repository` not being `Sync`.
+
+  Measured with hyperfine, mean of 20, 8 worktrees, config size the only
+  variable: 83 ms to 51 ms at 224 lines, 98 ms to 73 ms at 538, 184 ms to
+  118 ms at 1434. Combined with a `gwm doctor --fix` on the same repo,
+  184 ms becomes 100 ms.
+
+  This also speeds up `gwm statusline`, the daemon and every TUI refresh,
+  which share the same listing path.
 
 - **The Settings panel gets a value column, named sections and tab glyphs**
   ([#623](https://github.com/kbrdn1/gwm-cli/issues/623)). The panel carries the

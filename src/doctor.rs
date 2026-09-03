@@ -884,7 +884,7 @@ fn check_orphan_branch_config(ctx: &DoctorCtx<'_>) -> Check {
       sample.join(", ")
     ),
   )
-  .with_hint("run `gwm doctor --fix` to drop them — it edits `.git/config`, nothing else is touched")
+  .with_hint("run `gwm doctor --fix` to drop them: it edits `.git/config` and nothing else")
 }
 
 /// Check #7: the configured worktree `base` directory exists and is
