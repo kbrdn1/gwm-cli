@@ -72,6 +72,16 @@ impl ExecPicker {
 
   /// Move the highlight down one row, wrapping to the top. No-op when
   /// empty.
+  /// Point the highlight straight at `index` (issue #624 — a click lands on
+  /// an arbitrary row, not one step away). Out-of-range is ignored rather
+  /// than clamped: the caller is reporting where the user clicked, and a
+  /// click past the last profile picked nothing.
+  pub fn select_index(&mut self, index: usize) {
+    if index < self.profiles.len() {
+      self.selected = index;
+    }
+  }
+
   pub fn next(&mut self) {
     if self.profiles.is_empty() {
       return;

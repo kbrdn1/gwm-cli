@@ -10,6 +10,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The mouse gwm was already capturing now does something, and two hidden
+  panels get a place on the header**
+  ([#624](https://github.com/kbrdn1/gwm-cli/issues/624)). `EnableMouseCapture`
+  went out on the first frame and no `Event::Mouse` arm ever existed, which is
+  worse than not supporting the mouse at all: capture takes the terminal's own
+  drag-to-select away, so the cost was being paid and nothing was bought with
+  it.
+
+  Clicking now selects the worktree row under the pointer, focuses the pane it
+  lands in, picks a row in any modal listing, switches a Settings tab, or
+  closes a modal through the `✕` in its corner. The wheel scrolls — or moves
+  the selection of — whatever is **under the pointer**, which is a deliberate
+  departure from the issue's "the focused list": pointing at a pane is how a
+  pointer says which pane it means. Focus stays what `Tab` and the digits set.
+
+  The header carries `▤` and `⚙` left of the pinned version chip, opening the
+  Command Logs and Settings panels the way `3` and `4` do. They are the only
+  thing on screen saying those panels exist — until now the help overlay was
+  the only way to find out — so they are reserved ahead of the working path in
+  the row's sacrifice order.
+
+  The geometry every click resolves against is **published by the renderer**
+  as it draws, not re-derived afterwards: the layout is rebuilt from scratch
+  each frame, so a click target computed from `App` state drifts the first
+  time a rule changes, and the row-arithmetic rules here have changed twice
+  already. A surface that is not on screen publishes no zone and therefore
+  cannot be hit, which is what keeps the hit test free of any view branching.
+
+  `M` releases the mouse outright, handing the terminal's text selection back
+  until it is pressed again — and the release survives a trip through lazygit,
+  an `exec` run or a review launcher, which used to re-enable capture on the
+  way back. `Shift`+drag reaches the same selection without giving anything up
+  on the terminals that implement it, which is most of them.
+
+  The pointer reaches more than the issue listed, on feedback from using it:
+  a sidebar section's **title** opens that section full size (`Issue / PR`,
+  `Agents`, `Working Tree`, `Recent Commits` — the same modals `I`, `a`, `W`
+  and `c` open), the create and rename forms focus a field on click and step
+  the branch-type selector from its `‹` / `›`, and the confirmation modal's
+  buttons are buttons. The `✕` and the buttons both fire by handing the event
+  loop the key the user would have pressed — `Esc` and the modal keymap's
+  `activate` — so a rebind reaches the mouse and no modal grows a second copy
+  of its own teardown.
+
+  `[tui] mouse` decides whether any of this is on, defaulting to `true` and
+  editable live from the Settings panel's TUI tab. Reading the mouse and
+  letting the terminal select text are mutually exclusive — while gwm is reading, a drag belongs to gwm — so `M` switches
+  between the two for a session, `[tui] mouse = false` starts every session on
+  the other side of it, and the header carries a ` mouse off · M ` chip while
+  it is off — a mode with no sign on screen is one you get stuck in, with every
+  click doing nothing reading as a broken build rather than as a switch you
+  threw. gwm keeps
+  its side of that trade as small as it can: it asks for press tracking
+  (`1000`) only, never the drag and motion reporting (`1002` / `1003`) most
+  TUIs turn on with it, because nothing here reads a drag. `Shift`+drag is the middle
+  ground and does reach the terminal's own selection without giving the click
+  up — honoured by the terminal rather than by the application, so its setting
+  decides (Ghostty's `mouse-shift-capture`, iTerm2's "Terminal may report
+  mouse events").
+
+  The PTY overlay still drops mouse events, exactly as it did before: nothing
+  ever forwarded them to the child, so this is the status quo rather than a
+  regression. Real forwarding needs SGR re-encoding against the overlay's
+  inset origin and the child's own DECSET state.
+
 ### Changed
 
 - **The Settings panel gets a value column, named sections and tab glyphs**

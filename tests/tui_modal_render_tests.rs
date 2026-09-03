@@ -4197,7 +4197,18 @@ fn the_keybindings_overlay_breathes_between_its_sections() {
     "the body must have rendered its sections: {rule_at:?}"
   );
 
-  for i in &rule_at {
+  // The last visible body row is exempt: what is under a rule sitting on the
+  // viewport's edge is the next scroll position, not a blank. The overlay
+  // scrolls (`j` / `k`), and where its edge falls is a function of how many
+  // rows the keymap has — #624 added one and moved it onto a rule. What the
+  // guard is about is a rule followed by a blank *inside* the body.
+  // The scrollbar spans exactly the scrollable body, so its last row is the
+  // body's last row — the hint line and the padding under it carry no thumb.
+  let last_body = rows
+    .iter()
+    .rposition(|r| r.contains('\u{2588}') || r.contains('\u{2551}'))
+    .unwrap_or(rows.len());
+  for i in rule_at.iter().filter(|i| **i < last_body) {
     assert!(
       blank(&rows[i - 1]),
       "row {} above the rule {:?} must be blank:\n{}",

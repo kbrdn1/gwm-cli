@@ -107,6 +107,7 @@ impl SettingsTab {
         SettingField::Layout,
         SettingField::DimUnfocused,
         SettingField::StatusOneLine,
+        SettingField::Mouse,
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
         SettingField::NoteVim,
@@ -355,6 +356,8 @@ pub enum SettingField {
   Layout,
   /// `tui.dim_unfocused` — dim the pane without focus (issue #545).
   DimUnfocused,
+  /// `[tui] mouse` — whether the TUI reads mouse events (issue #624).
+  Mouse,
   /// `tui.status_one_line` — fold the sidebar Status block (issue #547).
   StatusOneLine,
   /// `tui.note_vim` — the note editor's vim normal mode (issue #557).
@@ -396,6 +399,7 @@ impl SettingField {
       SettingField::SidebarPosition => "sidebar position",
       SettingField::Layout => "layout",
       SettingField::DimUnfocused => "dim unfocused pane",
+      SettingField::Mouse => "mouse",
       SettingField::StatusOneLine => "status on one line",
       SettingField::NoteVim => "note vim mode",
       SettingField::MuxOpenIn => "mux opens in",
@@ -421,7 +425,9 @@ impl SettingField {
   /// [`SettingsTab::fields`] follows these runs.
   pub fn section(self) -> Option<&'static str> {
     Some(match self {
-      SettingField::Layout | SettingField::DimUnfocused | SettingField::StatusOneLine => "Appearance",
+      SettingField::Layout | SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::Mouse => {
+        "Appearance"
+      }
       SettingField::SidebarPosition | SettingField::SidebarOrientation => "Sidebar",
       SettingField::NoteVim | SettingField::Clipboard => "Editing",
       SettingField::OpenMode | SettingField::OpenShellCmd | SettingField::OpenEditorCmd => "Open",
@@ -445,6 +451,7 @@ impl SettingField {
       SettingField::SidebarPosition => "tui.sidebar_position",
       SettingField::Layout => "tui.layout",
       SettingField::DimUnfocused => "tui.dim_unfocused",
+      SettingField::Mouse => "tui.mouse",
       SettingField::StatusOneLine => "tui.status_one_line",
       SettingField::NoteVim => "tui.note_vim",
       SettingField::MuxOpenIn => "tui.mux_open_in",
@@ -473,7 +480,9 @@ impl SettingField {
       | SettingField::MuxPaneDirection
       | SettingField::TerminalBrowserOpenIn
       | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => FieldKind::Bool,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim | SettingField::Mouse => {
+        FieldKind::Bool
+      }
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
@@ -499,7 +508,9 @@ impl SettingField {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
       SettingField::Layout => LAYOUT_CHOICES,
-      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim => BOOL_CHOICES,
+      SettingField::DimUnfocused | SettingField::StatusOneLine | SettingField::NoteVim | SettingField::Mouse => {
+        BOOL_CHOICES
+      }
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::MuxOpenIn => MUX_OPEN_IN_CHOICES,
       SettingField::MuxPaneDirection => MUX_PANE_DIRECTION_CHOICES,
@@ -520,6 +531,7 @@ impl SettingField {
       SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
       SettingField::Layout => cfg.tui.layout.label().into(),
       SettingField::DimUnfocused => cfg.tui.dim_unfocused.to_string(),
+      SettingField::Mouse => cfg.tui.mouse.to_string(),
       SettingField::StatusOneLine => cfg.tui.status_one_line.to_string(),
       SettingField::NoteVim => cfg.tui.note_vim.to_string(),
       SettingField::MuxOpenIn => cfg.tui.mux_open_in.label().into(),
@@ -637,7 +649,10 @@ impl ConfigPanel {
 
   /// Number of selectable rows in the current tab: the static fields, or the
   /// dynamic key rows on the Keys tab.
-  fn selectable_count(&self) -> usize {
+  /// How many rows the current tab can put the cursor on. Public since #624
+  /// so the render-level guard can walk every selection a tab has rather
+  /// than a few chosen indices.
+  pub fn selectable_count(&self) -> usize {
     if self.tab == SettingsTab::Keys {
       self.key_rows.len()
     } else {
@@ -647,6 +662,20 @@ impl ConfigPanel {
 
   /// Move to the next tab, wrapping. Resets the field selection and any
   /// in-progress edit / capture so the new tab starts clean.
+  /// Switch straight to `tab` (issue #624 — a click lands on any tab, not
+  /// the next one). Same reset as [`Self::next_tab`], and a no-op on the tab
+  /// already showing so a stray click cannot throw away an in-progress edit.
+  pub fn set_tab(&mut self, tab: SettingsTab) {
+    if self.tab == tab {
+      return;
+    }
+    self.tab = tab;
+    self.selected = 0;
+    self.editing = None;
+    self.capture = None;
+    self.scroll = 0;
+  }
+
   pub fn next_tab(&mut self) {
     let idx = SettingsTab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
     self.tab = SettingsTab::ALL[(idx + 1) % SettingsTab::ALL.len()];
@@ -670,6 +699,19 @@ impl ConfigPanel {
   /// Flip the edit target layer (project ↔ global).
   pub fn toggle_layer(&mut self) {
     self.layer = self.layer.toggled();
+  }
+
+  /// Point the selection straight at `index` (issue #624 — a click lands on
+  /// an arbitrary row, not one step away). Ignored while an edit or a key
+  /// capture is in flight, the guard [`Self::select_prev`] carries: the row
+  /// under the cursor is the one being edited.
+  pub fn select_index(&mut self, index: usize) {
+    if self.editing.is_some() || self.capture.is_some() {
+      return;
+    }
+    if index < self.selectable_count() {
+      self.selected = index;
+    }
   }
 
   /// Select the previous field / key row in the current tab (no-op while

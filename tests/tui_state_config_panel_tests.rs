@@ -167,6 +167,7 @@ fn selected_field_follows_the_tab() {
     (SettingField::Layout, "Appearance"),
     (SettingField::DimUnfocused, "Appearance"),
     (SettingField::StatusOneLine, "Appearance"),
+    (SettingField::Mouse, "Appearance"),
     (SettingField::SidebarPosition, "Sidebar"),
     (SettingField::SidebarOrientation, "Sidebar"),
     (SettingField::NoteVim, "Editing"),
