@@ -251,13 +251,6 @@ pub const SETTINGS_ICON: &str = "\u{2699}";
 /// strip already use.
 const AFFORDANCE_W: usize = 2;
 
-/// The key the mouse-released chip names. Filled by [`draw_header`] from the
-/// live keymap so a rebound `toggle_mouse` shows through; the builder stays
-/// pure and takes it as a plain string through a thread-local-free route —
-/// the chip is only ever built with this constant substituted, so it lives
-/// beside the arithmetic that sizes it.
-const MOUSE_RELEASE_HINT: &str = "M";
-
 /// Cells the affordance group costs the row: a leading gap, both affordances,
 /// and a gap between them.
 const AFFORDANCES_W: usize = 1 + AFFORDANCE_W + 1 + AFFORDANCE_W;
@@ -320,10 +313,18 @@ pub fn header_line(
   repo_name: &str,
   workdir_display: &str,
   picker_mode: bool,
-  mouse_released: bool,
+  // `release_key` is the key bound to `toggle_mouse`, or `None` when the
+  // mouse is captured and the chip is not drawn. Resolved by the caller from
+  // the live keymap rather than hard-coded: a `[tui.keys] toggle_mouse`
+  // override has to show through, or the chip names a key that no longer
+  // brings the mouse back. `Some("")` — the verb unbound — still draws the
+  // chip, because the mode is real either way.
+  release_key: Option<&str>,
   width: usize,
   theme: &Theme,
 ) -> Header {
+  let mouse_released = release_key.is_some();
+  let release_key = release_key.unwrap_or_default();
   // A zero-width row can hold nothing — return an empty line rather than let
   // `trunc` floor a 1-column `…` into existence.
   if width == 0 {
@@ -405,9 +406,20 @@ pub fn header_line(
   // like a broken build rather than a switch they threw. The status bar says
   // it once, at the moment of the toggle, and the next message overwrites it.
   if mouse_released {
-    let chip = format!(" mouse off · {} ", MOUSE_RELEASE_HINT);
+    let chip = format!(" mouse off · {} ", release_key);
     let need = 1 + cells(&chip);
-    if used + need + version_w < width {
+    // `aff_w` is reserved further down but has to be counted HERE: at a width
+    // where the chip and the affordances each fit alone but not together
+    // (~38-42 columns at this version string), leaving it out let the spans
+    // run past the row, clipped the pinned version chip, and moved the
+    // affordance ranges — which are measured from the right edge — off the
+    // glyphs they name.
+    let aff_reserve = if used + AFFORDANCES_W + version_w <= width {
+      AFFORDANCES_W
+    } else {
+      0
+    };
+    if used + need + aff_reserve + version_w < width {
       spans.push(Span::raw(" "));
       spans.push(Span::styled(chip, picker_style));
       used += need;
@@ -588,13 +600,16 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, map: &mut MouseMap) {
   // Borderless single row (#185): the builder gets the full area width and the
   // line renders flush, mirroring the footer. No `Wrap` — `header_line`
   // guarantees one visual line clipped to `width`.
+  // Resolved from the live keymap, not hard-coded: a `[tui.keys]
+  // toggle_mouse` override has to reach the chip that names it.
+  let release_key = (!app.mouse_capture).then(|| app.keymap.keys_display(Action::ToggleMouse));
   let header = header_line(
     // The workspace label, which is what the user is looking at; `repo_name` is
     // the naming name and can be the same string in a workspace of one (#480).
     &app.display_repo_name,
     &workdir,
     app.picker_mode,
-    !app.mouse_capture,
+    release_key.as_deref(),
     area.width as usize,
     &app.theme,
   );
@@ -8021,8 +8036,13 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   // No footer band: every row inside is the child process's own screen,
   // and a ground painted under its last line would read as a footer that
   // is not one.
+  // No close button either (issue #624): the mouse belongs to the child here,
+  // so the event loop drops the event before the hit test and a painted `✕`
+  // would advertise a way out that does not work. `Esc` is the way out, and
+  // the footer hint says so.
   let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme)
     .without_footer()
+    .without_close()
     .render(f, map, area, title, None);
 
   if let Some(pty) = app.pty_overlay.as_ref() {
@@ -8240,6 +8260,10 @@ pub struct ModalFrame {
   footer_fill: Color,
   /// `false` on the surfaces whose last row is content, not a footer.
   footer: bool,
+  /// `false` on the PTY overlay (issue #624): the mouse belongs to the child
+  /// there, so the event loop drops the event before the hit test runs and a
+  /// painted `✕` would be a button that can never be pressed.
+  close: bool,
 }
 
 impl ModalFrame {
@@ -8257,7 +8281,13 @@ impl ModalFrame {
       header: compact_header_style(true, theme),
       footer_fill: theme.section_bg,
       footer: true,
+      close: true,
     }
+  }
+
+  /// Drop the close button: this modal's clicks do not reach the hit test.
+  pub fn without_close(self) -> Self {
+    Self { close: false, ..self }
   }
 
   /// Drop the footer band: this modal's last row carries content, and a
@@ -8401,8 +8431,11 @@ impl ModalFrame {
   /// forgiving half of a small target.
   fn close_button(&self, f: &mut Frame, map: &mut MouseMap, area: Rect, style: Style) {
     // A modal narrow enough that the button would collide with its own
-    // corner goes without: an unreachable title is worse than no button.
-    if area.width < CLOSE_BUTTON_W + 4 || area.height == 0 {
+    // corner goes without: an unreachable title is worse than no button. Nor
+    // is one drawn where a click cannot reach it (see [`Self::close`]) — a
+    // dead button is worse than none, because it says the modal closes that
+    // way and it does not.
+    if !self.close || area.width < CLOSE_BUTTON_W + 4 || area.height == 0 {
       return;
     }
     let rect = Rect {

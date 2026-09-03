@@ -243,24 +243,34 @@ impl MouseMap {
   ///
   /// Walks in reverse publication order: the renderer draws back to front, so
   /// the last zone published is the one the user can actually see at that
-  /// cell.
+  /// cell. A row strip whose cell carries no item does not end the walk — the
+  /// blank rows under a short listing belong to the pane beneath them.
   pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
     for (rect, zone) in self.zones.iter().rev() {
       if !contains(*rect, col, row) {
         continue;
       }
-      return match zone {
-        Zone::Pane(p) => Some(Hit::Pane(*p)),
-        Zone::Spot(s) => Some(Hit::Spot(*s)),
+      match zone {
+        Zone::Pane(p) => return Some(Hit::Pane(*p)),
+        Zone::Spot(s) => return Some(Hit::Spot(*s)),
         Zone::Rows { list, offset, len, map } => {
           let line = offset + (row - rect.y) as usize;
           let index = match map {
-            Some(m) => (*m.get(line)?)?,
-            None => line,
+            // A body line that is not an item — a section rule, a blank
+            // spacer, a row past the last one — resolves to nothing HERE and
+            // the walk carries on to what is under it. Returning `None` from
+            // the whole test instead was the bug: the blank rows below the
+            // last worktree, and the rules between Settings sections, sit on
+            // top of a pane zone, so a click there stopped focusing the pane
+            // and the wheel stopped scrolling it.
+            Some(m) => m.get(line).copied().flatten(),
+            None => Some(line),
           };
-          (index < *len).then_some(Hit::Row { list: *list, index })
+          if let Some(index) = index.filter(|i| *i < *len) {
+            return Some(Hit::Row { list: *list, index });
+          }
         }
-      };
+      }
     }
     None
   }

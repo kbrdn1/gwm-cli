@@ -8,6 +8,7 @@ mod common;
 
 use common::init_repo;
 use gwm::tui::keymap::Action;
+use gwm::tui::modal_keymap::ModalAction;
 use gwm::tui::mouse::{MouseKind, PaneId, RowList, SidebarPane, Spot};
 use gwm::tui::{App, ConfirmButton, LinkTarget, MouseOutcome, SettingsTab, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
@@ -92,16 +93,21 @@ fn a_click_drops_the_sidebar_scroll_and_the_cached_preview() {
   assert!(app.sidebar.cache.is_none(), "the cached preview was not invalidated");
 }
 
+/// The blank rows below the last worktree select nothing — but they are still
+/// the worktrees pane, which is what `draw_list` publishes under the strip, so
+/// a click there focuses it rather than doing nothing at all.
 #[test]
-fn a_click_below_the_last_worktree_selects_nothing() {
+fn a_click_below_the_last_worktree_focuses_the_pane_without_moving_the_cursor() {
   let (_d, mut app) = app_with_rows(3);
-  // Strip published for three rows in a taller area: `draw_list` bounds the
-  // strip by the item count, so y=6 is past it.
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
   app.mouse = Default::default();
+  app.mouse.push_pane(rect(0, 1, 80, 20), PaneId::Worktrees);
   app.mouse.push_rows(rect(0, 3, 80, 10), RowList::Worktrees, 0, 3);
 
-  assert_eq!(app.handle_mouse(MouseKind::Click, 10, 9), MouseOutcome::Ignored);
-  assert_eq!(app.list_state.selected(), Some(0));
+  assert_eq!(app.handle_mouse(MouseKind::Click, 10, 9), MouseOutcome::Handled);
+  assert_eq!(app.list_state.selected(), Some(0), "no row was under the pointer");
+  assert!(!app.sidebar.focused, "but the pane under it was");
 }
 
 /// A scrolled table. `TableState::offset()` is what the renderer publishes,
@@ -215,10 +221,11 @@ fn the_close_button_asks_the_event_loop_for_the_escape_path() {
   let (_d, mut app) = app_with_rows(2);
   app.mouse.push_spot(rect(76, 4, 3, 1), Spot::CloseModal);
 
+  app.enter_command_logs();
   assert_eq!(
     app.handle_mouse(MouseKind::Click, 77, 4),
-    MouseOutcome::CloseModal,
-    "the button must not close the modal itself — Esc already owns the teardown"
+    MouseOutcome::ModalVerb(ModalAction::CommandLogsClose),
+    "the button carries the open modal's own close VERB, never a key"
   );
 }
 
@@ -451,13 +458,14 @@ fn clicking_a_confirm_button_focuses_it_and_asks_for_the_activate_key() {
 
   assert_eq!(
     app.handle_mouse(MouseKind::Click, 22, 10),
-    MouseOutcome::ConfirmButton { confirm: true }
+    MouseOutcome::ModalVerb(ModalAction::ConfirmActivate)
   );
   assert_eq!(app.confirm.focused_button(), ConfirmButton::Confirm);
 
   assert_eq!(
     app.handle_mouse(MouseKind::Click, 34, 10),
-    MouseOutcome::ConfirmButton { confirm: false }
+    MouseOutcome::ModalVerb(ModalAction::ConfirmActivate),
+    "both buttons fire `activate`; which one it acts on is the focus moved above"
   );
   assert_eq!(app.confirm.focused_button(), ConfirmButton::Cancel);
 }
@@ -478,4 +486,56 @@ fn the_tui_mouse_knob_sets_the_state_the_session_opens_in() {
   let (dir2, _) = init_repo();
   let on = App::new_at_layered(Some(dir2.path()), None).unwrap();
   assert!(on.mouse_capture, "and the default is to read the mouse");
+}
+
+/// The hole the review found: `[tui.keys.modal.confirm] confirm = ["Esc"]` is
+/// a legal rebind, and a `✕` that synthesised `Esc` would resolve as
+/// **confirm** — running the delete the user clicked to dismiss. Carrying the
+/// verb makes that unrepresentable: the button can only ever fire the verb it
+/// belongs to.
+#[test]
+fn the_close_button_carries_a_verb_so_a_rebind_cannot_turn_it_into_confirm() {
+  let (_d, mut app) = app_with_rows(2);
+  app.mouse.push_spot(rect(76, 4, 3, 1), Spot::CloseModal);
+
+  for (open, expected) in [
+    (View::CommandLogs, ModalAction::CommandLogsClose),
+    (View::Config, ModalAction::ConfigClose),
+    (View::Help, ModalAction::HelpClose),
+    (View::Confirm, ModalAction::ConfirmCancel),
+    (View::Create, ModalAction::CreateCancel),
+  ] {
+    app.view = open;
+    assert_eq!(
+      app.handle_mouse(MouseKind::Click, 77, 4),
+      MouseOutcome::ModalVerb(expected),
+      "{open:?} must close through its own verb"
+    );
+  }
+
+  // The PTY overlay's `Esc` kills the child and the mouse belongs to that
+  // child, so the frame draws no button and the verb table says so.
+  app.view = View::Pty;
+  assert_eq!(app.handle_mouse(MouseKind::Click, 77, 4), MouseOutcome::Handled);
+}
+
+/// A Settings edit has to move the terminal's state, not just the file. The
+/// escape sequence is the event loop's, which reconciles against this flag —
+/// so what has to hold here is that the flag moved.
+#[test]
+fn editing_the_mouse_setting_moves_the_live_state() {
+  let (dir, _) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[worktree]\nbase = \"/tmp/wt\"\n").unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  assert!(app.mouse_capture);
+
+  app.apply_setting(gwm::tui::SettingField::Mouse, "false");
+  assert!(
+    !app.mouse_capture,
+    "the panel wrote the file but left the session captured: {}",
+    app.status
+  );
+
+  app.apply_setting(gwm::tui::SettingField::Mouse, "true");
+  assert!(app.mouse_capture, "and back: {}", app.status);
 }

@@ -142,12 +142,16 @@ pub enum MouseOutcome {
   /// Run this action through the normal dispatcher, exactly as if its key
   /// had been pressed.
   Action(Action),
-  /// Close the modal that is open — routed through the `Esc` path so the
-  /// button and the key cannot drift.
-  CloseModal,
-  /// A confirmation button was clicked: run the `y` (`confirm`) or `n` path,
-  /// which the event loop owns for the same reason it owns `Esc`.
-  ConfirmButton { confirm: bool },
+  /// Fire this modal verb, as if the key bound to it had been pressed.
+  ///
+  /// Never a hard-coded key. The first cut synthesised `Esc` for the `✕` and
+  /// `Enter` for the confirmation buttons, which is a hole rather than a
+  /// shortcut: `[tui.keys.modal.confirm] confirm = ["Esc"]` is a legal
+  /// rebind, and it makes a click on `✕` resolve as **confirm** — deleting a
+  /// worktree the user was dismissing. The verb is carried instead, and the
+  /// event loop asks the modal keymap which key is bound to *it*, so the
+  /// resolution can only ever land on the verb that was clicked.
+  ModalVerb(ModalAction),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -2506,6 +2510,44 @@ impl App {
     }
   }
 
+  /// The `close` verb of whichever modal is open (issue #624).
+  ///
+  /// Exhaustive over [`View`] rather than a `_` arm: a view added later has
+  /// to answer whether its `✕` closes it, and the compiler is what asks.
+  fn close_verb(&self) -> Option<ModalAction> {
+    Some(match self.view {
+      View::Help => ModalAction::HelpClose,
+      View::Create => ModalAction::CreateCancel,
+      // The rename modal reuses the create form, and its keys with it.
+      View::Edit => ModalAction::CreateCancel,
+      View::Confirm => ModalAction::ConfirmCancel,
+      View::Report => ModalAction::ReportClose,
+      View::OpenMenu => ModalAction::OpenMenuClose,
+      View::LinkPrompt => match self.link_prompt_stage() {
+        LinkPromptStage::ChooseTarget => ModalAction::LinkChooseCancel,
+        LinkPromptStage::InputNumber => ModalAction::LinkInputCancel,
+      },
+      View::CommandPalette => ModalAction::CommandPaletteClose,
+      View::CommandLogs => ModalAction::CommandLogsClose,
+      View::WorkingTree => ModalAction::WorkingTreeClose,
+      View::Commits => ModalAction::CommitsClose,
+      View::Config => ModalAction::ConfigClose,
+      View::ExecPicker => ModalAction::ExecPickerCancel,
+      View::CleanReport => ModalAction::CleanCancel,
+      View::Note => ModalAction::NoteClose,
+      View::DetailOverlay => match self.detail_overlay.kind {
+        DetailKind::CiChecks => ModalAction::CiChecksClose,
+        DetailKind::RichIssue | DetailKind::RichPr => ModalAction::RichViewClose,
+        DetailKind::Agents => ModalAction::DetailClose,
+      },
+      // The PTY overlay's `Esc` is hard-coded (it kills the child) and the
+      // mouse belongs to that child, so the frame draws no button there.
+      View::Pty => return None,
+      // Not a modal.
+      View::List => return None,
+    })
+  }
+
   /// Flip mouse reporting and say so on the status bar.
   ///
   /// Pure: the escape sequence is the event loop's, which is the only place
@@ -2530,7 +2572,14 @@ impl App {
       // dispatcher, one set of side effects.
       Hit::Spot(Spot::CommandLogs) => MouseOutcome::Action(Action::CommandLogs),
       Hit::Spot(Spot::Settings) => MouseOutcome::Action(Action::ConfigPanel),
-      Hit::Spot(Spot::CloseModal) => MouseOutcome::CloseModal,
+      Hit::Spot(Spot::CloseModal) => match self.close_verb() {
+        Some(verb) => MouseOutcome::ModalVerb(verb),
+        // A modal whose close verb is unbound has no close to fire; the
+        // button is not drawn as an exception, because `[tui.keys]`
+        // validation lets that state exist and a silent no-op beats
+        // reaching for a key that now means something else.
+        None => MouseOutcome::Handled,
+      },
       // Through the form's own steppers, which own the wrap.
       Hit::Spot(Spot::TypeChevron { forward }) => {
         let len = self.branch_types.len();
@@ -2551,7 +2600,12 @@ impl App {
         } else {
           self.confirm.focus_cancel();
         }
-        MouseOutcome::ConfirmButton { confirm }
+        // `activate` acts on the focus this just moved. No `Enter` fallback:
+        // an override that rebinds `confirm = ["Enter"]` unbinds `activate`
+        // from it, and firing `Enter` anyway would resolve as **confirm**,
+        // ignoring the focus and running the destructive path on a click
+        // meant for Cancel.
+        MouseOutcome::ModalVerb(ModalAction::ConfirmActivate)
       }
       Hit::Spot(Spot::ConfigTab(tab)) => {
         self.config_panel.set_tab(tab);
@@ -5595,6 +5649,14 @@ impl App {
       Err(e) => self.status = format!("theme: {}", e),
     }
     self.apply_sidebar_config();
+    // `[tui] mouse` is state the terminal holds, not just a value the render
+    // reads, so a Settings edit has to move it (issue #624). Unconditional
+    // rather than gated on the field: every other field leaves the value
+    // alone, so this is a no-op for them, and a gate is one more place to
+    // forget. The escape sequence is the event loop's — it reconciles
+    // `mouse_capture` against what it last put on the wire, which is also
+    // what makes `M` and this path the same mechanism.
+    self.mouse_capture = self.config.tui.mouse;
     // The sidebar payload is *built* from the config and the theme, not
     // merely styled by them — `status_one_line` picks its shape (#547) and
     // the theme colours every span in it. Both live in a cache keyed by

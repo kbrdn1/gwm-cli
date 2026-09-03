@@ -311,7 +311,18 @@ fn confirm_fire(app: &mut App) {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) -> Result<Option<PathBuf>> {
+  // What the terminal was last told about mouse reporting (issue #624).
+  // `enter_terminal` already sent the opening state; from here the loop
+  // reconciles `app.mouse_capture` against this on every tick, so every way
+  // the flag can move — `M`, a `[tui] mouse` edit in the Settings panel, and
+  // whatever comes next — reaches the terminal through one place rather than
+  // each remembering to send the sequence itself.
+  let mut mouse_on_wire = app.mouse_capture;
   loop {
+    if app.mouse_capture != mouse_on_wire {
+      set_mouse_capture(terminal, app.mouse_capture)?;
+      mouse_on_wire = app.mouse_capture;
+    }
     let now = Instant::now();
     // Generic off-thread tasks (issue #231; GitHub fetch folded in by #255):
     // apply any worker results that landed since the last tick — the
@@ -1095,19 +1106,19 @@ fn handle_mouse_event(
       run_action(terminal, app, action)?;
       Ok(None)
     }
-    MouseOutcome::CloseModal => Ok(Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
-    // A button click is the `activate` verb, resolved through the modal
-    // keymap rather than hard-coded to `Enter`: `[tui.keys.modal.confirm]`
-    // can rebind it, and a button that ignored the rebind would be a second
-    // implementation of the same decision. `App` already moved the focus, so
-    // the key acts on the button that was clicked.
-    MouseOutcome::ConfirmButton { .. } => {
-      let stroke = app
+    // A clicked control fires its VERB, and the key comes from whatever the
+    // modal keymap has bound to that verb — never a hard-coded `Esc` or
+    // `Enter`. `[tui.keys.modal.confirm] confirm = ["Esc"]` is a legal
+    // rebind, and a synthesised `Esc` would then resolve as **confirm**:
+    // clicking `✕` to dismiss a delete would run it. Resolving from the verb
+    // can only ever land on the verb, and an unbound verb fires nothing
+    // rather than falling back to a key that now means something else.
+    MouseOutcome::ModalVerb(verb) => Ok(
+      app
         .modal_keymap
-        .primary_stroke(ModalAction::ConfirmActivate)
-        .unwrap_or_else(|| crate::tui::keymap::KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE));
-      Ok(Some(KeyEvent::new(stroke.code, stroke.modifiers)))
-    }
+        .primary_stroke(verb)
+        .map(|stroke| KeyEvent::new(stroke.code, stroke.modifiers)),
+    ),
   }
 }
 
@@ -1146,12 +1157,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::FocusSwap => app.toggle_focus(),
     Action::FocusWorktrees => app.focus_worktrees(),
     Action::FocusStatus => app.focus_status(),
-    // #624: the flag flips on `App`, the escape sequence goes out here — the
-    // event loop is the half that holds the terminal.
-    Action::ToggleMouse => {
-      app.toggle_mouse_capture();
-      set_mouse_capture(terminal, app.mouse_capture)?;
-    }
+    // #624: only the flag flips here. The loop reconciles it against what it
+    // last put on the wire, so `M` and a `[tui] mouse` edit from the Settings
+    // panel go out through one place instead of each remembering to.
+    Action::ToggleMouse => app.toggle_mouse_capture(),
     Action::Filter => app.enter_filter(),
     // Issue #231: the user-initiated refresh runs off-thread so a large
     // repo / slow filesystem no longer freezes the TUI. A failed re-list

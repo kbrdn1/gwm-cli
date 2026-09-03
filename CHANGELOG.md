@@ -66,9 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threw. gwm keeps
   its side of that trade as small as it can: it asks for press tracking
   (`1000`) only, never the drag and motion reporting (`1002` / `1003`) most
-  TUIs turn on with it, because nothing here reads a drag. `Shift`+drag is
-  honoured by the terminal rather than by the application, and not every one
-  honours it: measured on Ghostty 1.3.1 under herdr, it does not.
+  TUIs turn on with it, because nothing here reads a drag. `Shift`+drag is the middle
+  ground and does reach the terminal's own selection without giving the click
+  up — honoured by the terminal rather than by the application, so its setting
+  decides (Ghostty's `mouse-shift-capture`, iTerm2's "Terminal may report
+  mouse events").
 
   The PTY overlay still drops mouse events, exactly as it did before: nothing
   ever forwarded them to the child, so this is the status quo rather than a

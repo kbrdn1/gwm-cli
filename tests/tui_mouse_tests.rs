@@ -206,6 +206,42 @@ fn a_zero_area_zone_swallows_nothing() {
   );
 }
 
+/// The walk does not stop at a row strip that resolves nothing. Blank rows
+/// under a short listing, and the section rules inside Settings, sit on top of
+/// a pane zone — so a click there has to reach the pane and focus it rather
+/// than fall on the floor.
+#[test]
+fn a_row_strip_that_resolves_nothing_lets_the_zone_under_it_through() {
+  let mut map = MouseMap::new();
+  map.push_pane(rect(0, 1, 80, 20), PaneId::Worktrees);
+  // Three worktrees drawn in a ten-row strip.
+  map.push_rows(rect(0, 3, 80, 10), RowList::Worktrees, 0, 3);
+
+  assert_eq!(
+    map.hit(10, 5),
+    Some(Hit::Row {
+      list: RowList::Worktrees,
+      index: 2
+    }),
+    "a row still wins where there is one"
+  );
+  assert_eq!(
+    map.hit(10, 8),
+    Some(Hit::Pane(PaneId::Worktrees)),
+    "and a blank row below the last worktree belongs to the pane"
+  );
+
+  // Same for a mapped strip's non-item lines.
+  let mut map = MouseMap::new();
+  map.push_pane(rect(0, 1, 80, 20), PaneId::Modal);
+  map.push_mapped_rows(rect(0, 4, 60, 3), RowList::Config, 0, 2, vec![None, Some(0), Some(1)]);
+  assert_eq!(
+    map.hit(10, 4),
+    Some(Hit::Pane(PaneId::Modal)),
+    "a section rule belongs to the modal body under it"
+  );
+}
+
 #[test]
 fn a_cell_outside_every_zone_hits_nothing() {
   let mut map = MouseMap::new();
