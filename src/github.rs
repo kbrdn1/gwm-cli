@@ -19,6 +19,7 @@ use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::BranchParser;
 use git2::Repository;
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::sync::LazyLock;
 
@@ -802,6 +803,108 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
     Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
     Err(e) => Err(GwmError::Git(e)),
   }
+}
+
+// ---- Orphaned branch config (issue #633) ---------------------------------
+
+/// Every key gwm persists lives at `branch.<name>.gwm-<something>`, so the
+/// orphan sweep matches on that **prefix** rather than on the constants
+/// above. A key added later is covered without anyone having to remember,
+/// and `gwm-created-at` — which lives in [`crate::worktree`], not here — is
+/// covered too. Passed to libgit2's config iterator, which compiles it as a
+/// POSIX regex over the full key name (`git_config_iterator_glob_new`).
+const GWM_BRANCH_KEY_GLOB: &str = r"^branch\..*\.gwm-";
+
+/// `branch.<name>.<leaf>` split into `(<name>, <leaf>)`.
+///
+/// Splits on the **last** dot, never the first: a branch name legitimately
+/// carries dots (`release/1.2.x`), and splitting on the first would hand
+/// back `release/1` as the branch and spare nothing.
+fn split_branch_key(key: &str) -> Option<(&str, &str)> {
+  key.strip_prefix("branch.")?.rsplit_once('.')
+}
+
+/// The local config level alone. Deletions must never run against the
+/// merged view: `git_config_delete_entry` there reaches into whatever file
+/// holds the highest-priority copy of the key, which can be `~/.gitconfig`.
+fn local_config(repo: &Repository) -> Result<git2::Config> {
+  Ok(repo.config()?.open_level(git2::ConfigLevel::Local)?)
+}
+
+/// `branch.<name>.gwm-*` keys whose branch no longer exists, grouped by
+/// branch. Key sets are deduplicated: a multi-valued key
+/// ([`AGENT_PIN_CONFIG_KEY`]) yields one iterator entry per value.
+fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTreeSet<String>>> {
+  let mut live: BTreeSet<String> = BTreeSet::new();
+  for entry in repo.branches(Some(git2::BranchType::Local))? {
+    let (branch, _) = entry?;
+    if let Some(name) = branch.name()? {
+      live.insert(name.to_string());
+    }
+  }
+
+  let cfg = local_config(repo)?;
+  let mut grouped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+  cfg.entries(Some(GWM_BRANCH_KEY_GLOB))?.for_each(|entry| {
+    // A non-UTF-8 key can't name a branch we could match, so skip it
+    // rather than guess — and never delete what we could not read.
+    let Ok(name) = entry.name() else { return };
+    let Some((branch, _leaf)) = split_branch_key(name) else {
+      return;
+    };
+    if live.contains(branch) {
+      return;
+    }
+    grouped.entry(branch.to_string()).or_default().insert(name.to_string());
+  })?;
+  Ok(grouped)
+}
+
+/// Branches that are gone but still carry `gwm-*` config, with how many
+/// distinct keys each left behind. Sorted by branch name.
+///
+/// Issue #633: `gwm create` writes ~7 of these per branch, nothing removes
+/// them when the branch dies, and "never delete the source branch" means
+/// none ever disappear on their own — so `.git/config` only grows. The cost
+/// is not the lookup (libgit2 caches the parsed config on the `Repository`),
+/// it is that both `Repository::open` and `git_config_snapshot` are linear
+/// in the file's size, and `gwm list` pays one open plus a snapshot per
+/// worktree. Measured on this repo: 121 ms at 13 lines, 309 ms at 1434.
+pub fn orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
+  Ok(
+    collect_orphan_branch_keys(repo)?
+      .into_iter()
+      .map(|(branch, keys)| (branch, keys.len()))
+      .collect(),
+  )
+}
+
+/// Drop the keys [`orphan_branch_config`] reports, from the local config
+/// level only. Returns what was purged, same shape as the report.
+///
+/// Removal goes through `remove_multivar` for every key, not `remove`:
+/// [`AGENT_PIN_CONFIG_KEY`] is multi-valued and `git_config_delete_entry`
+/// refuses those, and `.*` matches every value of a single-valued key just
+/// as well. A key that vanished between the read and the write is not an
+/// error — it is the outcome we wanted.
+pub fn purge_orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
+  let orphans = collect_orphan_branch_keys(repo)?;
+  let mut cfg = local_config(repo)?;
+  let mut purged = Vec::with_capacity(orphans.len());
+  for (branch, keys) in orphans {
+    let mut removed = 0usize;
+    for key in &keys {
+      match cfg.remove_multivar(key, ".*") {
+        Ok(()) => removed += 1,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+        Err(e) => return Err(GwmError::Git(e)),
+      }
+    }
+    if removed > 0 {
+      purged.push((branch, removed));
+    }
+  }
+  Ok(purged)
 }
 
 // ---- Issue / PR status ---------------------------------------------------

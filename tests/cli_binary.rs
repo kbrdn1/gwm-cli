@@ -8260,3 +8260,64 @@ fn note_show_resolves_the_main_checkout_by_name() {
     .success()
     .stdout(predicate::eq("the main checkout's note\n"));
 }
+
+/// Issue #633: `gwm doctor --fix` drops `branch.<name>.gwm-*` keys whose
+/// branch is gone, and nothing else. Sequenced in one test because the
+/// interesting property is the transition — warn, repair, stay green — and
+/// splitting it would let a `--fix` that purges nothing pass the first half.
+#[test]
+fn doctor_fix_purges_orphan_branch_config_and_spares_the_rest() {
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#1-live", &head, false).unwrap();
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-issue", "1").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-issue", "2").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-pr", "22").unwrap();
+  cfg.set_str("branch.feat/#2-dead.remote", "origin").unwrap();
+
+  // Plain `doctor` reports the orphans (exit 1 = at least one warning)
+  // and must not touch the config.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("doctor")
+    .assert()
+    .code(1)
+    .stdout(predicate::str::contains("no orphan branch config"))
+    .stdout(predicate::str::contains("feat/#2-dead"));
+  assert_eq!(
+    repo
+      .config()
+      .unwrap()
+      .get_string("branch.feat/#2-dead.gwm-issue")
+      .unwrap(),
+    "2",
+    "a plain `gwm doctor` must never edit .git/config"
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor", "--fix"])
+    .assert()
+    .stdout(predicate::str::contains(
+      "purged 2 orphan branch config key(s) from 1 deleted branch(es)",
+    ));
+
+  let cfg = repo.config().unwrap();
+  assert!(cfg.get_string("branch.feat/#2-dead.gwm-issue").is_err());
+  assert!(cfg.get_string("branch.feat/#2-dead.gwm-pr").is_err());
+  // git's own key on the dead branch, and the live branch's link, survive.
+  assert_eq!(cfg.get_string("branch.feat/#2-dead.remote").unwrap(), "origin");
+  assert_eq!(cfg.get_string("branch.feat/#1-live.gwm-issue").unwrap(), "1");
+
+  // Second run: nothing left, and the check is green.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor", "--fix"])
+    .assert()
+    .stdout(predicate::str::contains("nothing to purge"))
+    .stdout(predicate::str::contains("✓ no orphan branch config"));
+}

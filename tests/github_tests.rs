@@ -2144,3 +2144,103 @@ fn pr_merge_argv_names_its_method_and_never_deletes_the_branch() {
     vec!["pr", "merge", "3", "--merge"]
   );
 }
+
+// ---- Orphaned branch config (issue #633) ---------------------------------
+
+/// Seed the four shapes the sweep has to tell apart: a live branch with
+/// gwm keys, a dead one with gwm keys, a dead one with only git's own
+/// keys, and a dead branch name that carries dots.
+fn seed_branch_config(repo: &git2::Repository) {
+  make_branch(repo, "feat/#1-live");
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-issue", "1").unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-pr", "11").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-issue", "2").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-pr", "22").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-issue-title", "gone").unwrap();
+  // Not ours: git's own branch keys stay put even on a dead branch.
+  cfg.set_str("branch.feat/#2-dead.remote", "origin").unwrap();
+  cfg.set_str("branch.feat/#3-untouched.merge", "refs/heads/x").unwrap();
+  // A dotted branch name — the key splits on the LAST dot, not the first.
+  cfg.set_str("branch.release/1.2.x.gwm-issue", "3").unwrap();
+}
+
+#[test]
+fn orphan_branch_config_reports_dead_branches_and_spares_live_ones() {
+  let (_dir, repo) = init_repo();
+  seed_branch_config(&repo);
+
+  let orphans = github::orphan_branch_config(&repo).unwrap();
+
+  assert_eq!(
+    orphans,
+    vec![("feat/#2-dead".to_string(), 3), ("release/1.2.x".to_string(), 1)],
+    "only gwm keys of branches that no longer exist, dotted names split on the last dot"
+  );
+}
+
+#[test]
+fn orphan_branch_config_is_empty_when_every_key_belongs_to_a_live_branch() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#1-live");
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-issue", "1").unwrap();
+
+  assert!(github::orphan_branch_config(&repo).unwrap().is_empty());
+}
+
+#[test]
+fn purge_orphan_branch_config_drops_dead_keys_and_leaves_everything_else() {
+  let (_dir, repo) = init_repo();
+  seed_branch_config(&repo);
+
+  let purged = github::purge_orphan_branch_config(&repo).unwrap();
+  assert_eq!(
+    purged,
+    vec![("feat/#2-dead".to_string(), 3), ("release/1.2.x".to_string(), 1)]
+  );
+
+  let cfg = repo.config().unwrap();
+  // Gone.
+  for key in [
+    "branch.feat/#2-dead.gwm-issue",
+    "branch.feat/#2-dead.gwm-pr",
+    "branch.feat/#2-dead.gwm-issue-title",
+    "branch.release/1.2.x.gwm-issue",
+  ] {
+    assert!(cfg.get_string(key).is_err(), "{key} should have been purged");
+  }
+  // Untouched: the live branch's gwm keys, and git's own keys on a dead one.
+  assert_eq!(cfg.get_string("branch.feat/#1-live.gwm-issue").unwrap(), "1");
+  assert_eq!(cfg.get_string("branch.feat/#1-live.gwm-pr").unwrap(), "11");
+  assert_eq!(cfg.get_string("branch.feat/#2-dead.remote").unwrap(), "origin");
+  assert_eq!(
+    cfg.get_string("branch.feat/#3-untouched.merge").unwrap(),
+    "refs/heads/x"
+  );
+
+  // Idempotent: a second run finds nothing left to do.
+  assert!(github::purge_orphan_branch_config(&repo).unwrap().is_empty());
+}
+
+#[test]
+fn purge_orphan_branch_config_clears_every_value_of_a_multi_valued_key() {
+  let (_dir, repo) = init_repo();
+  let mut cfg = repo.config().unwrap();
+  // `gwm-agent-pin` accumulates: `Config::remove` refuses a multivar, so
+  // the purge has to go through `remove_multivar` or leave values behind.
+  cfg
+    .set_multivar("branch.feat/#9-gone.gwm-agent-pin", "^$", "session-a")
+    .unwrap();
+  cfg
+    .set_multivar("branch.feat/#9-gone.gwm-agent-pin", "^$", "session-b")
+    .unwrap();
+
+  let purged = github::purge_orphan_branch_config(&repo).unwrap();
+  assert_eq!(purged, vec![("feat/#9-gone".to_string(), 1)]);
+  assert!(repo
+    .config()
+    .unwrap()
+    .get_string("branch.feat/#9-gone.gwm-agent-pin")
+    .is_err());
+}

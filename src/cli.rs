@@ -427,6 +427,17 @@ pub enum Command {
     /// either way.
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
+    // Scoped to the one check that has a safe automatic remedy: the
+    // orphaned `branch.<name>.gwm-*` keys of issue #633. Every other
+    // check either states a fact (a missing binary) or would need a
+    // judgement call gwm has no business making (deleting a branch).
+    /// Drop `branch.<name>.gwm-*` config left behind by deleted branches.
+    ///
+    /// Edits `.git/config`: only keys gwm itself wrote, and only for
+    /// branches that no longer exist. Runs before the report, so the
+    /// checks below reflect the repaired state.
+    #[arg(long)]
+    fix: bool,
   },
   /// Run a long-running JSON-RPC 2.0 daemon over a local transport.
   ///
@@ -1203,7 +1214,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
     Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Agents { action, format } => cmd_agents(action, format),
-    Command::Doctor { format } => cmd_doctor(format),
+    Command::Doctor { format, fix } => cmd_doctor(format, fix),
     Command::Daemon { socket, poll_ms } => cmd_daemon(socket, poll_ms),
     Command::Statusline { socket, watch } => cmd_statusline(socket, watch),
     Command::Types { gitmoji } => cmd_types(gitmoji),
@@ -3759,8 +3770,26 @@ fn cmd_prune(dry_run: bool) -> Result<()> {
   Ok(())
 }
 
-fn cmd_doctor(format: OutputFormat) -> Result<()> {
+fn cmd_doctor(format: OutputFormat, fix: bool) -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context_lenient(None)?;
+
+  // Issue #633. Runs first so the report reflects the repaired state — a
+  // `--fix` that still printed the warning it just cleared would read as a
+  // failed repair. Text only: the JSON consumer reads the state, not the
+  // narration, and a stray line would break the parse.
+  if fix {
+    let purged = github::purge_orphan_branch_config(&repo)?;
+    if format == OutputFormat::Text {
+      let keys: usize = purged.iter().map(|(_, n)| n).sum();
+      match purged.len() {
+        0 => println!("✓ nothing to purge: no gwm config left behind by a deleted branch"),
+        n => println!(
+          "✓ purged {} orphan branch config key(s) from {} deleted branch(es)",
+          keys, n
+        ),
+      }
+    }
+  }
 
   // Thread the real global layer so the keymap check re-reads exactly what the
   // TUI loads, while keeping the ambient read out of `doctor::run` itself
