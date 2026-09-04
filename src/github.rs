@@ -733,19 +733,26 @@ pub fn pinnable_branch(branch: Option<&str>) -> Option<&str> {
 /// **The invariant this exists to state once.** A git config entry may
 /// have no value at all: `\tgwm-agent-pin` with no `=` is git's
 /// implicit-boolean form, and any hand-edited or third-party-written
-/// config can hold one. Both of libgit2's ways of touching such an entry
-/// are booby-trapped. [`git2::ConfigEntry::value`] panics on it by
-/// documented contract, and [`git2::Config::remove_multivar`] runs its
-/// value regex against it and **segfaults**, taking the `.git/config.lock`
-/// it already opened with it, which then fails every later config write in
-/// that repo, git's own included, until someone deletes the lock by hand.
+/// config can hold one.
 ///
-/// Reachable from any key gwm reads or deletes, so the guard lives here
-/// rather than at each call site (issue #633, review of PR #640: the sweep
-/// found the crash, and `gwm agents detach` had it too).
+/// Two things then crash, and the boundary is **not** read versus write:
+///
+/// * [`git2::ConfigEntry::value`] panics on such an entry, by documented
+///   contract. Check `has_value` first.
+/// * **every libgit2 call that takes a *value* regex** matches that regex
+///   against each existing value, reaching `strlen(NULL)` and
+///   **segfaulting**. That is `remove_multivar`, and it is equally
+///   `set_multivar`, whose pattern selects the value to replace. The crash
+///   takes the `.git/config.lock` already opened with it, after which
+///   every config write in that repo fails, git's own included, until
+///   someone deletes the lock by hand.
+///
+/// Stating it as "deleting is unsafe" is what let the third review pass
+/// find `set_multivar` still exposed after the first two were guarded
+/// (issue #633, review of PR #640). The class is the value regex.
 ///
 /// Fails safe: an unreadable multivar answers `false`, which routes the
-/// caller to the primitive that cannot crash.
+/// caller away from the regex APIs.
 fn every_entry_has_a_value(cfg: &git2::Config, key: &str) -> bool {
   let Ok(entries) = cfg.multivar(key, None) else {
     return false;
@@ -788,9 +795,17 @@ pub fn add_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Resul
     return Ok(());
   }
   let mut cfg = repo.config()?;
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  // `set_multivar` takes a value regex like `remove_multivar` does, so it
+  // crashes on the same shape. Appending is not worth a segfault plus a
+  // stale lock, especially here: the statusline pins in the background, so
+  // this runs unattended.
+  if !every_entry_has_a_value(&cfg, &key) {
+    return Err(valueless_entry_error(&key));
+  }
   // The never-matching regex makes libgit2 append a new value instead of
   // replacing an existing one (the documented multivar-append idiom).
-  cfg.set_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), "^$", session_id)?;
+  cfg.set_multivar(&key, "^$", session_id)?;
   Ok(())
 }
 

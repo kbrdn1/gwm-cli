@@ -2441,3 +2441,85 @@ fn every_multivar_deletion_survives_a_valueless_entry() {
     "a crashed write leaves the lock behind and bricks every later config write"
   );
 }
+
+/// Issue #633, review of PR #640, third pass: the invariant is not about
+/// **deleting**, it is about every libgit2 call that takes a *value*
+/// regex. `set_multivar` matches its pattern against existing values to
+/// decide which one to replace, so it walks the same `strlen(NULL)` path
+/// as `remove_multivar` and segfaults on a valueless entry.
+///
+/// This one is a regression the previous pass created: before it,
+/// `agent_pins` panicked on that entry and `add_agent_pin` never reached
+/// the write. Teaching the read path to skip the entry opened the road to
+/// the write path, trading a clean panic for a crash plus a stale lock.
+#[test]
+fn adding_a_pin_survives_a_valueless_entry_on_the_same_key() {
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  text.push_str("[branch \"feat/#9-pin\"]\n\tgwm-agent-pin\n");
+  std::fs::write(&cfg_path, text).unwrap();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+
+  // Refused with the actionable message, not crashed on. Appending is not
+  // worth a segfault plus a stale lock, least of all here: the statusline
+  // pins in the background, unattended.
+  let err = github::add_agent_pin(&repo, "feat/#9-pin", "session-a").unwrap_err();
+  assert!(err.to_string().contains("no value"), "got: {err}");
+  assert!(
+    !dir.path().join(".git/config.lock").exists(),
+    "a crashed write leaves the lock behind and bricks every later config write"
+  );
+}
+
+/// Canary for the valueless-entry invariant (issue #633, review of PR #640).
+///
+/// Three review passes found the same crash at three different call sites,
+/// because each fix guarded the site rather than the class. The class is
+/// "every libgit2 config call that takes a **value regex**": `set_multivar`
+/// and `remove_multivar`. On an entry with no value, the regex walk reaches
+/// `strlen(NULL)`, the process dies on SIGSEGV, and the `.git/config.lock`
+/// it opened is never released.
+///
+/// So the call sites are enumerated by construction instead of by memory.
+/// Adding one makes this test fail, which is the point: the new site has to
+/// be looked at, and either guarded with `every_entry_has_a_value` or
+/// listed here with a reason.
+#[test]
+fn every_value_regex_call_site_is_accounted_for() {
+  let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let mut sites: Vec<String> = Vec::new();
+  let mut stack = vec![src];
+  while let Some(dir) = stack.pop() {
+    for entry in std::fs::read_dir(&dir).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        stack.push(path);
+        continue;
+      }
+      if path.extension().is_none_or(|e| e != "rs") {
+        continue;
+      }
+      let text = std::fs::read_to_string(&path).unwrap();
+      for (i, line) in text.lines().enumerate() {
+        // Calls only: `cfg.set_multivar(…)`, not the prose that explains why.
+        if line.contains(".set_multivar(") || line.contains(".remove_multivar(") {
+          let rel = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap();
+          sites.push(format!("{}:{}", rel.display(), i + 1));
+        }
+      }
+    }
+  }
+  sites.sort();
+
+  // Every site below is guarded: the three in `github.rs` behind
+  // `every_entry_has_a_value`, the purge behind `KeyShape::needs_multivar`
+  // (same check, folded into the sweep's own iteration).
+  assert_eq!(
+    sites.len(),
+    4,
+    "a value-regex call site was added or removed. Every one of them segfaults on a \
+     config entry with no value: guard it with `every_entry_has_a_value` (or, inside \
+     the orphan sweep, `KeyShape::needs_multivar`) and update this count. Sites found: {sites:#?}"
+  );
+}

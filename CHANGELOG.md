@@ -121,9 +121,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand. `gwm agents detach` died that way, and so did the new
   `gwm doctor --fix` before this.
 
-  The invariant is now stated once, next to the guard: reading such an entry
-  panics and deleting it through the multivar path crashes, so both are
-  checked before either primitive is used. `gwm agents` reads past a
+  The class is not "deleting", it is **every libgit2 config call that takes
+  a value regex**: `remove_multivar` and equally `set_multivar`, whose
+  pattern selects the value to replace. Stating it too narrowly is what let
+  the crash survive two rounds of fixing, so the call sites are now
+  enumerated by a test rather than by memory: adding one fails the suite
+  until it is guarded. Reading is separate and simpler, `ConfigEntry::value`
+  panicking on the same entry by documented contract. `gwm agents` reads past a
   valueless pin, `detach` clears what it can, and the one shape libgit2
   offers no safe primitive for (a key both multi-valued and partly
   valueless) is refused with a message naming the line to delete, rather
