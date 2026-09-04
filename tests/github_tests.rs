@@ -2161,8 +2161,18 @@ fn seed_branch_config(repo: &git2::Repository) {
   // Not ours: git's own branch keys stay put even on a dead branch.
   cfg.set_str("branch.feat/#2-dead.remote", "origin").unwrap();
   cfg.set_str("branch.feat/#3-untouched.merge", "refs/heads/x").unwrap();
-  // A dotted branch name — the key splits on the LAST dot, not the first.
+  // A dotted branch name: the key splits on the LAST dot, not the first.
   cfg.set_str("branch.release/1.2.x.gwm-issue", "3").unwrap();
+  // The two dimensions above, CROSSED: a dead branch whose NAME contains
+  // `.gwm-`, carrying only git's own keys. The `^branch\..*\.gwm-` glob
+  // matches `.gwm-` anywhere in the key, this one included, so the leaf is
+  // what has to decide ownership. Missed by the first round of tests, which
+  // carried both dimensions and never crossed them (review of PR #640).
+  cfg.set_str("branch.docs/1.gwm-toml.remote", "origin").unwrap();
+  cfg.set_str("branch.docs/1.gwm-toml.merge", "refs/heads/x").unwrap();
+  // Same shape, but this one does carry a gwm key: only that key is ours.
+  cfg.set_str("branch.docs/2.gwm-toml.remote", "origin").unwrap();
+  cfg.set_str("branch.docs/2.gwm-toml.gwm-issue", "4").unwrap();
 }
 
 #[test]
@@ -2174,8 +2184,13 @@ fn orphan_branch_config_reports_dead_branches_and_spares_live_ones() {
 
   assert_eq!(
     orphans,
-    vec![("feat/#2-dead".to_string(), 3), ("release/1.2.x".to_string(), 1)],
-    "only gwm keys of branches that no longer exist, dotted names split on the last dot"
+    vec![
+      ("docs/2.gwm-toml".to_string(), 1),
+      ("feat/#2-dead".to_string(), 3),
+      ("release/1.2.x".to_string(), 1),
+    ],
+    "only gwm keys of dead branches: `docs/1.gwm-toml` contributes nothing despite its \
+     name matching the glob, and `docs/2.gwm-toml` contributes its gwm key, not its remote"
   );
 }
 
@@ -2194,10 +2209,14 @@ fn purge_orphan_branch_config_drops_dead_keys_and_leaves_everything_else() {
   let (_dir, repo) = init_repo();
   seed_branch_config(&repo);
 
-  let purged = github::purge_orphan_branch_config(&repo).unwrap();
+  let purged = github::purge_orphan_branch_config(&repo).unwrap().purged;
   assert_eq!(
     purged,
-    vec![("feat/#2-dead".to_string(), 3), ("release/1.2.x".to_string(), 1)]
+    vec![
+      ("docs/2.gwm-toml".to_string(), 1),
+      ("feat/#2-dead".to_string(), 3),
+      ("release/1.2.x".to_string(), 1),
+    ]
   );
 
   let cfg = repo.config().unwrap();
@@ -2218,9 +2237,14 @@ fn purge_orphan_branch_config_drops_dead_keys_and_leaves_everything_else() {
     cfg.get_string("branch.feat/#3-untouched.merge").unwrap(),
     "refs/heads/x"
   );
+  // A dead branch whose name matches the glob keeps every key git wrote.
+  assert_eq!(cfg.get_string("branch.docs/1.gwm-toml.remote").unwrap(), "origin");
+  assert_eq!(cfg.get_string("branch.docs/1.gwm-toml.merge").unwrap(), "refs/heads/x");
+  assert_eq!(cfg.get_string("branch.docs/2.gwm-toml.remote").unwrap(), "origin");
+  assert!(cfg.get_string("branch.docs/2.gwm-toml.gwm-issue").is_err());
 
   // Idempotent: a second run finds nothing left to do.
-  assert!(github::purge_orphan_branch_config(&repo).unwrap().is_empty());
+  assert!(github::purge_orphan_branch_config(&repo).unwrap().purged.is_empty());
 }
 
 #[test]
@@ -2236,11 +2260,100 @@ fn purge_orphan_branch_config_clears_every_value_of_a_multi_valued_key() {
     .set_multivar("branch.feat/#9-gone.gwm-agent-pin", "^$", "session-b")
     .unwrap();
 
-  let purged = github::purge_orphan_branch_config(&repo).unwrap();
+  let purged = github::purge_orphan_branch_config(&repo).unwrap().purged;
   assert_eq!(purged, vec![("feat/#9-gone".to_string(), 1)]);
   assert!(repo
     .config()
     .unwrap()
     .get_string("branch.feat/#9-gone.gwm-agent-pin")
     .is_err());
+}
+
+/// Issue #633, review of PR #640: `git_config_delete_entry` resolves the key
+/// through the merged view (`include`d files and all) but `config_file_write`
+/// only ever rewrites the backend's own path. It returns `Ok` having written
+/// nothing, so counting successful calls counts *attempts*, and `--fix`
+/// claimed a repair it had not made while the warning came back every run.
+#[test]
+fn purge_reports_what_survived_the_write_instead_of_counting_attempts() {
+  let (dir, repo) = init_repo();
+  let git_dir = dir.path().join(".git");
+  std::fs::write(
+    git_dir.join("extra-config"),
+    "[branch \"feat/#5-dead\"]\n\tgwm-issue = 5\n\tgwm-pr = 55\n",
+  )
+  .unwrap();
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("include.path", "extra-config").unwrap();
+  // Ours, and in `.git/config` itself: this one really does get dropped.
+  cfg.set_str("branch.feat/#6-dead.gwm-issue", "6").unwrap();
+
+  let outcome = github::purge_orphan_branch_config(&repo).unwrap();
+
+  assert_eq!(
+    outcome.purged,
+    vec![("feat/#6-dead".to_string(), 1)],
+    "only the key that actually left the file counts as purged"
+  );
+  assert_eq!(
+    outcome.remaining,
+    vec![("feat/#5-dead".to_string(), 2)],
+    "keys living in an included file survive the write and must be reported"
+  );
+  // And the included file is untouched, which is the point: gwm rewrites
+  // `.git/config`, never a file someone else owns.
+  assert_eq!(
+    std::fs::read_to_string(git_dir.join("extra-config")).unwrap(),
+    "[branch \"feat/#5-dead\"]\n\tgwm-issue = 5\n\tgwm-pr = 55\n"
+  );
+}
+
+/// Issue #633, review of PR #640: git's **deprecated dotted form**
+/// (`[branch.Feature]`) lowercases the subsection, while the quoted form
+/// gwm itself writes (`[branch "Feature"]`) preserves it. So a hand-edited
+/// `[branch.Feature]` stores its key under `branch.feature.*`, and the
+/// sweep reports it as belonging to a dead branch named `feature`.
+///
+/// That is the right call, and this test pins it so nobody "fixes" it into
+/// a case-insensitive match: git cannot read that key for `Feature` either
+/// (`git config --get branch.Feature.gwm-issue` comes back empty), so gwm
+/// cannot either, and the key is unreachable rather than merely misfiled.
+/// Matching case-insensitively would introduce the opposite bug, sparing a
+/// genuinely orphaned `feature` because some `Feature` happens to exist.
+#[test]
+fn a_key_under_gits_dotted_form_is_orphaned_by_its_own_lowercasing() {
+  let (dir, repo) = init_repo();
+  make_branch(&repo, "Feature");
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  text.push_str("[branch.Feature]\n\tgwm-issue = 42\n");
+  std::fs::write(&cfg_path, text).unwrap();
+
+  // Nobody can read it back under the branch's actual name.
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.config().unwrap().get_string("branch.Feature.gwm-issue").is_err(),
+    "the dotted form stores the key under a name the live branch does not have"
+  );
+  assert_eq!(
+    repo.config().unwrap().get_string("branch.feature.gwm-issue").unwrap(),
+    "42"
+  );
+
+  assert_eq!(
+    github::orphan_branch_config(&repo).unwrap(),
+    vec![("feature".to_string(), 1)],
+    "reported under the lowercased name the key actually lives at"
+  );
+
+  // The quoted form, which is what gwm writes, is spared as it should be.
+  let (dir2, repo2) = init_repo();
+  make_branch(&repo2, "Feature");
+  repo2
+    .config()
+    .unwrap()
+    .set_str("branch.Feature.gwm-issue", "42")
+    .unwrap();
+  let _ = dir2;
+  assert!(github::orphan_branch_config(&repo2).unwrap().is_empty());
 }

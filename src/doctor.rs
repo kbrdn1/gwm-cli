@@ -842,8 +842,9 @@ fn check_orphan_notes(ctx: &DoctorCtx<'_>) -> Check {
 /// open; `statuses()` and `branch.upstream()` then each take a
 /// `git_config_snapshot`, which duplicates every entry. Both costs are
 /// linear in the file's size, so the listing pays for branches that died
-/// months ago — measured on this repo, 8 worktrees held constant: 121 ms
-/// at 13 config lines, 309 ms at 1434.
+/// months ago. Measured for this change, hyperfine, 8 worktrees held
+/// constant and the config size the only variable: 45 ms at 13 config
+/// lines, 184 ms at 1434.
 ///
 /// The keys only ever accumulate: `gwm create` writes ~7 per branch,
 /// nothing removes them when the branch dies, and "never delete the source

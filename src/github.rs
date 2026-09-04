@@ -810,9 +810,17 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
 /// Every key gwm persists lives at `branch.<name>.gwm-<something>`, so the
 /// orphan sweep matches on that **prefix** rather than on the constants
 /// above. A key added later is covered without anyone having to remember,
-/// and `gwm-created-at` — which lives in [`crate::worktree`], not here — is
-/// covered too. Passed to libgit2's config iterator, which compiles it as a
+/// and `gwm-created-at`, which lives in [`crate::worktree`] and not here, is
+/// covered too. This is the leaf test, and it is what decides ownership.
+const GWM_KEY_PREFIX: &str = "gwm-";
+
+/// Pre-filter handed to libgit2's config iterator, which compiles it as a
 /// POSIX regex over the full key name (`git_config_iterator_glob_new`).
+///
+/// A pre-filter and nothing more. Unanchored on the right, it matches
+/// `.gwm-` **anywhere** in the key, and a branch name may carry that itself:
+/// `branch.docs/1.gwm-toml.remote` matches this glob and belongs to git.
+/// [`GWM_KEY_PREFIX`] on the leaf is the actual test (review of PR #640).
 const GWM_BRANCH_KEY_GLOB: &str = r"^branch\..*\.gwm-";
 
 /// `branch.<name>.<leaf>` split into `(<name>, <leaf>)`.
@@ -834,6 +842,14 @@ fn local_config(repo: &Repository) -> Result<git2::Config> {
 /// `branch.<name>.gwm-*` keys whose branch no longer exists, grouped by
 /// branch. Key sets are deduplicated: a multi-valued key
 /// ([`AGENT_PIN_CONFIG_KEY`]) yields one iterator entry per value.
+///
+/// Branch names are compared **case-sensitively**, which is what makes a
+/// key written under git's deprecated dotted form (`[branch.Feature]`,
+/// lowercased by git to `branch.feature.*`) read as orphaned next to a live
+/// `Feature`. That is correct rather than a near miss: git cannot resolve
+/// that key for `Feature` either, so neither can gwm, and the key is
+/// unreachable rather than misfiled. Matching case-insensitively would
+/// spare a genuinely orphaned `feature` because some `Feature` exists.
 fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTreeSet<String>>> {
   let mut live: BTreeSet<String> = BTreeSet::new();
   for entry in repo.branches(Some(git2::BranchType::Local))? {
@@ -849,9 +865,15 @@ fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTre
     // A non-UTF-8 key can't name a branch we could match, so skip it
     // rather than guess — and never delete what we could not read.
     let Ok(name) = entry.name() else { return };
-    let Some((branch, _leaf)) = split_branch_key(name) else {
+    let Some((branch, leaf)) = split_branch_key(name) else {
       return;
     };
+    // The glob got us here; the leaf is what proves the key is ours. A
+    // branch named `docs/1.gwm-toml` puts `.gwm-` in the key without
+    // putting it in the leaf, and its `remote` is git's to keep.
+    if !leaf.starts_with(GWM_KEY_PREFIX) {
+      return;
+    }
     if live.contains(branch) {
       return;
     }
@@ -869,7 +891,7 @@ fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTre
 /// is not the lookup (libgit2 caches the parsed config on the `Repository`),
 /// it is that both `Repository::open` and `git_config_snapshot` are linear
 /// in the file's size, and `gwm list` pays one open plus a snapshot per
-/// worktree. Measured on this repo: 121 ms at 13 lines, 309 ms at 1434.
+/// worktree. Measured for this change: 45 ms at 13 lines, 184 ms at 1434.
 pub fn orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
   Ok(
     collect_orphan_branch_keys(repo)?
@@ -879,32 +901,63 @@ pub fn orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
   )
 }
 
+/// What a purge actually achieved, read back from the file rather than
+/// inferred from the calls that were made.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PurgeOutcome {
+  /// Branches whose keys really left the file, with how many went.
+  pub purged: Vec<(String, usize)>,
+  /// Branches still carrying gwm keys after the write, with how many.
+  ///
+  /// Not an error and not a bug in the caller: a key can live in a file
+  /// pulled in by `include.path`. `git_config_delete_entry` resolves the
+  /// name through the merged view and returns `Ok`, while
+  /// `config_file_write` only ever rewrites the backend's own path, so the
+  /// key survives. gwm rewrites `.git/config` and never a file someone else
+  /// owns, so the honest move is to report the survivors.
+  pub remaining: Vec<(String, usize)>,
+}
+
 /// Drop the keys [`orphan_branch_config`] reports, from the local config
-/// level only. Returns what was purged, same shape as the report.
+/// level only.
 ///
 /// Removal goes through `remove_multivar` for every key, not `remove`:
 /// [`AGENT_PIN_CONFIG_KEY`] is multi-valued and `git_config_delete_entry`
 /// refuses those, and `.*` matches every value of a single-valued key just
 /// as well. A key that vanished between the read and the write is not an
-/// error — it is the outcome we wanted.
-pub fn purge_orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
-  let orphans = collect_orphan_branch_keys(repo)?;
+/// error, it is the outcome we wanted.
+///
+/// The result is read back from the config **after** the write. Counting
+/// successful `remove_multivar` calls counts attempts: libgit2 answers `Ok`
+/// for a key it resolved through an `include` and did not rewrite, so the
+/// old count claimed a repair that had not happened and the warning came
+/// back on the next run (review of PR #640).
+pub fn purge_orphan_branch_config(repo: &Repository) -> Result<PurgeOutcome> {
+  let before = collect_orphan_branch_keys(repo)?;
   let mut cfg = local_config(repo)?;
-  let mut purged = Vec::with_capacity(orphans.len());
-  for (branch, keys) in orphans {
-    let mut removed = 0usize;
-    for key in &keys {
+  for keys in before.values() {
+    for key in keys {
       match cfg.remove_multivar(key, ".*") {
-        Ok(()) => removed += 1,
+        Ok(()) => {}
         Err(e) if e.code() == git2::ErrorCode::NotFound => {}
         Err(e) => return Err(GwmError::Git(e)),
       }
     }
-    if removed > 0 {
-      purged.push((branch, removed));
+  }
+
+  let after = collect_orphan_branch_keys(repo)?;
+  let mut out = PurgeOutcome::default();
+  for (branch, keys) in &before {
+    let left = after.get(branch).map_or(0, |k| k.len());
+    let gone = keys.len().saturating_sub(left);
+    if gone > 0 {
+      out.purged.push((branch.clone(), gone));
     }
   }
-  Ok(purged)
+  for (branch, keys) in &after {
+    out.remaining.push((branch.clone(), keys.len()));
+  }
+  Ok(out)
 }
 
 // ---- Issue / PR status ---------------------------------------------------

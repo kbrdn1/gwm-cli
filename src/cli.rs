@@ -3778,15 +3778,25 @@ fn cmd_doctor(format: OutputFormat, fix: bool) -> Result<()> {
   // failed repair. Text only: the JSON consumer reads the state, not the
   // narration, and a stray line would break the parse.
   if fix {
-    let purged = github::purge_orphan_branch_config(&repo)?;
+    let outcome = github::purge_orphan_branch_config(&repo)?;
     if format == OutputFormat::Text {
-      let keys: usize = purged.iter().map(|(_, n)| n).sum();
-      match purged.len() {
+      let keys: usize = outcome.purged.iter().map(|(_, n)| n).sum();
+      match outcome.purged.len() {
         0 => println!("✓ nothing to purge: no gwm config left behind by a deleted branch"),
         n => println!(
           "✓ purged {} orphan branch config key(s) from {} deleted branch(es)",
           keys, n
         ),
+      }
+      // Read back from the file after the write, so a key gwm could not
+      // reach is named rather than folded into the success line above.
+      if !outcome.remaining.is_empty() {
+        let left: usize = outcome.remaining.iter().map(|(_, n)| n).sum();
+        println!(
+          "! {} key(s) from {} branch(es) survived: they live outside `.git/config`, in a file pulled in by `include.path`, which gwm does not rewrite",
+          left,
+          outcome.remaining.len()
+        );
       }
     }
   }

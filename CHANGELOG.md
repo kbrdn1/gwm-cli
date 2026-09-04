@@ -30,11 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are never touched, on a live branch or a dead one.
 
   `--fix` is opt-in because it edits `.git/config`; a plain `gwm doctor`
-  stays read-only. It works on the local config level alone, since deleting
+  stays read-only. It reports what it achieved by reading the config back
+  after writing, not by counting the deletions it attempted: a key pulled in
+  by `include.path` resolves through the merged view and reports success
+  while surviving in a file gwm does not rewrite, so those are named as
+  survivors instead of being claimed as purged. It works on the local config level alone, since deleting
   through the merged view would let git resolve the key up to
   `~/.gitconfig`. It leaves the empty `[branch "…"]` header behind, because
   libgit2 removes keys and not sections: on a repo grafted to 1434 lines,
-  purging 869 keys brought the file to 561, not to 13.
+  purging 869 keys brought the file to 561 lines, not to 13. That figure is
+  measured, not `1434 - 869`: a multi-valued key spans several lines, and
+  the keys of branches that are still alive stay put.
 
 - **The mouse gwm was already capturing now does something, and two hidden
   panels get a place on the header**
