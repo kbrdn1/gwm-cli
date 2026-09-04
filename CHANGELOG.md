@@ -12,6 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gwm doctor` reports the config a deleted branch left behind, and
+  `--fix` drops it**
+  ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). `gwm create`
+  writes about seven `branch.<name>.gwm-*` keys per branch and nothing
+  removes them when the branch goes away, so `.git/config` only grows. That
+  is not cosmetic: libgit2 reparses the file on every `Repository::open`,
+  and `statuses()` and `branch.upstream()` each take a config snapshot that
+  duplicates every entry, so `gwm list` pays the file's size once per
+  worktree, several times over. With 8 worktrees held constant and the
+  config as the only variable, the listing goes from 45 ms at 13 lines to
+  184 ms at 1434.
+
+  The sweep matches the `branch.<name>.gwm-` **prefix** rather than a list
+  of known key names, so a key added in a later release is covered without
+  anyone having to remember. Keys git itself writes (`remote`, `merge`, …)
+  are never touched, on a live branch or a dead one.
+
+  `--fix` is opt-in because it edits `.git/config`; a plain `gwm doctor`
+  stays read-only. It reports what it achieved by reading the config back
+  after writing, not by counting the deletions it attempted: a key pulled in
+  by `include.path` lives in a file gwm does not rewrite, and libgit2
+  refuses to delete it, so those are named as survivors instead of being
+  claimed as purged. A purge that cannot run at all does not take the
+  report down with it either: `doctor` exists to diagnose, so the checks
+  still print. It works on the local config level alone, since deleting
+  through the merged view would let git resolve the key up to
+  `~/.gitconfig`. It leaves the empty `[branch "…"]` header behind, because
+  libgit2 removes keys and not sections: on a repo grafted to 1434 lines,
+  purging 869 keys brought the file to 561 lines, not to 13. That figure is
+  measured, not `1434 - 869`: a multi-valued key spans several lines, and
+  the keys of branches that are still alive stay put.
+
 - **The mouse gwm was already capturing now does something, and two hidden
   panels get a place on the header**
   ([#624](https://github.com/kbrdn1/gwm-cli/issues/624)). `EnableMouseCapture`
@@ -77,7 +109,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression. Real forwarding needs SGR re-encoding against the overlay's
   inset origin and the child's own DECSET state.
 
+### Fixed
+
+- **A config key with no value no longer crashes gwm**
+  ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). A git config entry
+  may carry no value at all (`\tgwm-agent-pin` with no `=`, git's
+  implicit-boolean form). `Config::remove_multivar` runs its value regex
+  against such an entry and segfaults inside libgit2, taking the
+  `.git/config.lock` it had already opened with it, after which every config
+  write in that repo fails, git's own included, until the lock is deleted by
+  hand. `gwm agents detach` died that way, and so did the new
+  `gwm doctor --fix` before this.
+
+  The class is not "deleting", it is **every libgit2 config call that takes
+  a value regex**: `remove_multivar` and equally `set_multivar`, whose
+  pattern selects the value to replace. Stating it too narrowly is what let
+  the crash survive two rounds of fixing, so the call sites are now
+  enumerated by a test rather than by memory: adding one fails the suite
+  until it is guarded. Reading is separate and simpler, `ConfigEntry::value`
+  panicking on the same entry by documented contract. `gwm agents` reads past a
+  valueless pin, `detach` clears what it can, and the one shape libgit2
+  offers no safe primitive for (a key both multi-valued and partly
+  valueless) is refused with a message naming the line to delete, rather
+  than crashed on or half-deleted.
+
 ### Changed
+
+- **`gwm list` scans its worktrees in parallel**
+  ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens
+  its own `Repository`, runs `statuses()` over that worktree and walks its
+  branch age; nothing in that body touches the main repo, and it is where
+  a listing's time goes. It now runs on up to `available_parallelism()`
+  workers, work-stealing off an atomic cursor, the same shape
+  `gwm exec` has used for its fan-out since #313.
+
+  Row order is unchanged and guarded: `repo.worktrees()` is not sorted and
+  the table renders what it returns, so results are written into per-index
+  slots rather than collected as they complete. Everything read off the
+  main repo stays on the calling thread, `&Repository` not being `Sync`.
+
+  Measured with hyperfine, mean of 20, 8 worktrees, config size the only
+  variable: 83 ms to 51 ms at 224 lines, 98 ms to 73 ms at 538, 184 ms to
+  118 ms at 1434. Combined with a `gwm doctor --fix` on the same repo,
+  184 ms becomes 100 ms.
+
+  This also speeds up `gwm statusline`, the daemon and every TUI refresh,
+  which share the same listing path.
 
 - **The Settings panel gets a value column, named sections and tab glyphs**
   ([#623](https://github.com/kbrdn1/gwm-cli/issues/623)). The panel carries the

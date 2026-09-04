@@ -2144,3 +2144,412 @@ fn pr_merge_argv_names_its_method_and_never_deletes_the_branch() {
     vec!["pr", "merge", "3", "--merge"]
   );
 }
+
+// ---- Orphaned branch config (issue #633) ---------------------------------
+
+/// Seed the four shapes the sweep has to tell apart: a live branch with
+/// gwm keys, a dead one with gwm keys, a dead one with only git's own
+/// keys, and a dead branch name that carries dots.
+fn seed_branch_config(repo: &git2::Repository) {
+  make_branch(repo, "feat/#1-live");
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-issue", "1").unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-pr", "11").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-issue", "2").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-pr", "22").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-issue-title", "gone").unwrap();
+  // Not ours: git's own branch keys stay put even on a dead branch.
+  cfg.set_str("branch.feat/#2-dead.remote", "origin").unwrap();
+  cfg.set_str("branch.feat/#3-untouched.merge", "refs/heads/x").unwrap();
+  // A dotted branch name: the key splits on the LAST dot, not the first.
+  cfg.set_str("branch.release/1.2.x.gwm-issue", "3").unwrap();
+  // The two dimensions above, CROSSED: a dead branch whose NAME contains
+  // `.gwm-`, carrying only git's own keys. The `^branch\..*\.gwm-` glob
+  // matches `.gwm-` anywhere in the key, this one included, so the leaf is
+  // what has to decide ownership. Missed by the first round of tests, which
+  // carried both dimensions and never crossed them (review of PR #640).
+  cfg.set_str("branch.docs/1.gwm-toml.remote", "origin").unwrap();
+  cfg.set_str("branch.docs/1.gwm-toml.merge", "refs/heads/x").unwrap();
+  // Same shape, but this one does carry a gwm key: only that key is ours.
+  cfg.set_str("branch.docs/2.gwm-toml.remote", "origin").unwrap();
+  cfg.set_str("branch.docs/2.gwm-toml.gwm-issue", "4").unwrap();
+}
+
+#[test]
+fn orphan_branch_config_reports_dead_branches_and_spares_live_ones() {
+  let (_dir, repo) = init_repo();
+  seed_branch_config(&repo);
+
+  let orphans = github::orphan_branch_config(&repo).unwrap();
+
+  assert_eq!(
+    orphans,
+    vec![
+      ("docs/2.gwm-toml".to_string(), 1),
+      ("feat/#2-dead".to_string(), 3),
+      ("release/1.2.x".to_string(), 1),
+    ],
+    "only gwm keys of dead branches: `docs/1.gwm-toml` contributes nothing despite its \
+     name matching the glob, and `docs/2.gwm-toml` contributes its gwm key, not its remote"
+  );
+}
+
+#[test]
+fn orphan_branch_config_is_empty_when_every_key_belongs_to_a_live_branch() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#1-live");
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-issue", "1").unwrap();
+
+  assert!(github::orphan_branch_config(&repo).unwrap().is_empty());
+}
+
+#[test]
+fn purge_orphan_branch_config_drops_dead_keys_and_leaves_everything_else() {
+  let (_dir, repo) = init_repo();
+  seed_branch_config(&repo);
+
+  let purged = github::purge_orphan_branch_config(&repo).unwrap().purged;
+  assert_eq!(
+    purged,
+    vec![
+      ("docs/2.gwm-toml".to_string(), 1),
+      ("feat/#2-dead".to_string(), 3),
+      ("release/1.2.x".to_string(), 1),
+    ]
+  );
+
+  let cfg = repo.config().unwrap();
+  // Gone.
+  for key in [
+    "branch.feat/#2-dead.gwm-issue",
+    "branch.feat/#2-dead.gwm-pr",
+    "branch.feat/#2-dead.gwm-issue-title",
+    "branch.release/1.2.x.gwm-issue",
+  ] {
+    assert!(cfg.get_string(key).is_err(), "{key} should have been purged");
+  }
+  // Untouched: the live branch's gwm keys, and git's own keys on a dead one.
+  assert_eq!(cfg.get_string("branch.feat/#1-live.gwm-issue").unwrap(), "1");
+  assert_eq!(cfg.get_string("branch.feat/#1-live.gwm-pr").unwrap(), "11");
+  assert_eq!(cfg.get_string("branch.feat/#2-dead.remote").unwrap(), "origin");
+  assert_eq!(
+    cfg.get_string("branch.feat/#3-untouched.merge").unwrap(),
+    "refs/heads/x"
+  );
+  // A dead branch whose name matches the glob keeps every key git wrote.
+  assert_eq!(cfg.get_string("branch.docs/1.gwm-toml.remote").unwrap(), "origin");
+  assert_eq!(cfg.get_string("branch.docs/1.gwm-toml.merge").unwrap(), "refs/heads/x");
+  assert_eq!(cfg.get_string("branch.docs/2.gwm-toml.remote").unwrap(), "origin");
+  assert!(cfg.get_string("branch.docs/2.gwm-toml.gwm-issue").is_err());
+
+  // Idempotent: a second run finds nothing left to do.
+  assert!(github::purge_orphan_branch_config(&repo).unwrap().purged.is_empty());
+}
+
+#[test]
+fn purge_orphan_branch_config_clears_every_value_of_a_multi_valued_key() {
+  let (_dir, repo) = init_repo();
+  let mut cfg = repo.config().unwrap();
+  // `gwm-agent-pin` accumulates: `Config::remove` refuses a multivar, so
+  // the purge has to go through `remove_multivar` or leave values behind.
+  cfg
+    .set_multivar("branch.feat/#9-gone.gwm-agent-pin", "^$", "session-a")
+    .unwrap();
+  cfg
+    .set_multivar("branch.feat/#9-gone.gwm-agent-pin", "^$", "session-b")
+    .unwrap();
+
+  let purged = github::purge_orphan_branch_config(&repo).unwrap().purged;
+  assert_eq!(purged, vec![("feat/#9-gone".to_string(), 1)]);
+  assert!(repo
+    .config()
+    .unwrap()
+    .get_string("branch.feat/#9-gone.gwm-agent-pin")
+    .is_err());
+}
+
+/// Issue #633, review of PR #640: `git_config_delete_entry` resolves the key
+/// through the merged view (`include`d files and all) but `config_file_write`
+/// only ever rewrites the backend's own path. It returns `Ok` having written
+/// nothing, so counting successful calls counts *attempts*, and `--fix`
+/// claimed a repair it had not made while the warning came back every run.
+#[test]
+fn purge_reports_what_survived_the_write_instead_of_counting_attempts() {
+  let (dir, repo) = init_repo();
+  let git_dir = dir.path().join(".git");
+  std::fs::write(
+    git_dir.join("extra-config"),
+    "[branch \"feat/#5-dead\"]\n\tgwm-issue = 5\n\tgwm-pr = 55\n",
+  )
+  .unwrap();
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("include.path", "extra-config").unwrap();
+  // Ours, and in `.git/config` itself: this one really does get dropped.
+  cfg.set_str("branch.feat/#6-dead.gwm-issue", "6").unwrap();
+
+  let outcome = github::purge_orphan_branch_config(&repo).unwrap();
+
+  assert_eq!(
+    outcome.purged,
+    vec![("feat/#6-dead".to_string(), 1)],
+    "only the key that actually left the file counts as purged"
+  );
+  assert_eq!(
+    outcome.remaining,
+    vec![("feat/#5-dead".to_string(), 2)],
+    "keys living in an included file survive the write and must be reported"
+  );
+  // And the included file is untouched, which is the point: gwm rewrites
+  // `.git/config`, never a file someone else owns.
+  assert_eq!(
+    std::fs::read_to_string(git_dir.join("extra-config")).unwrap(),
+    "[branch \"feat/#5-dead\"]\n\tgwm-issue = 5\n\tgwm-pr = 55\n"
+  );
+}
+
+/// Issue #633, review of PR #640: git's **deprecated dotted form**
+/// (`[branch.Feature]`) lowercases the subsection, while the quoted form
+/// gwm itself writes (`[branch "Feature"]`) preserves it. So a hand-edited
+/// `[branch.Feature]` stores its key under `branch.feature.*`, and the
+/// sweep reports it as belonging to a dead branch named `feature`.
+///
+/// That is the right call, and this test pins it so nobody "fixes" it into
+/// a case-insensitive match: git cannot read that key for `Feature` either
+/// (`git config --get branch.Feature.gwm-issue` comes back empty), so gwm
+/// cannot either, and the key is unreachable rather than merely misfiled.
+/// Matching case-insensitively would introduce the opposite bug, sparing a
+/// genuinely orphaned `feature` because some `Feature` happens to exist.
+#[test]
+fn a_key_under_gits_dotted_form_is_orphaned_by_its_own_lowercasing() {
+  let (dir, repo) = init_repo();
+  make_branch(&repo, "Feature");
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  text.push_str("[branch.Feature]\n\tgwm-issue = 42\n");
+  std::fs::write(&cfg_path, text).unwrap();
+
+  // Nobody can read it back under the branch's actual name.
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.config().unwrap().get_string("branch.Feature.gwm-issue").is_err(),
+    "the dotted form stores the key under a name the live branch does not have"
+  );
+  assert_eq!(
+    repo.config().unwrap().get_string("branch.feature.gwm-issue").unwrap(),
+    "42"
+  );
+
+  assert_eq!(
+    github::orphan_branch_config(&repo).unwrap(),
+    vec![("feature".to_string(), 1)],
+    "reported under the lowercased name the key actually lives at"
+  );
+
+  // The quoted form, which is what gwm writes, is spared as it should be.
+  let (dir2, repo2) = init_repo();
+  make_branch(&repo2, "Feature");
+  repo2
+    .config()
+    .unwrap()
+    .set_str("branch.Feature.gwm-issue", "42")
+    .unwrap();
+  let _ = dir2;
+  assert!(github::orphan_branch_config(&repo2).unwrap().is_empty());
+}
+
+/// Issue #633, review of PR #640: a config entry may carry **no value at
+/// all** (`\tgwm-issue` with no `=`, git's implicit-boolean form). Running
+/// `remove_multivar`'s value regex against such an entry crashes inside
+/// libgit2: `gwm doctor --fix` died with SIGSEGV and left the
+/// `.git/config.lock` it had taken, which then failed every later config
+/// write in that repo, gwm's and git's alike, until someone deleted it.
+///
+/// A test that segfaults takes the whole binary with it, which is exactly
+/// the point: nothing about this is recoverable at the call site.
+#[test]
+fn purge_survives_a_key_that_has_no_value() {
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  // Written as text: `set_str` cannot express a key with no value.
+  text.push_str("[branch \"feat/#7-dead\"]\n\tgwm-issue\n\tgwm-pr = 7\n");
+  std::fs::write(&cfg_path, text).unwrap();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+
+  let outcome = github::purge_orphan_branch_config(&repo).unwrap();
+
+  assert!(
+    outcome.purged.iter().any(|(b, _)| b == "feat/#7-dead"),
+    "the valued key at least must go, got {:?}",
+    outcome.purged
+  );
+  assert!(
+    !cfg_path.with_extension("lock").exists() && !dir.path().join(".git/config.lock").exists(),
+    "a crashed write leaves the config lock behind and bricks every later write"
+  );
+  let after = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(!after.contains("gwm-pr"), "valued key should be gone:\n{after}");
+}
+
+/// Issue #633, review of PR #640: the valueless-key crash is a property of
+/// `Config::remove_multivar`, not of the sweep that first hit it. Every
+/// call site inherits it, and `gwm agents detach` was reproduced dying at
+/// exit 139 on a bare `gwm-agent-pin` line, leaving `.git/config.lock`
+/// behind. This pins all three sites, so the guard cannot be re-lost by
+/// adding a fourth.
+#[test]
+fn every_multivar_deletion_survives_a_valueless_entry() {
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  text.push_str("[branch \"feat/#9-pin\"]\n\tgwm-agent-pin\n");
+  std::fs::write(&cfg_path, text).unwrap();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+
+  // Reading: the valueless entry is skipped, not unwrapped.
+  assert!(github::agent_pins(&repo, "feat/#9-pin").unwrap().is_empty());
+  // `gwm agents detach <wt> <id>`: nothing to remove, and above all no crash.
+  assert!(!github::remove_agent_pin(&repo, "feat/#9-pin", "session-a").unwrap());
+  // `gwm agents detach <wt>`: clears what it can, never dies trying.
+  github::clear_agent_pins(&repo, "feat/#9-pin").unwrap();
+
+  // The nastier shape: one real pin alongside the valueless entry, so the
+  // id IS found and the targeted removal is actually attempted.
+  let (dir2, _r) = init_repo();
+  let cfg2 = dir2.path().join(".git/config");
+  let mut t2 = std::fs::read_to_string(&cfg2).unwrap();
+  t2.push_str("[branch \"feat/#9-pin\"]\n\tgwm-agent-pin\n\tgwm-agent-pin = session-a\n");
+  std::fs::write(&cfg2, t2).unwrap();
+  let repo2 = git2::Repository::open(dir2.path()).unwrap();
+  assert_eq!(github::agent_pins(&repo2, "feat/#9-pin").unwrap(), vec!["session-a"]);
+  // Refused with a message that names the fix, rather than killing the process.
+  let err = github::remove_agent_pin(&repo2, "feat/#9-pin", "session-a").unwrap_err();
+  assert!(
+    err.to_string().contains("no value"),
+    "the error should say what is wrong, got: {err}"
+  );
+  // Both multi-valued AND partly valueless: libgit2 has no primitive that
+  // works (`remove_multivar` crashes, `remove` refuses a multivar), so this
+  // one is refused with the same actionable message. Refusing is the point.
+  let err = github::clear_agent_pins(&repo2, "feat/#9-pin").unwrap_err();
+  assert!(err.to_string().contains("no value"), "got: {err}");
+  assert!(!dir2.path().join(".git/config.lock").exists());
+
+  assert!(
+    !dir.path().join(".git/config.lock").exists(),
+    "a crashed write leaves the lock behind and bricks every later config write"
+  );
+}
+
+/// Issue #633, review of PR #640, third pass: the invariant is not about
+/// **deleting**, it is about every libgit2 call that takes a *value*
+/// regex. `set_multivar` matches its pattern against existing values to
+/// decide which one to replace, so it walks the same `strlen(NULL)` path
+/// as `remove_multivar` and segfaults on a valueless entry.
+///
+/// This one is a regression the previous pass created: before it,
+/// `agent_pins` panicked on that entry and `add_agent_pin` never reached
+/// the write. Teaching the read path to skip the entry opened the road to
+/// the write path, trading a clean panic for a crash plus a stale lock.
+#[test]
+fn adding_a_pin_survives_a_valueless_entry_on_the_same_key() {
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  text.push_str("[branch \"feat/#9-pin\"]\n\tgwm-agent-pin\n");
+  std::fs::write(&cfg_path, text).unwrap();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+
+  // Refused with the actionable message, not crashed on. Appending is not
+  // worth a segfault plus a stale lock, least of all here: the statusline
+  // pins in the background, unattended.
+  let err = github::add_agent_pin(&repo, "feat/#9-pin", "session-a").unwrap_err();
+  assert!(err.to_string().contains("no value"), "got: {err}");
+  assert!(
+    !dir.path().join(".git/config.lock").exists(),
+    "a crashed write leaves the lock behind and bricks every later config write"
+  );
+}
+
+/// Canary for the valueless-entry invariant (issue #633, review of PR #640).
+///
+/// Three review passes found the same crash at three different call sites,
+/// because each fix guarded the site rather than the class. The class is
+/// "every libgit2 config call that takes a **value regex**": `set_multivar`,
+/// `remove_multivar`, and `multivar` when its pattern is not `None`. On an
+/// entry with no value the regex walk reaches `strlen(NULL)`, the process
+/// dies on SIGSEGV, and the `.git/config.lock` it opened is never released.
+///
+/// So the call sites are enumerated by construction rather than by memory,
+/// and by the **function** they sit in rather than by a count: moving an
+/// existing call into a new unguarded helper has to fail this too. Adding a
+/// site makes this test fail, which is the point.
+#[test]
+fn every_value_regex_call_site_is_accounted_for() {
+  /// Each site, named by the function holding it, and why it is safe.
+  const ACCOUNTED_FOR: &[(&str, &str)] = &[
+    (
+      "every_entry_has_a_value",
+      "the guard itself; `None` pattern, no regex walk",
+    ),
+    ("agent_pins", "reads values; `None` pattern, no regex walk"),
+    ("add_agent_pin", "guarded by `every_entry_has_a_value`"),
+    ("remove_agent_pin", "guarded by `every_entry_has_a_value`"),
+    ("clear_agent_pins", "guarded by `every_entry_has_a_value`"),
+    ("purge_orphan_branch_config", "guarded by `KeyShape::needs_multivar`"),
+  ];
+
+  let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+  let mut found: Vec<String> = Vec::new();
+  let mut stack = vec![src];
+  while let Some(dir) = stack.pop() {
+    for entry in std::fs::read_dir(&dir).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        stack.push(path);
+        continue;
+      }
+      if path.extension().is_none_or(|e| e != "rs") {
+        continue;
+      }
+      let text = std::fs::read_to_string(&path).unwrap();
+      let lines: Vec<&str> = text.lines().collect();
+      for (i, line) in lines.iter().enumerate() {
+        // Calls only, not the prose that explains them.
+        let is_call =
+          line.contains(".set_multivar(") || line.contains(".remove_multivar(") || line.contains(".multivar(");
+        if !is_call {
+          continue;
+        }
+        // Walk back to the enclosing `fn`, so the guard survives every edit
+        // that moves lines around without moving the call.
+        let owner = lines[..=i]
+          .iter()
+          .rev()
+          .find_map(|l| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let t = t.strip_prefix("pub(crate) ").unwrap_or(t);
+            t.strip_prefix("fn ")
+              .map(|rest| rest.split(['(', '<']).next().unwrap_or(rest).to_string())
+          })
+          .unwrap_or_else(|| format!("{}:{}", path.display(), i + 1));
+        found.push(owner);
+      }
+    }
+  }
+  found.sort();
+  found.dedup();
+
+  let mut expected: Vec<String> = ACCOUNTED_FOR.iter().map(|(f, _)| f.to_string()).collect();
+  expected.sort();
+
+  assert_eq!(
+    found, expected,
+    "a value-regex call site moved, appeared or vanished. Every one of them segfaults \
+     on a config entry with no value unless its pattern is `None`: guard it with \
+     `every_entry_has_a_value` (or, inside the orphan sweep, `KeyShape::needs_multivar`), \
+     then add it to ACCOUNTED_FOR with the reason it is safe."
+  );
+}

@@ -19,6 +19,7 @@ use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::BranchParser;
 use git2::Repository;
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::sync::LazyLock;
 
@@ -724,6 +725,42 @@ pub fn pinnable_branch(branch: Option<&str>) -> Option<&str> {
   }
 }
 
+/// Whether every entry stored at `key` carries a value.
+///
+/// **The invariant this exists to state once.** A git config entry may
+/// have no value at all: `\tgwm-agent-pin` with no `=` is git's
+/// implicit-boolean form, and any hand-edited or third-party-written
+/// config can hold one.
+///
+/// Two things then crash, and the boundary is **not** read versus write:
+///
+/// * [`git2::ConfigEntry::value`] panics on such an entry, by documented
+///   contract. Check `has_value` first.
+/// * **every libgit2 call that takes a *value* regex** matches that regex
+///   against each existing value, reaching `strlen(NULL)` and
+///   **segfaulting**. That is `remove_multivar`, and it is equally
+///   `set_multivar`, whose pattern selects the value to replace. The crash
+///   takes the `.git/config.lock` already opened with it, after which
+///   every config write in that repo fails, git's own included, until
+///   someone deletes the lock by hand.
+///
+/// Stating it as "deleting is unsafe" is what let the third review pass
+/// find `set_multivar` still exposed after the first two were guarded
+/// (issue #633, review of PR #640). The class is the value regex.
+///
+/// Fails safe: an unreadable multivar answers `false`, which routes the
+/// caller away from the regex APIs.
+fn every_entry_has_a_value(cfg: &git2::Config, key: &str) -> bool {
+  let Ok(entries) = cfg.multivar(key, None) else {
+    return false;
+  };
+  let mut all_valued = true;
+  if entries.for_each(|e| all_valued &= e.has_value()).is_err() {
+    return false;
+  }
+  all_valued
+}
+
 /// Every manual agent-session pin on `branch` (issue #408 US4). The key is
 /// **multi-valued** (user feedback 2026-07-22): several agents can work one
 /// worktree at once, so attach accumulates instead of replacing.
@@ -735,8 +772,11 @@ pub fn agent_pins(repo: &Repository, branch: &str) -> Result<Vec<String>> {
     Ok(entries) => {
       entries
         .for_each(|e| {
-          if let Ok(v) = e.value() {
-            out.push(v.to_string());
+          // `has_value` first: `value()` panics on a valueless entry.
+          if e.has_value() {
+            if let Ok(v) = e.value() {
+              out.push(v.to_string());
+            }
           }
         })
         .map_err(GwmError::Git)?;
@@ -755,9 +795,17 @@ pub fn add_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Resul
     return Ok(());
   }
   let mut cfg = repo.config()?;
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  // `set_multivar` takes a value regex like `remove_multivar` does, so it
+  // crashes on the same shape. Appending is not worth a segfault plus a
+  // stale lock, especially here: the statusline pins in the background, so
+  // this runs unattended.
+  if !every_entry_has_a_value(&cfg, &key) {
+    return Err(valueless_entry_error(&key));
+  }
   // The never-matching regex makes libgit2 append a new value instead of
   // replacing an existing one (the documented multivar-append idiom).
-  cfg.set_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), "^$", session_id)?;
+  cfg.set_multivar(&key, "^$", session_id)?;
   Ok(())
 }
 
@@ -768,6 +816,13 @@ pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Re
     return Ok(false);
   }
   let mut cfg = repo.config()?;
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  if !every_entry_has_a_value(&cfg, &key) {
+    // Refusing beats crashing, and beats guessing: removing one value out
+    // of a key that also holds a valueless entry cannot be expressed to
+    // libgit2 without the regex that kills it.
+    return Err(valueless_entry_error(&key));
+  }
   // Escape regex metacharacters so an id is matched literally, anchored.
   let escaped: String = session_id
     .chars()
@@ -779,7 +834,7 @@ pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Re
       }
     })
     .collect();
-  cfg.remove_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), &format!("^{escaped}$"))?;
+  cfg.remove_multivar(&key, &format!("^{escaped}$"))?;
   Ok(true)
 }
 
@@ -787,11 +842,45 @@ pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Re
 /// when none is set.
 pub fn clear_agent_pins(repo: &Repository, branch: &str) -> Result<()> {
   let mut cfg = repo.config()?;
-  match cfg.remove_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), ".*") {
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  // Clearing everything has a crash-free primitive available whenever the
+  // multivar one is unsafe: `remove` drops the whole key, which is the ask.
+  let dropped = if every_entry_has_a_value(&cfg, &key) {
+    cfg.remove_multivar(&key, ".*")
+  } else {
+    // `remove` is the crash-free primitive, and it is enough whenever the
+    // key holds a single entry. It refuses a multivar outright, so a key
+    // that is *both* multi-valued and partly valueless has no primitive
+    // that works: say so, rather than crash or half-delete.
+    //
+    // Scoped to the local level for the same reason [`local_config`] gives:
+    // `git_config_delete_entry` on the merged view reaches whatever file
+    // holds the highest-priority copy of the key, up to `~/.gitconfig`.
+    // (`remove_multivar` above keeps the merged view it has always had;
+    // narrowing that is a behaviour change this PR has no business making.)
+    match local_config(repo) {
+      Ok(mut local) => local.remove(&key),
+      Err(GwmError::Git(e)) => Err(e),
+      Err(_) => cfg.remove(&key),
+    }
+  };
+  match dropped {
     Ok(()) => Ok(()),
     Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
+    Err(_) if !every_entry_has_a_value(&cfg, &key) => Err(valueless_entry_error(&key)),
     Err(e) => Err(GwmError::Git(e)),
   }
+}
+
+/// The one message for a config key libgit2 has no safe way to edit.
+/// Names the key and the fix, because the repair is a one-line edit the
+/// user can make and gwm cannot make for them without guessing.
+fn valueless_entry_error(key: &str) -> GwmError {
+  GwmError::Other(format!(
+    "'{}' holds an entry with no value; delete that line from .git/config, \
+     it is not a shape gwm can edit safely",
+    key
+  ))
 }
 
 fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> {
@@ -802,6 +891,204 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
     Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
     Err(e) => Err(GwmError::Git(e)),
   }
+}
+
+// ---- Orphaned branch config (issue #633) ---------------------------------
+
+/// Every key gwm persists lives at `branch.<name>.gwm-<something>`, so the
+/// orphan sweep matches on that **prefix** rather than on the constants
+/// above. A key added later is covered without anyone having to remember,
+/// and `gwm-created-at`, which lives in [`crate::worktree`] and not here, is
+/// covered too. This is the leaf test, and it is what decides ownership.
+const GWM_KEY_PREFIX: &str = "gwm-";
+
+/// Pre-filter handed to libgit2's config iterator, which compiles it as a
+/// POSIX regex over the full key name (`git_config_iterator_glob_new`).
+///
+/// A pre-filter and nothing more. Unanchored on the right, it matches
+/// `.gwm-` **anywhere** in the key, and a branch name may carry that itself:
+/// `branch.docs/1.gwm-toml.remote` matches this glob and belongs to git.
+/// [`GWM_KEY_PREFIX`] on the leaf is the actual test (review of PR #640).
+const GWM_BRANCH_KEY_GLOB: &str = r"^branch\..*\.gwm-";
+
+/// `branch.<name>.<leaf>` split into `(<name>, <leaf>)`.
+///
+/// Splits on the **last** dot, never the first: a branch name legitimately
+/// carries dots (`release/1.2.x`), and splitting on the first would hand
+/// back `release/1` as the branch and spare nothing.
+fn split_branch_key(key: &str) -> Option<(&str, &str)> {
+  key.strip_prefix("branch.")?.rsplit_once('.')
+}
+
+/// The local config level alone. Deletions must never run against the
+/// merged view: `git_config_delete_entry` there reaches into whatever file
+/// holds the highest-priority copy of the key, which can be `~/.gitconfig`.
+fn local_config(repo: &Repository) -> Result<git2::Config> {
+  Ok(repo.config()?.open_level(git2::ConfigLevel::Local)?)
+}
+
+/// `branch.<name>.gwm-*` keys whose branch no longer exists, grouped by
+/// branch. Key sets are deduplicated: a multi-valued key
+/// ([`AGENT_PIN_CONFIG_KEY`]) yields one iterator entry per value.
+///
+/// Branch names are compared **case-sensitively**, which is what makes a
+/// key written under git's deprecated dotted form (`[branch.Feature]`,
+/// lowercased by git to `branch.feature.*`) read as orphaned next to a live
+/// `Feature`. That is correct rather than a near miss: git cannot resolve
+/// that key for `Feature` either, so neither can gwm, and the key is
+/// unreachable rather than misfiled. Matching case-insensitively would
+/// spare a genuinely orphaned `feature` because some `Feature` exists.
+/// What a config key looks like on disk, which decides how it can safely
+/// be deleted. libgit2 offers two primitives and neither handles both
+/// shapes: `git_config_delete_entry` silently no-ops on a multi-valued key,
+/// and `git_config_delete_multivar` runs its value regex against the entry,
+/// which **segfaults** when the entry has no value at all (git's
+/// implicit-boolean form, a bare `gwm-issue` line). So the shape has to be
+/// observed while iterating, not guessed at deletion time.
+#[derive(Debug, Default, Clone, Copy)]
+struct KeyShape {
+  /// How many entries carry this name. More than one means multi-valued.
+  entries: usize,
+  /// False as soon as one entry has no value.
+  all_valued: bool,
+}
+
+impl KeyShape {
+  /// `remove_multivar` is required for a multi-valued key and unsafe on a
+  /// valueless one, so it is used only where it is both needed and safe.
+  /// A multi-valued key with a valueless entry falls back to `remove`,
+  /// which may leave values behind: the post-write read-back reports those
+  /// as survivors rather than claiming a purge that did not happen.
+  fn needs_multivar(&self) -> bool {
+    self.entries > 1 && self.all_valued
+  }
+}
+
+fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTreeMap<String, KeyShape>>> {
+  let mut live: BTreeSet<String> = BTreeSet::new();
+  for entry in repo.branches(Some(git2::BranchType::Local))? {
+    let (branch, _) = entry?;
+    if let Some(name) = branch.name()? {
+      live.insert(name.to_string());
+    }
+  }
+
+  let cfg = local_config(repo)?;
+  let mut grouped: BTreeMap<String, BTreeMap<String, KeyShape>> = BTreeMap::new();
+  cfg.entries(Some(GWM_BRANCH_KEY_GLOB))?.for_each(|entry| {
+    // A non-UTF-8 key can't name a branch we could match, so skip it
+    // rather than guess — and never delete what we could not read.
+    let Ok(name) = entry.name() else { return };
+    let Some((branch, leaf)) = split_branch_key(name) else {
+      return;
+    };
+    // The glob got us here; the leaf is what proves the key is ours. A
+    // branch named `docs/1.gwm-toml` puts `.gwm-` in the key without
+    // putting it in the leaf, and its `remote` is git's to keep.
+    if !leaf.starts_with(GWM_KEY_PREFIX) {
+      return;
+    }
+    if live.contains(branch) {
+      return;
+    }
+    let shape = grouped
+      .entry(branch.to_string())
+      .or_default()
+      .entry(name.to_string())
+      .or_insert(KeyShape {
+        entries: 0,
+        all_valued: true,
+      });
+    shape.entries += 1;
+    shape.all_valued &= entry.has_value();
+  })?;
+  Ok(grouped)
+}
+
+/// Branches that are gone but still carry `gwm-*` config, with how many
+/// distinct keys each left behind. Sorted by branch name.
+///
+/// Issue #633: `gwm create` writes ~7 of these per branch, nothing removes
+/// them when the branch dies, and "never delete the source branch" means
+/// none ever disappear on their own — so `.git/config` only grows. The cost
+/// is not the lookup (libgit2 caches the parsed config on the `Repository`),
+/// it is that both `Repository::open` and `git_config_snapshot` are linear
+/// in the file's size, and `gwm list` pays one open plus a snapshot per
+/// worktree. Measured for this change: 45 ms at 13 lines, 184 ms at 1434.
+pub fn orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
+  Ok(
+    collect_orphan_branch_keys(repo)?
+      .into_iter()
+      .map(|(branch, keys)| (branch, keys.len()))
+      .collect(),
+  )
+}
+
+/// What a purge actually achieved, read back from the file rather than
+/// inferred from the calls that were made.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PurgeOutcome {
+  /// Branches whose keys really left the file, with how many went.
+  pub purged: Vec<(String, usize)>,
+  /// Branches still carrying gwm keys after the write, with how many.
+  ///
+  /// Not an error and not a bug in the caller. gwm rewrites `.git/config`
+  /// and nothing else, so a key defined in a file pulled in by
+  /// `include.path` stays where it is; a config that could not be written
+  /// at all (locked, read-only) leaves every key behind the same way. Both
+  /// end up here rather than in a failure, because the file is the truth
+  /// and a count of attempted deletions is not.
+  pub remaining: Vec<(String, usize)>,
+}
+
+/// Drop the keys [`orphan_branch_config`] reports, from the local config
+/// level only.
+///
+/// The deletion primitive is picked per key from its observed
+/// [`KeyShape`]: `remove_multivar` only where a key really carries several
+/// values, `remove` everywhere else. Neither handles both shapes, and
+/// `remove_multivar` on a valueless entry segfaults inside libgit2. A key
+/// that vanished between the read and the write is not an error, it is the
+/// outcome we wanted.
+///
+/// The result is read back from the config **after** the write. Counting
+/// successful `remove_multivar` calls counts attempts: libgit2 answers `Ok`
+/// for a key it resolved through an `include` and did not rewrite, so the
+/// old count claimed a repair that had not happened and the warning came
+/// back on the next run (review of PR #640).
+pub fn purge_orphan_branch_config(repo: &Repository) -> Result<PurgeOutcome> {
+  let before = collect_orphan_branch_keys(repo)?;
+  let mut cfg = local_config(repo)?;
+  for keys in before.values() {
+    for (key, shape) in keys {
+      let dropped = if shape.needs_multivar() {
+        cfg.remove_multivar(key, ".*")
+      } else {
+        cfg.remove(key)
+      };
+      // A per-key failure never aborts the sweep, and never propagates.
+      // libgit2 refuses a key it cannot own outright ("entry is not unique
+      // due to being included"), and a locked or read-only config fails
+      // every key alike. Either way the read-back below is what decides:
+      // whatever is still there is reported as a survivor, so no error is
+      // swallowed into a false success.
+      drop(dropped);
+    }
+  }
+
+  let after = collect_orphan_branch_keys(repo)?;
+  let mut out = PurgeOutcome::default();
+  for (branch, keys) in &before {
+    let left = after.get(branch).map_or(0, |k| k.len());
+    let gone = keys.len().saturating_sub(left);
+    if gone > 0 {
+      out.purged.push((branch.clone(), gone));
+    }
+  }
+  for (branch, keys) in &after {
+    out.remaining.push((branch.clone(), keys.len()));
+  }
+  Ok(out)
 }
 
 // ---- Issue / PR status ---------------------------------------------------

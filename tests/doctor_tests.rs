@@ -1933,3 +1933,101 @@ fn a_blank_orphan_note_does_not_warn() {
 
   assert_eq!(orphan_note_check(&report).status, CheckStatus::Ok);
 }
+
+// ---- Orphaned branch config (issue #633) ---------------------------------
+
+fn branch_config_check(report: &doctor::DoctorReport) -> &doctor::Check {
+  report
+    .checks
+    .iter()
+    .find(|c| c.name == "no orphan branch config")
+    .expect("expected the orphan branch config check in the report")
+}
+
+#[test]
+fn orphan_branch_config_check_warns_and_names_the_dead_branches() {
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#1-live", &head, false).unwrap();
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("branch.feat/#1-live.gwm-issue", "1").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-issue", "2").unwrap();
+  cfg.set_str("branch.feat/#2-dead.gwm-pr", "22").unwrap();
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let check = branch_config_check(&report);
+
+  assert_eq!(check.status, CheckStatus::Warning);
+  assert!(
+    check.detail.contains("2 key(s) from 1 deleted branch(es)") && check.detail.contains("feat/#2-dead"),
+    "detail should count the keys and name the branch, got: {}",
+    check.detail
+  );
+  assert!(
+    !check.detail.contains("feat/#1-live"),
+    "a live branch must never be reported, got: {}",
+    check.detail
+  );
+  assert!(check.fix_hint.as_deref().unwrap_or_default().contains("--fix"));
+}
+
+#[test]
+fn orphan_branch_config_check_is_ok_when_every_key_has_a_branch() {
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#1-live", &head, false).unwrap();
+  repo
+    .config()
+    .unwrap()
+    .set_str("branch.feat/#1-live.gwm-issue", "1")
+    .unwrap();
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  assert_eq!(branch_config_check(&report).status, CheckStatus::Ok);
+}
+
+#[test]
+fn orphan_branch_config_check_truncates_a_long_list() {
+  let (dir, repo) = init_repo();
+  let mut cfg = repo.config().unwrap();
+  for i in 0..9 {
+    cfg.set_str(&format!("branch.feat/#{i}-gone.gwm-issue"), "1").unwrap();
+  }
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let detail = &branch_config_check(&report).detail;
+
+  assert!(detail.contains("9 key(s) from 9 deleted branch(es)"), "got: {detail}");
+  assert!(
+    detail.contains("… and 4 more"),
+    "should elide past 5 names, got: {detail}"
+  );
+}
+
+#[test]
+fn doctor_report_is_read_only_and_leaves_the_config_alone() {
+  let (dir, repo) = init_repo();
+  repo
+    .config()
+    .unwrap()
+    .set_str("branch.feat/#2-dead.gwm-issue", "2")
+    .unwrap();
+
+  let config = Config::default();
+  doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  // Reporting must never purge: the remedy edits `.git/config` and is
+  // gated behind `gwm doctor --fix`.
+  assert_eq!(
+    repo
+      .config()
+      .unwrap()
+      .get_string("branch.feat/#2-dead.gwm-issue")
+      .unwrap(),
+    "2"
+  );
+}
