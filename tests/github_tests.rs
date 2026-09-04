@@ -2391,3 +2391,53 @@ fn purge_survives_a_key_that_has_no_value() {
   let after = std::fs::read_to_string(&cfg_path).unwrap();
   assert!(!after.contains("gwm-pr"), "valued key should be gone:\n{after}");
 }
+
+/// Issue #633, review of PR #640: the valueless-key crash is a property of
+/// `Config::remove_multivar`, not of the sweep that first hit it. Every
+/// call site inherits it, and `gwm agents detach` was reproduced dying at
+/// exit 139 on a bare `gwm-agent-pin` line, leaving `.git/config.lock`
+/// behind. This pins all three sites, so the guard cannot be re-lost by
+/// adding a fourth.
+#[test]
+fn every_multivar_deletion_survives_a_valueless_entry() {
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  text.push_str("[branch \"feat/#9-pin\"]\n\tgwm-agent-pin\n");
+  std::fs::write(&cfg_path, text).unwrap();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+
+  // Reading: the valueless entry is skipped, not unwrapped.
+  assert!(github::agent_pins(&repo, "feat/#9-pin").unwrap().is_empty());
+  // `gwm agents detach <wt> <id>`: nothing to remove, and above all no crash.
+  assert!(!github::remove_agent_pin(&repo, "feat/#9-pin", "session-a").unwrap());
+  // `gwm agents detach <wt>`: clears what it can, never dies trying.
+  github::clear_agent_pins(&repo, "feat/#9-pin").unwrap();
+
+  // The nastier shape: one real pin alongside the valueless entry, so the
+  // id IS found and the targeted removal is actually attempted.
+  let (dir2, _r) = init_repo();
+  let cfg2 = dir2.path().join(".git/config");
+  let mut t2 = std::fs::read_to_string(&cfg2).unwrap();
+  t2.push_str("[branch \"feat/#9-pin\"]\n\tgwm-agent-pin\n\tgwm-agent-pin = session-a\n");
+  std::fs::write(&cfg2, t2).unwrap();
+  let repo2 = git2::Repository::open(dir2.path()).unwrap();
+  assert_eq!(github::agent_pins(&repo2, "feat/#9-pin").unwrap(), vec!["session-a"]);
+  // Refused with a message that names the fix, rather than killing the process.
+  let err = github::remove_agent_pin(&repo2, "feat/#9-pin", "session-a").unwrap_err();
+  assert!(
+    err.to_string().contains("no value"),
+    "the error should say what is wrong, got: {err}"
+  );
+  // Both multi-valued AND partly valueless: libgit2 has no primitive that
+  // works (`remove_multivar` crashes, `remove` refuses a multivar), so this
+  // one is refused with the same actionable message. Refusing is the point.
+  let err = github::clear_agent_pins(&repo2, "feat/#9-pin").unwrap_err();
+  assert!(err.to_string().contains("no value"), "got: {err}");
+  assert!(!dir2.path().join(".git/config.lock").exists());
+
+  assert!(
+    !dir.path().join(".git/config.lock").exists(),
+    "a crashed write leaves the lock behind and bricks every later config write"
+  );
+}

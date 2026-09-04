@@ -109,6 +109,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression. Real forwarding needs SGR re-encoding against the overlay's
   inset origin and the child's own DECSET state.
 
+### Fixed
+
+- **A config key with no value no longer crashes gwm**
+  ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). A git config entry
+  may carry no value at all (`\tgwm-agent-pin` with no `=`, git's
+  implicit-boolean form). `Config::remove_multivar` runs its value regex
+  against such an entry and segfaults inside libgit2, taking the
+  `.git/config.lock` it had already opened with it, after which every config
+  write in that repo fails, git's own included, until the lock is deleted by
+  hand. `gwm agents detach` died that way, and so did the new
+  `gwm doctor --fix` before this.
+
+  The invariant is now stated once, next to the guard: reading such an entry
+  panics and deleting it through the multivar path crashes, so both are
+  checked before either primitive is used. `gwm agents` reads past a
+  valueless pin, `detach` clears what it can, and the one shape libgit2
+  offers no safe primitive for (a key both multi-valued and partly
+  valueless) is refused with a message naming the line to delete, rather
+  than crashed on or half-deleted.
+
 ### Changed
 
 - **`gwm list` scans its worktrees in parallel**

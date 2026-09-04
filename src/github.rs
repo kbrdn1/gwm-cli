@@ -728,6 +728,35 @@ pub fn pinnable_branch(branch: Option<&str>) -> Option<&str> {
 /// Every manual agent-session pin on `branch` (issue #408 US4). The key is
 /// **multi-valued** (user feedback 2026-07-22): several agents can work one
 /// worktree at once, so attach accumulates instead of replacing.
+/// Whether every entry stored at `key` carries a value.
+///
+/// **The invariant this exists to state once.** A git config entry may
+/// have no value at all: `\tgwm-agent-pin` with no `=` is git's
+/// implicit-boolean form, and any hand-edited or third-party-written
+/// config can hold one. Both of libgit2's ways of touching such an entry
+/// are booby-trapped. [`git2::ConfigEntry::value`] panics on it by
+/// documented contract, and [`git2::Config::remove_multivar`] runs its
+/// value regex against it and **segfaults**, taking the `.git/config.lock`
+/// it already opened with it, which then fails every later config write in
+/// that repo, git's own included, until someone deletes the lock by hand.
+///
+/// Reachable from any key gwm reads or deletes, so the guard lives here
+/// rather than at each call site (issue #633, review of PR #640: the sweep
+/// found the crash, and `gwm agents detach` had it too).
+///
+/// Fails safe: an unreadable multivar answers `false`, which routes the
+/// caller to the primitive that cannot crash.
+fn every_entry_has_a_value(cfg: &git2::Config, key: &str) -> bool {
+  let Ok(entries) = cfg.multivar(key, None) else {
+    return false;
+  };
+  let mut all_valued = true;
+  if entries.for_each(|e| all_valued &= e.has_value()).is_err() {
+    return false;
+  }
+  all_valued
+}
+
 pub fn agent_pins(repo: &Repository, branch: &str) -> Result<Vec<String>> {
   let cfg = repo.config()?;
   let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
@@ -736,8 +765,11 @@ pub fn agent_pins(repo: &Repository, branch: &str) -> Result<Vec<String>> {
     Ok(entries) => {
       entries
         .for_each(|e| {
-          if let Ok(v) = e.value() {
-            out.push(v.to_string());
+          // `has_value` first: `value()` panics on a valueless entry.
+          if e.has_value() {
+            if let Ok(v) = e.value() {
+              out.push(v.to_string());
+            }
           }
         })
         .map_err(GwmError::Git)?;
@@ -769,6 +801,13 @@ pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Re
     return Ok(false);
   }
   let mut cfg = repo.config()?;
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  if !every_entry_has_a_value(&cfg, &key) {
+    // Refusing beats crashing, and beats guessing: removing one value out
+    // of a key that also holds a valueless entry cannot be expressed to
+    // libgit2 without the regex that kills it.
+    return Err(valueless_entry_error(&key));
+  }
   // Escape regex metacharacters so an id is matched literally, anchored.
   let escaped: String = session_id
     .chars()
@@ -780,7 +819,7 @@ pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Re
       }
     })
     .collect();
-  cfg.remove_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), &format!("^{escaped}$"))?;
+  cfg.remove_multivar(&key, &format!("^{escaped}$"))?;
   Ok(true)
 }
 
@@ -788,11 +827,35 @@ pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Re
 /// when none is set.
 pub fn clear_agent_pins(repo: &Repository, branch: &str) -> Result<()> {
   let mut cfg = repo.config()?;
-  match cfg.remove_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), ".*") {
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  // Clearing everything has a crash-free primitive available whenever the
+  // multivar one is unsafe: `remove` drops the whole key, which is the ask.
+  let dropped = if every_entry_has_a_value(&cfg, &key) {
+    cfg.remove_multivar(&key, ".*")
+  } else {
+    // `remove` is the crash-free primitive, and it is enough whenever the
+    // key holds a single entry. It refuses a multivar outright, so a key
+    // that is *both* multi-valued and partly valueless has no primitive
+    // that works: say so, rather than crash or half-delete.
+    cfg.remove(&key)
+  };
+  match dropped {
     Ok(()) => Ok(()),
     Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
+    Err(_) if !every_entry_has_a_value(&cfg, &key) => Err(valueless_entry_error(&key)),
     Err(e) => Err(GwmError::Git(e)),
   }
+}
+
+/// The one message for a config key libgit2 has no safe way to edit.
+/// Names the key and the fix, because the repair is a one-line edit the
+/// user can make and gwm cannot make for them without guessing.
+fn valueless_entry_error(key: &str) -> GwmError {
+  GwmError::Other(format!(
+    "'{}' holds an entry with no value; delete that line from .git/config, \
+     it is not a shape gwm can edit safely",
+    key
+  ))
 }
 
 fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> {
