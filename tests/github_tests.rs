@@ -2476,19 +2476,32 @@ fn adding_a_pin_survives_a_valueless_entry_on_the_same_key() {
 ///
 /// Three review passes found the same crash at three different call sites,
 /// because each fix guarded the site rather than the class. The class is
-/// "every libgit2 config call that takes a **value regex**": `set_multivar`
-/// and `remove_multivar`. On an entry with no value, the regex walk reaches
-/// `strlen(NULL)`, the process dies on SIGSEGV, and the `.git/config.lock`
-/// it opened is never released.
+/// "every libgit2 config call that takes a **value regex**": `set_multivar`,
+/// `remove_multivar`, and `multivar` when its pattern is not `None`. On an
+/// entry with no value the regex walk reaches `strlen(NULL)`, the process
+/// dies on SIGSEGV, and the `.git/config.lock` it opened is never released.
 ///
-/// So the call sites are enumerated by construction instead of by memory.
-/// Adding one makes this test fail, which is the point: the new site has to
-/// be looked at, and either guarded with `every_entry_has_a_value` or
-/// listed here with a reason.
+/// So the call sites are enumerated by construction rather than by memory,
+/// and by the **function** they sit in rather than by a count: moving an
+/// existing call into a new unguarded helper has to fail this too. Adding a
+/// site makes this test fail, which is the point.
 #[test]
 fn every_value_regex_call_site_is_accounted_for() {
+  /// Each site, named by the function holding it, and why it is safe.
+  const ACCOUNTED_FOR: &[(&str, &str)] = &[
+    (
+      "every_entry_has_a_value",
+      "the guard itself; `None` pattern, no regex walk",
+    ),
+    ("agent_pins", "reads values; `None` pattern, no regex walk"),
+    ("add_agent_pin", "guarded by `every_entry_has_a_value`"),
+    ("remove_agent_pin", "guarded by `every_entry_has_a_value`"),
+    ("clear_agent_pins", "guarded by `every_entry_has_a_value`"),
+    ("purge_orphan_branch_config", "guarded by `KeyShape::needs_multivar`"),
+  ];
+
   let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-  let mut sites: Vec<String> = Vec::new();
+  let mut found: Vec<String> = Vec::new();
   let mut stack = vec![src];
   while let Some(dir) = stack.pop() {
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -2501,25 +2514,42 @@ fn every_value_regex_call_site_is_accounted_for() {
         continue;
       }
       let text = std::fs::read_to_string(&path).unwrap();
-      for (i, line) in text.lines().enumerate() {
-        // Calls only: `cfg.set_multivar(…)`, not the prose that explains why.
-        if line.contains(".set_multivar(") || line.contains(".remove_multivar(") {
-          let rel = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap();
-          sites.push(format!("{}:{}", rel.display(), i + 1));
+      let lines: Vec<&str> = text.lines().collect();
+      for (i, line) in lines.iter().enumerate() {
+        // Calls only, not the prose that explains them.
+        let is_call =
+          line.contains(".set_multivar(") || line.contains(".remove_multivar(") || line.contains(".multivar(");
+        if !is_call {
+          continue;
         }
+        // Walk back to the enclosing `fn`, so the guard survives every edit
+        // that moves lines around without moving the call.
+        let owner = lines[..=i]
+          .iter()
+          .rev()
+          .find_map(|l| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let t = t.strip_prefix("pub(crate) ").unwrap_or(t);
+            t.strip_prefix("fn ")
+              .map(|rest| rest.split(['(', '<']).next().unwrap_or(rest).to_string())
+          })
+          .unwrap_or_else(|| format!("{}:{}", path.display(), i + 1));
+        found.push(owner);
       }
     }
   }
-  sites.sort();
+  found.sort();
+  found.dedup();
 
-  // Every site below is guarded: the three in `github.rs` behind
-  // `every_entry_has_a_value`, the purge behind `KeyShape::needs_multivar`
-  // (same check, folded into the sweep's own iteration).
+  let mut expected: Vec<String> = ACCOUNTED_FOR.iter().map(|(f, _)| f.to_string()).collect();
+  expected.sort();
+
   assert_eq!(
-    sites.len(),
-    4,
-    "a value-regex call site was added or removed. Every one of them segfaults on a \
-     config entry with no value: guard it with `every_entry_has_a_value` (or, inside \
-     the orphan sweep, `KeyShape::needs_multivar`) and update this count. Sites found: {sites:#?}"
+    found, expected,
+    "a value-regex call site moved, appeared or vanished. Every one of them segfaults \
+     on a config entry with no value unless its pattern is `None`: guard it with \
+     `every_entry_has_a_value` (or, inside the orphan sweep, `KeyShape::needs_multivar`), \
+     then add it to ACCOUNTED_FOR with the reason it is safe."
   );
 }

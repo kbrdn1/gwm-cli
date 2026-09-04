@@ -725,9 +725,6 @@ pub fn pinnable_branch(branch: Option<&str>) -> Option<&str> {
   }
 }
 
-/// Every manual agent-session pin on `branch` (issue #408 US4). The key is
-/// **multi-valued** (user feedback 2026-07-22): several agents can work one
-/// worktree at once, so attach accumulates instead of replacing.
 /// Whether every entry stored at `key` carries a value.
 ///
 /// **The invariant this exists to state once.** A git config entry may
@@ -764,6 +761,9 @@ fn every_entry_has_a_value(cfg: &git2::Config, key: &str) -> bool {
   all_valued
 }
 
+/// Every manual agent-session pin on `branch` (issue #408 US4). The key is
+/// **multi-valued** (user feedback 2026-07-22): several agents can work one
+/// worktree at once, so attach accumulates instead of replacing.
 pub fn agent_pins(repo: &Repository, branch: &str) -> Result<Vec<String>> {
   let cfg = repo.config()?;
   let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
@@ -852,7 +852,17 @@ pub fn clear_agent_pins(repo: &Repository, branch: &str) -> Result<()> {
     // key holds a single entry. It refuses a multivar outright, so a key
     // that is *both* multi-valued and partly valueless has no primitive
     // that works: say so, rather than crash or half-delete.
-    cfg.remove(&key)
+    //
+    // Scoped to the local level for the same reason [`local_config`] gives:
+    // `git_config_delete_entry` on the merged view reaches whatever file
+    // holds the highest-priority copy of the key, up to `~/.gitconfig`.
+    // (`remove_multivar` above keeps the merged view it has always had;
+    // narrowing that is a behaviour change this PR has no business making.)
+    match local_config(repo) {
+      Ok(mut local) => local.remove(&key),
+      Err(GwmError::Git(e)) => Err(e),
+      Err(_) => cfg.remove(&key),
+    }
   };
   match dropped {
     Ok(()) => Ok(()),
