@@ -32,9 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--fix` is opt-in because it edits `.git/config`; a plain `gwm doctor`
   stays read-only. It reports what it achieved by reading the config back
   after writing, not by counting the deletions it attempted: a key pulled in
-  by `include.path` resolves through the merged view and reports success
-  while surviving in a file gwm does not rewrite, so those are named as
-  survivors instead of being claimed as purged. It works on the local config level alone, since deleting
+  by `include.path` lives in a file gwm does not rewrite, and libgit2
+  refuses to delete it, so those are named as survivors instead of being
+  claimed as purged. A purge that cannot run at all does not take the
+  report down with it either: `doctor` exists to diagnose, so the checks
+  still print. It works on the local config level alone, since deleting
   through the merged view would let git resolve the key up to
   `~/.gitconfig`. It leaves the empty `[branch "…"]` header behind, because
   libgit2 removes keys and not sections: on a repo grafted to 1434 lines,

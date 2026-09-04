@@ -850,7 +850,33 @@ fn local_config(repo: &Repository) -> Result<git2::Config> {
 /// that key for `Feature` either, so neither can gwm, and the key is
 /// unreachable rather than misfiled. Matching case-insensitively would
 /// spare a genuinely orphaned `feature` because some `Feature` exists.
-fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTreeSet<String>>> {
+/// What a config key looks like on disk, which decides how it can safely
+/// be deleted. libgit2 offers two primitives and neither handles both
+/// shapes: `git_config_delete_entry` silently no-ops on a multi-valued key,
+/// and `git_config_delete_multivar` runs its value regex against the entry,
+/// which **segfaults** when the entry has no value at all (git's
+/// implicit-boolean form, a bare `gwm-issue` line). So the shape has to be
+/// observed while iterating, not guessed at deletion time.
+#[derive(Debug, Default, Clone, Copy)]
+struct KeyShape {
+  /// How many entries carry this name. More than one means multi-valued.
+  entries: usize,
+  /// False as soon as one entry has no value.
+  all_valued: bool,
+}
+
+impl KeyShape {
+  /// `remove_multivar` is required for a multi-valued key and unsafe on a
+  /// valueless one, so it is used only where it is both needed and safe.
+  /// A multi-valued key with a valueless entry falls back to `remove`,
+  /// which may leave values behind: the post-write read-back reports those
+  /// as survivors rather than claiming a purge that did not happen.
+  fn needs_multivar(&self) -> bool {
+    self.entries > 1 && self.all_valued
+  }
+}
+
+fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTreeMap<String, KeyShape>>> {
   let mut live: BTreeSet<String> = BTreeSet::new();
   for entry in repo.branches(Some(git2::BranchType::Local))? {
     let (branch, _) = entry?;
@@ -860,7 +886,7 @@ fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTre
   }
 
   let cfg = local_config(repo)?;
-  let mut grouped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+  let mut grouped: BTreeMap<String, BTreeMap<String, KeyShape>> = BTreeMap::new();
   cfg.entries(Some(GWM_BRANCH_KEY_GLOB))?.for_each(|entry| {
     // A non-UTF-8 key can't name a branch we could match, so skip it
     // rather than guess — and never delete what we could not read.
@@ -877,7 +903,16 @@ fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTre
     if live.contains(branch) {
       return;
     }
-    grouped.entry(branch.to_string()).or_default().insert(name.to_string());
+    let shape = grouped
+      .entry(branch.to_string())
+      .or_default()
+      .entry(name.to_string())
+      .or_insert(KeyShape {
+        entries: 0,
+        all_valued: true,
+      });
+    shape.entries += 1;
+    shape.all_valued &= entry.has_value();
   })?;
   Ok(grouped)
 }
@@ -909,23 +944,24 @@ pub struct PurgeOutcome {
   pub purged: Vec<(String, usize)>,
   /// Branches still carrying gwm keys after the write, with how many.
   ///
-  /// Not an error and not a bug in the caller: a key can live in a file
-  /// pulled in by `include.path`. `git_config_delete_entry` resolves the
-  /// name through the merged view and returns `Ok`, while
-  /// `config_file_write` only ever rewrites the backend's own path, so the
-  /// key survives. gwm rewrites `.git/config` and never a file someone else
-  /// owns, so the honest move is to report the survivors.
+  /// Not an error and not a bug in the caller. gwm rewrites `.git/config`
+  /// and nothing else, so a key defined in a file pulled in by
+  /// `include.path` stays where it is; a config that could not be written
+  /// at all (locked, read-only) leaves every key behind the same way. Both
+  /// end up here rather than in a failure, because the file is the truth
+  /// and a count of attempted deletions is not.
   pub remaining: Vec<(String, usize)>,
 }
 
 /// Drop the keys [`orphan_branch_config`] reports, from the local config
 /// level only.
 ///
-/// Removal goes through `remove_multivar` for every key, not `remove`:
-/// [`AGENT_PIN_CONFIG_KEY`] is multi-valued and `git_config_delete_entry`
-/// refuses those, and `.*` matches every value of a single-valued key just
-/// as well. A key that vanished between the read and the write is not an
-/// error, it is the outcome we wanted.
+/// The deletion primitive is picked per key from its observed
+/// [`KeyShape`]: `remove_multivar` only where a key really carries several
+/// values, `remove` everywhere else. Neither handles both shapes, and
+/// `remove_multivar` on a valueless entry segfaults inside libgit2. A key
+/// that vanished between the read and the write is not an error, it is the
+/// outcome we wanted.
 ///
 /// The result is read back from the config **after** the write. Counting
 /// successful `remove_multivar` calls counts attempts: libgit2 answers `Ok`
@@ -936,12 +972,19 @@ pub fn purge_orphan_branch_config(repo: &Repository) -> Result<PurgeOutcome> {
   let before = collect_orphan_branch_keys(repo)?;
   let mut cfg = local_config(repo)?;
   for keys in before.values() {
-    for key in keys {
-      match cfg.remove_multivar(key, ".*") {
-        Ok(()) => {}
-        Err(e) if e.code() == git2::ErrorCode::NotFound => {}
-        Err(e) => return Err(GwmError::Git(e)),
-      }
+    for (key, shape) in keys {
+      let dropped = if shape.needs_multivar() {
+        cfg.remove_multivar(key, ".*")
+      } else {
+        cfg.remove(key)
+      };
+      // A per-key failure never aborts the sweep, and never propagates.
+      // libgit2 refuses a key it cannot own outright ("entry is not unique
+      // due to being included"), and a locked or read-only config fails
+      // every key alike. Either way the read-back below is what decides:
+      // whatever is still there is reported as a survivor, so no error is
+      // swallowed into a false success.
+      drop(dropped);
     }
   }
 

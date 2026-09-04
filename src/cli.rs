@@ -3778,26 +3778,38 @@ fn cmd_doctor(format: OutputFormat, fix: bool) -> Result<()> {
   // failed repair. Text only: the JSON consumer reads the state, not the
   // narration, and a stray line would break the parse.
   if fix {
-    let outcome = github::purge_orphan_branch_config(&repo)?;
-    if format == OutputFormat::Text {
-      let keys: usize = outcome.purged.iter().map(|(_, n)| n).sum();
-      match outcome.purged.len() {
-        0 => println!("✓ nothing to purge: no gwm config left behind by a deleted branch"),
-        n => println!(
-          "✓ purged {} orphan branch config key(s) from {} deleted branch(es)",
-          keys, n
-        ),
-      }
-      // Read back from the file after the write, so a key gwm could not
-      // reach is named rather than folded into the success line above.
-      if !outcome.remaining.is_empty() {
+    // The remedy never costs the diagnosis. `doctor` exists to report, so a
+    // purge that cannot run says so and the checks below still print, rather
+    // than the command dying on `error: failed to lock file …` with none of
+    // them shown (review of PR #640).
+    match github::purge_orphan_branch_config(&repo) {
+      Err(e) if format == OutputFormat::Text => println!("✗ could not purge orphan branch config: {}", e),
+      Err(_) => {}
+      Ok(outcome) if format == OutputFormat::Text => {
+        let purged: usize = outcome.purged.iter().map(|(_, n)| n).sum();
         let left: usize = outcome.remaining.iter().map(|(_, n)| n).sum();
-        println!(
-          "! {} key(s) from {} branch(es) survived: they live outside `.git/config`, in a file pulled in by `include.path`, which gwm does not rewrite",
-          left,
-          outcome.remaining.len()
-        );
+        if purged > 0 {
+          println!(
+            "✓ purged {} orphan branch config key(s) from {} deleted branch(es)",
+            purged,
+            outcome.purged.len()
+          );
+        }
+        // Read back from the file after the write. Printed instead of the
+        // "nothing to purge" line, never under it: claiming there is nothing
+        // left behind and then listing what was left behind is a
+        // contradiction the reader has to resolve.
+        if left > 0 {
+          println!(
+            "! {} key(s) from {} branch(es) survived: gwm only rewrites `.git/config`, so a key defined elsewhere (a file pulled in by `include.path`) stays put, and so does every key if that file could not be written (locked, read-only)",
+            left,
+            outcome.remaining.len()
+          );
+        } else if purged == 0 {
+          println!("✓ nothing to purge: no gwm config left behind by a deleted branch");
+        }
       }
+      Ok(_) => {}
     }
   }
 

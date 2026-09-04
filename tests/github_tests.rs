@@ -2357,3 +2357,37 @@ fn a_key_under_gits_dotted_form_is_orphaned_by_its_own_lowercasing() {
   let _ = dir2;
   assert!(github::orphan_branch_config(&repo2).unwrap().is_empty());
 }
+
+/// Issue #633, review of PR #640: a config entry may carry **no value at
+/// all** (`\tgwm-issue` with no `=`, git's implicit-boolean form). Running
+/// `remove_multivar`'s value regex against such an entry crashes inside
+/// libgit2: `gwm doctor --fix` died with SIGSEGV and left the
+/// `.git/config.lock` it had taken, which then failed every later config
+/// write in that repo, gwm's and git's alike, until someone deleted it.
+///
+/// A test that segfaults takes the whole binary with it, which is exactly
+/// the point: nothing about this is recoverable at the call site.
+#[test]
+fn purge_survives_a_key_that_has_no_value() {
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".git/config");
+  let mut text = std::fs::read_to_string(&cfg_path).unwrap();
+  // Written as text: `set_str` cannot express a key with no value.
+  text.push_str("[branch \"feat/#7-dead\"]\n\tgwm-issue\n\tgwm-pr = 7\n");
+  std::fs::write(&cfg_path, text).unwrap();
+  let repo = git2::Repository::open(dir.path()).unwrap();
+
+  let outcome = github::purge_orphan_branch_config(&repo).unwrap();
+
+  assert!(
+    outcome.purged.iter().any(|(b, _)| b == "feat/#7-dead"),
+    "the valued key at least must go, got {:?}",
+    outcome.purged
+  );
+  assert!(
+    !cfg_path.with_extension("lock").exists() && !dir.path().join(".git/config.lock").exists(),
+    "a crashed write leaves the config lock behind and bricks every later write"
+  );
+  let after = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(!after.contains("gwm-pr"), "valued key should be gone:\n{after}");
+}
