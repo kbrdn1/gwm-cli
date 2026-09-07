@@ -2525,15 +2525,37 @@ fn every_value_regex_call_site_is_accounted_for() {
         }
         // Walk back to the enclosing `fn`, so the guard survives every edit
         // that moves lines around without moving the call.
+        //
+        // The visibility and qualifiers are open-ended (`pub(super)`,
+        // `pub(in crate::x)`, `async`, `unsafe`, `const`, `extern "C"`, and
+        // combinations), so this accepts any prefix made of qualifier-shaped
+        // words rather than a fixed list. Stripping only `pub ` and
+        // `pub(crate) ` attributed a call in a `pub(super) fn` to the
+        // *previous* function, which left the canary green on exactly the
+        // new helper it exists to catch (found reviewing this test).
         let owner = lines[..=i]
           .iter()
           .rev()
           .find_map(|l| {
             let t = l.trim_start();
-            let t = t.strip_prefix("pub ").unwrap_or(t);
-            let t = t.strip_prefix("pub(crate) ").unwrap_or(t);
-            t.strip_prefix("fn ")
-              .map(|rest| rest.split(['(', '<']).next().unwrap_or(rest).to_string())
+            if t.starts_with("//") {
+              return None; // prose that mentions `fn `, not a declaration
+            }
+            // `fn ` with the space: `fn(u32) -> u32` as a type never matches.
+            let at = t.find("fn ")?;
+            // Character-shaped rather than word-shaped: `pub(in crate::x)`
+            // splits into two words of which neither is a keyword, so a
+            // whitespace split leaks it through. Qualifiers only ever use
+            // letters, `_`, parentheses, `:` and the ABI string's quotes;
+            // anything else on that line means it is not a declaration.
+            let qualifiers_only = t[..at]
+              .chars()
+              .all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '(' | ')' | ':' | '"' | ' '));
+            if !qualifiers_only {
+              return None;
+            }
+            let rest = &t[at + 3..];
+            Some(rest.split(['(', '<']).next().unwrap_or(rest).trim().to_string())
           })
           .unwrap_or_else(|| format!("{}:{}", path.display(), i + 1));
         found.push(owner);

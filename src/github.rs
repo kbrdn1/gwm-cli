@@ -940,8 +940,10 @@ fn local_config(repo: &Repository) -> Result<git2::Config> {
 /// spare a genuinely orphaned `feature` because some `Feature` exists.
 /// What a config key looks like on disk, which decides how it can safely
 /// be deleted. libgit2 offers two primitives and neither handles both
-/// shapes: `git_config_delete_entry` silently no-ops on a multi-valued key,
-/// and `git_config_delete_multivar` runs its value regex against the entry,
+/// shapes: `git_config_delete_entry` refuses a multi-valued key outright
+/// ("entry is not unique due to being a multivar", measured on both a fully
+/// valued one and a partly valueless one), and `git_config_delete_multivar`
+/// runs its value regex against the entry,
 /// which **segfaults** when the entry has no value at all (git's
 /// implicit-boolean form, a bare `gwm-issue` line). So the shape has to be
 /// observed while iterating, not guessed at deletion time.

@@ -2055,15 +2055,25 @@ fn the_doctor_page_documents_every_check_in_order() {
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{page}: {e}"));
     // `### <n>. <title>`, in document order. CRLF-safe: the repo checks in
     // files that a Windows clone may hand back with \r line endings.
-    let sections: Vec<String> = text
+    let sections: Vec<(u32, String)> = text
       .lines()
       .filter_map(|l| {
         let l = l.trim_end_matches('\r');
         let rest = l.strip_prefix("### ")?;
         let (num, title) = rest.split_once(". ")?;
-        num.parse::<u32>().ok().map(|_| title.to_string())
+        num.parse::<u32>().ok().map(|n| (n, title.to_string()))
       })
       .collect();
+
+    // The numbering itself, which a renumbering pass has already broken
+    // once in this PR (it produced 8, 8, 9). Discarding the number while
+    // claiming to pin the page is how that survived.
+    let numbers: Vec<u32> = sections.iter().map(|(n, _)| *n).collect();
+    let expected_numbers: Vec<u32> = (1..=sections.len() as u32).collect();
+    assert_eq!(
+      numbers, expected_numbers,
+      "{page}: sections must be numbered 1..N with no gap or repeat"
+    );
 
     assert_eq!(
       sections.len(),
@@ -2073,12 +2083,15 @@ fn the_doctor_page_documents_every_check_in_order() {
       printed.len()
     );
 
-    // The English page titles the sections with the check names; the French
-    // one translates them, so only the count and the order are pinned there
-    // by comparing against the English page's own order.
+    // The English page titles its sections with the check names verbatim,
+    // so it is pinned name for name and in order. The French one translates
+    // them, and there is no correspondence table to check it against: its
+    // count and its numbering are pinned above, its wording is not. Saying
+    // so beats the previous comment, which claimed an order check the code
+    // did not perform.
     if page.starts_with("docs/5") {
       let normalise = |s: &str| s.replace(['`', '[', ']'], "");
-      let doc: Vec<String> = sections.iter().map(|s| normalise(s)).collect();
+      let doc: Vec<String> = sections.iter().map(|(_, t)| normalise(t)).collect();
       let run: Vec<String> = printed.iter().map(|s| normalise(s)).collect();
       assert_eq!(
         doc, run,
