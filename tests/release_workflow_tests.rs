@@ -425,8 +425,36 @@ fn ci_test_matrix_runs_on_windows_latest() {
     "windows-latest must run the same cargo build step as the other test matrix rows, got {runs:?}"
   );
   assert!(
-    runs.iter().any(|r| r.contains("cargo test")),
-    "windows-latest must run the same cargo test step as the other test matrix rows, got {runs:?}"
+    runs.iter().any(|r| r.contains("cargo nextest run")),
+    "windows-latest must run the same test step as the other test matrix rows, got {runs:?}"
+  );
+}
+
+/// `cargo-nextest` has no `cargo install` step on purpose: building it from
+/// source on every runner, windows-latest most of all, costs minutes against
+/// the seconds a prebuilt binary takes, and the swap is only worth making if
+/// the tool arrives cheaply (issue #634). So the install action is pinned
+/// here rather than left to whoever next edits the job.
+#[test]
+fn ci_installs_nextest_from_a_prebuilt_binary() {
+  let job = ci_job("test");
+  let uses: Vec<String> = job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|s| s["uses"].as_str().map(str::to_owned))
+    .collect();
+  assert!(
+    uses.iter().any(|u| u.starts_with("taiki-e/install-action")),
+    "the test job must install cargo-nextest from a prebuilt binary, got {uses:?}"
+  );
+  assert!(
+    !run_steps(&job)
+      .iter()
+      .any(|r| r.contains("cargo install cargo-nextest")),
+    "cargo-nextest must arrive prebuilt: building it from source on every runner \
+     eats the time the pooled run is meant to save"
   );
 }
 
