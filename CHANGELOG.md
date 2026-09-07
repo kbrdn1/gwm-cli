@@ -117,6 +117,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The warm-cache sidebar bench runs again, and a CI job now runs the
+  benches** ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)).
+  `benches/sidebar_cache_hit.rs` drew one frame and asserted the sidebar
+  cache had filled itself. That was the contract when it was written: the
+  first frame ran `git log` and stored the rendered sections. #351 took git
+  off the render path, so a frame warms nothing, and the bench has panicked
+  on every run since, 1086 commits ago. `cargo bench` stops at the first
+  failure, so it also masked the third bench, which was healthy all along.
+
+  Nobody saw it because nothing ran the benches. Both halves are fixed
+  here: the bench seeds the payload the way the event loop does, and a
+  `bench` job runs all three on every push and pull request. The job passes
+  criterion's `--test`, which runs each benchmark once and measures
+  nothing, so it fails on a panic or a build break and never on timing
+  noise from a shared runner. A perf gate that goes red on a slow runner is
+  a perf gate somebody switches off.
+
+  The old assertion does not come back. `cache.is_some()` is what let this
+  rot: the renderer serves the cache only when its key matches the current
+  selection and mode, so a payload under any other key renders the loading
+  placeholder and the bench would still report a plausible number for
+  drawing it. The timed frame is asserted to carry a real commit subject
+  instead.
+
 - **A config key with no value no longer crashes gwm**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). A git config entry
   may carry no value at all (`\tgwm-agent-pin` with no `=`, git's
@@ -140,6 +164,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than crashed on or half-deleted.
 
 ### Changed
+
+- **CI schedules the test suite in one pool with `cargo-nextest`**
+  ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)). `cargo test` runs
+  110 test binaries in sequence, each with its own thread pool, and most of
+  them hold a handful of tests that never saturate a runner's cores.
+  `cargo-nextest` schedules all 3525 across one global pool. The tests
+  themselves are untouched and all 3525 pass under it, process-per-test
+  isolation included. Doctests are not lost: nextest cannot run them, and
+  every ``` fence under `src/` is a ```text or ```go block, so
+  `cargo test --doc` reports zero tests on this tree. The MSRV job still
+  compiles at the declared floor and runs no tests.
 
 - **`gwm list` scans its worktrees in parallel**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens
