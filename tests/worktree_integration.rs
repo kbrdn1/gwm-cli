@@ -2663,3 +2663,61 @@ fn working_tree_stats_on_an_unborn_head_is_empty_not_an_error() {
 
   assert!(worktree::working_tree_stats(dir.path()).unwrap().is_empty());
 }
+
+/// Issue #633: `list` scans the linked worktrees on several threads, so the
+/// row order can no longer be read off the loop that produced it. The
+/// oracle is `repo.worktrees()`, which is what the sequential version
+/// followed and what the table renders: **not** sorted, and deliberately so
+/// (a listing that reordered itself between runs would be unusable).
+///
+/// Twelve worktrees so the fan-out actually fans out on any CI runner, and
+/// so a completion-ordered result would be near-certain to differ from the
+/// input order rather than passing by luck.
+#[test]
+fn list_returns_linked_worktrees_in_the_order_git_reports_them() {
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  for i in 0..12 {
+    let name = format!("feat-{i}-row");
+    worktree::add(
+      &repo,
+      &name,
+      &wt_root.path().join(&name),
+      &format!("feat/#{i}-row"),
+      false,
+    )
+    .unwrap();
+  }
+
+  let expected: Vec<String> = repo
+    .worktrees()
+    .unwrap()
+    .iter()
+    .filter_map(|r| r.ok().flatten())
+    .map(|s| s.to_string())
+    .collect();
+  assert_eq!(expected.len(), 12, "fixture must hold twelve linked worktrees");
+
+  let listed: Vec<String> = worktree::list(&repo)
+    .unwrap()
+    .into_iter()
+    .filter(|w| !w.is_main)
+    .map(|w| w.id)
+    .collect();
+
+  assert_eq!(listed, expected, "row order must follow `repo.worktrees()` exactly");
+
+  // The rows carry their own worktree's data, not a neighbour's: a slot
+  // written to the wrong index would keep the order and swap the contents.
+  for w in worktree::list(&repo).unwrap().into_iter().filter(|w| !w.is_main) {
+    let i = w.id.strip_prefix("feat-").and_then(|s| s.split('-').next()).unwrap();
+    assert_eq!(
+      w.branch.as_deref(),
+      Some(format!("feat/#{i}-row").as_str()),
+      "{} carries the wrong branch",
+      w.id
+    );
+    assert!(paths_equal(&w.path, &wt_root.path().join(&w.id)));
+  }
+}

@@ -4,6 +4,7 @@ use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePr
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -197,6 +198,98 @@ pub fn repo_name(repo: &Repository) -> String {
     .unwrap_or_else(|| "repo".into())
 }
 
+/// What the main repo knows about a linked worktree before anything is
+/// opened. Split out so [`list`] can read it on one thread and hand the
+/// expensive half to [`scan_worktrees`].
+struct WorktreeEntry {
+  id: String,
+  path: PathBuf,
+  is_locked: bool,
+  is_prunable: bool,
+}
+
+/// HEAD ref, HEAD oid, status, branch age: everything [`list`] needs that
+/// can only be read by opening the worktree itself.
+type WorktreeScan = (Option<String>, Option<String>, BranchStatus, Option<Duration>);
+
+/// Open one worktree and read its HEAD, status and branch age.
+///
+/// Issue #103: the age computation piggybacks on this open so the TUI
+/// render path does not call `Repository::open` per row per frame. Cost is
+/// the same revwalk we would otherwise do per frame.
+fn scan_worktree(path: &Path) -> WorktreeScan {
+  match Repository::open(path) {
+    Ok(sub) => {
+      let head_ref = sub.head().ok();
+      let b = head_ref
+        .as_ref()
+        .and_then(|r| r.shorthand().ok().map(|s| s.to_string()));
+      let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
+      let s = compute_status(&sub);
+      // The trunk-baseline lookup must run against the main repo's branch
+      // table; the linked worktree's `sub` has the same refs DB either way
+      // (git2 shares the gitdir), so either handle works.
+      let a = b.as_deref().and_then(|name| branch_age(&sub, name));
+      (b, h, s, a)
+    }
+    Err(_) => (
+      None,
+      None,
+      BranchStatus {
+        unknown: true,
+        ..Default::default()
+      },
+      None,
+    ),
+  }
+}
+
+/// [`scan_worktree`] for every entry, on up to `available_parallelism()`
+/// workers, returned **in input order** (issue #633).
+///
+/// The body is independent per row: each one opens its own `Repository`,
+/// and `statuses()` plus the age revwalk are the listing's whole cost. It
+/// is also the half that grows with `.git/config`, since libgit2 reparses
+/// the file on every open and `statuses()` snapshots it again, so a repo
+/// that has been worked in for a year pays this eight, twenty, forty times
+/// over. Sequentially, that is ~11 ms per worktree on a clean clone.
+///
+/// Ordering is not cosmetic: `repo.worktrees()` is not sorted, and the
+/// table renders the order it returns. Same shape as
+/// [`crate::exec::run_in_dirs_parallel`]: work-stealing off an atomic
+/// cursor, results written into per-index slots, so a slow worktree
+/// steals no other row's place and completion order never leaks out.
+fn scan_worktrees(entries: &[WorktreeEntry]) -> Vec<WorktreeScan> {
+  if entries.is_empty() {
+    return Vec::new();
+  }
+  let workers = std::thread::available_parallelism()
+    .map(|n| n.get())
+    .unwrap_or(1)
+    .clamp(1, entries.len());
+  let next = AtomicUsize::new(0);
+  let slots: Vec<Mutex<Option<WorktreeScan>>> = (0..entries.len()).map(|_| Mutex::new(None)).collect();
+  std::thread::scope(|s| {
+    for _ in 0..workers {
+      s.spawn(|| loop {
+        let i = next.fetch_add(1, Ordering::Relaxed);
+        if i >= entries.len() {
+          break;
+        }
+        let scan = scan_worktree(&entries[i].path);
+        // `.lock()` never poisons: `scan_worktree` swallows every libgit2
+        // error into the `unknown` status rather than unwinding.
+        *slots[i].lock().expect("worktree scan mutex never poisoned") = Some(scan);
+      });
+    }
+  });
+  slots
+    .into_iter()
+    .map(|m| m.into_inner().expect("worktree scan mutex never poisoned"))
+    .map(|slot| slot.expect("every worktree slot filled by a worker"))
+    .collect()
+}
+
 pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   let mut out = Vec::new();
 
@@ -251,43 +344,31 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   let names = repo.worktrees()?;
   // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
   // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
-  for name in names.iter().filter_map(|r| r.ok().flatten()) {
-    let wt = match repo.find_worktree(name) {
-      Ok(w) => w,
-      Err(_) => continue,
-    };
-    let path = wt.path().to_path_buf();
-    let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
-    let is_prunable = matches!(wt.is_prunable(None), Ok(p) if p);
+  // Everything read off the main `repo` happens here, on this thread:
+  // `&Repository` is not `Sync`, and this half is cheap anyway (issue #633
+  // measured the config lookups flat).
+  let entries: Vec<WorktreeEntry> = names
+    .iter()
+    .filter_map(|r| r.ok().flatten())
+    .filter_map(|name| {
+      let wt = repo.find_worktree(name).ok()?;
+      Some(WorktreeEntry {
+        id: name.to_string(),
+        path: wt.path().to_path_buf(),
+        is_locked: matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_))),
+        is_prunable: matches!(wt.is_prunable(None), Ok(p) if p),
+      })
+    })
+    .collect();
 
-    // Open the worktree as a repo to read its HEAD + status + branch age.
-    // Issue #103: piggyback the age computation onto this existing open so
-    // the TUI render path no longer needs to call `Repository::open` per
-    // row per frame. Cost is the same revwalk we'd otherwise do per frame.
-    let (branch, head, status, age) = match Repository::open(&path) {
-      Ok(sub) => {
-        let head_ref = sub.head().ok();
-        let b = head_ref
-          .as_ref()
-          .and_then(|r| r.shorthand().ok().map(|s| s.to_string()));
-        let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
-        let s = compute_status(&sub);
-        // The trunk-baseline lookup must run against the main repo's
-        // branch table; the linked worktree's `sub` has the same refs DB
-        // either way (git2 shares the gitdir), so either handle works.
-        let a = b.as_deref().and_then(|name| branch_age(&sub, name));
-        (b, h, s, a)
-      }
-      Err(_) => (
-        None,
-        None,
-        BranchStatus {
-          unknown: true,
-          ..Default::default()
-        },
-        None,
-      ),
-    };
+  let scans = scan_worktrees(&entries);
+  for (entry, (branch, head, status, age)) in entries.into_iter().zip(scans) {
+    let WorktreeEntry {
+      id: name,
+      path,
+      is_locked,
+      is_prunable,
+    } = entry;
 
     let link = branch
       .as_deref()
@@ -298,10 +379,10 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let display_name = path
       .file_name()
       .map(|n| n.to_string_lossy().to_string())
-      .unwrap_or_else(|| name.to_string());
+      .unwrap_or_else(|| name.clone());
     out.push(WorktreeInfo {
       name: display_name,
-      id: name.to_string(),
+      id: name,
       path,
       has_note: carries_note(branch.as_deref()),
       branch,
