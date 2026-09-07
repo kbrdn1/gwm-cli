@@ -376,25 +376,99 @@ fn docs_sync_watches_every_root_the_site_reads() {
   }
 }
 
+/// One `ci.yml` job by name, parsed. The text-slicing predecessor of this
+/// helper cut the `test` job out between the literal `  test:` and
+/// `\n  hook-smoke:` markers, so inserting any job between the two silently
+/// emptied what the assertions ran against, the same failure mode the `msrv`
+/// tests already parse the YAML to avoid.
+fn ci_job(name: &str) -> serde_yaml_ng::Value {
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap())
+      .expect("ci.yml must be valid YAML");
+  let job = workflow["jobs"][name].clone();
+  assert!(!job.is_null(), "ci.yml must define a `{name}` job");
+  job
+}
+
+/// The `run:` scripts of a job's steps, in order.
+fn run_steps(job: &serde_yaml_ng::Value) -> Vec<String> {
+  job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|s| s["run"].as_str().map(str::to_owned))
+    .collect()
+}
+
 #[test]
 fn ci_test_matrix_runs_on_windows_latest() {
-  let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
-  let test_job = workflow
-    .split("  test:")
-    .nth(1)
-    .and_then(|tail| tail.split("\n  hook-smoke:").next())
-    .expect("ci.yml must contain a test job before hook-smoke");
+  let job = ci_job("test");
+  let matrix: Vec<String> = job["strategy"]["matrix"]["os"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|v| v.as_str().map(str::to_owned))
+    .collect();
 
   for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
-    assert!(test_job.contains(os), "ci.yml test matrix must include {os}");
+    assert!(
+      matrix.iter().any(|m| m == os),
+      "ci.yml test matrix must include {os} (matrix is {matrix:?})"
+    );
   }
+
+  let runs = run_steps(&job);
   assert!(
-    test_job.contains("run: cargo build --verbose"),
-    "windows-latest must run the same cargo build step as the other test matrix rows"
+    runs.iter().any(|r| r.contains("cargo build")),
+    "windows-latest must run the same cargo build step as the other test matrix rows, got {runs:?}"
   );
   assert!(
-    test_job.contains("run: cargo test --verbose"),
-    "windows-latest must run the same cargo test step as the other test matrix rows"
+    runs.iter().any(|r| r.contains("cargo test")),
+    "windows-latest must run the same cargo test step as the other test matrix rows, got {runs:?}"
+  );
+}
+
+/// Issue #634: `benches/sidebar_cache_hit.rs` panicked for 1086 commits and
+/// nobody noticed, because no job ran the benches. `cargo bench` also aborts
+/// at the first failure, so it masked the third bench on top. This pins the
+/// job that would have caught it.
+///
+/// Two properties, both load-bearing:
+///
+/// - it must actually RUN them (`--test` is criterion's run-once-measure-
+///   nothing mode), not just `--no-run` them: a bench that builds and then
+///   panics is exactly the case that went unseen;
+/// - it must be able to go red: no `continue-on-error`, and no pipe on the
+///   command, which would report the pipe's exit code instead of the runner's.
+#[test]
+fn ci_runs_the_benches_and_can_fail_on_one() {
+  let job = ci_job("bench");
+  let runs = run_steps(&job);
+  let bench_run = runs
+    .iter()
+    .find(|r| r.contains("cargo bench"))
+    .unwrap_or_else(|| panic!("the bench job must run `cargo bench`, got {runs:?}"));
+
+  assert!(
+    bench_run.contains("-- --test"),
+    "the bench job must pass criterion's `--test` so each bench actually runs \
+     once (and the job stays a compile-and-run guard, not a timing gate), got {bench_run:?}"
+  );
+  assert!(
+    !bench_run.contains('|'),
+    "piping the bench command reports the pipe's exit code, not the bench runner's, \
+     the panic this job exists to catch would be swallowed, got {bench_run:?}"
+  );
+  assert!(
+    job["continue-on-error"].is_null(),
+    "the bench job must be able to fail the workflow: a dead bench is what #634 is about"
+  );
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  assert!(
+    steps.iter().all(|s| s["continue-on-error"].is_null()),
+    "no step of the bench job may swallow its own failure"
   );
 }
 

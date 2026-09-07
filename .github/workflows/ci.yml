@@ -125,6 +125,35 @@ jobs:
       - name: cargo test
         run: cargo test --verbose
 
+  bench:
+    name: benches
+    runs-on: ubuntu-latest
+    # The perf benches were dead for 1086 commits (issue #634) because nothing
+    # ran them: `benches/sidebar_cache_hit.rs` still asserted the pre-#343
+    # contract that a render frame warms the sidebar cache, panicked, and
+    # `cargo bench` aborted before reaching the third bench. Fixing it without
+    # a job that runs it just digs the same hole again.
+    #
+    # ubuntu-only and single-shot on purpose: this is a compile-and-run guard,
+    # not a perf gate. Criterion's `--test` runs each benchmark exactly once
+    # and measures nothing, so the job fails on a panic or a build break and
+    # never on timing noise from a shared runner, which is what would make it
+    # flaky enough to be switched off again.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: configure git identity (libgit2 commit needs one)
+        run: |
+          git config --global user.email "ci@gwm.test"
+          git config --global user.name "ci"
+      # Deliberately unpiped: `| tail` / `| grep` would report the pipe's exit
+      # code, not the bench runner's, and this job exists to read that code.
+      - name: cargo bench --test
+        run: cargo bench --benches -- --test
+
   hook-smoke:
     name: pre-commit hook smoke
     runs-on: ubuntu-latest
