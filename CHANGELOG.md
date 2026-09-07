@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyone having to remember. Keys git itself writes (`remote`, `merge`, …)
   are never touched, on a live branch or a dead one.
 
+  The report separates keys `--fix` can drop from keys reached through
+  `include.path`, which live in a file gwm does not rewrite: for those the
+  hint names the only remedy that works, editing that file, instead of
+  pointing at a `--fix` that has already failed on them and warning again
+  every run.
+
   `--fix` is opt-in because it edits `.git/config`; a plain `gwm doctor`
   stays read-only. It reports what it achieved by reading the config back
   after writing, not by counting the deletions it attempted: a key pulled in
@@ -151,7 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Measured with hyperfine, mean of 20, 8 worktrees, config size the only
   variable: 83 ms to 51 ms at 224 lines, 98 ms to 73 ms at 538, 184 ms to
   118 ms at 1434. Combined with a `gwm doctor --fix` on the same repo,
-  184 ms becomes 100 ms.
+  184 ms becomes 100 ms. That last figure does not interpolate from the
+  table: purging leaves 193 empty `[branch "…"]` headers behind, so a
+  561-line config that has been swept is not the same object as a 538-line
+  one that never grew.
 
   This also speeds up `gwm statusline`, the daemon and every TUI refresh,
   which share the same listing path.

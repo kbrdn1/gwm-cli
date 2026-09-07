@@ -951,6 +951,13 @@ struct KeyShape {
   entries: usize,
   /// False as soon as one entry has no value.
   all_valued: bool,
+  /// False as soon as one entry comes from a file pulled in by
+  /// `include.path`. gwm rewrites `.git/config` and nothing else, so such
+  /// a key cannot be dropped: `git_config_delete_entry` refuses it outright
+  /// ("entry is not unique due to being included"). Knowing this at report
+  /// time is what lets the hint stay honest instead of pointing at a
+  /// `--fix` that has no way to help.
+  reachable: bool,
 }
 
 impl KeyShape {
@@ -998,11 +1005,39 @@ fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTre
       .or_insert(KeyShape {
         entries: 0,
         all_valued: true,
+        reachable: true,
       });
     shape.entries += 1;
     shape.all_valued &= entry.has_value();
+    shape.reachable &= entry.include_depth() == 0;
   })?;
   Ok(grouped)
+}
+
+/// Orphaned `gwm-*` config, split by whether `gwm doctor --fix` can do
+/// anything about it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OrphanReport {
+  /// Keys living in `.git/config` itself. `--fix` drops these.
+  pub purgeable: Vec<(String, usize)>,
+  /// Keys reached through `include.path`, in a file gwm does not own and
+  /// will not rewrite. Reported apart so the remediation named to the user
+  /// is one that can actually work: edit that file. Folding them into
+  /// `purgeable` is what made the check warn forever while pointing at a
+  /// `--fix` that had already failed on them.
+  pub out_of_reach: Vec<(String, usize)>,
+}
+
+impl OrphanReport {
+  pub fn is_empty(&self) -> bool {
+    self.purgeable.is_empty() && self.out_of_reach.is_empty()
+  }
+
+  /// Every orphaned key, both populations, for the counts a caller wants
+  /// to state as one number.
+  pub fn total_keys(&self) -> usize {
+    self.purgeable.iter().chain(&self.out_of_reach).map(|(_, n)| n).sum()
+  }
 }
 
 /// Branches that are gone but still carry `gwm-*` config, with how many
@@ -1015,13 +1050,19 @@ fn collect_orphan_branch_keys(repo: &Repository) -> Result<BTreeMap<String, BTre
 /// it is that both `Repository::open` and `git_config_snapshot` are linear
 /// in the file's size, and `gwm list` pays one open plus a snapshot per
 /// worktree. Measured for this change: 45 ms at 13 lines, 184 ms at 1434.
-pub fn orphan_branch_config(repo: &Repository) -> Result<Vec<(String, usize)>> {
-  Ok(
-    collect_orphan_branch_keys(repo)?
-      .into_iter()
-      .map(|(branch, keys)| (branch, keys.len()))
-      .collect(),
-  )
+pub fn orphan_branch_config(repo: &Repository) -> Result<OrphanReport> {
+  let mut report = OrphanReport::default();
+  for (branch, keys) in collect_orphan_branch_keys(repo)? {
+    let reachable = keys.values().filter(|s| s.reachable).count();
+    let stuck = keys.len() - reachable;
+    if reachable > 0 {
+      report.purgeable.push((branch.clone(), reachable));
+    }
+    if stuck > 0 {
+      report.out_of_reach.push((branch, stuck));
+    }
+  }
+  Ok(report)
 }
 
 /// What a purge actually achieved, read back from the file rather than
@@ -1061,6 +1102,11 @@ pub fn purge_orphan_branch_config(repo: &Repository) -> Result<PurgeOutcome> {
   let mut cfg = local_config(repo)?;
   for keys in before.values() {
     for (key, shape) in keys {
+      if !shape.reachable {
+        // Attempting it only produces an error libgit2 is right to raise;
+        // the read-back below reports it as a survivor either way.
+        continue;
+      }
       let dropped = if shape.needs_multivar() {
         cfg.remove_multivar(key, ".*")
       } else {

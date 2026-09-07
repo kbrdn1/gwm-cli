@@ -2031,3 +2031,59 @@ fn doctor_report_is_read_only_and_leaves_the_config_alone() {
     "2"
   );
 }
+
+/// Canary: the doctor page lists exactly the checks the report prints, in
+/// the same order (issue #633, review of PR #640).
+///
+/// The page said "9 health checks" for a report that printed 10, numbered
+/// ten sections for eleven checks, and omitted `no orphan worktree notes`
+/// entirely since #515. Each drift was found by a human reading the page
+/// against a real run, which is not a mechanism. This is.
+///
+/// Adding a check to `doctor::run` now fails here until the page gains its
+/// section, in the right place. The section titles must match the check
+/// names verbatim: the page is what a user compares their own output to.
+#[test]
+fn the_doctor_page_documents_every_check_in_order() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let printed: Vec<String> = report.checks.iter().map(|c| c.name.clone()).collect();
+
+  for page in ["docs/5.integrations/2.doctor.md", "docs/fr/5.integrations/2.doctor.md"] {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(page);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{page}: {e}"));
+    // `### <n>. <title>`, in document order. CRLF-safe: the repo checks in
+    // files that a Windows clone may hand back with \r line endings.
+    let sections: Vec<String> = text
+      .lines()
+      .filter_map(|l| {
+        let l = l.trim_end_matches('\r');
+        let rest = l.strip_prefix("### ")?;
+        let (num, title) = rest.split_once(". ")?;
+        num.parse::<u32>().ok().map(|_| title.to_string())
+      })
+      .collect();
+
+    assert_eq!(
+      sections.len(),
+      printed.len(),
+      "{page} documents {} checks, the report prints {}. Sections: {sections:#?}",
+      sections.len(),
+      printed.len()
+    );
+
+    // The English page titles the sections with the check names; the French
+    // one translates them, so only the count and the order are pinned there
+    // by comparing against the English page's own order.
+    if page.starts_with("docs/5") {
+      let normalise = |s: &str| s.replace(['`', '[', ']'], "");
+      let doc: Vec<String> = sections.iter().map(|s| normalise(s)).collect();
+      let run: Vec<String> = printed.iter().map(|s| normalise(s)).collect();
+      assert_eq!(
+        doc, run,
+        "the page's sections must name the report's checks, in the report's order"
+      );
+    }
+  }
+}

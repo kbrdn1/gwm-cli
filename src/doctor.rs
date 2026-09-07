@@ -863,29 +863,55 @@ fn check_orphan_branch_config(ctx: &DoctorCtx<'_>) -> Check {
     return Check::ok(name, "no gwm keys left behind by a deleted branch");
   }
 
-  let keys: usize = orphans.iter().map(|(_, n)| n).sum();
   // A repo that has never been swept carries hundreds of these; naming
   // them all would bury every other check in the report.
   const SAMPLE: usize = 5;
-  let mut sample: Vec<String> = orphans
-    .iter()
-    .take(SAMPLE)
-    .map(|(b, _)| crate::naming::sanitise_for_terminal(b))
-    .collect();
-  if orphans.len() > SAMPLE {
-    sample.push(format!("… and {} more", orphans.len() - SAMPLE));
+  let sample = |branches: &[(String, usize)]| {
+    let mut names: Vec<String> = branches
+      .iter()
+      .take(SAMPLE)
+      .map(|(b, _)| crate::naming::sanitise_for_terminal(b))
+      .collect();
+    if branches.len() > SAMPLE {
+      names.push(format!("… and {} more", branches.len() - SAMPLE));
+    }
+    names.join(", ")
+  };
+  let count = |branches: &[(String, usize)]| -> usize { branches.iter().map(|(_, n)| n).sum() };
+
+  let mut detail = Vec::new();
+  if !orphans.purgeable.is_empty() {
+    detail.push(format!(
+      "{} key(s) from {} deleted branch(es): {}",
+      count(&orphans.purgeable),
+      orphans.purgeable.len(),
+      sample(&orphans.purgeable)
+    ));
+  }
+  if !orphans.out_of_reach.is_empty() {
+    detail.push(format!(
+      "{} key(s) from {} deleted branch(es) live in a file pulled in by `include.path`: {}",
+      count(&orphans.out_of_reach),
+      orphans.out_of_reach.len(),
+      sample(&orphans.out_of_reach)
+    ));
   }
 
-  Check::warning(
-    name,
-    format!(
-      "{} key(s) from {} deleted branch(es): {}",
-      keys,
-      orphans.len(),
-      sample.join(", ")
-    ),
-  )
-  .with_hint("run `gwm doctor --fix` to drop them: it edits `.git/config` and nothing else")
+  // The hint has to name a remedy that can actually work. `--fix` rewrites
+  // `.git/config` and nothing else, so pointing at it for a key defined in
+  // an included file left the user in a loop: warn, run `--fix`, warn
+  // again, forever, with CI stuck at exit 1 (review of PR #640).
+  let hint = match (orphans.purgeable.is_empty(), orphans.out_of_reach.is_empty()) {
+    (false, true) => "run `gwm doctor --fix` to drop them: it edits `.git/config` and nothing else".to_string(),
+    (true, false) => {
+      "gwm does not rewrite an included file: delete those keys from it by hand, or drop the `include.path` entry".to_string()
+    }
+    _ => {
+      "run `gwm doctor --fix` for the first group; the included ones are in a file gwm does not rewrite, delete them there by hand".to_string()
+    }
+  };
+
+  Check::warning(name, detail.join("; ")).with_hint(hint)
 }
 
 /// Check #7: the configured worktree `base` directory exists and is

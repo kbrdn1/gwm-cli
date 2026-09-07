@@ -2182,8 +2182,9 @@ fn orphan_branch_config_reports_dead_branches_and_spares_live_ones() {
 
   let orphans = github::orphan_branch_config(&repo).unwrap();
 
+  assert!(orphans.out_of_reach.is_empty(), "nothing here comes from an include");
   assert_eq!(
-    orphans,
+    orphans.purgeable,
     vec![
       ("docs/2.gwm-toml".to_string(), 1),
       ("feat/#2-dead".to_string(), 3),
@@ -2341,7 +2342,7 @@ fn a_key_under_gits_dotted_form_is_orphaned_by_its_own_lowercasing() {
   );
 
   assert_eq!(
-    github::orphan_branch_config(&repo).unwrap(),
+    github::orphan_branch_config(&repo).unwrap().purgeable,
     vec![("feature".to_string(), 1)],
     "reported under the lowercased name the key actually lives at"
   );
@@ -2552,4 +2553,44 @@ fn every_value_regex_call_site_is_accounted_for() {
      `every_entry_has_a_value` (or, inside the orphan sweep, `KeyShape::needs_multivar`), \
      then add it to ACCOUNTED_FOR with the reason it is safe."
   );
+}
+
+/// Issue #633, fourth review pass: `--fix` was made honest about keys it
+/// could not remove, and the check that follows it was left saying "run
+/// `gwm doctor --fix`" about those very keys. A key defined in a file
+/// pulled in by `include.path` then warns forever, pointing at a command
+/// that has just failed on it, and CI sits at exit 1 with no way out.
+///
+/// libgit2 knows the difference (`ConfigEntry::include_depth`), so the
+/// report separates what `--fix` can drop from what only a human editing
+/// that other file can.
+#[test]
+fn orphan_report_separates_what_fix_can_reach_from_what_it_cannot() {
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".git/extra-config"),
+    "[branch \"feat/#5-included\"]\n\tgwm-issue = 5\n\tgwm-pr = 55\n",
+  )
+  .unwrap();
+  let mut cfg = repo.config().unwrap();
+  cfg.set_str("include.path", "extra-config").unwrap();
+  cfg.set_str("branch.feat/#6-local.gwm-issue", "6").unwrap();
+
+  let report = github::orphan_branch_config(&repo).unwrap();
+
+  assert_eq!(
+    report.purgeable,
+    vec![("feat/#6-local".to_string(), 1)],
+    "only keys living in .git/config itself can be dropped by --fix"
+  );
+  assert_eq!(
+    report.out_of_reach,
+    vec![("feat/#5-included".to_string(), 2)],
+    "keys from an included file are reported apart, so the hint can be honest"
+  );
+
+  // And the purge does not even try them: `remaining` is what it says.
+  let outcome = github::purge_orphan_branch_config(&repo).unwrap();
+  assert_eq!(outcome.purged, vec![("feat/#6-local".to_string(), 1)]);
+  assert_eq!(outcome.remaining, vec![("feat/#5-included".to_string(), 2)]);
 }
