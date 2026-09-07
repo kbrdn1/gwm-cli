@@ -8306,7 +8306,14 @@ fn doctor_fix_purges_orphan_branch_config_and_spares_the_rest() {
     .assert()
     .stdout(predicate::str::contains(
       "purged 2 orphan branch config key(s) from 1 deleted branch(es)",
-    ));
+    ))
+    // The contract four doc files and the clap help all state: `--fix` runs
+    // BEFORE the report, so the check printed under it shows the repaired
+    // state. Asserted on the run that actually writes, not on the second
+    // one where there is nothing left to purge and the check would be green
+    // either way (review of PR #640).
+    .stdout(predicate::str::contains("✓ no orphan branch config"))
+    .stdout(predicate::str::contains("! no orphan branch config").not());
 
   let cfg = repo.config().unwrap();
   assert!(cfg.get_string("branch.feat/#2-dead.gwm-issue").is_err());
