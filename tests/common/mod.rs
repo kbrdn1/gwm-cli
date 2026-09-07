@@ -85,8 +85,18 @@ pub fn git_only_bin() -> &'static Path {
       let link = dir.join("git");
       // Recreated rather than reused: the toolchain moves between runs, and a
       // symlink to a garbage-collected nix store path resolves to nothing.
-      let _ = std::fs::remove_file(&link);
-      std::os::unix::fs::symlink(&git, &link).expect("git symlinks into the shim directory");
+      //
+      // Staged under a unique name and renamed into place rather than
+      // unlinked and re-created. The directory is a fixed path, and the
+      // `OnceLock` above only serialises the tests sharing ONE process:
+      // `cargo-nextest` gives each test its own, so several of them reach
+      // here at once and unlink-then-symlink loses that race with
+      // `AlreadyExists`. `rename` is atomic and replaces the destination, so
+      // concurrent callers each publish a link that resolves to the same git.
+      let staging = dir.join(format!("git.{}", std::process::id()));
+      let _ = std::fs::remove_file(&staging);
+      std::os::unix::fs::symlink(&git, &staging).expect("git symlinks into the shim directory");
+      std::fs::rename(&staging, &link).expect("the git shim link moves into place");
       dir
     })
     .as_path()
