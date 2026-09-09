@@ -499,6 +499,18 @@ fn ci_runs_the_benches_and_can_fail_on_one() {
     steps.iter().all(|s| s["continue-on-error"].is_null()),
     "no step of the bench job may swallow its own failure"
   );
+  // The `doctor` job in this same file is narrowed with an `if:`. Doing that
+  // here would keep all the assertions above green while the benches quietly
+  // stop running on pull requests, which is the state #634 exists to close.
+  assert!(
+    job["if"].is_null(),
+    "the bench job must not be narrowed with an `if:`: it has to run on every event this \
+     workflow runs on, or a dead bench goes unseen again"
+  );
+  assert!(
+    steps.iter().all(|s| s["if"].is_null()),
+    "no step of the bench job may be conditioned away"
+  );
 }
 
 #[test]
@@ -683,4 +695,125 @@ fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
     .current_dir(root)
     .output()
     .unwrap()
+}
+
+/// Every fence opener inside a `///` or `//!` line under `src/`, paired with
+/// its file and line. Openers only: the closing bare ``` of an open block is
+/// not one, which is the whole reason this tracks state instead of grepping.
+fn doc_comment_fence_openers() -> Vec<(String, usize, String)> {
+  let mut stack = vec![std::path::PathBuf::from("src")];
+  let mut files = Vec::new();
+  while let Some(d) = stack.pop() {
+    for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("cannot list {}: {e}", d.display())) {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        stack.push(path);
+      } else if path.extension().is_some_and(|e| e == "rs") {
+        files.push(path);
+      }
+    }
+  }
+  files.sort();
+
+  let mut openers = Vec::new();
+  for file in files {
+    // CRLF normalised: a Windows checkout stores these with `\r\n`, and the
+    // info string would carry a trailing `\r` into the classifier below.
+    let text = fs::read_to_string(&file)
+      .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()))
+      .replace("\r\n", "\n");
+    let mut open = false;
+    for (i, line) in text.lines().enumerate() {
+      let trimmed = line.trim_start();
+      let Some(rest) = trimmed.strip_prefix("///").or_else(|| trimmed.strip_prefix("//!")) else {
+        continue;
+      };
+      let rest = rest.trim();
+      let Some(info) = rest.strip_prefix("```") else {
+        continue;
+      };
+      if open {
+        open = false; // this one closes the block, it is not an opener
+      } else {
+        open = true;
+        openers.push((file.display().to_string(), i + 1, info.trim().to_string()));
+      }
+    }
+  }
+  openers
+}
+
+/// `cargo nextest run` cannot run doctests: they have no test binary for it to
+/// schedule. #634 took `cargo test` out of the `test` job, and no other
+/// workflow runs `cargo test --doc`, so from that commit on the repo's
+/// doctest coverage is not a property of CI at all. It is a property of
+/// `src/`: there are no Rust fences in doc comments, therefore nothing is
+/// lost. The first one anyone writes is silently never compiled and never
+/// run, which is the same shape of rot as the bench that panicked for 1086
+/// commits with nothing to report it.
+///
+/// The swap shipped with that stated in a comment, and the comment had the
+/// enumeration wrong: it said every fence was ```text or ```go and missed
+/// four ```toml ones. So this derives the fact rather than asserting a list.
+///
+/// rustdoc compiles a fence as Rust unless its info string carries a token it
+/// does not recognise, so `text`/`toml`/`go` opt out and an empty info string
+/// opts *in*. If this test fails, either tag the new fence with a non-Rust
+/// language, or add a `cargo test --doc` step to `ci.yml` next to the nextest
+/// one and relax the guard to match.
+#[test]
+fn no_doctest_under_src_while_ci_cannot_run_doctests() {
+  const RUST_TOKENS: [&str; 8] = [
+    "rust",
+    "ignore",
+    "should_panic",
+    "no_run",
+    "compile_fail",
+    "test_harness",
+    "edition2018",
+    "edition2021",
+  ];
+
+  // Read from the parsed `run:` scripts, never from the file text. The job
+  // comment next to the nextest step *names* `cargo test --doc` as the thing
+  // to add if a doctest ever appears, so a substring search over `ci.yml`
+  // matches that sentence and the guard never fires. It was written that way
+  // first, and it stayed green with a bare ``` fence planted under `src/`.
+  let runs_doctests = ["test", "bench", "msrv"]
+    .iter()
+    .filter_map(|name| {
+      let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+      let job = workflow["jobs"][*name].clone();
+      (!job.is_null()).then(|| run_steps(&job))
+    })
+    .flatten()
+    .any(|r| r.contains("cargo test --doc"));
+
+  let openers = doc_comment_fence_openers();
+  // Not decoration: an empty scan (a moved `src/`, a broken walker) would make
+  // every filter below vacuously true and this guard green on nothing.
+  assert!(
+    !openers.is_empty(),
+    "the scan found no fenced block at all under src/, which is a broken scan, not a clean tree"
+  );
+
+  let eligible: Vec<String> = openers
+    .into_iter()
+    .filter(|(_, _, info)| {
+      info.is_empty()
+        || info
+          .split([',', ' '])
+          .filter(|t| !t.is_empty())
+          .all(|t| RUST_TOKENS.contains(&t))
+    })
+    .map(|(f, line, info)| format!("{f}:{line} (```{info})"))
+    .collect();
+
+  assert!(
+    runs_doctests || eligible.is_empty(),
+    "these doc-comment fences are compiled as Rust doctests, and nothing in CI runs them \
+     since `cargo nextest run` replaced `cargo test`: {eligible:?}. Either tag them with a \
+     non-Rust language, or add a `cargo test --doc` step to ci.yml."
+  );
 }

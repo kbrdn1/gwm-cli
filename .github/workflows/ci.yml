@@ -155,10 +155,16 @@ jobs:
       # it from source on every runner, minutes against seconds, which a swap
       # that is time-neutral on wall-clock cannot afford.
       #
-      # nextest does not run doctests (it cannot: they have no test binary).
-      # Nothing is lost here: every ``` fence in `src/` is a ```text or ```go
-      # block, so `cargo test --doc` reports "0 tests". If a real Rust doctest
-      # is ever added, this job needs a `cargo test --doc` step next to it.
+      # nextest does not run doctests (it cannot: they have no test binary),
+      # and no other workflow runs them either. Nothing is lost today, but
+      # that is a property of `src/`, not of CI, so it is not left to a
+      # comment to promise: `no_doctest_under_src_while_ci_cannot_run_doctests`
+      # in tests/release_workflow_tests.rs classifies every fence opener in a
+      # doc comment under `src/` and goes red on the first one rustdoc would
+      # compile as Rust. The remedy it names is a `cargo test --doc` step
+      # right here; the guard reads this file's parsed `run:` scripts, so
+      # adding one turns it green. (The comment it replaced enumerated the
+      # fences by hand and got it wrong, missing four ```toml ones.)
       - uses: taiki-e/install-action@nextest
       - name: cargo nextest run
         run: cargo nextest run

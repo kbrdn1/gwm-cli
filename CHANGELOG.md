@@ -188,10 +188,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   race an unlink-then-symlink. The link is staged and renamed into place
   now, which is atomic.
 
-  Doctests are not lost: nextest cannot run them, and every ``` fence under
-  `src/` is a ```text or ```go block, so `cargo test --doc` reports zero
-  tests on this tree. The MSRV job still compiles at the declared floor and
-  runs no tests.
+  Doctests are not lost, and that is a test now rather than a claim. nextest
+  cannot run them and no other workflow does either, so the coverage lost
+  today is zero only because no doc comment under `src/` carries a Rust
+  fence. `no_doctest_under_src_while_ci_cannot_run_doctests` classifies every
+  fence opener under `src/` and goes red on the first one rustdoc would
+  compile, naming the `cargo test --doc` step to add. The comment it replaced
+  enumerated the fences by hand and had it wrong, missing four ```toml ones.
+  The MSRV job still compiles at the declared floor and runs no tests.
 
 - **`gwm list` scans its worktrees in parallel**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens
