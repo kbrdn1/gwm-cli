@@ -759,9 +759,14 @@ fn ci_runs_doctests_since_nextest_cannot() {
   // One `if:` is legitimate, and only one: doctests behave identically on the
   // three runners, so this pays for them once on the row with the slack.
   // Anything else is the step being switched off by another name.
-  match step["if"].as_str() {
-    None => {}
-    Some("matrix.os == 'ubuntu-latest'") => {}
-    Some(other) => panic!("the doctest step may only be narrowed to the ubuntu matrix row, got `if: {other}`"),
-  }
+  //
+  // Matched on the VALUE, not through `as_str()`. `if: false` is a YAML
+  // boolean, so `as_str()` hands back `None` for it exactly as it does for an
+  // absent key: the first version of this check used `match … .as_str()` and
+  // the canonical way to switch a step off took its "no `if:` at all" arm.
+  let cond = &step["if"];
+  assert!(
+    cond.is_null() || cond.as_str() == Some("matrix.os == 'ubuntu-latest'"),
+    "the doctest step may only be narrowed to the ubuntu matrix row, got `if: {cond:?}`"
+  );
 }
