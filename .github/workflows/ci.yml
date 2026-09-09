@@ -140,8 +140,9 @@ jobs:
       # measured on a local 8-core machine, where a binary holding a handful
       # of tests leaves most cores idle. A runner has fewer cores, so a
       # per-binary pool already saturates them and process-spawn overhead eats
-      # what is left. The step is compile-bound either way, roughly 45s of the
-      # ~76s on ubuntu is building the 110 binaries, identical under both.
+      # what is left. The step is compile-bound either way: building the 110
+      # test binaries was the larger half of it in both runs, and that half is
+      # identical under either runner.
       #
       # What the swap does buy is process-per-test isolation, which `cargo
       # test` structurally cannot give: a shared-fixture race that a
