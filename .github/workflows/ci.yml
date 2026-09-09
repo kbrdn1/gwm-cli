@@ -160,19 +160,29 @@ jobs:
       # it from source on every runner, minutes against seconds, which a swap
       # that is time-neutral on wall-clock cannot afford.
       #
-      # nextest does not run doctests (it cannot: they have no test binary),
-      # and no other workflow runs them either. Nothing is lost today, but
-      # that is a property of `src/`, not of CI, so it is not left to a
-      # comment to promise: `no_doctest_under_src_while_ci_cannot_run_doctests`
-      # in tests/release_workflow_tests.rs classifies every fence opener in a
-      # doc comment under `src/` and goes red on the first one rustdoc would
-      # compile as Rust. The remedy it names is a `cargo test --doc` step
-      # right here; the guard reads this file's parsed `run:` scripts, so
-      # adding one turns it green. (The comment it replaced enumerated the
-      # fences by hand and got it wrong, missing four ```toml ones.)
+      # nextest does not run doctests: they have no test binary for it to
+      # schedule. So `cargo test --doc` runs next to it, below.
       - uses: taiki-e/install-action@nextest
       - name: cargo nextest run
         run: cargo nextest run
+      # Doctests, the one thing nextest gives up. ubuntu only: a doctest is
+      # the same on all three runners, and this job has roughly three minutes
+      # of slack against windows in the same matrix, so the ~35s it costs
+      # never reaches the workflow's critical path.
+      #
+      # This step IS the check. Two review passes were spent watching a
+      # hand-written scanner try to decide which fences rustdoc compiles, and
+      # it was wrong ten different ways: indented blocks with no fence at all,
+      # fences inside a blockquote, `~~~`, `/** */` blocks, `#[doc = "..."]`
+      # attributes, `{.rust}`, and the tag rules, which are order-sensitive
+      # (```` ```no_run,text ```` is a doctest, ```` ```text,no_run ```` is
+      # not). Every one of those was found by probing rustdoc, which is the
+      # tell: the oracle was available the whole time and cost 35 seconds off
+      # the critical path. `ci_runs_doctests_since_nextest_cannot` pins that
+      # this step stays.
+      - name: cargo test --doc
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --doc
 
   bench:
     name: benches

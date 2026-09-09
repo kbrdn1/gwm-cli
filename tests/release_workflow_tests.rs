@@ -706,243 +706,34 @@ fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
     .unwrap()
 }
 
-/// The doc-comment "documents" of one source file: each contiguous run of
-/// `///` or `//!` lines, and each `/** */` or `/*! */` block, as the lines
-/// rustdoc would hand to its markdown parser.
-///
-/// Per document, not per file, because rustdoc parses each one as its own
-/// markdown: an unbalanced fence in one cannot invert opener and closer in
-/// the next.
-fn doc_documents(text: &str) -> Vec<(usize, Vec<String>)> {
-  let lines: Vec<&str> = text.lines().collect();
-  let mut docs: Vec<(usize, Vec<String>)> = Vec::new();
-  let mut i = 0;
-  while i < lines.len() {
-    let t = lines[i].trim_start();
-    if let Some(rest) = t.strip_prefix("///").or_else(|| t.strip_prefix("//!")) {
-      let start = i + 1;
-      let mut body = vec![rest.to_string()];
-      i += 1;
-      while i < lines.len() {
-        let t = lines[i].trim_start();
-        let Some(rest) = t.strip_prefix("///").or_else(|| t.strip_prefix("//!")) else {
-          break;
-        };
-        body.push(rest.to_string());
-        i += 1;
-      }
-      docs.push((start, body));
-    } else if t.starts_with("/**") || t.starts_with("/*!") {
-      let start = i + 1;
-      let mut body = Vec::new();
-      let mut first = t[3..].to_string();
-      let mut closed = false;
-      if let Some(cut) = first.find("*/") {
-        first.truncate(cut);
-        closed = true;
-      }
-      body.push(first);
-      i += 1;
-      while !closed && i < lines.len() {
-        let mut l = lines[i].to_string();
-        if let Some(cut) = l.find("*/") {
-          l.truncate(cut);
-          closed = true;
-        }
-        // rustdoc strips the decorative leading `*` of the `/** */` style.
-        let stripped = l.trim_start();
-        body.push(match stripped.strip_prefix('*') {
-          Some(r) => r.to_string(),
-          None => l,
-        });
-        i += 1;
-      }
-      docs.push((start, body));
-    } else {
-      i += 1;
-    }
-  }
-  docs
-}
-
-/// Every fence opener inside a doc comment under `src/`, as
-/// `(file, line, info string)`.
-///
-/// Openers only: the closing fence of an open block is not one, which is why
-/// this tracks state instead of grepping. Both fence characters are handled
-/// (rustdoc's markdown accepts `~~~` as readily as backticks) and a closer
-/// has to match the opener's character and be at least as long, so a four
-/// backtick block quoting a three backtick one closes where it should.
-fn doc_comment_fence_openers() -> Vec<(String, usize, String)> {
-  let mut stack = vec![std::path::PathBuf::from("src")];
-  let mut files = Vec::new();
-  while let Some(d) = stack.pop() {
-    for entry in fs::read_dir(&d).unwrap_or_else(|e| panic!("cannot list {}: {e}", d.display())) {
-      let path = entry.unwrap().path();
-      if path.is_dir() {
-        stack.push(path);
-      } else if path.extension().is_some_and(|e| e == "rs") {
-        files.push(path);
-      }
-    }
-  }
-  files.sort();
-
-  fn fence(line: &str) -> Option<(char, usize, String)> {
-    let t = line.trim_start();
-    let c = t.chars().next().filter(|c| *c == '`' || *c == '~')?;
-    let len = t.chars().take_while(|x| *x == c).count();
-    (len >= 3).then(|| (c, len, t[len..].trim().to_string()))
-  }
-
-  let mut openers = Vec::new();
-  for file in files {
-    // CRLF normalised: a Windows checkout stores these with `\r\n`, and the
-    // info string would carry a trailing `\r` into the classifier.
-    let text = fs::read_to_string(&file)
-      .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()))
-      .replace("\r\n", "\n");
-    for (start, body) in doc_documents(&text) {
-      let mut open: Option<(char, usize)> = None;
-      for (offset, line) in body.iter().enumerate() {
-        let Some((c, len, info)) = fence(line) else {
-          continue;
-        };
-        match open {
-          Some((oc, olen)) if oc == c && len >= olen && info.is_empty() => open = None,
-          Some(_) => {}
-          None => {
-            open = Some((c, len));
-            openers.push((file.display().to_string(), start + offset, info));
-          }
-        }
-      }
-    }
-  }
-  openers
-}
-
-/// Does rustdoc compile this fence's body as a doctest?
-///
-/// Its rule is `rust &= !seen_other_tags || seen_rust_tags`, starting from
-/// `rust = true`: an empty info string is Rust, and **any** recognised Rust
-/// token keeps it Rust no matter what else sits beside it. Writing that as
-/// "every token must be recognised" is the mistake this function was fixed
-/// out of, and it is not academic. Probed against the local toolchain, all
-/// three of ```` ```rust,zzz_unknown ````, ```` ```edition2024 ```` and
-/// ```` ```compile_fail,E0308 ```` compile and run, and an `all`-based
-/// filter calls all three non-Rust.
-///
-/// `edition` and `ignore-` are prefix matches in rustdoc, not literals, so
-/// they are prefixes here too: an `edition2027` list entry would otherwise
-/// have to be added the year it appears, which is exactly the maintenance a
-/// derived guard exists to avoid.
-fn is_rust_doctest_fence(info: &str) -> bool {
-  const RUST_TOKENS: [&str; 7] = [
-    "rust",
-    "ignore",
-    "should_panic",
-    "no_run",
-    "compile_fail",
-    "test_harness",
-    "standalone_crate",
-  ];
-  let info = info.trim();
-  if info.is_empty() {
-    return true;
-  }
-  info
-    .split([',', ' ', '\t'])
-    .map(str::trim)
-    .filter(|t| !t.is_empty())
-    .any(|t| RUST_TOKENS.contains(&t) || t.starts_with("edition") || t.starts_with("ignore-"))
-}
-
 /// `cargo nextest run` cannot run doctests: they have no test binary for it
-/// to schedule. #634 took `cargo test` out of the `test` job, and no other
-/// workflow runs `cargo test --doc`, so from that commit on the repo's
-/// doctest coverage stopped being a property of CI. It is a property of
-/// `src/`: no doc comment carries a Rust fence, therefore nothing is lost.
-/// The first one anyone writes is silently never compiled and never run,
-/// which is the same shape of rot as the bench that panicked for 1086
+/// to schedule. #634 took `cargo test` out of this job, so unless something
+/// runs them explicitly the repo silently stops compiling every `///` example
+/// it has, which is the same shape of rot as the bench that panicked for 1086
 /// commits with nothing to report it.
 ///
-/// The swap shipped with that stated in a comment, and the comment had the
-/// enumeration wrong: it said every fence was ```text or ```go and missed
-/// four ```toml ones. So this derives the fact rather than asserting a list.
+/// This pins the step rather than the property, on purpose, and the detour is
+/// worth recording. The first version of this guard scanned `src/` and decided
+/// for itself which fences rustdoc would compile, so that CI would not have to
+/// pay for a doctest run. Two review passes probed it against the toolchain
+/// and it was wrong ten ways: indented blocks carrying no fence at all, fences
+/// nested in a blockquote (`src/forge.rs` already writes that style), `~~~`,
+/// `/** */` blocks, `#[doc = "..."]` attributes, `{.rust}`, and the tag rules
+/// themselves, which turn out to be order-sensitive on 1.96.1
+/// (```` ```no_run,text ```` is a doctest, ```` ```text,no_run ```` is not).
 ///
-/// If it fails, either tag the new fence with a non-Rust language, or add a
-/// `cargo test --doc` step to `ci.yml` next to the nextest one and this goes
-/// green on its own: it reads that file's parsed `run:` scripts.
+/// Every one of those was found by asking rustdoc. Which is the point: the
+/// oracle was there the whole time, it costs about 35 seconds, and pinning it
+/// to ubuntu keeps it off a critical path that windows holds for four minutes
+/// more. An emulation that has to track rustdoc's release notes to stay
+/// correct is a worse guard than the thing it emulates, however cheap it runs.
 #[test]
-fn no_doctest_under_src_while_ci_cannot_run_doctests() {
-  // Read from the parsed `run:` scripts, never from the file text. The job
-  // comment next to the nextest step *names* `cargo test --doc` as the thing
-  // to add if a doctest ever appears, so a substring search over `ci.yml`
-  // matches that sentence and the guard never fires. It was written that way
-  // first, and it stayed green with a bare ``` fence planted under `src/`.
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap())
-      .expect("ci.yml must be valid YAML");
-  let runs_doctests = ["test", "bench", "msrv"]
-    .iter()
-    .filter_map(|name| {
-      let job = workflow["jobs"][*name].clone();
-      (!job.is_null()).then(|| run_steps(&job))
-    })
-    .flatten()
-    .any(|r| r.contains("cargo test --doc"));
-
-  let openers = doc_comment_fence_openers();
-  // Not decoration: an empty scan (a moved `src/`, a broken walker) would
-  // make every filter below vacuously true and this guard green on nothing.
+fn ci_runs_doctests_since_nextest_cannot() {
+  let job = ci_job("test");
+  let runs = run_steps(&job);
   assert!(
-    !openers.is_empty(),
-    "the scan found no fenced block at all under src/, which is a broken scan, not a clean tree"
+    runs.iter().any(|r| r.contains("cargo test --doc")),
+    "the test job must run `cargo test --doc`: nextest cannot, and nothing else in the repo \
+     does, so without it every doctest under src/ is compiled and run by nobody. Got {runs:?}"
   );
-
-  let eligible: Vec<String> = openers
-    .into_iter()
-    .filter(|(_, _, info)| is_rust_doctest_fence(info))
-    .map(|(f, line, info)| format!("{f}:{line} (fence info {info:?})"))
-    .collect();
-
-  assert!(
-    runs_doctests || eligible.is_empty(),
-    "these doc-comment fences are compiled as Rust doctests, and nothing in CI runs them \
-     since `cargo nextest run` replaced `cargo test`: {eligible:?}. Either tag them with a \
-     non-Rust language, or add a `cargo test --doc` step to ci.yml."
-  );
-}
-
-/// The classifier, pinned against what the toolchain actually does.
-///
-/// Every case here was run through `cargo test --doc` on a scratch crate
-/// before being written down; the three in the first group are the ones an
-/// `all`-based filter got wrong.
-#[test]
-fn rust_doctest_fence_classification_matches_rustdoc() {
-  for info in [
-    "",
-    "rust",
-    "rust,zzz_unknown",
-    "edition2024",
-    "edition2021",
-    "compile_fail,E0308",
-    "should_panic",
-    "no_run",
-    "ignore",
-    "ignore-windows",
-  ] {
-    assert!(
-      is_rust_doctest_fence(info),
-      "rustdoc runs ```{info} as a doctest, the guard must see it"
-    );
-  }
-  for info in ["text", "toml", "go", "json", "bash", "console", "text,toml"] {
-    assert!(
-      !is_rust_doctest_fence(info),
-      "rustdoc does not run ```{info}, flagging it would make the guard cry wolf"
-    );
-  }
 }
