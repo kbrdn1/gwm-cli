@@ -128,14 +128,20 @@ jobs:
       # tests themselves are untouched, and all 3525 pass under it.
       #
       # It is NOT here for wall-clock, and the issue's premise did not
-      # survive being measured on the runners. Execution time is a wash:
-      # ubuntu 33.7s -> 30.6s, windows 122.4s -> 119.7s, macos 49.8s -> 51.4s.
-      # The 1.76x in the issue was measured on a local 8-core machine, where a
-      # binary holding a handful of tests leaves most cores idle; a runner has
-      # fewer cores, so a per-binary pool already saturates them and
-      # process-spawn overhead eats what is left. The step is compile-bound
-      # either way: ~45s of the ~76s on ubuntu is building the 110 binaries,
-      # identical under both runners.
+      # survive being measured on the runners. Execution time (nextest's own
+      # `Summary`, against the sum of `cargo test`'s per-binary `finished in`)
+      # lands inside the runner's noise band, and the band is wide: two runs
+      # of this identical command reported 30.6s and 47.0s on ubuntu, against
+      # 33.7s for `cargo test`. Same on the others, 51.4s and 53.6s against
+      # 49.8s on macos, 119.7s and 127.1s against 122.4s on windows. Nothing
+      # here is a saving anyone can spend.
+      #
+      # The 1.76x in the issue is not refuted, it does not transfer: it was
+      # measured on a local 8-core machine, where a binary holding a handful
+      # of tests leaves most cores idle. A runner has fewer cores, so a
+      # per-binary pool already saturates them and process-spawn overhead eats
+      # what is left. The step is compile-bound either way, roughly 45s of the
+      # ~76s on ubuntu is building the 110 binaries, identical under both.
       #
       # What the swap does buy is process-per-test isolation, which `cargo
       # test` structurally cannot give: a shared-fixture race that a

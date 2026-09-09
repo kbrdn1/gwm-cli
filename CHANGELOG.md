@@ -174,11 +174,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   This is not a speed change, and it is worth writing down why rather than
   leaving the next reader to assume it was one. Measured on the three
-  runners, execution time is a wash: 33.7s to 30.6s on ubuntu, 122.4s to
-  119.7s on windows, 49.8s to 51.4s on macos. The pooling gain the issue
-  measured came off a local 8-core machine; a runner has fewer cores, so a
-  per-binary pool already saturates them and process-spawn overhead eats
-  what is left. The test step is compile-bound either way.
+  runners, the difference sits inside the run-to-run noise, and the noise
+  is wide: two runs of the identical nextest command reported 30.6s and
+  47.0s of execution on ubuntu, against 33.7s for `cargo test`. The pooling
+  gain the issue measured came off a local 8-core machine; a runner has
+  fewer cores, so a per-binary pool already saturates them and process-spawn
+  overhead eats what is left. The test step is compile-bound either way.
 
   What the swap does buy is process-per-test isolation. It surfaced a
   shared-fixture race in the test harness on its first run: the git shim
