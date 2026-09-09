@@ -127,15 +127,19 @@ jobs:
       # binaries in sequence with a fresh thread pool each (issue #634). The
       # tests themselves are untouched, and all 3525 pass under it.
       #
-      # It is NOT here for wall-clock. Measured over 11 `cargo test` runs on
-      # `dev` against 4 runs of this job (nextest's own `Summary` against the
-      # sum of `cargo test`'s per-binary `finished in`), normalised per test
-      # because the suite grew from 3273 to 3525 over the window, the median
-      # moves -8.9% on ubuntu, -6.5% on macos and +0.8% on windows. Every
-      # macos and windows sample lands inside the `cargo test` spread, and
-      # that spread is wide: 29.2s to 42.2s of execution on ubuntu for the
-      # same command. A single-digit tendency inside a band that size is not
-      # a saving anyone can plan around.
+      # The wall-clock case is weaker than the issue expected. Measured over
+      # 11 `cargo test` runs on `dev` against 4 of this job (nextest's own
+      # `Summary` against the sum of `cargo test`'s per-binary `finished
+      # in`), normalised per test because the suite grew from 3273 to 3525
+      # over the window, the median moves -8.9% on ubuntu, -6.5% on macos
+      # and +0.8% on windows. Real and in the same direction on the two Unix
+      # runners, but single-digit, and inside a band that is far wider: 29.2s
+      # to 42.2s of execution on ubuntu for the same command on the same
+      # suite. Every macos and windows sample lands inside the `cargo test`
+      # spread. Not a saving anyone can plan around, and nowhere near 1.76x.
+      # (The 4 samples are 3 commits plus a re-run of one, so two of them
+      # share a commit and a warm cache and are not independent draws; the
+      # 11 baseline runs are 11 different commits on different days.)
       #
       # The 1.76x in the issue is not refuted, it does not transfer: it was
       # measured on a local 8-core machine, where a binary holding a handful

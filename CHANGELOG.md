@@ -172,17 +172,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each test its own process. The tests themselves are untouched and all 3525
   pass under it.
 
-  This is not a speed change, and it is worth writing down why rather than
-  leaving the next reader to assume it was one. Measured over 11 `cargo test`
-  runs on `dev` against 4 runs of the swapped job, normalised per test
-  because the suite grew from 3273 to 3525 tests across that window, the
-  median moves -8.9% on ubuntu, -6.5% on macos and +0.8% on windows. Every
-  macos and windows sample falls inside the `cargo test` spread, and that
-  spread is wide: 29.2s to 42.2s of execution on ubuntu for the same
-  command. The pooling gain the issue measured came off a local 8-core
-  machine; a runner has fewer cores, so a per-binary pool already saturates
-  them and process-spawn overhead eats what is left. The test step is
-  compile-bound either way.
+  The speed case is weaker than the issue expected, which is worth writing
+  down rather than leaving the next reader to assume otherwise. Measured
+  over 11 `cargo test` runs on `dev` against 4 of the swapped job,
+  normalised per test because the suite grew from 3273 to 3525 tests across
+  that window, the median moves -8.9% on ubuntu, -6.5% on macos and +0.8%
+  on windows. Real and in the same direction on the two Unix runners, but
+  single-digit, and inside a far wider band: 29.2s to 42.2s of execution on
+  ubuntu for the same command on the same suite. Every macos and windows
+  sample falls inside the `cargo test` spread. The pooling gain the issue
+  measured came off a local 8-core machine; a runner has fewer cores, so a
+  per-binary pool already saturates them and process-spawn overhead eats
+  what is left. The test step is compile-bound either way.
 
   What the swap does buy is process-per-test isolation. It surfaced a
   shared-fixture race in the test harness on its first run: the git shim
