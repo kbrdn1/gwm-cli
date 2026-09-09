@@ -432,9 +432,10 @@ fn ci_test_matrix_runs_on_windows_latest() {
 
 /// `cargo-nextest` has no `cargo install` step on purpose: building it from
 /// source on every runner, windows-latest most of all, costs minutes against
-/// the seconds a prebuilt binary takes, and the swap is only worth making if
-/// the tool arrives cheaply (issue #634). So the install action is pinned
-/// here rather than left to whoever next edits the job.
+/// the seconds a prebuilt binary takes (issue #634). The swap is time-neutral
+/// on wall-clock, so it is bought for process-per-test isolation and cannot
+/// afford to pay minutes for the tool. The install action is pinned here
+/// rather than left to whoever next edits the job.
 #[test]
 fn ci_installs_nextest_from_a_prebuilt_binary() {
   let job = ci_job("test");
@@ -454,7 +455,7 @@ fn ci_installs_nextest_from_a_prebuilt_binary() {
       .iter()
       .any(|r| r.contains("cargo install cargo-nextest")),
     "cargo-nextest must arrive prebuilt: building it from source on every runner \
-     eats the time the pooled run is meant to save"
+     costs minutes, and the swap has no wall-clock gain to spend them from"
   );
 }
 

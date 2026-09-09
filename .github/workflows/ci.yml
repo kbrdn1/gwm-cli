@@ -123,11 +123,30 @@ jobs:
       - name: cargo build
         run: cargo build --verbose
       # `cargo-nextest` schedules 3525 tests across 110 binaries in ONE global
-      # pool, instead of running the binaries in sequence with a fresh thread
-      # pool each, most of which never saturate the runner's cores (issue
-      # #634). The tests themselves are untouched, and all 3525 pass under it.
+      # pool and gives each test its own process, where `cargo test` runs the
+      # binaries in sequence with a fresh thread pool each (issue #634). The
+      # tests themselves are untouched, and all 3525 pass under it.
+      #
+      # It is NOT here for wall-clock, and the issue's premise did not
+      # survive being measured on the runners. Execution time is a wash:
+      # ubuntu 33.7s -> 30.6s, windows 122.4s -> 119.7s, macos 49.8s -> 51.4s.
+      # The 1.76x in the issue was measured on a local 8-core machine, where a
+      # binary holding a handful of tests leaves most cores idle; a runner has
+      # fewer cores, so a per-binary pool already saturates them and
+      # process-spawn overhead eats what is left. The step is compile-bound
+      # either way: ~45s of the ~76s on ubuntu is building the 110 binaries,
+      # identical under both runners.
+      #
+      # What the swap does buy is process-per-test isolation, which `cargo
+      # test` structurally cannot give: a shared-fixture race that a
+      # `OnceLock` hides inside one process becomes a failure. The very first
+      # run under nextest found one, in `tests/common/mod.rs`. Windows also
+      # reports `3 leaky` (passing tests that outlive their own process)
+      # which `cargo test` never surfaced.
+      #
       # Installed from a prebuilt binary: `cargo install cargo-nextest` builds
-      # it from source on every runner, which is minutes against seconds here.
+      # it from source on every runner, minutes against seconds, which a swap
+      # that is time-neutral on wall-clock cannot afford.
       #
       # nextest does not run doctests (it cannot: they have no test binary).
       # Nothing is lost here: every ``` fence in `src/` is a ```text or ```go

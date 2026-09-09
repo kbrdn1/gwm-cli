@@ -165,16 +165,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **CI schedules the test suite in one pool with `cargo-nextest`**
+- **CI runs the test suite under `cargo-nextest`**
   ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)). `cargo test` runs
-  110 test binaries in sequence, each with its own thread pool, and most of
-  them hold a handful of tests that never saturate a runner's cores.
-  `cargo-nextest` schedules all 3525 across one global pool. The tests
-  themselves are untouched and all 3525 pass under it, process-per-test
-  isolation included. Doctests are not lost: nextest cannot run them, and
-  every ``` fence under `src/` is a ```text or ```go block, so
-  `cargo test --doc` reports zero tests on this tree. The MSRV job still
-  compiles at the declared floor and runs no tests.
+  110 test binaries in sequence, each with its own thread pool.
+  `cargo-nextest` schedules all 3525 tests across one global pool and gives
+  each test its own process. The tests themselves are untouched and all 3525
+  pass under it.
+
+  This is not a speed change, and it is worth writing down why rather than
+  leaving the next reader to assume it was one. Measured on the three
+  runners, execution time is a wash: 33.7s to 30.6s on ubuntu, 122.4s to
+  119.7s on windows, 49.8s to 51.4s on macos. The pooling gain the issue
+  measured came off a local 8-core machine; a runner has fewer cores, so a
+  per-binary pool already saturates them and process-spawn overhead eats
+  what is left. The test step is compile-bound either way.
+
+  What the swap does buy is process-per-test isolation. It surfaced a
+  shared-fixture race in the test harness on its first run: the git shim
+  directory is a fixed path, and the `OnceLock` guarding it only serialises
+  the tests sharing one process, so process-per-test had several of them
+  race an unlink-then-symlink. The link is staged and renamed into place
+  now, which is atomic.
+
+  Doctests are not lost: nextest cannot run them, and every ``` fence under
+  `src/` is a ```text or ```go block, so `cargo test --doc` reports zero
+  tests on this tree. The MSRV job still compiles at the declared floor and
+  runs no tests.
 
 - **`gwm list` scans its worktrees in parallel**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens
