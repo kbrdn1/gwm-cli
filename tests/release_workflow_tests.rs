@@ -736,4 +736,32 @@ fn ci_runs_doctests_since_nextest_cannot() {
     "the test job must run `cargo test --doc`: nextest cannot, and nothing else in the repo \
      does, so without it every doctest under src/ is compiled and run by nobody. Got {runs:?}"
   );
+
+  // Present is not the same as running. `run_steps` flattens the steps and
+  // reports their scripts whatever their `if:`, so `if: false` would leave
+  // the assertion above green over a step that never executes, and
+  // `continue-on-error` would leave it green over one that never fails. That
+  // is not hypothetical here: `continue-on-error` on the `audit` job is what
+  // hid RUSTSEC-2025-0068 for nine months, and the bench job carries the same
+  // pair of assertions for the same reason.
+  let step = job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .find(|s| s["run"].as_str().is_some_and(|r| r.contains("cargo test --doc")))
+    .expect("the `cargo test --doc` step was found in the scripts, so it must be in the steps");
+  assert!(
+    step["continue-on-error"].is_null(),
+    "the doctest step must be able to fail the job: a doctest that runs and is not allowed to \
+     go red is a doctest nobody runs"
+  );
+  // One `if:` is legitimate, and only one: doctests behave identically on the
+  // three runners, so this pays for them once on the row with the slack.
+  // Anything else is the step being switched off by another name.
+  match step["if"].as_str() {
+    None => {}
+    Some("matrix.os == 'ubuntu-latest'") => {}
+    Some(other) => panic!("the doctest step may only be narrowed to the ubuntu matrix row, got `if: {other}`"),
+  }
 }
