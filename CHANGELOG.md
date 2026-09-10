@@ -117,6 +117,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The warm-cache sidebar bench runs again, and a CI job now runs the
+  benches** ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)).
+  `benches/sidebar_cache_hit.rs` drew one frame and asserted the sidebar
+  cache had filled itself. That was the contract when it was written: the
+  first frame ran `git log` and stored the rendered sections. #351 took git
+  off the render path, so a frame warms nothing, and the bench has panicked
+  on every run since, 1086 commits ago. `cargo bench` stops at the first
+  failure, so it also masked the third bench, which was healthy all along.
+
+  Nobody saw it because nothing ran the benches. Both halves are fixed
+  here: the bench seeds the payload the way the event loop does, and a
+  `bench` job runs all three on every push and pull request. The job passes
+  criterion's `--test`, which runs each benchmark once and measures
+  nothing, so it fails on a panic or a build break and never on timing
+  noise from a shared runner. A perf gate that goes red on a slow runner is
+  a perf gate somebody switches off.
+
+  The old assertion does not come back. `cache.is_some()` is what let this
+  rot: the renderer serves the cache only when its key matches the current
+  selection and mode, so a payload under any other key renders the loading
+  placeholder and the bench would still report a plausible number for
+  drawing it. The timed frame is asserted to carry a real commit subject
+  instead.
+
 - **A config key with no value no longer crashes gwm**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). A git config entry
   may carry no value at all (`\tgwm-agent-pin` with no `=`, git's
@@ -140,6 +164,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than crashed on or half-deleted.
 
 ### Changed
+
+- **CI runs the test suite under `cargo-nextest`**
+  ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)). `cargo test` runs
+  110 test binaries in sequence, each with its own thread pool.
+  `cargo-nextest` schedules all 3525 tests across one global pool and gives
+  each test its own process. The tests themselves are untouched and all 3525
+  pass under it.
+
+  The speed case is weaker than the issue expected, which is worth writing
+  down rather than leaving the next reader to assume otherwise. Measured
+  over 11 `cargo test` runs on `dev` against 4 of the swapped job,
+  normalised per test because the suite grew from 3273 to 3525 tests across
+  that window, the median moves -8.9% on ubuntu, -6.5% on macos and +0.8%
+  on windows. Real and in the same direction on the two Unix runners, but
+  single-digit, and inside a far wider band: 29.2s to 42.2s of execution on
+  ubuntu for the same command on the same suite. Every macos and windows
+  sample falls inside the `cargo test` spread. The pooling gain the issue
+  measured came off a local 8-core machine; a runner has fewer cores, so a
+  per-binary pool already saturates them and process-spawn overhead eats
+  what is left. The test step is compile-bound either way.
+
+  What the swap does buy is process-per-test isolation. It surfaced a
+  shared-fixture race in the test harness on its first run: the git shim
+  directory is a fixed path, and the `OnceLock` guarding it only serialises
+  the tests sharing one process, so process-per-test had several of them
+  race an unlink-then-symlink. The link is staged and renamed into place
+  now, which is atomic.
+
+  Doctests are the one thing nextest gives up, so `cargo test --doc` runs
+  next to it. On ubuntu only: a doctest behaves the same on all three
+  runners, and that job carries minutes of slack against windows in the same
+  matrix, so the roughly 35 seconds it costs never reaches the workflow's
+  critical path. The MSRV job still compiles at the declared floor and runs
+  no tests.
 
 - **`gwm list` scans its worktrees in parallel**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens

@@ -167,7 +167,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-All three must be green. The pre-commit hook lives in [`tools/git-hooks/pre-commit`](https://github.com/kbrdn1/gwm-cli/blob/main/tools/git-hooks/pre-commit); enable it with:
+All three must be green. CI runs one more thing the hook does not: a `benches`
+job runs `cargo bench --benches -- --test`, which builds and runs every
+benchmark once without measuring, so a bench that panics or stops compiling
+goes red. It is a compile-and-run guard, not a performance gate, and there is
+no timing threshold to trip. Run it locally with the same command if you touch
+`benches/`.
+
+The pre-commit hook lives in [`tools/git-hooks/pre-commit`](https://github.com/kbrdn1/gwm-cli/blob/main/tools/git-hooks/pre-commit); enable it with:
 
 ```bash
 git config core.hooksPath tools/git-hooks

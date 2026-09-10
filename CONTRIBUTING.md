@@ -391,10 +391,14 @@ Three of those are counter-intuitive and are set that way on purpose:
 - **Linear history off.** Turning it on would force squash or rebase merges and
   break [Merge strategy](#merge-strategy). The atomic commit history is the
   artefact, so merge commits have to stay legal.
-- **`gwm doctor (advisory)`, CodeRabbit and GitGuardian are not required.** The
-  first is advisory by design; the other two are third-party and can stop
-  reporting. A required check that never reports blocks the branch forever, so
-  only checks we own and that always run are in the list.
+- **`gwm doctor (advisory)`, `benches`, CodeRabbit and GitGuardian are not
+  required.** The first is advisory by design; the last two are third-party and
+  can stop reporting. A required check that never reports blocks the branch
+  forever, so only checks we own and that always run are in the list.
+  `benches` is the odd one out: it is ours and it does always run, it is simply
+  newer than this table (#634). Promoting it means editing the protection, so
+  until that happens a red bench fails the pull request's checks without
+  blocking the `dev` to `main` merge.
 
 `strict` is off because `main` gains a merge commit that `dev` does not have on
 every release; requiring "up to date" would force a back-merge into `dev` before

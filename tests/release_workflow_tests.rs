@@ -376,25 +376,149 @@ fn docs_sync_watches_every_root_the_site_reads() {
   }
 }
 
+/// One `ci.yml` job by name, parsed. The text-slicing predecessor of this
+/// helper cut the `test` job out between the literal `  test:` and
+/// `\n  hook-smoke:` markers, so inserting any job between the two silently
+/// emptied what the assertions ran against, the same failure mode the `msrv`
+/// tests already parse the YAML to avoid.
+fn ci_job(name: &str) -> serde_yaml_ng::Value {
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap())
+      .expect("ci.yml must be valid YAML");
+  let job = workflow["jobs"][name].clone();
+  assert!(!job.is_null(), "ci.yml must define a `{name}` job");
+  job
+}
+
+/// The `run:` scripts of a job's steps, in order.
+fn run_steps(job: &serde_yaml_ng::Value) -> Vec<String> {
+  job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|s| s["run"].as_str().map(str::to_owned))
+    .collect()
+}
+
 #[test]
 fn ci_test_matrix_runs_on_windows_latest() {
-  let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
-  let test_job = workflow
-    .split("  test:")
-    .nth(1)
-    .and_then(|tail| tail.split("\n  hook-smoke:").next())
-    .expect("ci.yml must contain a test job before hook-smoke");
+  let job = ci_job("test");
+  let matrix: Vec<String> = job["strategy"]["matrix"]["os"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|v| v.as_str().map(str::to_owned))
+    .collect();
 
   for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
-    assert!(test_job.contains(os), "ci.yml test matrix must include {os}");
+    assert!(
+      matrix.iter().any(|m| m == os),
+      "ci.yml test matrix must include {os} (matrix is {matrix:?})"
+    );
   }
+
+  let runs = run_steps(&job);
   assert!(
-    test_job.contains("run: cargo build --verbose"),
-    "windows-latest must run the same cargo build step as the other test matrix rows"
+    runs.iter().any(|r| r.contains("cargo build")),
+    "windows-latest must run the same cargo build step as the other test matrix rows, got {runs:?}"
   );
   assert!(
-    test_job.contains("run: cargo test --verbose"),
-    "windows-latest must run the same cargo test step as the other test matrix rows"
+    runs.iter().any(|r| r.contains("cargo nextest run")),
+    "windows-latest must run the same test step as the other test matrix rows, got {runs:?}"
+  );
+}
+
+/// `cargo-nextest` has no `cargo install` step on purpose: building it from
+/// source on every runner, windows-latest most of all, costs minutes against
+/// the seconds a prebuilt binary takes (issue #634). The swap is time-neutral
+/// on wall-clock, so it is bought for process-per-test isolation and cannot
+/// afford to pay minutes for the tool. The install action is pinned here
+/// rather than left to whoever next edits the job.
+#[test]
+fn ci_installs_nextest_from_a_prebuilt_binary() {
+  let job = ci_job("test");
+  let uses: Vec<String> = job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|s| s["uses"].as_str().map(str::to_owned))
+    .collect();
+  assert!(
+    uses.iter().any(|u| u.starts_with("taiki-e/install-action")),
+    "the test job must install cargo-nextest from a prebuilt binary, got {uses:?}"
+  );
+  assert!(
+    !run_steps(&job)
+      .iter()
+      .any(|r| r.contains("cargo install cargo-nextest")),
+    "cargo-nextest must arrive prebuilt: building it from source on every runner \
+     costs minutes, and the swap has no wall-clock gain to spend them from"
+  );
+}
+
+/// Issue #634: `benches/sidebar_cache_hit.rs` panicked for 1086 commits and
+/// nobody noticed, because no job ran the benches. `cargo bench` also aborts
+/// at the first failure, so it masked the third bench on top. This pins the
+/// job that would have caught it.
+///
+/// Two properties, both load-bearing:
+///
+/// - it must actually RUN them (`--test` is criterion's run-once-measure-
+///   nothing mode), not just `--no-run` them: a bench that builds and then
+///   panics is exactly the case that went unseen;
+/// - it must be able to go red: no `continue-on-error`, and no pipe on the
+///   command, which would report the pipe's exit code instead of the runner's.
+#[test]
+fn ci_runs_the_benches_and_can_fail_on_one() {
+  let job = ci_job("bench");
+  let runs = run_steps(&job);
+  let bench_run = runs
+    .iter()
+    .find(|r| r.contains("cargo bench"))
+    .unwrap_or_else(|| panic!("the bench job must run `cargo bench`, got {runs:?}"));
+
+  // `--benches` and not `--bench <name>`: the second builds and runs one
+  // target, which is the partial coverage #634 is about. `cargo bench` alone
+  // would also do, but naming the flag keeps a later `--bench sidebar_cache_hit`
+  // from passing a guard whose whole subject is a bench nobody ran.
+  assert!(
+    bench_run.contains("--benches"),
+    "the bench job must run every bench target (`--benches`), not one by name: the third \
+     bench went unrun for 1086 commits and that is what this job exists to catch, got {bench_run:?}"
+  );
+  assert!(
+    bench_run.contains("-- --test"),
+    "the bench job must pass criterion's `--test` so each bench actually runs \
+     once (and the job stays a compile-and-run guard, not a timing gate), got {bench_run:?}"
+  );
+  assert!(
+    !bench_run.contains('|'),
+    "piping the bench command reports the pipe's exit code, not the bench runner's, \
+     the panic this job exists to catch would be swallowed, got {bench_run:?}"
+  );
+  assert!(
+    job["continue-on-error"].is_null(),
+    "the bench job must be able to fail the workflow: a dead bench is what #634 is about"
+  );
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  assert!(
+    steps.iter().all(|s| s["continue-on-error"].is_null()),
+    "no step of the bench job may swallow its own failure"
+  );
+  // The `doctor` job in this same file is narrowed with an `if:`. Doing that
+  // here would keep all the assertions above green while the benches quietly
+  // stop running on pull requests, which is the state #634 exists to close.
+  assert!(
+    job["if"].is_null(),
+    "the bench job must not be narrowed with an `if:`: it has to run on every event this \
+     workflow runs on, or a dead bench goes unseen again"
+  );
+  assert!(
+    steps.iter().all(|s| s["if"].is_null()),
+    "no step of the bench job may be conditioned away"
   );
 }
 
@@ -580,4 +704,69 @@ fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
     .current_dir(root)
     .output()
     .unwrap()
+}
+
+/// `cargo nextest run` cannot run doctests: they have no test binary for it
+/// to schedule. #634 took `cargo test` out of this job, so unless something
+/// runs them explicitly the repo silently stops compiling every `///` example
+/// it has, which is the same shape of rot as the bench that panicked for 1086
+/// commits with nothing to report it.
+///
+/// This pins the step rather than the property, on purpose, and the detour is
+/// worth recording. The first version of this guard scanned `src/` and decided
+/// for itself which fences rustdoc would compile, so that CI would not have to
+/// pay for a doctest run. Two review passes probed it against the toolchain
+/// and it was wrong ten ways: indented blocks carrying no fence at all, fences
+/// nested in a blockquote (`src/forge.rs` already writes that style), `~~~`,
+/// `/** */` blocks, `#[doc = "..."]` attributes, `{.rust}`, and the tag rules
+/// themselves, which turn out to be order-sensitive on 1.96.1
+/// (```` ```no_run,text ```` is a doctest, ```` ```text,no_run ```` is not).
+///
+/// Every one of those was found by asking rustdoc. Which is the point: the
+/// oracle was there the whole time, it costs about 35 seconds, and pinning it
+/// to ubuntu keeps it off a critical path that windows holds for four minutes
+/// more. An emulation that has to track rustdoc's release notes to stay
+/// correct is a worse guard than the thing it emulates, however cheap it runs.
+#[test]
+fn ci_runs_doctests_since_nextest_cannot() {
+  let job = ci_job("test");
+  let runs = run_steps(&job);
+  assert!(
+    runs.iter().any(|r| r.contains("cargo test --doc")),
+    "the test job must run `cargo test --doc`: nextest cannot, and nothing else in the repo \
+     does, so without it every doctest under src/ is compiled and run by nobody. Got {runs:?}"
+  );
+
+  // Present is not the same as running. `run_steps` flattens the steps and
+  // reports their scripts whatever their `if:`, so `if: false` would leave
+  // the assertion above green over a step that never executes, and
+  // `continue-on-error` would leave it green over one that never fails. That
+  // is not hypothetical here: `continue-on-error` on the `audit` job is what
+  // hid RUSTSEC-2025-0068 for nine months, and the bench job carries the same
+  // pair of assertions for the same reason.
+  let step = job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .find(|s| s["run"].as_str().is_some_and(|r| r.contains("cargo test --doc")))
+    .expect("the `cargo test --doc` step was found in the scripts, so it must be in the steps");
+  assert!(
+    step["continue-on-error"].is_null(),
+    "the doctest step must be able to fail the job: a doctest that runs and is not allowed to \
+     go red is a doctest nobody runs"
+  );
+  // One `if:` is legitimate, and only one: doctests behave identically on the
+  // three runners, so this pays for them once on the row with the slack.
+  // Anything else is the step being switched off by another name.
+  //
+  // Matched on the VALUE, not through `as_str()`. `if: false` is a YAML
+  // boolean, so `as_str()` hands back `None` for it exactly as it does for an
+  // absent key: the first version of this check used `match … .as_str()` and
+  // the canonical way to switch a step off took its "no `if:` at all" arm.
+  let cond = &step["if"];
+  assert!(
+    cond.is_null() || cond.as_str() == Some("matrix.os == 'ubuntu-latest'"),
+    "the doctest step may only be narrowed to the ubuntu matrix row, got `if: {cond:?}`"
+  );
 }

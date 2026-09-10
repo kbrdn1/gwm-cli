@@ -122,8 +122,96 @@ jobs:
           git config --global user.name "ci"
       - name: cargo build
         run: cargo build --verbose
-      - name: cargo test
-        run: cargo test --verbose
+      # `cargo-nextest` schedules 3525 tests across 110 binaries in ONE global
+      # pool and gives each test its own process, where `cargo test` runs the
+      # binaries in sequence with a fresh thread pool each (issue #634). The
+      # tests themselves are untouched, and all 3525 pass under it.
+      #
+      # The wall-clock case is weaker than the issue expected. Measured over
+      # 11 `cargo test` runs on `dev` against 4 of this job (nextest's own
+      # `Summary` against the sum of `cargo test`'s per-binary `finished
+      # in`), normalised per test because the suite grew from 3273 to 3525
+      # over the window, the median moves -8.9% on ubuntu, -6.5% on macos
+      # and +0.8% on windows. Real and in the same direction on the two Unix
+      # runners, but single-digit, and inside a band that is far wider: 29.2s
+      # to 42.2s of execution on ubuntu for the same command on the same
+      # suite. Every macos and windows sample lands inside the `cargo test`
+      # spread. Not a saving anyone can plan around, and nowhere near 1.76x.
+      # (The 4 samples are 3 commits plus a re-run of one, so two of them
+      # share a commit and a warm cache and are not independent draws; the
+      # 11 baseline runs are 11 different commits on different days.)
+      #
+      # The 1.76x in the issue is not refuted, it does not transfer: it was
+      # measured on a local 8-core machine, where a binary holding a handful
+      # of tests leaves most cores idle. A runner has fewer cores, so a
+      # per-binary pool already saturates them and process-spawn overhead eats
+      # what is left. The step is compile-bound either way: building the 110
+      # test binaries was the larger half of it in both runs, and that half is
+      # identical under either runner.
+      #
+      # What the swap does buy is process-per-test isolation, which `cargo
+      # test` structurally cannot give: a shared-fixture race that a
+      # `OnceLock` hides inside one process becomes a failure. The very first
+      # run under nextest found one, in `tests/common/mod.rs`. Windows also
+      # reports `3 leaky` (passing tests that outlive their own process)
+      # which `cargo test` never surfaced.
+      #
+      # Installed from a prebuilt binary: `cargo install cargo-nextest` builds
+      # it from source on every runner, minutes against seconds, which a swap
+      # that is time-neutral on wall-clock cannot afford.
+      #
+      # nextest does not run doctests: they have no test binary for it to
+      # schedule. So `cargo test --doc` runs next to it, below.
+      - uses: taiki-e/install-action@nextest
+      - name: cargo nextest run
+        run: cargo nextest run
+      # Doctests, the one thing nextest gives up. ubuntu only: a doctest is
+      # the same on all three runners, and this job has roughly three minutes
+      # of slack against windows in the same matrix, so the ~35s it costs
+      # never reaches the workflow's critical path.
+      #
+      # This step IS the check. Two review passes were spent watching a
+      # hand-written scanner try to decide which fences rustdoc compiles, and
+      # it was wrong ten different ways: indented blocks with no fence at all,
+      # fences inside a blockquote, `~~~`, `/** */` blocks, `#[doc = "..."]`
+      # attributes, `{.rust}`, and the tag rules, which are order-sensitive
+      # (```` ```no_run,text ```` is a doctest, ```` ```text,no_run ```` is
+      # not). Every one of those was found by probing rustdoc, which is the
+      # tell: the oracle was available the whole time and cost 35 seconds off
+      # the critical path. `ci_runs_doctests_since_nextest_cannot` pins that
+      # this step stays.
+      - name: cargo test --doc
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --doc
+
+  bench:
+    name: benches
+    runs-on: ubuntu-latest
+    # The perf benches were dead for 1086 commits (issue #634) because nothing
+    # ran them: `benches/sidebar_cache_hit.rs` still asserted the pre-#343
+    # contract that a render frame warms the sidebar cache, panicked, and
+    # `cargo bench` aborted before reaching the third bench. Fixing it without
+    # a job that runs it just digs the same hole again.
+    #
+    # ubuntu-only and single-shot on purpose: this is a compile-and-run guard,
+    # not a perf gate. Criterion's `--test` runs each benchmark exactly once
+    # and measures nothing, so the job fails on a panic or a build break and
+    # never on timing noise from a shared runner, which is what would make it
+    # flaky enough to be switched off again.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: configure git identity (libgit2 commit needs one)
+        run: |
+          git config --global user.email "ci@gwm.test"
+          git config --global user.name "ci"
+      # Deliberately unpiped: `| tail` / `| grep` would report the pipe's exit
+      # code, not the bench runner's, and this job exists to read that code.
+      - name: cargo bench --test
+        run: cargo bench --benches -- --test
 
   hook-smoke:
     name: pre-commit hook smoke
