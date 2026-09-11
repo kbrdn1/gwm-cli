@@ -45,8 +45,7 @@ use super::super::state::async_task::{TaskKind, TaskMsg};
 use super::super::theme::Theme;
 use super::super::ui::{
   author_initials, branch_name_color, centered, freshness_color, meta_pick, modal_hint_line, overlay_worktree,
-  scrollable_body_area, MetaColumn, ModalFrame, COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN, META_GAP,
-  RECENT_COMMITS_LIMIT,
+  scrollable_body_area, MetaColumn, ModalFrame, META_GAP, RECENT_COMMITS_LIMIT,
 };
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::KeyEvent;
@@ -59,6 +58,19 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Number of hex chars rendered for each commit's SHA in the sidebar.
+/// Matches lazygit's `Gui.CommitHashLength` default of 8.
+pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
+
+/// Cells the subject must keep for the metadata column to be worth showing.
+///
+/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
+/// topology), so what the left side needs cannot be derived from a
+/// constant: the policy is stated as a floor on what survives instead. A
+/// merge-heavy history at 80 columns would otherwise leave a subject of ten
+/// cells to buy an author column, which is a worse listing than no column.
+pub const COMMITS_SUBJECT_FLOOR: usize = 30;
 
 /// One page of history. Matched to the sidebar's own limit so the first
 /// snapshot hits the cache entry a sidebar in Commits mode already warmed

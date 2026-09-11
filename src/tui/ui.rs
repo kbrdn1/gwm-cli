@@ -2838,21 +2838,8 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
 /// dense on tall terminals without paginating.
 pub const RECENT_COMMITS_LIMIT: usize = 300;
 
-/// Number of hex chars rendered for each commit's SHA in the sidebar.
-/// Matches lazygit's `Gui.CommitHashLength` default of 8.
-pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
-
 /// Gap, in cells, between the commit subject and the metadata column.
 pub const META_GAP: usize = 2;
-
-/// Cells the subject must keep for the metadata column to be worth showing.
-///
-/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
-/// topology), so what the left side needs cannot be derived from a
-/// constant: the policy is stated as a floor on what survives instead. A
-/// merge-heavy history at 80 columns would otherwise leave a subject of ten
-/// cells to buy an author column, which is a worse listing than no column.
-pub const COMMITS_SUBJECT_FLOOR: usize = 30;
 
 /// Pick the widest metadata column that leaves the left side `floor` cells.
 ///
@@ -2867,8 +2854,8 @@ pub fn meta_pick(body_w: usize, tiers: &[usize], floor: usize) -> Option<usize> 
 /// Cells a Working Tree row must keep for its `+N -M` column to be worth
 /// showing.
 ///
-/// Lower than [`COMMITS_SUBJECT_FLOOR`] because the row is a leaf name
-/// under a connector prefix, not a sentence: `ui.rs` stays readable at a
+/// Lower than [`crate::tui::COMMITS_SUBJECT_FLOOR`] because the row is a leaf
+/// name under a connector prefix, not a sentence: `ui.rs` stays readable at a
 /// width where a commit subject would be a fragment. The connectors grow
 /// with the nesting depth, so what a row needs cannot be derived from a
 /// constant here either — the floor states the policy instead.

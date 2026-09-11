@@ -60,7 +60,7 @@ pub use state::sidebar::SidebarState;
 pub use state::working_tree::{WorkingTreeModal, WorkingTreeSnapshot};
 pub use views::commits::{
   commit_meta_columns, commits_meta_pick, recent_commits_lines, recent_commits_listing, CommitsModal, CommitsSnapshot,
-  COMMITS_MAX, COMMITS_PAGE,
+  COMMITS_MAX, COMMITS_PAGE, COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN,
 };
 pub use views::exec_picker::ExecPicker;
 
@@ -103,8 +103,8 @@ pub use ui::{
   working_tree_pane_title, working_tree_stat_spans, working_tree_status_counts, working_tree_status_line,
   worktree_name_style, worktree_path_style, worktrees_pane_title, Header, HelpRow, HintContext, MetaColumn,
   SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, CLOSE_ICON, COMMAND_LOGS_ICON,
-  COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, SETTINGS_ICON,
-  WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON, WT_NAME_FLOOR,
+  ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, SETTINGS_ICON, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
