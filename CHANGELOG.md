@@ -137,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   condition. The `audit` guard adds `--deny warnings` and rejects a pipe on
   the command, since a pipeline reports its last element's exit status.
 
+  A fifth way to switch a job off is covered as well, found while reviewing
+  the first four: GitHub skips a job whose dependency was skipped, so
+  `needs: doctor` on any of the four stops it on every event that does not
+  target `dev` while its own `if:` and `continue-on-error:` stay clean.
+  `doctor` sits one screen below `audit` in the same file and is narrowed
+  exactly that way. The whole `needs:` closure is walked, since a job two
+  hops from a conditional one is skipped the same way.
+
   Each guard was proved by mutating `ci.yml` and rerunning the two affected
   binaries, `bench` included, so the refactor cannot have traded coverage
   for a shared definition.
