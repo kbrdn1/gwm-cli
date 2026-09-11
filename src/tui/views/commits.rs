@@ -526,13 +526,6 @@ pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> V
   hints
 }
 
-/// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
-/// over the dimmed list showing the lazygit-style transcript of the
-/// external commands gwm ran, newest-first. Scrolls like the help overlay —
-/// the renderer republishes `command_logs.max_scroll` / `max_x_scroll`
-/// against the live viewport so `App`'s scroll cursor can never run past
-/// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
-/// fail / `muted` output) so a theme override applies here too.
 /// Render the full-size commit listing (issue #593).
 ///
 /// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the

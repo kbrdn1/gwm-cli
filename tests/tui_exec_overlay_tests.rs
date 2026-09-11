@@ -1,8 +1,14 @@
 //! State-machine tests for the exec profile picker overlay (issue #325).
 //!
-//! The picker is pure state — no PTY, no config beyond the sorted
-//! profile-name list handed in at open time — so these run ratatui-free
-//! on every platform.
+//! These are the navigation tests: the sorted profile-name list, the
+//! wrapping highlight and the target worktree, all handed in at open time,
+//! so they run ratatui-free on every platform.
+//!
+//! The picker is no longer pure state. #635 moved it to `tui::views` and
+//! brought its three satellites home from `App`: the `[exec]` config and
+//! the commondir captured at open, and the monotonic counter behind a
+//! containerised run's `--name`. Those are exercised from
+//! `tui_app_tests.rs`, which has an `App` in reach.
 
 use gwm::tui::ExecPicker;
 use std::path::PathBuf;

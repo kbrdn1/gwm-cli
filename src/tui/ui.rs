@@ -5384,6 +5384,13 @@ fn draw_working_tree(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   f.render_widget(modal_hint_line(&footer_hints, &theme), footer_area);
 }
 
+/// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
+/// over the dimmed list showing the lazygit-style transcript of the
+/// external commands gwm ran, newest-first. Scrolls like the help overlay —
+/// the renderer republishes `command_logs.max_scroll` / `max_x_scroll`
+/// against the live viewport so `App`'s scroll cursor can never run past
+/// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
+/// fail / `muted` output) so a theme override applies here too.
 fn draw_command_logs(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
