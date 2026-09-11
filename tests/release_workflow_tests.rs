@@ -3,7 +3,7 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os};
+use common::{assert_job_is_blocking, effective_matrix_os, step_label};
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -999,29 +999,65 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
 
   for job_name in &jobs {
     if job_name == "doctor" {
-      let job = &workflow["jobs"]["doctor"];
-      assert!(
-        !job["if"].is_null(),
-        "the `doctor` job is exempt from the blocking guard because it is advisory, and it \
-         has lost the `if:` that restricts it to `dev`. It is no longer the job this \
-         exemption was written for: guard it like the rest, or restore the condition"
-      );
-      let advisory = job["steps"]
-        .as_sequence()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .any(|s| s["continue-on-error"].as_bool() == Some(true));
-      assert!(
-        advisory,
-        "the `doctor` job is exempt from the blocking guard because it is advisory, and no \
-         step of it carries `continue-on-error: true` any more. A job that can turn the \
-         workflow red does not belong in an exemption for one that cannot"
-      );
+      assert_doctor_is_still_the_advisory_job(&workflow["jobs"]["doctor"]);
       continue;
     }
     assert_job_is_blocking(&workflow, job_name, steps_allowed_an_if(job_name));
   }
+}
+
+/// What the sweep's one exemption is exempt *as*: the advisory job, its `if:`
+/// restricting it to `dev` and its report step marked `continue-on-error:
+/// true`. Both are deliberate, the report wants eyes rather than a blocked
+/// merge and `lazygit` is absent on the runner so a Warning is its floor. Lose
+/// either and it is no longer the job the exemption was written for, so it
+/// goes red here and has to join the guarded set instead.
+///
+/// The marker is pinned to the step that carries it, never asserted
+/// existentially over the job's steps. "some step of `doctor` is
+/// `continue-on-error`" is satisfied by any of them, so moving the marker off
+/// `gwm doctor` and onto `cargo build` leaves an existential assertion green
+/// while `gwm doctor` itself becomes able to fail the job, which is the exact
+/// drift the exemption claims to catch. `assert_job_is_blocking` already
+/// closes that shape for its `if:` waivers by requiring exactly one step to
+/// answer to the label; it is closed the same way here.
+///
+/// "The job cannot turn the workflow red" is deliberately *not* the property
+/// asserted, because it is not true and never was: `doctor`'s checkout, its
+/// toolchain install and its `cargo build` all fail hard, and should. Only the
+/// report is advisory.
+fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
+  assert!(
+    !job["if"].is_null(),
+    "the `doctor` job is exempt from the blocking guard because it is advisory, and it has \
+     lost the `if:` that restricts it to `dev`. It is no longer the job this exemption was \
+     written for: guard it like the rest, or restore the condition"
+  );
+
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  let reports: Vec<&serde_yaml_ng::Value> = steps
+    .iter()
+    .filter(|s| s["name"].as_str() == Some("gwm doctor"))
+    .collect();
+  assert_eq!(
+    reports.len(),
+    1,
+    "the `doctor` job must hold exactly one step named `gwm doctor`, found {}. Zero means \
+     the step this exemption is written around was renamed or removed and the exemption now \
+     covers nothing; more than one means a second step answers to the label and inherits \
+     the advisory marker written for its neighbour",
+    reports.len()
+  );
+  assert_eq!(
+    reports[0]["continue-on-error"].as_bool(),
+    Some(true),
+    "the `gwm doctor` step must carry `continue-on-error: true`: that one step being \
+     advisory is the whole reason this job sits outside the blocking guard. Asserting it of \
+     the step rather than of the job as a whole is deliberate, since `some step is \
+     continue-on-error` stays green when the marker moves onto `cargo build` and `gwm \
+     doctor` quietly becomes able to fail the job. Got `continue-on-error: {:?}`",
+    reports[0]["continue-on-error"]
+  );
 }
 
 /// The `if:` conditions the sweep above allows, by job. Everything not listed
@@ -1089,9 +1125,30 @@ fn ci_fmt_job_checks_formatting_rather_than_rewriting_it() {
 /// job, so it is one edit away from being gone for all eight of them, and the
 /// `msrv` job already overrides it to `""` at job level, which is precedent
 /// that it does get overridden. The command has to carry its own denial.
+///
+/// It is also not inert, which is the other half of the same fact and the
+/// hole the paragraph above left open. The lint level clippy runs at is the
+/// command *and* `RUSTFLAGS`, and `RUSTFLAGS` wins: `env: RUSTFLAGS:
+/// "--cap-lints=allow"` on this job makes `cargo clippy --all-targets
+/// --all-features -- -D warnings` exit 0 on every lint in the tree, denial
+/// intact, one bare invocation, job green. So the flags that reach the job are
+/// pinned rather than left to the command alone, at the two levels `env:`
+/// exists above a step and on the steps themselves.
+///
+/// Pinned by value, not screened for weakening spellings. `--cap-lints=allow`,
+/// `-A warnings`, `--force-warn`, a `-D warnings` cancelled by an earlier
+/// `--cap-lints`: rustc's flags are not a fixed set and enumerating the ones
+/// that weaken is the denylist #652 already walked through. The exact value is
+/// the only statement that also closes the ones nobody has thought of.
+///
+/// `CARGO_ENCODED_RUSTFLAGS` is refused outright rather than pinned, because
+/// cargo reads it *instead of* `RUSTFLAGS` when it is set: a job carrying it
+/// would leave the pin above describing a variable nothing reads.
 #[test]
 fn ci_clippy_job_denies_warnings_across_all_targets() {
-  let runs = run_steps(&ci_job("clippy"));
+  let workflow = ci_workflow();
+  let job = ci_job("clippy");
+  let runs = run_steps(&job);
   let clippy = runs
     .iter()
     .find(|r| r.contains("cargo clippy"))
@@ -1107,5 +1164,48 @@ fn ci_clippy_job_denies_warnings_across_all_targets() {
     "the clippy job must lint every target (`--all-targets`): the default leaves `tests/`, \
      `benches/` and `examples/` unlinted, which here is 110 test binaries and three benches \
      the job would report clean without having read. Got {clippy:?}"
+  );
+
+  assert_eq!(
+    workflow["env"]["RUSTFLAGS"].as_str(),
+    Some("-D warnings"),
+    "the workflow-wide `RUSTFLAGS` must stay exactly `-D warnings`, because it is half of \
+     the lint level `cargo clippy` runs at and the half that wins: `--cap-lints=allow` here \
+     exits the job 0 on every lint in the tree while the `-D warnings` on the command sits \
+     there untouched. Changing what clippy is allowed to ignore is a conscious decision in \
+     a reviewed diff, not a one-word edit to a shared `env:` block. Got {:?}",
+    workflow["env"]["RUSTFLAGS"]
+  );
+
+  // Below the workflow, `env:` exists at exactly two levels, and either one
+  // shadows the value pinned above for this job alone. `msrv` overriding
+  // `RUSTFLAGS` to `""` two jobs away is the precedent that this does happen.
+  let mut envs: Vec<(&serde_yaml_ng::Value, String)> = vec![(&job["env"], "the `clippy` job".to_string())];
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  for step in &steps {
+    envs.push((&step["env"], format!("step {:?} of the `clippy` job", step_label(step))));
+  }
+  for (env, where_) in &envs {
+    assert!(
+      env["RUSTFLAGS"].is_null(),
+      "`RUSTFLAGS` must not be set on {where_}: it shadows the workflow-wide `-D warnings` \
+       for this job alone, and it decides the lint level over the command's own denial. Got \
+       `RUSTFLAGS: {:?}`",
+      env["RUSTFLAGS"]
+    );
+    assert!(
+      env["CARGO_ENCODED_RUSTFLAGS"].is_null(),
+      "`CARGO_ENCODED_RUSTFLAGS` must not be set on {where_}: cargo reads it *instead of* \
+       `RUSTFLAGS`, so it silently replaces the value pinned above rather than adding to it. \
+       Got `CARGO_ENCODED_RUSTFLAGS: {:?}`",
+      env["CARGO_ENCODED_RUSTFLAGS"]
+    );
+  }
+  assert!(
+    workflow["env"]["CARGO_ENCODED_RUSTFLAGS"].is_null(),
+    "`CARGO_ENCODED_RUSTFLAGS` must not be set workflow-wide either, for the same reason: \
+     cargo reads it instead of `RUSTFLAGS`, so the pin above would describe a variable \
+     nothing reads. Got {:?}",
+    workflow["env"]["CARGO_ENCODED_RUSTFLAGS"]
   );
 }

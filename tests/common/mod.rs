@@ -462,7 +462,7 @@ fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
 /// workflow author reads, then `uses:` for the action-only steps that carry no
 /// name, then the script itself.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-fn step_label(step: &serde_yaml_ng::Value) -> &str {
+pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
   step["name"]
     .as_str()
     .or_else(|| step["uses"].as_str())
