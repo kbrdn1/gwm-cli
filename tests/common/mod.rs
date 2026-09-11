@@ -113,8 +113,8 @@ pub fn git_only_bin() -> &'static Path {
 /// stopped running, and `continue-on-error` on the `audit` job is what hid
 /// RUSTSEC-2025-0068 for nine months.
 ///
-/// Four ways to neutralise a job, four assertions, plus the two that keep
-/// this from passing over nothing:
+/// Five ways to neutralise a job, plus the two assertions that keep this from
+/// passing over nothing:
 ///
 /// - the job must **exist**, and hold at least one step. An absent job parses
 ///   to `Value::Null`, and `null["if"]` is null, `null["steps"]` yields an
@@ -122,7 +122,17 @@ pub fn git_only_bin() -> &'static Path {
 ///   job outright would otherwise walk past every assertion below;
 /// - no `if:` on the job, and none on any step, except the exact conditions
 ///   passed in `steps_allowed_an_if`;
-/// - no `continue-on-error:` on the job, and none on any step.
+/// - no `continue-on-error:` on the job, and none on any step;
+/// - nothing in its `needs:` closure is narrowed with an `if:`. GitHub skips a
+///   job whose dependency was skipped, so `needs: doctor` on a guarded job
+///   stops it on every event that does not target `dev` while all of the above
+///   stay green. `ci.yml` ships exactly such a job one screen away, which is
+///   why this is checked rather than assumed. A `continue-on-error:` on a
+///   dependency is deliberately not an error: it makes the dependency report
+///   success, which lets the dependent run rather than skipping it.
+///
+/// The whole closure is walked, not just the direct dependencies: a job two
+/// hops away from a conditional one is skipped exactly the same way.
 ///
 /// `steps_allowed_an_if` carries the **value**, not a dispensation: a step
 /// listed here still has to match the condition it was allowed, so widening
@@ -134,7 +144,8 @@ pub fn git_only_bin() -> &'static Path {
 /// does for an absent key, and the canonical way to switch something off would
 /// take the "no `if:` at all" arm (the defect fixed at `6bb82758`).
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-pub fn assert_job_is_blocking(job: &serde_yaml_ng::Value, job_name: &str, steps_allowed_an_if: &[(&str, &str)]) {
+pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, steps_allowed_an_if: &[(&str, &str)]) {
+  let job = &workflow["jobs"][job_name];
   assert!(
     !job.is_null(),
     "ci.yml must define a `{job_name}` job: an absent job parses to null, and every \
@@ -161,6 +172,32 @@ pub fn assert_job_is_blocking(job: &serde_yaml_ng::Value, job_name: &str, steps_
      runs and reports success while doing nothing"
   );
 
+  // The `needs:` closure. A dependency that gets skipped skips everything
+  // below it, so a job whose own `if:` and `continue-on-error:` are clean can
+  // still be switched off through the job it waits on.
+  let mut pending: Vec<String> = job_needs(job);
+  let mut seen: Vec<String> = vec![job_name.to_string()];
+  while let Some(dep) = pending.pop() {
+    if seen.contains(&dep) {
+      continue;
+    }
+    let upstream = &workflow["jobs"][dep.as_str()];
+    assert!(
+      !upstream.is_null(),
+      "the `{job_name}` job waits on `{dep}`, which ci.yml does not define: the workflow \
+       would not start at all"
+    );
+    assert!(
+      upstream["if"].is_null(),
+      "the `{job_name}` job waits on `{dep}`, which is narrowed with `if: {:?}`. GitHub \
+       skips a job whose dependency was skipped, so this switches `{job_name}` off on every \
+       event the condition excludes while its own `if:` and `continue-on-error:` stay clean",
+      upstream["if"]
+    );
+    pending.extend(job_needs(upstream));
+    seen.push(dep);
+  }
+
   for step in &steps {
     let label = step["name"]
       .as_str()
@@ -184,5 +221,25 @@ pub fn assert_job_is_blocking(job: &serde_yaml_ng::Value, job_name: &str, steps_
       "step {label:?} of the `{job_name}` job may not be conditioned away: it carries \
        `if: {cond:?}` and the only condition allowed for it is {allowed:?}"
     );
+  }
+}
+
+/// The `needs:` of a job, as a list. The Actions schema allows both a bare
+/// string and a sequence, and a job with no dependency parses to null, so the
+/// three shapes are read here rather than at each call site.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
+  match &job["needs"] {
+    serde_yaml_ng::Value::String(one) => vec![one.clone()],
+    serde_yaml_ng::Value::Sequence(many) => many
+      .iter()
+      .map(|v| {
+        v.as_str()
+          .unwrap_or_else(|| panic!("a `needs:` entry must be a job name, got {v:?}"))
+          .to_string()
+      })
+      .collect(),
+    serde_yaml_ng::Value::Null => Vec::new(),
+    other => panic!("`needs:` must be a job name or a list of them, got {other:?}"),
   }
 }

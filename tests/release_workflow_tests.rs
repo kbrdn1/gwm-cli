@@ -384,10 +384,12 @@ fn docs_sync_watches_every_root_the_site_reads() {
 /// `\n  hook-smoke:` markers, so inserting any job between the two silently
 /// emptied what the assertions ran against, the same failure mode the `msrv`
 /// tests already parse the YAML to avoid.
+fn ci_workflow() -> serde_yaml_ng::Value {
+  serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).expect("ci.yml must be valid YAML")
+}
+
 fn ci_job(name: &str) -> serde_yaml_ng::Value {
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap())
-      .expect("ci.yml must be valid YAML");
+  let workflow = ci_workflow();
   let job = workflow["jobs"][name].clone();
   assert!(!job.is_null(), "ci.yml must define a `{name}` job");
   job
@@ -506,7 +508,7 @@ fn ci_runs_the_benches_and_can_fail_on_one() {
   // and it has to run at all: the `doctor` job in this same file is narrowed
   // with an `if:`, and doing that here would keep every assertion above green
   // while the benches quietly stopped running on pull requests.
-  assert_job_is_blocking(&job, "bench", &[]);
+  assert_job_is_blocking(&ci_workflow(), "bench", &[]);
 }
 
 #[test]
@@ -771,7 +773,7 @@ fn ci_runs_doctests_since_nextest_cannot() {
 #[test]
 fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
   assert_job_is_blocking(
-    &ci_job("test"),
+    &ci_workflow(),
     "test",
     &[("cargo test --doc", "matrix.os == 'ubuntu-latest'")],
   );
@@ -800,7 +802,7 @@ fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
 #[test]
 fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
   let job = ci_job("audit");
-  assert_job_is_blocking(&job, "audit", &[]);
+  assert_job_is_blocking(&ci_workflow(), "audit", &[]);
 
   let step = job["steps"]
     .as_sequence()
