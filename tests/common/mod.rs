@@ -289,6 +289,67 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 /// space, so `cargo\tcheck --locked || true` opted out of it entirely. A
 /// prefix test is no good either, since `env VAR=x cargo …` defeats it.
 /// `Cargo.toml` is not a `cargo` token, so the reader step stays out.
+///
+/// ## Where this stops (issue #656)
+///
+/// The property being reached for is "the command fails the job when the code
+/// is broken". Between this file and that property sit cargo's own argument
+/// parsing, the process environment and `.cargo/config.toml`, and a reader of
+/// the workflow does not cross that gap. It can only make a crossing visible
+/// in a diff, which is what the shape above does. Three surfaces sit on the
+/// far side. Reviewing #654 found them; they are listed below as this branch
+/// re-measured them against the commands the workflow actually runs, which
+/// moved two of them away from where #656 put them. #656 records the decision
+/// to name them here rather than chase them: each review pass opened a surface
+/// the previous fix did not touch instead of a variant of it, which is a
+/// domain with no last entry.
+///
+/// - **a filter that matches nothing.** `cargo nextest run --no-tests pass
+///   zzz_no_such_test` reports `0 tests run` and exits 0, and `cargo bench
+///   --benches -- --test zzz_no_such_bench` exits 0 having measured nothing:
+///   `--benches` picks up the lib and bin harnesses alongside the three
+///   criterion benches, the harnesses answer `0 tests` and the benches print
+///   nothing at all. Each is a single bare line of allowed characters. A bare
+///   filter is not enough against nextest 0.9.143, which exits 4 on a run of
+///   zero tests, so it is `--no-tests pass` that does the silencing. Telling a
+///   filter from the value of a flag means re-implementing cargo's argument
+///   parsing on both sides of `--`, which is the mistake #634 already paid
+///   for, a model written in place of the oracle;
+/// - **the environment.** `CARGO_TARGET_<TRIPLE>_RUNNER: "true"` has cargo put
+///   each test or bench binary through `true` instead of executing it, and
+///   `env:` sits three lines from the `RUSTFLAGS` the `msrv` job already
+///   overrides. Measured against the commands this workflow runs, it reaches
+///   `bench` and stops there:
+///   `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=true cargo bench --benches --
+///   --test` reports all five of those binaries as run and exits 0 without
+///   executing one, the harness lines gone with them. `cargo nextest run`
+///   exits 4 under the same override, since nextest lists tests by running
+///   each binary and `true` lists none, so the `test` job goes red rather than
+///   quiet. Walking the `env:` mappings would not close the bench case either,
+///   because a step can write the same variable into `$GITHUB_ENV`, which
+///   GitHub documents as inherited by every later step of the job;
+/// - **configuration on disk.** `target.<triple>.runner` in
+///   `.cargo/config.toml` is that override in file form, and a step can write
+///   it before the cargo step runs.
+///
+/// One vector named in the issue is deliberately not in that list. Both the
+/// non-matching filter and the runner override leave `cargo test --doc` at
+/// `0 passed`, exit 0, and so does a plain `cargo test --doc` on this tree:
+/// the crate has no Rust doctests, every fenced block in its doc comments
+/// being `text`, `toml` or `go`. Nothing is being silenced there, the step
+/// has nothing to run, which is a defect of its own and not a limit of this
+/// guard, filed as #659.
+///
+/// The last two surfaces are one shape: a step this guard leaves free-form
+/// reconfigures what cargo reads, and the cargo line it does guard is
+/// untouched. Closing them means constraining every step of a job rather than
+/// its cargo steps, which is a different guard with a different cost.
+///
+/// So a green run here says the workflow carries no visible off switch on the
+/// cargo commands it guards. It does not say CI is honest. The instrument that
+/// would say that is observational, a canary that breaks a test on a scratch
+/// branch and watches the checks turn red, and it costs a CI run every time it
+/// runs. #656 holds that trade-off.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 fn assert_run_cannot_swallow_its_failure(
   workflow: &serde_yaml_ng::Value,
