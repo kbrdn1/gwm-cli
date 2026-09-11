@@ -45,10 +45,10 @@ pub struct AgentState {
   /// A full pool scan was requested while a detection run was in flight —
   /// it chains after that run lands instead of walking the store
   /// concurrently (Codex review round R).
-  pub pool_wanted: bool,
+  pub(crate) pool_wanted: bool,
 
   /// A pin changed while a detection run was in flight — the re-scan (and
   /// the pins refresh) chains after that run lands instead of racing a
   /// second walk against it (Codex review round U).
-  pub redetect_wanted: bool,
+  pub(crate) redetect_wanted: bool,
 }

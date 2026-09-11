@@ -8,8 +8,8 @@
 //! per-row payload for consumer actions (the session id for attach/detach).
 //! Pinned by `tests/tui_app_tests.rs::agent_detail_overlay`.
 
-use super::super::app::LinkTarget;
 use crate::agent_sessions::{AgentSession, Freshness, WorktreeAgents};
+use crate::cli::LinkTarget;
 use std::path::PathBuf;
 use std::time::SystemTime;
 

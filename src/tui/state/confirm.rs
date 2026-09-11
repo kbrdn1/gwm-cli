@@ -257,17 +257,17 @@ pub struct ConfirmContext {
   /// Discriminated the way `DetailKind` discriminates the detail overlay,
   /// with exhaustive matches and no `_` arm, so a third use has to answer
   /// the question rather than inherit the delete flow's behaviour.
-  pub kind: ConfirmKind,
+  pub(crate) kind: ConfirmKind,
 
   /// The merge the confirmation is holding, snapshotted when it opened.
   ///
   /// A snapshot for the same reason `App::pending_delete` is one (#484): an
   /// auto-refresh can land during the safety countdown, and the row under
   /// the cursor is not necessarily the row the user aimed at.
-  pub pending_merge: Option<PendingMerge>,
+  pub(crate) pending_merge: Option<PendingMerge>,
 
   /// The error banner a failed merge leaves in the modal, mirroring
   /// [`Self::delete_failure`]: the forge's own words, kept where the decision was
   /// made rather than flashed on a status bar the reader may miss.
-  pub merge_failure: Option<String>,
+  pub(crate) merge_failure: Option<String>,
 }

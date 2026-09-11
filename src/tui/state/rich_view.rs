@@ -45,7 +45,7 @@ use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, ISSUE_IC
 /// overlay rather than read back from the fetch cache, which the manual
 /// refresh flushes (Codex review #529).
 #[derive(Debug, Clone)]
-pub enum RichSource {
+pub(crate) enum RichSource {
   Issue(IssueStatus),
   Pr(PrStatus),
 }
@@ -66,7 +66,7 @@ pub struct RichView {
   /// yanked away by the next fetch, while an issue the view opened on by
   /// default still must be. This is the bit that tells them apart, and it
   /// belongs to one open overlay — `close_detail_overlay` clears it.
-  pub tab_pinned: bool,
+  pub(crate) tab_pinned: bool,
 
   /// The rich view to come back to when a modal opened FROM it closes
   /// (validation feedback on issue #551).
@@ -77,7 +77,7 @@ pub struct RichView {
   /// were reading. The source is kept rather than re-fetched, for the
   /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
   /// invalidates the cache on its way out.
-  pub return_to: Option<(RichSource, bool)>,
+  pub(crate) return_to: Option<(RichSource, bool)>,
 
   /// How many columns the rich view is scrolled right (issue #551).
   ///
@@ -87,7 +87,7 @@ pub struct RichView {
   /// the only way to its tail. Every other row was wrapped to fit and simply
   /// loses its left edge, which is why the offset is bounded by the widest
   /// preformatted row rather than by the widest row.
-  pub h_offset: usize,
+  pub(crate) h_offset: usize,
 
   /// The status the open rich view renders (issue #420 / Codex review
   /// #529). The overlay owns its source rather than reading it back from
@@ -96,7 +96,7 @@ pub struct RichView {
   /// landing in that window would find nothing and, if the refresh then
   /// failed, would never get another chance. Populated at open and on
   /// every landing, cleared on close.
-  pub source: Option<RichSource>,
+  pub(crate) source: Option<RichSource>,
 }
 
 /// Width the metadata block's label column is expected to need. The wrap

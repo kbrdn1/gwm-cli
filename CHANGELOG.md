@@ -174,10 +174,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   horizontal while the variability is vertical. `views/commits.rs` and
   `views/exec_picker.rs` are the pilot.
 
-  No behaviour change, and no test was edited to make it land: the whole
-  move is invisible from outside the crate, because `views` is a private
-  module and every `gwm::tui::*` path resolves through the same re-exports
-  as before.
+  No behaviour change. The view move itself is invisible from outside the
+  crate — `views` is private and every `gwm::tui::*` path resolves through
+  the same re-exports — and it edits no test at all. The satellite
+  repatriation that follows does touch five test files, but only to follow
+  a field path: `app.edit_failure` became
+  `app.create_form.edit_failure`. Undoing each rename with sed reproduces
+  every one of those files byte for byte, so no value, assertion, case or
+  test name moved. Two paths that did go away are
+  `gwm::tui::state::commits` and `gwm::tui::state::exec_picker`, whose
+  modules moved to `views`; everything they held is still re-exported at
+  `gwm::tui::*`, and `src/lib.rs` declares the library an internal test
+  seam with no SemVer guarantee (#342).
 
   The Commits overlay's key routing was a `match` sitting inside the run
   loop, which is the one shape a test cannot reach — the hole
