@@ -333,7 +333,7 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 ///   it before the cargo step runs.
 ///
 /// One vector named in the issue is deliberately not in that list. Both the
-/// empty filter and the runner override leave `cargo test --doc` at
+/// non-matching filter and the runner override leave `cargo test --doc` at
 /// `0 passed`, exit 0, and so does a plain `cargo test --doc` on this tree:
 /// the crate has no Rust doctests, every fenced block in its doc comments
 /// being `text`, `toml` or `go`. Nothing is being silenced there, the step
