@@ -17874,3 +17874,36 @@ fn an_unbound_key_inside_the_commits_overlay_is_inert() {
   assert_eq!(app.commits.scroll, 3);
   assert_eq!(app.view, View::Commits, "and the overlay is still up");
 }
+
+#[cfg(unix)] // `[container]` is refused on Windows.
+#[test]
+fn reopening_the_exec_picker_does_not_reuse_a_container_name() {
+  // Issue #635: the monotonic half of the container name moved from
+  // `App::exec_container_seq` onto `ExecPicker::container_seq`, and
+  // `ExecPicker::open` runs on every open. If it reset the counter the way
+  // it resets the highlight, two overlay runs on the same worktree in one
+  // session would ask the daemon for the same `--name` — and the second
+  // `docker run` fails, or worse, tears down the first one's container
+  // through the teardown argv that names it.
+  //
+  // The pid is the other half and is constant within a test process, so the
+  // names can only differ by the counter.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  let name_of = |app: &mut App| {
+    app.enter_exec_picker();
+    let (argv, _, _) = app.exec_picker_resolve().expect("a container profile resolves");
+    let name = argv
+      .windows(2)
+      .find(|w| w[0] == "--name")
+      .map(|w| w[1].clone())
+      .expect("the run is named");
+    app.close_exec_picker();
+    name
+  };
+
+  let first = name_of(&mut app);
+  let second = name_of(&mut app);
+  assert_ne!(first, second, "a reopened picker names its run something new");
+}
