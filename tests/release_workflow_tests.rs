@@ -965,15 +965,37 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
     .filter_map(|k| k.as_str().map(str::to_owned))
     .collect();
 
-  // An empty `jobs:` parses to a mapping with no keys, and a loop over it
-  // asserts nothing at all. The count is deliberately a floor and not an
-  // equality: adding a job must not be a red test, only removing the guard
-  // from one.
-  assert!(
-    jobs.len() >= 8,
-    "ci.yml must still define its eight jobs: a `jobs:` block emptied down to one leaves \
-     this sweep iterating over nothing while reporting success. Got {jobs:?}"
-  );
+  // A sweep guards the jobs it finds and says nothing about the ones that
+  // stopped existing. An emptied `jobs:` leaves it iterating over nothing
+  // while reporting success, and a count-based floor does not close that
+  // either: deleting one job while adding another satisfies any count. So the
+  // eight are named.
+  //
+  // This is an enumeration, and deliberately so, because it is a **bounded**
+  // one. It covers the jobs `ci.yml` ships today; the sweep below covers the
+  // ones it does not, which is the exact inverse of the caller list this test
+  // replaces, a list that could only ever cover what someone remembered to add
+  // to it. Membership is a floor and never an equality: a ninth job has to be
+  // a green test that the sweep then guards, not a red one.
+  for expected in [
+    "fmt",
+    "clippy",
+    "msrv",
+    "test",
+    "bench",
+    "hook-smoke",
+    "audit",
+    "doctor",
+  ] {
+    assert!(
+      jobs.iter().any(|j| j == expected),
+      "ci.yml must still define the `{expected}` job. Deleting or renaming it is invisible to \
+       the sweep below, which guards whatever jobs it finds, and a job going quiet is not \
+       always a blocked merge either: only five of the eight are required contexts on `main`, \
+       so `msrv`, `bench` and `doctor` can vanish with nothing on GitHub's side objecting. \
+       Got {jobs:?}"
+    );
+  }
 
   for job_name in &jobs {
     if job_name == "doctor" {
