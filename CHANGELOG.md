@@ -187,13 +187,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolves modal verbs only, with no global-toggle block in front, so a
   global `commits` key rebound onto `j` still scrolls here.
 
-  `exec_picker_cfg`, `exec_picker_common_dir` and `exec_container_seq`
-  come home to `ExecPicker`, taking `App` from 85 fields to 82. The
-  counter is the one that carries a real invariant: it is the monotonic
-  half of a containerised run's `--name`, and `ExecPicker::open` runs on
-  every open right next to where the highlight is reset. Reset it too and
-  two overlay runs on one worktree in one session collide. That is now a
-  test.
+  **`App` goes from 85 fields to 60.** The issue's second scope point asks
+  for the orphaned satellite fields to come home, on the two moved views
+  and on any modal whose extraction stopped halfway, and all of them do:
+  `ExecPicker` takes its captured config, commondir and container counter;
+  `CleanOverlay` its config and countdown; `DetailOverlay` the worktree and
+  forge link it was built for; `CreateForm` the two failure banners and the
+  Edit origin; and `ConfirmContext` what the confirmation is actually
+  confirming. Three modals had no state module at all, so `state/help.rs`,
+  `state/agents.rs` and `RichView` in `state/rich_view.rs` are new.
+
+  Three of those moves put a field next to a method that resets its
+  neighbours, and each of the three would have been a silent behaviour
+  change: `ExecPicker::container_seq` is the monotonic half of a
+  containerised run's `--name`, so resetting it in `open` makes two runs on
+  one worktree collide; `DetailOverlay::target` / `link` are pinned by the
+  consumer *before* `open`, so clearing them there leaves the agents
+  overlay attaching against nothing; and `CreateForm::reset` must leave the
+  failure banners up, because one caller resets the form without clearing
+  them. All three are now tests, each proven red by making the mistake.
 
   **The churn the pilot was meant to measure did not move, and the reason
   is worth writing down.** Of 2251 commits, 512 touch `app.rs` or `ui.rs`;
