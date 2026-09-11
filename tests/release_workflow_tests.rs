@@ -865,6 +865,19 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
       .iter()
       .filter_map(|v| v.as_str().map(str::to_owned))
       .collect();
+    // Membership is not enough: GitHub reads these as patterns, and a later
+    // `!dev` excludes what an earlier `dev` included. `[main, dev, '!dev']`
+    // passes every membership test above while no pull request to `dev` runs
+    // any CI at all.
+    for pattern in &branches {
+      assert!(
+        !pattern.starts_with('!'),
+        "ci.yml must not carry a negative branch pattern on `{event}`: `{pattern}` excludes \
+         what an earlier entry includes, so the list still reads as if it covered that \
+         branch while nothing fires on it. Got {branches:?}"
+      );
+    }
+
     for branch in ["main", "dev"] {
       assert!(
         branches.iter().any(|b| b == branch),

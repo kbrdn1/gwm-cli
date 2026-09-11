@@ -113,8 +113,8 @@ pub fn git_only_bin() -> &'static Path {
 /// stopped running, and `continue-on-error` on the `audit` job is what hid
 /// RUSTSEC-2025-0068 for nine months.
 ///
-/// Six ways to neutralise a job, plus the two assertions that keep this from
-/// passing over nothing:
+/// Five ways to neutralise a job, one invariant on the commands it runs, and
+/// the two assertions that keep this from passing over nothing:
 ///
 /// - the job must **exist**, and hold at least one step. An absent job parses
 ///   to `Value::Null`, and `null["if"]` is null, `null["steps"]` yields an
@@ -132,11 +132,10 @@ pub fn git_only_bin() -> &'static Path {
 ///   success, which lets the dependent run rather than skipping it.
 ///
 /// - no command the job exists to run may swallow its own failure (issue
-///   #652). `cargo nextest run || true` needs none of the five keys above and
-///   produces the same dead job: the step reports success over a failing
-///   suite. Four shapes are rejected on any line that invokes cargo, `||`, a
-///   pipe, `set +e` anywhere in the same block, and `exit 0` anywhere after
-///   it.
+///   #652). A `run:` block that invokes cargo must be **exactly one bare
+///   cargo invocation**, which is an invariant rather than a list of forbidden
+///   spellings. See `assert_run_cannot_swallow_its_failure` for why that
+///   distinction is the whole point.
 ///
 /// The whole closure is walked, not just the direct dependencies: a job two
 /// hops away from a conditional one is skipped exactly the same way.
@@ -246,89 +245,75 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
   }
 }
 
-/// A `run:` block must let the command the job exists to run decide the step's
-/// exit status (issue #652).
+/// A `run:` block that invokes cargo must be **exactly one bare cargo
+/// invocation** (issue #652).
 ///
-/// The property is not "no pipe", which is why this is scoped rather than
-/// applied to every line: the `read the declared MSRV` step legitimately pipes
-/// `grep -m1 '^rust-version = ' Cargo.toml` into `cut -d'"' -f2`, and a guard
-/// that breaks it is the wrong guard. What matters is the command the job
-/// exists for, so only lines invoking cargo are read, and `exit 1` stays
-/// allowed, since that same step uses it to fail loudly.
+/// This started as a denylist, `||`, a pipe, `set +e`, `exit 0`, and two
+/// review passes walked straight through it: `if ! cargo audit --deny
+/// warnings; then echo 'advisories found'; fi` leaves the `audit` job green on
+/// a red audit, which is literally the RUSTSEC-2025-0068 scenario, and `cargo
+/// bench --benches -- --test &` leaves `bench` green without waiting for the
+/// bench at all. Neither carries any of the four. A `shell:` line with `-e`
+/// dropped, and the same line moved to `defaults.run.shell`, walked through it
+/// too.
 ///
-/// The four shapes, each verified against the real workflow:
+/// Enumerating the ways a shell can discard an exit status does not converge,
+/// because the shell is a programming language and the list is its grammar.
+/// So the property is stated positively instead: one line, starting with
+/// `cargo `, made only of characters that carry no shell meaning. Everything
+/// above fails that, including the spellings nobody has thought of yet, and
+/// all eight cargo commands in `ci.yml` pass it unchanged.
 ///
-/// - `||`, which is how `cargo nextest run || true` reports success over a
-///   failing suite. `!line.contains('|')` covers the pipe case too;
-/// - a pipe, since a shell pipeline reports its last element's exit status;
-/// - `set +e` anywhere in the block, which disarms the `bash -e` GitHub runs
-///   `run:` under and leaves every following failure unreported;
-/// - a `shell:` whose command line drops `-e`, which disarms the same thing
-///   from outside the script. GitHub's own line for `shell: bash` is `bash
-///   --noprofile --norc -eo pipefail {0}`; writing that minus `-e` as a custom
-///   `shell:` is a one-word edit the `set +e` check cannot see, so only the
-///   built-in keywords that keep errexit are allowed;
-/// - `exit 0` anywhere in the block, before the command as well as on or after
-///   it. Before means cargo never runs, on or after means its status is
-///   discarded, and `cargo nextest run; exit 0` is the shortest spelling of
-///   the second.
+/// **Why there is no `shell:` assertion here.** A single command's exit status
+/// becomes the step's under every shell GitHub offers: `bash -e` and `sh -e`
+/// stop on it, and for `pwsh` GitHub appends `exit $LASTEXITCODE`. The
+/// denylist needed to know the shell because it allowed multi-command blocks,
+/// where errexit decides whether line 2 is reached. This does not allow them,
+/// so `shell:`, `defaults.run.shell` at job or workflow level, and pwsh's
+/// `$PSNativeCommandUseErrorActionPreference` all stop mattering. Removing
+/// that assertion is what the invariant buys, not something it overlooked.
 ///
-/// Matched with `contains("cargo ")` rather than `starts_with`, on purpose.
-/// `starts_with` tests a position, and a line prefixes: `env CARGO_TERM_COLOR=always
-/// cargo nextest run || true` and `timeout 600 cargo test --doc || true` are
-/// exactly the case this exists to catch and neither starts with `cargo `.
-/// `Cargo.toml` does not match it, capital C and no trailing space, which is
-/// checked against the real reader step rather than assumed.
+/// Steps that do not invoke cargo are out of scope and stay free-form: the
+/// `read the declared MSRV` step pipes `grep -m1 '^rust-version = ' Cargo.toml`
+/// into `cut -d'"' -f2` and uses `exit 1` to fail loudly, both of which are
+/// correct. It is detected by `contains("cargo ")` rather than a prefix,
+/// because a prefix test is defeated by `env VAR=x cargo …`, and `Cargo.toml`
+/// does not match it (capital C, no trailing space).
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 fn assert_run_cannot_swallow_its_failure(step: &serde_yaml_ng::Value, job_name: &str, label: &str) {
   let Some(script) = step["run"].as_str() else {
     return;
   };
-  // Line continuations first: `cargo test \` then `|| true` on the next line is
-  // one command to the shell, and would read as two clean lines here.
-  let joined = script.replace("\\\n", " ");
-  let lines: Vec<&str> = joined.lines().collect();
-
+  let lines: Vec<&str> = script.lines().collect();
   if !lines.iter().any(|l| l.contains("cargo ")) {
     return;
   }
 
-  // Built-in keywords only. GitHub expands each into a command line that keeps
-  // errexit on (`bash --noprofile --norc -eo pipefail {0}`, `sh -e {0}`, and
-  // pwsh's `$ErrorActionPreference = 'stop'`), where a custom line is free to
-  // drop it. That is `set +e` written one level out, where the check below
-  // cannot reach.
-  let shell = &step["shell"];
-  assert!(
-    shell.is_null() || matches!(shell.as_str(), Some("bash" | "sh" | "pwsh")),
-    "step {label:?} of the `{job_name}` job runs cargo under `shell: {shell:?}`. Only the \
-     built-in `bash`, `sh` and `pwsh` keywords are allowed: a custom shell line is free to \
-     drop the `-e` that makes the step fail when cargo does, which is `set +e` moved out of \
-     the script where this guard cannot see it"
+  assert_eq!(
+    lines.len(),
+    1,
+    "step {label:?} of the `{job_name}` job invokes cargo, so its `run:` must be that one \
+     command and nothing else. A second line is where the exit status gets discarded, by an \
+     `exit 0`, by an `echo` that reports its own status, or by a `set +e` that stops errexit \
+     from ever reaching it. Got {script:?}"
   );
 
-  for line in lines.iter().filter(|l| l.contains("cargo ")) {
-    assert!(
-      !line.contains('|'),
-      "step {label:?} of the `{job_name}` job must let cargo decide the step's exit status: \
-       `||` reports success over a failure and a pipeline reports its last element's status, \
-       so the job goes green over a red command. Got {line:?}"
-    );
-  }
+  // Bare invocation: the characters allowed are the ones that appear in a
+  // cargo command line and carry no meaning to the shell. Everything else,
+  // `|`, `&`, `;`, `>`, backtick, `$`, `(`, `!`, `#`, quotes, is either a way
+  // to discard the status or a way to run something that is not this command.
+  let line = lines[0];
+  let bare = line.starts_with("cargo ")
+    && line
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || " ._:/@=+-".contains(c));
   assert!(
-    !joined.contains("set +e"),
-    "step {label:?} of the `{job_name}` job must not `set +e`: GitHub runs `run:` under \
-     `bash -e`, and disarming it lets every later failure go unreported while the step \
-     still reports success. Got {script:?}"
-  );
-  // The whole block, not the lines after the command. `exit 0` before it means
-  // cargo never runs, on the same line (`cargo nextest run; exit 0`) means its
-  // status is discarded, and a window opened at `at + 1` sees neither.
-  assert!(
-    !joined.contains("exit 0"),
-    "step {label:?} of the `{job_name}` job must not carry `exit 0`: before the cargo line it \
-     stops cargo from running at all, on or after it the status cargo returned is discarded. \
-     `exit 1` stays allowed, the MSRV reader uses it to fail loudly. Got {script:?}"
+    bare,
+    "step {label:?} of the `{job_name}` job must run cargo as a bare command: one \
+     invocation, no shell operators. `if ! cargo audit …; then …; fi` and `cargo bench … &` \
+     both report success over a failure while carrying no `||`, no pipe, no `set +e` and no \
+     `exit 0`, which is why this is stated as an invariant and not as a list of forbidden \
+     spellings. Got {line:?}"
   );
 }
 
