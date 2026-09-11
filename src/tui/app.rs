@@ -18,6 +18,7 @@ use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::help::HelpOverlay;
 use super::state::link_prompt::LinkPrompt;
 use super::state::pty_overlay::PtyOverlay;
+use super::state::rich_view::{RichSource, RichView};
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
 use super::state::working_tree::WorkingTreeModal;
@@ -306,16 +307,6 @@ pub enum LinkPromptKey {
 /// (issue #106).
 pub use crate::cli::LinkTarget;
 
-/// What the open rich view (issue #420) was built from. Kept whole rather
-/// than as pre-built rows so a resize can re-wrap it, and owned by the
-/// overlay rather than read back from the fetch cache, which the manual
-/// refresh flushes (Codex review #529).
-#[derive(Debug, Clone)]
-enum RichSource {
-  Issue(IssueStatus),
-  Pr(PrStatus),
-}
-
 /// Dispatch target for the `o` key (issue #73). Resolved by
 /// [`App::resolve_open_target`] from the current selection + the
 /// `[tui.open]` config so the event loop can hand off to the right
@@ -476,6 +467,9 @@ pub struct App {
 
   /// Keybindings (help) overlay scroll state (#217, #222).
   pub help: HelpOverlay,
+
+  /// Rich PR / Issue view state (issues #420, #551).
+  pub rich: RichView,
 
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
@@ -705,15 +699,6 @@ pub struct App {
   /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
   pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
 
-  /// Whether the reader CHOSE the rich view's current side (issue #551).
-  ///
-  /// The view opens on the PR whenever one is linked and lets a landing PR
-  /// promote an issue that was only standing in for it (#529). Tabs make
-  /// those two rules collide: an issue the reader tabbed to must not be
-  /// yanked away by the next fetch, while an issue the view opened on by
-  /// default still must be. This is the bit that tells them apart, and it
-  /// belongs to one open overlay — `close_detail_overlay` clears it.
-  rich_tab_pinned: bool,
   /// What the open confirmation modal is about (validation feedback on
   /// issue #551).
   ///
@@ -734,25 +719,6 @@ pub struct App {
   /// `delete_failure`: the forge's own words, kept where the decision was
   /// made rather than flashed on a status bar the reader may miss.
   merge_failure: Option<String>,
-  /// The rich view to come back to when a modal opened FROM it closes
-  /// (validation feedback on issue #551).
-  ///
-  /// `c` and `m` are reached from inside the view, so returning to the
-  /// worktree table on `Esc` throws away where the reader was: they have to
-  /// re-select the row and press `I` again to get back to the thing they
-  /// were reading. The source is kept rather than re-fetched, for the
-  /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
-  /// invalidates the cache on its way out.
-  rich_return: Option<(RichSource, bool)>,
-  /// How many columns the rich view is scrolled right (issue #551).
-  ///
-  /// Only the rows that cannot be reflowed are wide enough to need it — a
-  /// fenced code line, a diff hunk — and they are the reason it exists: in
-  /// code the column is the meaning, so the line is kept whole and this is
-  /// the only way to its tail. Every other row was wrapped to fit and simply
-  /// loses its left edge, which is why the offset is bounded by the widest
-  /// preformatted row rather than by the widest row.
-  rich_h_offset: usize,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
@@ -764,15 +730,6 @@ pub struct App {
   /// window the reader is actually looking at, and only the frame knows how
   /// tall that is.
   term_height: u16,
-
-  /// The status the open rich view renders (issue #420 / Codex review
-  /// #529). The overlay owns its source rather than reading it back from
-  /// the fetch cache, for the same reason `ci_overlay_checks` does: the
-  /// manual refresh flushes that cache before re-requesting, so a rebuild
-  /// landing in that window would find nothing and, if the refresh then
-  /// failed, would never get another chance. Populated at open and on
-  /// every landing, cleared on close.
-  rich_overlay_source: Option<RichSource>,
 
   /// The `PrCheck`s the open CI overlay renders (Codex review #455): the
   /// duration tick used to read them back from the PR fetch cache, so an
@@ -875,6 +832,7 @@ impl App {
       branch_types,
       report: None,
       help: HelpOverlay::new(),
+      rich: RichView::default(),
       sidebar: SidebarState::new(),
       agent_snapshot: None,
       agent_snapshot_at: None,
@@ -913,18 +871,14 @@ impl App {
       note_editor: None,
       clean_overlay: CleanOverlay::new(),
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
-      rich_tab_pinned: false,
       confirm_kind: ConfirmKind::DeleteWorktree,
       pending_merge: None,
       merge_failure: None,
-      rich_return: None,
-      rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
       term_width: 80,
       term_height: 24,
-      rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
       mouse_capture,
@@ -4164,7 +4118,7 @@ impl App {
     // renders so a disagreeing mutation can close it.
     self.detail_overlay.target = None;
     self.detail_overlay.link = Some((self.github.forge_identity(), target, number));
-    self.rich_overlay_source = Some(source);
+    self.rich.source = Some(source);
     self
       .detail_overlay
       .open(kind, crate::naming::sanitise_for_terminal(&title), rows);
@@ -4239,7 +4193,7 @@ impl App {
       return;
     }
     let width = self.rich_view_width();
-    let rows = match &self.rich_overlay_source {
+    let rows = match &self.rich.source {
       Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(
         pr,
         self.github.pr_threads_state(pr.number),
@@ -4272,7 +4226,7 @@ impl App {
     //
     // Only the DESTINATION has to be loaded, since it is the one a switch
     // has to render.
-    let (on_issue, active) = match (&self.rich_overlay_source, self.detail_overlay.kind) {
+    let (on_issue, active) = match (&self.rich.source, self.detail_overlay.kind) {
       (Some(RichSource::Issue(i)), DetailKind::RichIssue) => (true, format!("Issue #{}", i.number)),
       (Some(RichSource::Pr(p)), DetailKind::RichPr) => (false, format!("{} #{}", self.pr_noun_titlecase(), p.number)),
       _ => return Vec::new(),
@@ -4333,10 +4287,10 @@ impl App {
       let number = pr.number;
       self.spawn_github_pr_threads(number);
     }
-    self.rich_tab_pinned = true;
+    self.rich.tab_pinned = true;
     // The offset describes the side being left. Carried across, the other
     // tab would open already scrolled, with its first columns hidden.
-    self.rich_h_offset = 0;
+    self.rich.h_offset = 0;
     self.open_rich_overlay(source, title, width);
   }
 
@@ -4350,7 +4304,7 @@ impl App {
   /// with nothing on screen to explain it. One clamp here means a path
   /// added later inherits it instead of having to remember it.
   pub fn rich_h_offset(&self) -> usize {
-    self.rich_h_offset.min(self.rich_h_max())
+    self.rich.h_offset.min(self.rich_h_max())
   }
 
   /// The furthest right the view can usefully scroll: enough to bring the
@@ -4380,12 +4334,12 @@ impl App {
 
   /// `l` / `→` inside the rich view.
   pub fn rich_view_scroll_right(&mut self) {
-    self.rich_h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
+    self.rich.h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
   }
 
   /// `h` / `←` inside the rich view.
   pub fn rich_view_scroll_left(&mut self) {
-    self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
+    self.rich.h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
   }
 
   /// Remember the open rich view so a child modal can come back to it.
@@ -4399,10 +4353,10 @@ impl App {
     let from_rich = self.view == View::DetailOverlay
       && matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr);
     if !from_rich {
-      self.rich_return = None;
+      self.rich.return_to = None;
       return;
     }
-    self.rich_return = self.rich_overlay_source.clone().map(|s| (s, self.rich_tab_pinned));
+    self.rich.return_to = self.rich.source.clone().map(|s| (s, self.rich.tab_pinned));
   }
 
   /// Reopen the rich view a child modal was opened from, if there was one.
@@ -4410,7 +4364,7 @@ impl App {
   /// `true` when it took the view back, so the caller knows not to fall
   /// through to the worktree table.
   fn restore_rich_view(&mut self) -> bool {
-    let Some((source, pinned)) = self.rich_return.take() else {
+    let Some((source, pinned)) = self.rich.return_to.take() else {
       return false;
     };
     let width = self.rich_view_width();
@@ -4422,7 +4376,7 @@ impl App {
     // The tab the reader had chosen survives the round trip; without this a
     // PR landing right after would promote the issue tab out from under
     // them, which is the bug the pin exists to prevent.
-    self.rich_tab_pinned = pinned;
+    self.rich.tab_pinned = pinned;
     true
   }
 
@@ -4433,7 +4387,7 @@ impl App {
   /// cache, and a yank landing in that window would copy an empty string
   /// over whatever the user had.
   pub fn rich_yank_url(&self) -> Option<String> {
-    match self.rich_overlay_source.as_ref()? {
+    match self.rich.source.as_ref()? {
       RichSource::Pr(pr) => Some(pr.url.clone()),
       RichSource::Issue(issue) => Some(issue.url.clone()),
     }
@@ -4446,7 +4400,7 @@ impl App {
   /// over whatever was on the clipboard is worse than saying there is
   /// nothing to copy.
   pub fn rich_yank_body(&self) -> Option<String> {
-    let body = match self.rich_overlay_source.as_ref()? {
+    let body = match self.rich.source.as_ref()? {
       RichSource::Pr(pr) => &pr.detail.body,
       RichSource::Issue(issue) => &issue.detail.body,
     };
@@ -4961,10 +4915,10 @@ impl App {
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay.target = None;
     self.detail_overlay.link = None;
-    self.rich_tab_pinned = false;
-    self.rich_h_offset = 0;
+    self.rich.tab_pinned = false;
+    self.rich.h_offset = 0;
     self.ci_overlay_checks.clear();
-    self.rich_overlay_source = None;
+    self.rich.source = None;
     // Back to the rich view when this overlay was opened from it, rather
     // than all the way out to the table (validation feedback on #551).
     if self.restore_rich_view() {
@@ -8020,7 +7974,7 @@ impl App {
   /// The PR whose inline review threads the rich view is currently
   /// rendering, if that is what is on screen (issue #619).
   ///
-  /// Gated on the VIEW rather than on `rich_overlay_source` alone: the
+  /// Gated on the VIEW rather than on `RichView::source` alone: the
   /// source outlives the overlay until [`Self::close_detail_overlay`]
   /// clears it, and a keep that outlives the reader would pin one PR's
   /// threads in the cache for the rest of the session. `DetailOverlay`
@@ -8031,7 +7985,7 @@ impl App {
     if self.view != View::DetailOverlay {
       return None;
     }
-    match self.rich_overlay_source.as_ref()? {
+    match self.rich.source.as_ref()? {
       RichSource::Pr(pr) => Some(pr.number),
       RichSource::Issue(_) => None,
     }
@@ -8383,7 +8337,7 @@ impl App {
         // The reader is on the issue tab because they asked to be (#551).
         // Promoting here is right for an issue that was standing in for a
         // PR that had not landed yet, and wrong for one that was chosen.
-        if self.rich_tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
+        if self.rich.tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
           return;
         }
         (
@@ -8426,9 +8380,9 @@ impl App {
     // left, and the new one would open already scrolled with its first
     // columns hidden and nothing saying why.
     if promoted {
-      self.rich_h_offset = 0;
+      self.rich.h_offset = 0;
     }
-    self.rich_overlay_source = Some(source);
+    self.rich.source = Some(source);
     self.detail_overlay.link = Some((self.github.forge_identity(), target, number));
     if promoted {
       self.detail_overlay.open(kind, title, rows);

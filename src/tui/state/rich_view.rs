@@ -40,6 +40,65 @@ use crate::forge::{
 use crate::naming::{sanitise_block_for_terminal, sanitise_for_terminal};
 use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, ISSUE_ICON, PR_ICON};
 
+/// What the open rich view (issue #420) was built from. Kept whole rather
+/// than as pre-built rows so a resize can re-wrap it, and owned by the
+/// overlay rather than read back from the fetch cache, which the manual
+/// refresh flushes (Codex review #529).
+#[derive(Debug, Clone)]
+pub enum RichSource {
+  Issue(IssueStatus),
+  Pr(PrStatus),
+}
+
+/// Owned state for the rich PR / Issue view (issues #420, #551).
+///
+/// These four sat flat on `App` until #635, satellites of a view whose
+/// row-building already lived in this module. `App::close_detail_overlay`
+/// clears them together, which is what makes them one struct rather than
+/// four numbers that happen to share a prefix.
+#[derive(Debug, Default)]
+pub struct RichView {
+  /// Whether the reader CHOSE the rich view's current side (issue #551).
+  ///
+  /// The view opens on the PR whenever one is linked and lets a landing PR
+  /// promote an issue that was only standing in for it (#529). Tabs make
+  /// those two rules collide: an issue the reader tabbed to must not be
+  /// yanked away by the next fetch, while an issue the view opened on by
+  /// default still must be. This is the bit that tells them apart, and it
+  /// belongs to one open overlay — `close_detail_overlay` clears it.
+  pub tab_pinned: bool,
+
+  /// The rich view to come back to when a modal opened FROM it closes
+  /// (validation feedback on issue #551).
+  ///
+  /// `c` and `m` are reached from inside the view, so returning to the
+  /// worktree table on `Esc` throws away where the reader was: they have to
+  /// re-select the row and press `I` again to get back to the thing they
+  /// were reading. The source is kept rather than re-fetched, for the
+  /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
+  /// invalidates the cache on its way out.
+  pub return_to: Option<(RichSource, bool)>,
+
+  /// How many columns the rich view is scrolled right (issue #551).
+  ///
+  /// Only the rows that cannot be reflowed are wide enough to need it — a
+  /// fenced code line, a diff hunk — and they are the reason it exists: in
+  /// code the column is the meaning, so the line is kept whole and this is
+  /// the only way to its tail. Every other row was wrapped to fit and simply
+  /// loses its left edge, which is why the offset is bounded by the widest
+  /// preformatted row rather than by the widest row.
+  pub h_offset: usize,
+
+  /// The status the open rich view renders (issue #420 / Codex review
+  /// #529). The overlay owns its source rather than reading it back from
+  /// the fetch cache, for the same reason `ci_overlay_checks` does: the
+  /// manual refresh flushes that cache before re-requesting, so a rebuild
+  /// landing in that window would find nothing and, if the refresh then
+  /// failed, would never get another chance. Populated at open and on
+  /// every landing, cleared on close.
+  pub source: Option<RichSource>,
+}
+
 /// Width the metadata block's label column is expected to need. The wrap
 /// budget no longer subtracts it (see [`wrap_budget`]), but the METADATA
 /// rows do carry labels, and the shell sizes its column from the widest one
