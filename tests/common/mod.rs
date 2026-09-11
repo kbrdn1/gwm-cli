@@ -302,27 +302,43 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 /// the previous fix did not touch instead of a variant of it, which is a
 /// domain with no last entry.
 ///
-/// - **a filter that matches nothing.** Every guarded runner has one, all
-///   measured locally at exit 0. `cargo test --doc zzz_no_such_doctest`
-///   reports `0 passed`; `cargo nextest run --no-tests pass zzz_no_such_test`
-///   reports `0 tests run`, and bare nextest 0.9.143 exits 4 on no tests, so
-///   it is `--no-tests pass` that silences it; `cargo bench --benches --
-///   --test zzz_no_such_bench` runs the three bench binaries, prints nothing
-///   and exits 0. Each one is a single bare line of allowed characters.
-///   Telling a filter from the value of a flag means re-implementing cargo's
-///   argument parsing on both sides of `--`, which is the mistake #634 already
-///   paid for, a model written in place of the oracle;
-/// - **the environment.** `CARGO_TARGET_<TRIPLE>_RUNNER: "true"` has every
-///   test binary executed by `true`:
-///   `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=true cargo test --test
-///   msrv_tests` never launches the binary and exits 0. Walking the `env:`
-///   mappings would not close it either, because a step can write the same
-///   variable into `$GITHUB_ENV`, which GitHub documents as inherited by every
-///   later step of the job;
-/// - **configuration on disk.** The same override lives in
-///   `.cargo/config.toml`, which a step can write before the cargo step runs.
+/// - **a filter that matches nothing.** `cargo nextest run --no-tests pass
+///   zzz_no_such_test` reports `0 tests run` and exits 0, and `cargo bench
+///   --benches -- --test zzz_no_such_bench` exits 0 having measured nothing:
+///   `--benches` picks up the lib and bin harnesses alongside the three
+///   criterion benches, the harnesses answer `0 tests` and the benches print
+///   nothing at all. Each is a single bare line of allowed characters. A bare
+///   filter is not enough against nextest 0.9.143, which exits 4 on a run of
+///   zero tests, so it is `--no-tests pass` that does the silencing. Telling a
+///   filter from the value of a flag means re-implementing cargo's argument
+///   parsing on both sides of `--`, which is the mistake #634 already paid
+///   for, a model written in place of the oracle;
+/// - **the environment.** `CARGO_TARGET_<TRIPLE>_RUNNER: "true"` has cargo put
+///   each test or bench binary through `true` instead of executing it, and
+///   `env:` sits three lines from the `RUSTFLAGS` the `msrv` job already
+///   overrides. Measured against the commands this workflow runs, it reaches
+///   `bench` and stops there:
+///   `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=true cargo bench --benches --
+///   --test` reports all five of those binaries as run and exits 0 without
+///   executing one, the harness lines gone with them. `cargo nextest run`
+///   exits 4 under the same override, since nextest lists tests by running
+///   each binary and `true` lists none, so the `test` job goes red rather than
+///   quiet. Walking the `env:` mappings would not close the bench case either,
+///   because a step can write the same variable into `$GITHUB_ENV`, which
+///   GitHub documents as inherited by every later step of the job;
+/// - **configuration on disk.** `target.<triple>.runner` in
+///   `.cargo/config.toml` is that override in file form, and a step can write
+///   it before the cargo step runs.
 ///
-/// The last two are one shape: a step this guard leaves free-form
+/// One vector named in the issue is deliberately not in that list. Both the
+/// empty filter and the runner override leave `cargo test --doc` at
+/// `0 passed`, exit 0, and so does a plain `cargo test --doc` on this tree:
+/// the crate has no Rust doctests, every fenced block in its doc comments
+/// being `text`, `toml` or `go`. Nothing is being silenced there, the step
+/// has nothing to run, which is a defect of its own and not a limit of this
+/// guard, filed as #659.
+///
+/// The last two surfaces are one shape: a step this guard leaves free-form
 /// reconfigures what cargo reads, and the cargo line it does guard is
 /// untouched. Closing them means constraining every step of a job rather than
 /// its cargo steps, which is a different guard with a different cost.
