@@ -24,8 +24,7 @@
 //! real viewport, since only the renderer knows both the row count and the
 //! inner modal height.
 
-use super::super::ui::WorkingTreeCounts;
-use super::commits::MetaColumn;
+use super::super::ui::{MetaColumn, WorkingTreeCounts};
 use ratatui::text::Line;
 use std::path::{Path, PathBuf};
 

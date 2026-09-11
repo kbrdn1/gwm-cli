@@ -33,7 +33,7 @@
 //! real viewport, since only the renderer knows both the row count and the
 //! inner modal height.
 
-use super::super::ui::RECENT_COMMITS_LIMIT;
+use super::super::ui::{MetaColumn, RECENT_COMMITS_LIMIT};
 use ratatui::text::Line;
 use std::path::{Path, PathBuf};
 
@@ -52,16 +52,6 @@ pub const COMMITS_PAGE: usize = RECENT_COMMITS_LIMIT;
 /// worktrees' sidebar entries out and make them re-walk. Five pages per
 /// worktree keeps that well inside the budget.
 pub const COMMITS_MAX: usize = COMMITS_PAGE * 5;
-
-/// One right-hand metadata column: its rows and the width they need.
-///
-/// The width is measured once, when the column is built, so it cannot jump
-/// while the user scrolls: every row is padded to the same column.
-#[derive(Debug, Default, Clone)]
-pub struct MetaColumn {
-  pub lines: Vec<Line<'static>>,
-  pub width: usize,
-}
 
 /// Everything one read of the log produces, as it travels from the worker
 /// to the overlay.

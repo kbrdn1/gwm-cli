@@ -3,7 +3,7 @@ use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::mouse::{MouseMap, PaneId, RowList, SidebarPane, Spot};
 use super::state::async_task::TaskKind;
-use super::state::commits::{CommitsSnapshot, MetaColumn};
+use super::state::commits::CommitsSnapshot;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
@@ -2478,6 +2478,23 @@ impl WtRows {
       counts: WorkingTreeCounts::default(),
     }
   }
+}
+
+/// One right-hand metadata column: its rows and the width they need.
+///
+/// The width is measured once, when the column is built, so it cannot jump
+/// while the user scrolls: every row is padded to the same column.
+///
+/// A rendering type, not the state of any one view: the commit listing
+/// carries three of these and the working tree two, and
+/// [`meta_column`] below is the only thing that builds one. It lived in
+/// `state::commits` until #635 moved the Commits view out, which would
+/// otherwise have left the working tree importing its own metadata column
+/// from another view.
+#[derive(Debug, Default, Clone)]
+pub struct MetaColumn {
+  pub lines: Vec<Line<'static>>,
+  pub width: usize,
 }
 
 /// Package a set of parallel rows into a [`MetaColumn`], measuring the
