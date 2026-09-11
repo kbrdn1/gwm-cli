@@ -101,3 +101,88 @@ pub fn git_only_bin() -> &'static Path {
     })
     .as_path()
 }
+
+/// Asserts that a CI job is **blocking**: that it runs, and that it can turn
+/// the workflow red.
+///
+/// Issue #646. GitHub Actions applies `if:` and `continue-on-error:` at the
+/// job level as well as the step level, and the job wins. A guard that reads
+/// only `step[...]` therefore says nothing about the job containing it: `if:
+/// false` on the `test` job left all 19 tests in `release_workflow_tests`
+/// green while `cargo build`, `cargo nextest run` and `cargo test --doc` had
+/// stopped running, and `continue-on-error` on the `audit` job is what hid
+/// RUSTSEC-2025-0068 for nine months.
+///
+/// Four ways to neutralise a job, four assertions, plus the two that keep
+/// this from passing over nothing:
+///
+/// - the job must **exist**, and hold at least one step. An absent job parses
+///   to `Value::Null`, and `null["if"]` is null, `null["steps"]` yields an
+///   empty sequence, and `.all()` over an empty sequence is true. Deleting a
+///   job outright would otherwise walk past every assertion below;
+/// - no `if:` on the job, and none on any step, except the exact conditions
+///   passed in `steps_allowed_an_if`;
+/// - no `continue-on-error:` on the job, and none on any step.
+///
+/// `steps_allowed_an_if` carries the **value**, not a dispensation: a step
+/// listed here still has to match the condition it was allowed, so widening
+/// `matrix.os == 'ubuntu-latest'` into `false` is caught here and not left to
+/// whichever other test happens to pin that step today.
+///
+/// The `if:` comparisons go through the `Value`, never `as_str()`: `if: false`
+/// is a YAML boolean, so `as_str()` hands back `None` for it exactly as it
+/// does for an absent key, and the canonical way to switch something off would
+/// take the "no `if:` at all" arm (the defect fixed at `6bb82758`).
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+pub fn assert_job_is_blocking(job: &serde_yaml_ng::Value, job_name: &str, steps_allowed_an_if: &[(&str, &str)]) {
+  assert!(
+    !job.is_null(),
+    "ci.yml must define a `{job_name}` job: an absent job parses to null, and every \
+     assertion below passes over null, so deleting the job would go unseen"
+  );
+  assert!(
+    job["if"].is_null(),
+    "the `{job_name}` job must carry no `if:`: a job-level condition switches every step \
+     off at once while step-level guards stay green, got `if: {:?}`",
+    job["if"]
+  );
+  assert!(
+    job["continue-on-error"].is_null(),
+    "the `{job_name}` job must carry no `continue-on-error:` at all. The key has to be \
+     absent, not `false`, so that a later `true` is a diff against nothing rather than a \
+     one-word edit. Got `continue-on-error: {:?}`",
+    job["continue-on-error"]
+  );
+
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  assert!(
+    !steps.is_empty(),
+    "the `{job_name}` job must hold at least one step: emptying `steps:` leaves a job that \
+     runs and reports success while doing nothing"
+  );
+
+  for step in &steps {
+    let label = step["name"]
+      .as_str()
+      .or_else(|| step["uses"].as_str())
+      .or_else(|| step["run"].as_str())
+      .unwrap_or("<unnamed step>");
+    assert!(
+      step["continue-on-error"].is_null(),
+      "no step of the `{job_name}` job may swallow its own failure: step {label:?} carries \
+       `continue-on-error: {:?}`",
+      step["continue-on-error"]
+    );
+
+    let cond = &step["if"];
+    let allowed = steps_allowed_an_if
+      .iter()
+      .find(|(name, _)| *name == label)
+      .map(|(_, cond)| *cond);
+    assert!(
+      cond.is_null() || (allowed.is_some() && cond.as_str() == allowed),
+      "step {label:?} of the `{job_name}` job may not be conditioned away: it carries \
+       `if: {cond:?}` and the only condition allowed for it is {allowed:?}"
+    );
+  }
+}
