@@ -124,9 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflow and each leaving the whole suite green.
 
   **Below.** A command can be made unable to fail without touching any of the
-  keys #646 reads: `cargo nextest run || true`, a pipe, `set +e`, or an
-  `exit 0` after the command. All four are now rejected on any line that
-  invokes cargo, in every guarded job. Scoped to cargo lines rather than every
+  keys #646 reads: `cargo nextest run || true`, a pipe, `set +e`, an `exit 0`
+  anywhere in the block, or a custom `shell:` line that drops the `-e` GitHub
+  normally passes. All five are now rejected on any step that invokes cargo,
+  in every guarded job. Scoped to cargo lines rather than every
   line on purpose, since the property is not "no pipe": the `read the declared
   MSRV` step legitimately pipes `grep` into `cut`, and `exit 1` stays allowed
   because that same step uses it to fail loudly. Matched on `contains` rather
@@ -138,10 +139,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `strategy.matrix.os` and never the `exclude` beside it, so
   `test (windows-latest)` could stop existing while
   `ci_test_matrix_runs_on_windows_latest` kept passing. Both now read the
-  effective matrix. The workflow's own `on:` block takes all eight jobs at
-  once, so the events and branches it fires on are pinned, and `paths:` /
-  `paths-ignore:` are asserted absent: a path filter would skip CI entirely on
-  a change it does not match.
+  effective matrix, and `runs-on:` is pinned to it: a literal runner keeps
+  `test (windows-latest)` in the checks list, satisfying the required contexts
+  on `main`, while nothing ever compiles the
+  `[target."cfg(windows)".dependencies]` block. The workflow's own `on:` block
+  takes all eight jobs at once, so the events and branches it fires on are
+  pinned, and `paths:`, `paths-ignore:` and `types:` are asserted absent: a
+  path filter skips CI on a change it does not match, and `types:` has
+  defaults, so replacing them runs no CI on an ordinary pull request.
 
 - **Three CI jobs could be switched off without a test going red**
   ([#646](https://github.com/kbrdn1/gwm-cli/issues/646)). GitHub Actions
