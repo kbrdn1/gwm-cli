@@ -5053,7 +5053,7 @@ fn edit_worktree_failure_replaces_the_loading_status() {
     app.status
   );
   assert_eq!(
-    app.edit_failure.as_deref(),
+    app.create_form.edit_failure.as_deref(),
     Some("target path already exists"),
     "the modal keeps the failure for inline display"
   );
@@ -10081,9 +10081,12 @@ fn enter_edit_worktree_prefills_create_form_from_branch() {
     app.branch_types[app.create_form.type_index].name, "fix",
     "the type selector must point at the parsed branch type"
   );
-  assert_eq!(app.edit_original_branch.as_deref(), Some("fix/#42-broken-thing"));
+  assert_eq!(
+    app.create_form.edit_original_branch.as_deref(),
+    Some("fix/#42-broken-thing")
+  );
   assert!(
-    app.edit_original_path.is_some(),
+    app.create_form.edit_original_path.is_some(),
     "the original path is captured for git worktree move"
   );
 }
@@ -10178,13 +10181,13 @@ fn the_rename_form_refuses_a_free_form_name_create_would_refuse() {
       "`{}` is documented as refused by create",
       refused
     );
-    app.edit_failure = None;
+    app.create_form.edit_failure = None;
     app
       .submit_edit_worktree()
       .expect("a refusal is a form failure, not an error");
     assert_eq!(app.view, View::Edit, "the form stays open on `{}`", refused);
     assert!(
-      app.edit_failure.is_some(),
+      app.create_form.edit_failure.is_some(),
       "`{}` must be refused by rename too, with a reason",
       refused
     );
@@ -10244,13 +10247,16 @@ fn a_corrected_rename_is_not_held_back_by_the_previous_attempt() {
   app
     .submit_edit_worktree()
     .expect("a refusal is a form failure, not an error");
-  assert!(app.edit_failure.is_some(), "an empty description is refused");
+  assert!(
+    app.create_form.edit_failure.is_some(),
+    "an empty description is refused"
+  );
 
   // Fixing it has to be enough.
   app.create_form.desc = "other-desc".into();
   app.submit_edit_worktree().expect("submits");
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "a corrected form must not be held back by the previous attempt's message"
   );
 }
@@ -10399,7 +10405,7 @@ fn enter_edit_worktree_opens_an_unparseable_branch_in_free_form() {
 
   assert_eq!(app.view, View::Edit, "free-form mode needs no decomposition");
   assert_eq!(app.create_form.mode, Mode::Freeform);
-  assert_eq!(app.edit_original_branch.as_deref(), Some("main"));
+  assert_eq!(app.create_form.edit_original_branch.as_deref(), Some("main"));
 }
 
 #[test]
@@ -10421,7 +10427,7 @@ fn enter_edit_worktree_refuses_the_main_worktree() {
   app.enter_edit_worktree();
 
   assert_eq!(app.view, View::List, "the main worktree is not renamed from here");
-  assert!(app.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
   assert!(
     app.status.contains("main worktree"),
     "the refusal names what it is protecting: {}",
@@ -10442,8 +10448,8 @@ fn cancel_edit_worktree_resets_state() {
   app.cancel_edit_worktree();
 
   assert_eq!(app.view, View::List);
-  assert!(app.edit_original_branch.is_none());
-  assert!(app.edit_original_path.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_path.is_none());
 }
 
 #[test]
@@ -10516,7 +10522,7 @@ fn enter_edit_worktree_refuses_unconfigured_branch_type() {
   app.enter_edit_worktree();
 
   assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
-  assert!(app.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
   assert!(
     app.status.contains("not configured") && app.status.contains("zzz"),
     "status must name the type and the reason: {}",
@@ -12200,6 +12206,7 @@ fn submit_edit_worktree_refuses_to_change_a_segment_no_pattern_writes() {
 
   assert_eq!(app.view, View::Edit, "the form stays open on a refusal");
   let failure = app
+    .create_form
     .edit_failure
     .clone()
     .expect("the refusal must be reported in the form");
@@ -12238,7 +12245,7 @@ fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
   app.submit_edit_worktree().expect("submits");
 
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "editing a segment the pattern writes is not a frozen-segment change"
   );
 }
@@ -12288,9 +12295,9 @@ fn submit_edit_worktree_lets_the_directory_carry_what_the_branch_cannot() {
   app.submit_edit_worktree().expect("submits");
 
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "`path_pattern` writes {{type}}, so there is somewhere to put `docs`: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12325,9 +12332,9 @@ fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
   app.create_form.desc = "other".into();
   app.submit_edit_worktree().expect("submits");
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "an untouched type read from the directory is not a change: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12361,9 +12368,9 @@ fn submit_edit_worktree_counts_worktree_base_as_a_destination() {
   app.submit_edit_worktree().expect("submits");
 
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "`base` writes {{type}}, so the worktree moves from `fix/` to `docs/`: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12396,9 +12403,13 @@ fn the_rename_form_still_refuses_to_change_what_neither_pattern_writes() {
     .submit_edit_worktree()
     .expect("the refusal is a form failure, not an error");
   assert!(
-    app.edit_failure.as_deref().is_some_and(|e| e.contains("{type}")),
+    app
+      .create_form
+      .edit_failure
+      .as_deref()
+      .is_some_and(|e| e.contains("{type}")),
     "changing a type the branch pattern cannot write must be refused: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12530,7 +12541,7 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
   app.create_form.issue = "43".into();
   app.submit_edit_worktree().expect("submits");
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "an untouched frozen description must not read as a change"
   );
 
@@ -12541,9 +12552,13 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
     .submit_edit_worktree()
     .expect("the refusal is a form failure, not an error");
   assert!(
-    app.edit_failure.as_deref().is_some_and(|e| e.contains("{desc}")),
+    app
+      .create_form
+      .edit_failure
+      .as_deref()
+      .is_some_and(|e| e.contains("{desc}")),
     "editing the frozen description must still be refused: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12754,7 +12769,7 @@ fn the_rename_form_refuses_a_segment_it_cannot_read_back_from_the_name() {
   app.enter_edit_worktree();
 
   assert_eq!(app.view, View::List, "opening would overwrite the on-disk type");
-  assert!(app.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
   assert!(
     app.status.contains("{type}") && app.status.contains("worktree.base"),
     "the status must name the segment and where to look: {}",
@@ -12838,9 +12853,9 @@ fn a_hidden_segment_cannot_block_the_rename_it_is_not_part_of() {
 
   let out = app.submit_edit_worktree();
   assert!(
-    !app.edit_failure.as_deref().unwrap_or("").contains("{type}"),
+    !app.create_form.edit_failure.as_deref().unwrap_or("").contains("{type}"),
     "the hidden type must not be read as a change: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
   assert!(
     !app.status.contains("no {type} to write"),
@@ -17939,5 +17954,45 @@ fn opening_a_detail_overlay_keeps_the_identity_its_consumer_just_pinned() {
     app.detail_overlay.link.map(|(_, t, n)| (t, n)),
     Some((LinkTarget::Pr, 42)),
     "nor the forge link it pinned"
+  );
+}
+
+#[test]
+fn resetting_the_create_form_leaves_the_failure_banner_up() {
+  // Issue #635: the two failure banners and the Edit origin moved off `App`
+  // onto `CreateForm`, where they now sit next to the fields
+  // `CreateForm::reset` clears. Folding them into `reset` looks tidy and is
+  // a behaviour change: `App` clears each banner at its own explicit sites,
+  // and `open_create_form_from_issue` resets the form WITHOUT clearing it.
+  // Add them to `reset` and that path starts wiping an error the user has
+  // not read yet.
+  let (_dir, mut app) = make_app();
+  app.create_form.create_failure = Some("branch already exists".into());
+  app.create_form.edit_failure = Some("refused: unfetched commits".into());
+  app.create_form.edit_original_branch = Some("feat/#1-old".into());
+  app.create_form.edit_original_path = Some(std::path::PathBuf::from("/tmp/old-worktree"));
+  app.create_form.issue = "42".into();
+
+  app.create_form.reset();
+
+  assert_eq!(app.create_form.issue, "", "`reset` does clear what the user typed");
+  assert_eq!(
+    app.create_form.create_failure.as_deref(),
+    Some("branch already exists"),
+    "but not the banner its caller has not dismissed"
+  );
+  assert_eq!(
+    app.create_form.edit_failure.as_deref(),
+    Some("refused: unfetched commits"),
+    "nor the Edit banner"
+  );
+  assert_eq!(
+    app.create_form.edit_original_branch.as_deref(),
+    Some("feat/#1-old"),
+    "nor the branch the Edit form is renaming away from"
+  );
+  assert!(
+    app.create_form.edit_original_path.is_some(),
+    "nor the worktree it is moving"
   );
 }

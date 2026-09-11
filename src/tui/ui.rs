@@ -6516,7 +6516,7 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.create_failure.as_deref() {
+  } else if let Some(error) = app.create_form.create_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("create failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
@@ -9062,8 +9062,8 @@ fn draw_clean_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
 /// same Create form state (Type / Issue / Desc) pre-filled from the current
 /// branch — plus a `From :` line showing the original branch, an async
 /// "renaming…" loader, and an inline failure surfaced from
-/// `App::edit_failure`. State lives on `App::create_form` +
-/// `App::edit_original_branch`.
+/// `CreateForm::edit_failure`. State lives on `App::create_form` +
+/// `CreateForm::edit_original_branch`.
 fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -9087,6 +9087,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
 
   let label = |s: &str| format!("{:<label_w$}", s);
   let old_branch = app
+    .create_form
     .edit_original_branch
     .as_deref()
     .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
@@ -9178,7 +9179,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.edit_failure.as_deref() {
+  } else if let Some(error) = app.create_form.edit_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("rename failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],

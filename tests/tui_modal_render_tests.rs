@@ -291,7 +291,7 @@ fn create_modal_renders_loader_while_create_is_in_flight() {
 fn create_modal_renders_create_failure_after_async_create_fails() {
   let (_dir, mut app) = make_app();
   app.enter_create();
-  app.create_failure = Some("branch already exists".into());
+  app.create_form.create_failure = Some("branch already exists".into());
 
   let buf = render(&mut app);
 
@@ -1168,7 +1168,7 @@ fn the_rename_refusal_fits_in_the_modal() {
     .position(|t| t.name == "docs")
     .expect("docs is configured");
   app.submit_edit_worktree().expect("the refusal is a form failure");
-  let failure = app.edit_failure.clone().expect("refused");
+  let failure = app.create_form.edit_failure.clone().expect("refused");
 
   let buf = render(&mut app);
   assert_present(&buf, &failure, "the whole refusal, not the part that fits");

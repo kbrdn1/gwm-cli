@@ -219,8 +219,8 @@ pub enum View {
   /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
   /// Desc) pre-filled by parsing the current branch; submitting renames the
   /// local + remote branch and moves the worktree directory. State lives on
-  /// [`App::create_form`] plus [`App::edit_original_branch`] /
-  /// [`App::edit_original_path`].
+  /// [`App::create_form`] plus [`CreateForm::edit_original_branch`] /
+  /// [`CreateForm::edit_original_path`].
   Edit,
   /// Generic detail overlay (issue #408). A centred row-list modal — its
   /// first consumer is the agent-session view (`a` on the worktree list);
@@ -464,8 +464,6 @@ pub struct App {
   /// Create-worktree overlay state (extracted per #123). Holds field
   /// focus, type index, and the issue/slug input buffers.
   pub create_form: CreateForm,
-  /// Last asynchronous create failure shown inside the Create modal.
-  pub create_failure: Option<String>,
   /// Branch types displayed in the create-form picker. Resolved once at
   /// startup from [`Config::resolved_branch_types`] so the picker
   /// honours any `[[branch_types]]` override in `.gwm.toml` without
@@ -797,20 +795,6 @@ pub struct App {
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
   pub should_exit_to: Option<PathBuf>,
 
-  /// The selected worktree's branch name captured when the rename modal
-  /// (`View::Edit`, #290) opens — the `<old>` in `git branch -m <old> <new>`.
-  /// `None` while the modal is closed.
-  pub edit_original_branch: Option<String>,
-
-  /// The selected worktree's on-disk path captured when the rename modal
-  /// opens — the source for `git worktree move <old_path> <new_path>`.
-  pub edit_original_path: Option<PathBuf>,
-
-  /// Last rename failure, surfaced inside the Edit modal (mirrors
-  /// [`Self::create_failure`]) so the user can correct and retry without
-  /// losing the form. Cleared when the modal reopens.
-  pub edit_failure: Option<String>,
-
   /// Whether the terminal's mouse reporting is on (issue #624).
   ///
   /// gwm reads mouse events, and reading them costs the terminal's own
@@ -896,7 +880,6 @@ impl App {
       pending_delete: Vec::new(),
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
-      create_failure: None,
       branch_types,
       report: None,
       help_scroll: 0,
@@ -955,9 +938,6 @@ impl App {
       rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
-      edit_original_branch: None,
-      edit_original_path: None,
-      edit_failure: None,
       mouse_capture,
       mouse: crate::tui::mouse::MouseMap::new(),
     };
@@ -1991,7 +1971,7 @@ impl App {
           }
           match result {
             Ok(result) => {
-              self.create_failure = None;
+              self.create_form.create_failure = None;
               self.report = Some(result.report);
               self.view = View::Report;
               let refresh_result = self.refresh();
@@ -2006,7 +1986,7 @@ impl App {
               };
             }
             Err(e) => {
-              self.create_failure = Some(e.clone());
+              self.create_form.create_failure = Some(e.clone());
               self.view = View::Create;
               self.status = format!("create failed: {}", e);
             }
@@ -2235,9 +2215,9 @@ impl App {
               // stays on the row the user just edited (mapped through the
               // filter — Codex review on PR #292).
               self.reselect_by_path(&res.new_path);
-              self.edit_original_branch = None;
-              self.edit_original_path = None;
-              self.edit_failure = None;
+              self.create_form.edit_original_branch = None;
+              self.create_form.edit_original_path = None;
+              self.create_form.edit_failure = None;
               self.create_form.reset();
               self.view = View::List;
             }
@@ -2246,7 +2226,7 @@ impl App {
             // longer reads as in-progress (Codex review on PR #292, P3).
             Err(e) => {
               self.status = format!("rename failed: {}", e);
-              self.edit_failure = Some(e);
+              self.create_form.edit_failure = Some(e);
             }
           }
           applied = true;
@@ -6045,9 +6025,9 @@ impl App {
       self.create_form.mode = Mode::Freeform;
       self.create_form.name = branch.clone();
       self.create_form.field = Field::Name;
-      self.edit_original_branch = Some(branch);
-      self.edit_original_path = Some(path);
-      self.edit_failure = None;
+      self.create_form.edit_original_branch = Some(branch);
+      self.create_form.edit_original_path = Some(path);
+      self.create_form.edit_failure = None;
       self.view = View::Edit;
       return;
     };
@@ -6107,9 +6087,9 @@ impl App {
     // description, and naming `Field::Desc` here focused an input the renderer
     // does not draw on a pattern without one (#418).
     self.create_form.field = self.create_form.last_field();
-    self.edit_original_branch = Some(branch);
-    self.edit_original_path = Some(path);
-    self.edit_failure = None;
+    self.create_form.edit_original_branch = Some(branch);
+    self.create_form.edit_original_path = Some(path);
+    self.create_form.edit_failure = None;
     self.view = View::Edit;
   }
 
@@ -6210,7 +6190,7 @@ impl App {
     }
     match self.create_form.mode {
       Mode::Structured if self.create_form.name.is_empty() => {
-        if let Some(branch) = self.edit_original_branch.clone() {
+        if let Some(branch) = self.create_form.edit_original_branch.clone() {
           self.create_form.name = branch;
         }
       }
@@ -6233,9 +6213,9 @@ impl App {
   /// Cancel the rename modal (`Esc`): drop the captured original branch/path
   /// and return to the list without touching git.
   pub fn cancel_edit_worktree(&mut self) {
-    self.edit_original_branch = None;
-    self.edit_original_path = None;
-    self.edit_failure = None;
+    self.create_form.edit_original_branch = None;
+    self.create_form.edit_original_path = None;
+    self.create_form.edit_failure = None;
     self.create_form.reset();
     self.view = View::List;
   }
@@ -6300,12 +6280,13 @@ impl App {
     // added there is what actually makes the two agree.
     let written = self.required_segments();
     let writes = |segment: &str| written.contains(&segment);
-    let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
+    let opened_with = self.create_form.edit_original_branch.as_deref().and_then(|branch| {
       crate::naming::worktree_spec(
         &self.config,
         &self.repo_name,
         branch,
         self
+          .create_form
           .edit_original_path
           .as_ref()
           .and_then(|path| path.file_name())
@@ -6345,7 +6326,7 @@ impl App {
           // quoted is on screen anyway, in the `From :` row above (found
           // validating by hand).
           let _ = was;
-          self.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
+          self.create_form.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
           return true;
         }
       }
@@ -6384,7 +6365,7 @@ impl App {
     let name = match self.worktree_name_from_form() {
       Ok(n) => n,
       Err(e) => {
-        self.edit_failure = Some(e);
+        self.create_form.edit_failure = Some(e);
         return Ok(());
       }
     };
@@ -6395,23 +6376,23 @@ impl App {
     let (new_branch, new_name) = match self.edit_target() {
       Ok(target) => target,
       Err(e) => {
-        self.edit_failure = Some(e);
+        self.create_form.edit_failure = Some(e);
         return Ok(());
       }
     };
     let new_path = match name.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir) {
       Ok(p) => p,
       Err(e) => {
-        self.edit_failure = Some(e.to_string());
+        self.create_form.edit_failure = Some(e.to_string());
         return Ok(());
       }
     };
 
-    let Some(old_branch) = self.edit_original_branch.clone() else {
+    let Some(old_branch) = self.create_form.edit_original_branch.clone() else {
       self.cancel_edit_worktree();
       return Ok(());
     };
-    let Some(old_path) = self.edit_original_path.clone() else {
+    let Some(old_path) = self.create_form.edit_original_path.clone() else {
       self.cancel_edit_worktree();
       return Ok(());
     };
@@ -6434,7 +6415,7 @@ impl App {
     let Some(generation) = self.tasks.request(TaskKind::EditWorktree) else {
       return Ok(());
     };
-    self.edit_failure = None;
+    self.create_form.edit_failure = None;
     self.spinner.reset();
     self.status = TaskKind::EditWorktree.loading_label().into();
     self.spawn_edit_worktree(
@@ -6594,7 +6575,7 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
-    self.create_failure = None;
+    self.create_form.create_failure = None;
     // Open focused on the first field the user types into rather than the
     // cycle-only Type field (#217 UX): the first keypress then edits text
     // instead of being a silent no-op on Type. The type keeps its `reset()`
@@ -6619,7 +6600,7 @@ impl App {
   pub fn enter_create_from_issue(&mut self) {
     self.view = View::Create;
     self.create_form.enter_from_issue();
-    self.create_failure = None;
+    self.create_form.create_failure = None;
     self.status = "issue number, then enter: derive the branch from it · esc: cancel".into();
   }
 
@@ -6960,7 +6941,7 @@ impl App {
     let Some(generation) = self.tasks.request(TaskKind::CreateWorktree) else {
       return Ok(());
     };
-    self.create_failure = None;
+    self.create_form.create_failure = None;
     self.spinner.reset();
     self.status = TaskKind::CreateWorktree.loading_label().into();
     self.spawn_create_worktree(
