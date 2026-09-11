@@ -17782,3 +17782,95 @@ fn the_arrows_cycle_a_settings_choice_in_both_directions() {
   assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
   assert_eq!(app.config_panel.x_scroll, 1, "the All tab still pans");
 }
+
+// ── Commits key precedence (issues #613, #635) ───────────────────────────────
+//
+// These could not exist before #635: the routing was a `match` sitting inside
+// the run loop, and a `match` in the event loop is not reachable from a test.
+// The extraction into `App::handle_commits_key` is what makes the order the
+// arms resolve in assertable, which is the whole point of #613.
+
+#[test]
+fn the_commits_overlay_resolves_modal_verbs_only_no_global_toggle() {
+  // The Commits overlay deliberately does NOT open its routing with a
+  // `modal_toggle_stroke` block the way the Working Tree one does: `c`
+  // closes it as a bound `CommitsClose` alternative in the modal context,
+  // not as a rebindable global toggle.
+  //
+  // So with the global `commits` action rebound onto `j` — the key the
+  // modal context spends on `scroll_down` — `j` still SCROLLS. Put a
+  // toggle-first block at the head of `handle_commits_key` (the
+  // `handle_working_tree_key` shape) and both assertions below go red: it
+  // would close instead, and the scroll would never run.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::Commits, &["j"]);
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 10;
+
+  let close = app.handle_commits_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+  assert!(!close, "a rebound global `commits` key does not close this overlay");
+  assert_eq!(app.commits.scroll, 1, "it reaches the modal scroll verb instead");
+}
+
+#[test]
+fn the_commits_close_arm_leaves_the_cursor_where_it_was() {
+  // Not arm ORDER — the patterns are disjoint, so moving `CommitsClose`
+  // down the `match` changes nothing and a test claiming otherwise would
+  // pin nothing. What is pinned is that the close arm returns without a
+  // side effect on the cursor: `CommitsClose => { self.commits
+  // .scroll_to_top(); return true }` would go red here. A reopen rewinds
+  // the scroll on its own (`begin`), so a rewind hidden in the close would
+  // be invisible until someone made the overlay remember its position.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 10;
+  app.commits.scroll = 4;
+
+  assert!(app.handle_commits_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+  assert_eq!(app.commits.scroll, 4, "closing did not also move the cursor");
+}
+
+#[test]
+fn every_commits_scroll_verb_routes_through_the_handler() {
+  // The rest of the arms, so a dropped one is caught rather than silently
+  // becoming a dead key. Each asserts the cursor the verb is supposed to
+  // move, and none of them closes.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 40;
+  app.commits.viewport = 10;
+
+  let press = |app: &mut App, c: char| app.handle_commits_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+
+  assert!(!press(&mut app, 'j'));
+  assert_eq!(app.commits.scroll, 1, "`j` scrolls down one row");
+  assert!(!press(&mut app, 'k'));
+  assert_eq!(app.commits.scroll, 0, "`k` scrolls back up");
+  assert!(!press(&mut app, 'G'));
+  assert_eq!(app.commits.scroll, 40, "`G` jumps to the last row");
+  assert!(!press(&mut app, 'g'));
+  assert_eq!(app.commits.scroll, 0, "`g` jumps back to the first");
+  assert!(!press(&mut app, 'D'));
+  assert_eq!(app.commits.scroll, 5, "`D` moves half the published viewport");
+  assert!(!press(&mut app, 'U'));
+  assert_eq!(app.commits.scroll, 0, "`U` moves half a viewport back");
+}
+
+#[test]
+fn an_unbound_key_inside_the_commits_overlay_is_inert() {
+  // The `_ => {}` arm: an unbound stroke neither closes nor moves anything,
+  // so a key with no meaning here cannot fall through to a global action.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 10;
+  app.commits.scroll = 3;
+
+  assert!(!app.handle_commits_key(KeyEvent::new(KeyCode::Char('%'), KeyModifiers::NONE)));
+  assert_eq!(app.commits.scroll, 3);
+  assert_eq!(app.view, View::Commits, "and the overlay is still up");
+}
