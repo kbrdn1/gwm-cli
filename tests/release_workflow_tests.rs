@@ -3,7 +3,7 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::assert_job_is_blocking;
+use common::{assert_job_is_blocking, effective_matrix_os};
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -406,16 +406,14 @@ fn run_steps(job: &serde_yaml_ng::Value) -> Vec<String> {
     .collect()
 }
 
+/// Read through `effective_matrix_os` and not `strategy.matrix.os` directly
+/// (issue #653): an `exclude:` beside that list deletes rows without touching
+/// it, so `test (windows-latest)` stops existing while this guard, whose whole
+/// subject is the matrix, keeps passing.
 #[test]
 fn ci_test_matrix_runs_on_windows_latest() {
   let job = ci_job("test");
-  let matrix: Vec<String> = job["strategy"]["matrix"]["os"]
-    .as_sequence()
-    .cloned()
-    .unwrap_or_default()
-    .iter()
-    .filter_map(|v| v.as_str().map(str::to_owned))
-    .collect();
+  let matrix = effective_matrix_os(&job, "test");
 
   for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
     assert!(
@@ -831,5 +829,65 @@ fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
     "the audit command must carry no pipe and no `||`: a shell pipeline reports its last \
      element's exit status, so `cargo audit --deny warnings || true` succeeds over a \
      failing audit exactly as the `continue-on-error` this guard also forbids. Got {run:?}"
+  );
+}
+
+/// Issue #653. Every guard in this file and in `msrv_tests.rs` reasons about
+/// jobs, and the workflow's own `on:` block switches all eight off at once,
+/// one level above every one of them. Narrowing `branches:` to `[main]` stops
+/// the whole of CI on a pull request targeting `dev`, which is where every
+/// feature branch lands, and leaves all 26 tests green.
+///
+/// `paths:` is the same hole in a subtler shape, and the reason it is asserted
+/// absent rather than merely checked: `paths: ['src/**']` would skip CI on a
+/// pull request touching only `tests/`, which is exactly the shape of this
+/// very change. It is `needs:` one level up.
+///
+/// The key is read as the string `"on"`. YAML 1.1 would resolve a bare `on`
+/// to the boolean `true`, which is the classic trap for anything parsing
+/// Actions workflows, but serde_yaml_ng implements YAML 1.2, where it stays a
+/// string. Checked against this file rather than assumed, and stated here so
+/// nobody "fixes" it into `workflow[true]`.
+#[test]
+fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
+  let on = &ci_workflow()["on"];
+  assert!(
+    !on.is_null(),
+    "ci.yml must declare an `on:` block: without one the workflow never runs and every \
+     job-level guard in this file passes over a workflow nobody triggers"
+  );
+
+  for event in ["push", "pull_request"] {
+    let branches: Vec<String> = on[event]["branches"]
+      .as_sequence()
+      .cloned()
+      .unwrap_or_default()
+      .iter()
+      .filter_map(|v| v.as_str().map(str::to_owned))
+      .collect();
+    for branch in ["main", "dev"] {
+      assert!(
+        branches.iter().any(|b| b == branch),
+        "ci.yml must fire on `{event}` for `{branch}` (branches are {branches:?}). `dev` is \
+         where every feature branch lands and `main` is what releases are cut from, so \
+         dropping either stops all eight jobs on that path while every job-level guard \
+         stays green"
+      );
+    }
+    for filter in ["paths", "paths-ignore"] {
+      assert!(
+        on[event][filter].is_null(),
+        "ci.yml must not filter `{event}` by `{filter}`: a path filter skips the whole \
+         workflow on a change it does not match, so a pull request touching only `tests/` \
+         would run no CI at all. Got `{filter}: {:?}`",
+        on[event][filter]
+      );
+    }
+  }
+
+  assert!(
+    on.as_mapping().is_some_and(|m| m.contains_key("workflow_dispatch")),
+    "ci.yml must keep `workflow_dispatch:`: it is the only way to re-run the suite without \
+     pushing a commit"
   );
 }
