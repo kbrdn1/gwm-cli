@@ -117,6 +117,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four of the eight CI jobs were guarded, and two of the unguarded ones are
+  required checks on `main`**
+  ([#655](https://github.com/kbrdn1/gwm-cli/issues/655)).
+  `assert_job_is_blocking` had four callers for eight jobs, and the four were
+  the ones #646's own audit happened to name. `fmt`, `clippy` and `hook-smoke`
+  were not among them, and all three are contexts `main` requires: `if: false`,
+  `continue-on-error: true` and `|| true` on the command, applied to `clippy`
+  at once, left all 27 tests across the two binaries that parse `ci.yml` green.
+  Those are exactly the neutralisations #646, #652 and #653 exist to close,
+  pointed at jobs nobody had pointed the guard at.
+
+  The caller list is replaced by a sweep over `jobs:`, because a list is what
+  produced this in the first place: #646 guarded what it had looked at, #652
+  and #653 widened the helper without widening its callers, and a ninth job
+  would arrive unguarded the same way. `doctor` is the one exemption and it is
+  pinned rather than waived. It is advisory by design, `continue-on-error:
+  true` on its step and an `if:` restricting it to `dev`, and should it lose
+  either property the exemption goes red instead of quietly covering a job it
+  was not written for. `hook-smoke` had been written down as exempt too, on
+  the reasoning that its shell gates are legitimately multi-line with pipes;
+  running the guard against it before believing that said otherwise, since a
+  `run:` block invoking no cargo is outside the command invariant's scope to
+  begin with. It costs one iteration of the sweep and it is a required check,
+  so it is guarded.
+
+  Being blocking is not the whole property for these two. `cargo fmt --all`
+  without `--check` rewrites the tree and exits 0, and `cargo clippy` without
+  `-D warnings` exits 0 on every lint it finds. Both are one bare cargo
+  invocation on one line under a built-in shell, so they satisfy every
+  assertion the helper makes, and neither is `--no-run` or `--dry-run`, which
+  is the bounded list it already carries. A flag, not a shell operator, is
+  what separates enforcing from reporting here, the same class as `cargo
+  bench --no-run` (#634) and a `cargo audit` without `--deny warnings` (#340).
+  So `--check`, `--all`, `-D warnings` and `--all-targets` are asserted on the
+  commands themselves, where `CLAUDE.md` already states them. The workflow's
+  own `RUSTFLAGS: -D warnings` is not leant on for clippy: it is set once for
+  all eight jobs, and `msrv` already overrides it to `""` at job level.
+
+  Fourteen mutations, each applied alone and each read back to confirm it
+  fired the assertion it was aimed at and not an earlier one. Applying them
+  together proves less than it looks, since the job-level `if:` is checked
+  before `continue-on-error:` and both before the command, so a combined
+  mutation panics on the first and never reaches the one it is meant to
+  demonstrate.
+
 - **CI could still be silenced, below the job and above it**
   ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
   [#653](https://github.com/kbrdn1/gwm-cli/issues/653)). #646 pinned the job
