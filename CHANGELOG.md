@@ -125,24 +125,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Below.** A command can be made unable to fail without touching any of the
   keys #646 reads: `cargo nextest run || true`, a pipe, `set +e`, `exit 0`,
-  `if ! cargo audit …; then …; fi`, a trailing `&`, a custom `shell:` line with
-  the `-e` dropped, or that same line moved to `defaults.run.shell`. Listing
-  those spellings does not converge, because the shell is a programming
-  language and the list is its grammar, so the guard states the property
-  instead: a `run:` block that invokes cargo is exactly one bare cargo
-  invocation, one line, no shell operators. Every spelling above fails that,
+  `if ! cargo audit …; then …; fi`, a trailing `&`. Listing those spellings
+  does not converge, because the shell is a programming language and the list
+  is its grammar, so the guard states the property instead: a `run:` block
+  that invokes cargo is exactly one bare cargo invocation, one line, made only
+  of characters that carry no shell meaning. Every spelling above fails that,
   including the ones nobody has thought of yet, and all eight cargo commands
-  in `ci.yml` pass it unchanged. Two things the shape alone does not reach are
-  named separately: the `shell:` that runs the command, since `shell:` takes a
-  whole command line and `true {0}` never runs the script at all (read at step
-  level and in `defaults.run` at job and workflow level), and the cargo flags
-  that compile without executing, since `cargo bench --no-run --benches --
-  --test` satisfies the shape while being issue #634 verbatim. Scoped to cargo lines rather than every
-  line on purpose, since the property is not "no pipe": the `read the declared
-  MSRV` step legitimately pipes `grep` into `cut`, and `exit 1` stays allowed
-  because that same step uses it to fail loudly. Matched on `contains` rather
-  than a prefix, so `env VAR=x cargo nextest run || true` is caught too, and
-  line continuations are joined first.
+  in `ci.yml` pass it unchanged.
+
+  Two things the shape alone does not reach are named separately. The `shell:`
+  that runs the command, because `shell:` takes a whole command line rather
+  than a keyword, so `true {0}` never runs the script and `bash -n {0}` only
+  parses it: the built-ins that do run it are whitelisted, at step level and in
+  `defaults.run` at job and workflow level. And the cargo flags that compile
+  without executing, because `cargo bench --no-run --benches -- --test`
+  satisfies the shape while being issue #634 verbatim.
+
+  Steps that do not invoke cargo stay free-form, which is what keeps the `read
+  the declared MSRV` step legal: it pipes `grep` into `cut` and uses `exit 1`
+  to fail loudly, both correct. A step is recognised by a whitespace-delimited
+  `cargo` token, so neither `Cargo.toml` nor a prefixed `env VAR=x cargo …`
+  fools it.
 
   **Above.** `strategy.matrix.exclude` deletes matrix rows, which defeated the
   two guards whose entire subject is the matrix: they read

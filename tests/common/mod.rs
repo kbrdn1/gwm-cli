@@ -358,7 +358,10 @@ fn assert_run_cannot_swallow_its_failure(
      invocation, no shell operators. `if ! cargo audit …; then …; fi` and `cargo bench … &` \
      both report success over a failure while carrying no `||`, no pipe, no `set +e` and no \
      `exit 0`, which is why this is stated as an invariant and not as a list of forbidden \
-     spellings. Got {line:?}"
+     spellings. A `${{{{ … }}}}` expression is refused too, deliberately: the runner splices it \
+     into the line before any shell sees it, so an attacker-controlled value becomes shell \
+     source. Pass it through `env:` and read it as `$VAR`, which is GitHub's own advice, in a \
+     step this guard leaves free-form. Got {line:?}"
   );
 
   for flag in ["--no-run", "--dry-run"] {
