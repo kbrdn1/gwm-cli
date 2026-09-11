@@ -9,6 +9,8 @@
 //! Pinned by `tests/tui_app_tests.rs::agent_detail_overlay`.
 
 use crate::agent_sessions::{AgentSession, Freshness, WorktreeAgents};
+use crate::cli::LinkTarget;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// What the overlay is currently doing: browsing the worktree's sessions,
@@ -123,6 +125,42 @@ pub struct DetailOverlay {
   pub input: String,
   /// Highlight inside the filtered candidate list of the input mode.
   pub input_selected: usize,
+
+  /// The worktree the open detail overlay was built for — `(path, branch)`
+  /// captured at open so attach/detach pin against it even if an
+  /// auto-refresh drifts the live selection (clean-overlay pattern).
+  ///
+  /// Set by the consumer **before** [`Self::open`], and deliberately NOT
+  /// cleared by it: `open` resets what a reopen must forget (rows, cursor,
+  /// input mode), while this and [`Self::link`] are the identity the
+  /// consumer just pinned. Clear them in `open` and the agents overlay
+  /// loses the worktree it is about to act on.
+  pub target: Option<(PathBuf, Option<String>)>,
+
+  /// Forge-consumer counterpart of [`Self::target`] (Codex review
+  /// #455): the `(forge identity, side, number)` the open forge-linked
+  /// overlay was built for, captured by `App::enter_ci_checks` and
+  /// `App::enter_rich_view`. Any link mutation that disagrees — the PR
+  /// changed, disappeared, or (workspace mode) the slug moved to another
+  /// repo whose PR happens to share the number — closes the overlay up
+  /// front via `App::close_forge_overlay_if_link_disagrees`; otherwise
+  /// the stale rows stay up through the new fetch, and forever if it
+  /// fails, with `Enter` opening an old PR's URL.
+  ///
+  /// The `LinkTarget` is part of the identity, not decoration (issue
+  /// #420): issue #42 and PR #42 are different things, and a tuple that
+  /// dropped the discriminant would reproduce the #138 bug class the
+  /// fetch cache already paid for once. The first element is the **forge
+  /// identity** (`<kind> <web origin>/<slug>`), not the bare slug, for
+  /// the reason `GitHubFetch::forge_identity` already documents: an
+  /// origin moving from `github.com/acme/widgets` to
+  /// `gitlab.com/acme/widgets` keeps the slug, so a slug-keyed tuple
+  /// compared equal and left `Enter` pointing at the old host (Codex
+  /// review #529).
+  ///
+  /// Not cleared by [`Self::open`] either, for the reason on
+  /// [`Self::target`].
+  pub link: Option<(Option<String>, LinkTarget, u64)>,
 }
 
 impl DetailOverlay {

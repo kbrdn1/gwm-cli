@@ -1189,7 +1189,7 @@ pub fn remove_dry_run(repo: &Repository, name: &str) -> Result<()> {
 /// Mirrors lazygit's columnar layout (hash + author + subject) so the
 /// renderer can lay out one commit per visual line. Hashes are parsed
 /// into binary OIDs once, then formatted on display to a fixed length (the
-/// `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/ui.rs`, currently 8
+/// `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/views/commits.rs`, currently 8
 /// chars, matching lazygit's `Gui.CommitHashLength` default). Not
 /// user-configurable today — change the constant to retune.
 /// `parents.len() >= 2` flags a merge commit, which the renderer marks

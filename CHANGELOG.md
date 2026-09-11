@@ -165,6 +165,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Two TUI views move to `src/tui/views/`, one module each for their
+  state, their rendering and their keys**
+  ([#635](https://github.com/kbrdn1/gwm-cli/issues/635)). `state/` was
+  already split one module per view, but the behaviour lived in `app.rs`
+  (9765 lines) and the rendering in `ui.rs` (10366), so adding or changing
+  a view meant editing three files, two of them enormous. The layering was
+  horizontal while the variability is vertical. `views/commits.rs` and
+  `views/exec_picker.rs` are the pilot.
+
+  No behaviour change. The view move itself is invisible from outside the
+  crate — `views` is private and every `gwm::tui::*` path resolves through
+  the same re-exports — and it edits no test at all. The satellite
+  repatriation that follows does touch five test files, but only to follow
+  a field path: `app.edit_failure` became
+  `app.create_form.edit_failure`. Undoing each rename with sed reproduces
+  every one of those files byte for byte, so no value, assertion, case or
+  test name moved. Two paths that did go away are
+  `gwm::tui::state::commits` and `gwm::tui::state::exec_picker`, whose
+  modules moved to `views`; everything they held is still re-exported at
+  `gwm::tui::*`, and `src/lib.rs` declares the library an internal test
+  seam with no SemVer guarantee (#342).
+
+  The Commits overlay's key routing was a `match` sitting inside the run
+  loop, which is the one shape a test cannot reach — the hole
+  [#613](https://github.com/kbrdn1/gwm-cli/issues/613) named. It is now
+  `App::handle_commits_key`, and four tests pin what it does, including
+  the thing that distinguishes it from the Working Tree overlay: Commits
+  resolves modal verbs only, with no global-toggle block in front, so a
+  global `commits` key rebound onto `j` still scrolls here.
+
+  **`App` goes from 85 fields to 60.** The issue's second scope point asks
+  for the orphaned satellite fields to come home, on the two moved views
+  and on any modal whose extraction stopped halfway, and all of them do:
+  `ExecPicker` takes its captured config, commondir and container counter;
+  `CleanOverlay` its config and countdown; `DetailOverlay` the worktree and
+  forge link it was built for; `CreateForm` the two failure banners and the
+  Edit origin; and `ConfirmContext` what the confirmation is actually
+  confirming. Three modals had no state module at all, so `state/help.rs`,
+  `state/agents.rs` and `RichView` in `state/rich_view.rs` are new.
+
+  Three of those moves put a field next to a method that resets its
+  neighbours, and each of the three would have been a silent behaviour
+  change: `ExecPicker::container_seq` is the monotonic half of a
+  containerised run's `--name`, so resetting it in `open` makes two runs on
+  one worktree collide; `DetailOverlay::target` / `link` are pinned by the
+  consumer *before* `open`, so clearing them there leaves the agents
+  overlay attaching against nothing; and `CreateForm::reset` must leave the
+  failure banners up, because one caller resets the form without clearing
+  them. All three are now tests, each proven red by making the mistake.
+
+  **The churn the pilot was meant to measure did not move, and the reason
+  is worth writing down.** Of 2251 commits, 512 touch `app.rs` or `ui.rs`;
+  21 of those touch either of the two moved surfaces, about 4%. Measured
+  per view over the same 512, the ranking is roughly the inverse of the
+  "most independent first" order the issue proposed: `sidebar` 61,
+  `create_form` 41, header/footer 36, `detail_overlay` 33,
+  `working_tree` 32, `config_panel` 27, against `commits` 13 and
+  `exec_picker` 9.
+
+  Those integers are upper bounds, not clean counts, and the method is
+  why. They come from `git log -G` over identifiers named after each view,
+  restricted to those two files, so a commit that only touched
+  `app.commits.scroll` in the run loop counts for the Commits view even
+  though that line is not moving. They over-count rather than under-count,
+  which cuts the same direction as the conclusion. `git log -L
+  :funcname:` would have been exact and works on `ui.rs`, but git's Rust
+  funcname pattern does not match a method indented inside an `impl`, so
+  it returns zero for every method in `app.rs` — a silent zero, not an
+  error. The ordering is what carries the argument, and the ordering
+  survives the imprecision.
+
+  The views that are cheap to extract are cheap precisely because nothing
+  changes them. So the mechanism works and the two pilot files are the
+  right shape, but continuing down the independence list buys nothing:
+  the next extraction worth doing is `sidebar` or `create_form`, and
+  those are coupled, which is a different and larger piece of work than
+  this one. Not folded in here.
+
 - **CI runs the test suite under `cargo-nextest`**
   ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)). `cargo test` runs
   110 test binaries in sequence, each with its own thread pool.

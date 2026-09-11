@@ -2,30 +2,35 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::mouse::{Hit, MouseKind, PaneId, RowList, SidebarPane, Spot};
 use super::palette::PaletteState;
+use super::state::agents::AgentState;
 use super::state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
   TaskRunner,
 };
 use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
-use super::state::commits::{CommitsModal, COMMITS_PAGE};
 use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
-use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+use super::state::confirm::{
+  ConfirmContext, ConfirmKeyAction, ConfirmKind, ConfirmModal, CountdownTickOutcome, PendingMerge,
+};
 use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::detail_overlay::DetailKind;
-use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
+use super::state::help::HelpOverlay;
 use super::state::link_prompt::LinkPrompt;
 use super::state::pty_overlay::PtyOverlay;
+use super::state::rich_view::{RichSource, RichView};
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
 use super::state::working_tree::WorkingTreeModal;
 use super::theme::Theme;
+use super::views::commits::CommitsModal;
+use super::views::exec_picker::ExecPicker;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
-use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode};
+use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
@@ -65,39 +70,6 @@ pub struct LauncherPlan {
   /// `None` for the git_tui launcher. Surfaced so the status bar /
   /// caller can mention which ref was used.
   pub base: Option<String>,
-}
-
-/// What an open [`View::Confirm`] is asking about.
-///
-/// Exhaustive matches, no `_` arm: the modal carries a safety countdown and
-/// a danger border because what follows cannot be taken back, and a third
-/// use must state its own answer rather than inherit the delete flow's.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
-pub enum ConfirmKind {
-  #[default]
-  DeleteWorktree,
-  /// Landing a PR / MR on its base branch (issue #551).
-  MergePr,
-}
-
-/// The merge a confirmation is holding, snapshotted when it opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingMerge {
-  pub number: u64,
-  pub title: String,
-  pub head_ref: String,
-  pub base_ref: String,
-  pub method: crate::forge::MergeMethod,
-  /// The CI rollup as it stood when the modal opened, rendered in the
-  /// summary. Merging on a red CI is the case the confirmation earns its
-  /// cost, and gwm shows it rather than deciding for the forge: `main` here
-  /// carries required checks, so the server refuses on its own and its
-  /// error is more accurate than a rule invented in this process.
-  pub ci: crate::forge::CiState,
-  pub checks_passed: u32,
-  pub checks_total: u32,
-  /// `PR` / `MR`, resolved by the caller.
-  pub noun: String,
 }
 
 /// Outcome of [`App::handle_command_logs_key`] (issue #613): the two side
@@ -219,8 +191,8 @@ pub enum View {
   /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
   /// Desc) pre-filled by parsing the current branch; submitting renames the
   /// local + remote branch and moves the worktree directory. State lives on
-  /// [`App::create_form`] plus [`App::edit_original_branch`] /
-  /// [`App::edit_original_path`].
+  /// [`App::create_form`] plus [`CreateForm::edit_original_branch`] /
+  /// [`CreateForm::edit_original_path`].
   Edit,
   /// Generic detail overlay (issue #408). A centred row-list modal — its
   /// first consumer is the agent-session view (`a` on the worktree list);
@@ -304,16 +276,6 @@ pub enum LinkPromptKey {
 /// crossing the cli/tui boundary doesn't need a manual conversion
 /// (issue #106).
 pub use crate::cli::LinkTarget;
-
-/// What the open rich view (issue #420) was built from. Kept whole rather
-/// than as pre-built rows so a resize can re-wrap it, and owned by the
-/// overlay rather than read back from the fetch cache, which the manual
-/// refresh flushes (Codex review #529).
-#[derive(Debug, Clone)]
-enum RichSource {
-  Issue(IssueStatus),
-  Pr(PrStatus),
-}
 
 /// Dispatch target for the `o` key (issue #73). Resolved by
 /// [`App::resolve_open_target`] from the current selection + the
@@ -464,8 +426,6 @@ pub struct App {
   /// Create-worktree overlay state (extracted per #123). Holds field
   /// focus, type index, and the issue/slug input buffers.
   pub create_form: CreateForm,
-  /// Last asynchronous create failure shown inside the Create modal.
-  pub create_failure: Option<String>,
   /// Branch types displayed in the create-form picker. Resolved once at
   /// startup from [`Config::resolved_branch_types`] so the picker
   /// honours any `[[branch_types]]` override in `.gwm.toml` without
@@ -475,17 +435,18 @@ pub struct App {
   // Bootstrap report
   pub report: Option<BootstrapReport>,
 
-  /// Keybindings (help) overlay scroll offset, in rows. Reset to 0 every
-  /// time the overlay opens; clamped to `help_max_scroll` (#217).
-  pub help_scroll: u16,
-  /// Keybindings (help) overlay horizontal scroll offset, in columns (#222).
-  pub help_x_scroll: u16,
-  /// Maximum help scroll offset, republished by [`super::ui::draw_help`]
-  /// each frame as `content_rows.saturating_sub(viewport_rows)` so the
-  /// offset can never scroll past the last line into the void.
-  pub help_max_scroll: u16,
-  /// Maximum horizontal help scroll offset, republished by the renderer.
-  pub help_max_x_scroll: u16,
+  /// Keybindings (help) overlay scroll state (#217, #222).
+  pub help: HelpOverlay,
+
+  /// Rich PR / Issue view state (issues #420, #551).
+  pub rich: RichView,
+
+  /// Agent-session detection state (issue #408).
+  pub agents: AgentState,
+
+  /// What the open confirmation modal is about, what it holds, and what
+  /// the attempt left behind (issues #257, #551).
+  pub confirm_ctx: ConfirmContext,
 
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
@@ -498,33 +459,6 @@ pub struct App {
   /// Recent Commits height; [`SidebarState::scroll_down`] clamps
   /// against it.
   pub sidebar: SidebarState,
-
-  /// Last completed agent-session snapshot, keyed by worktree path string
-  /// (issue #408). `None` until the first detection lands — the table then
-  /// renders without agent cells, no placeholder noise. Replaced atomically
-  /// by [`Self::apply_agent_snapshot`]; the render path only reads it.
-  pub agent_snapshot: Option<std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>>,
-  /// When the current snapshot was taken — drives the periodic re-detection
-  /// in [`Self::maybe_refresh_agent_sessions`] so freshness colours do not
-  /// fossilise at their startup value.
-  pub agent_snapshot_at: Option<std::time::Instant>,
-  /// Every session the last detection saw, matched or not — the candidate
-  /// pool of the overlay's attach-by-id prompt (user feedback 2026-07-22).
-  pub agent_all_sessions: Vec<crate::agent_sessions::AgentSession>,
-  /// Pinned session ids per worktree path — the sidebar Agents pane shows
-  /// ONLY these (user feedback 2026-07-22), and the render path must not
-  /// read git config, so the map is refreshed off-render (each detection
-  /// cycle + immediately after attach/detach). Empty in workspace mode
-  /// (same single-repo ceiling as the pins themselves).
-  pub agent_pins: std::collections::BTreeMap<String, Vec<String>>,
-  /// A full pool scan was requested while a detection run was in flight —
-  /// it chains after that run lands instead of walking the store
-  /// concurrently (Codex review round R).
-  agent_pool_wanted: bool,
-  /// A pin changed while a detection run was in flight — the re-scan (and
-  /// the pins refresh) chains after that run lands instead of racing a
-  /// second walk against it (Codex review round U).
-  agent_redetect_wanted: bool,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
@@ -596,11 +530,6 @@ pub struct App {
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
 
-  /// Last delete-worktree failure shown inside the confirm modal (issue
-  /// #257). Kept on `App`, not `ConfirmModal`, because it is the outcome of
-  /// the async worktree deletion side effect rather than countdown state.
-  pub delete_failure: Option<String>,
-
   /// Animated loader for overlays (issue #187). Advanced by the event
   /// loop's 200ms poll tick while the confirm countdown is armed and
   /// read by the renderer; pure state lives in
@@ -654,7 +583,7 @@ pub struct App {
   pub last_auto_refresh_at: Instant,
   /// Sender cloned into each background task worker (issue #231; carries the
   /// GitHub fetch results too since #255).
-  task_tx: mpsc::Sender<TaskMsg>,
+  pub(crate) task_tx: mpsc::Sender<TaskMsg>,
   /// Receiver drained by [`Self::drain_task_results`] each event-loop tick.
   /// A worker whose `App` has dropped simply fails its `send` and is ignored.
   task_rx: mpsc::Receiver<TaskMsg>,
@@ -705,121 +634,15 @@ pub struct App {
   /// editor owns a branch and a path it can only have while open.
   pub note_editor: Option<crate::tui::state::note_editor::NoteEditor>,
 
-  /// The `[exec]` config captured when the exec picker opened (issue #325).
-  /// In workspace mode `sync_active_repo` can swap `self.config` to another
-  /// repo while the overlay is open, so `Enter` resolves the argv against
-  /// this snapshot — the active repo's `[exec]` at open time — not the live
-  /// config (Codex #333 review).
-  exec_picker_cfg: ExecConfig,
-
-  /// The active repo's `commondir` (`<main>/.git`), captured alongside
-  /// [`Self::exec_picker_cfg`] for the same reason: in workspace mode the
-  /// active repo can swap while the overlay is open. Only read when the
-  /// picked profile carries a `[container]` block (issue #421), which mounts
-  /// it so git answers inside the container.
-  exec_picker_common_dir: PathBuf,
-
-  /// Monotonic counter behind the container name of an overlay run (issue
-  /// #421). The pid alone would collide across two overlays opened on the
-  /// same worktree within one session.
-  exec_container_seq: u64,
-
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
   /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
   /// fires [`crate::clean::delete_reclaim`] when the countdown elapses.
   pub clean_overlay: CleanOverlay,
 
-  /// The `[clean]` config captured when the clean overlay opened (issue
-  /// #325) — every re-scan and the delete resolve their dir-set against this
-  /// snapshot, not the live `self.config.clean`, which a workspace
-  /// auto-refresh could swap to another repo's (Codex #333 review).
-  clean_overlay_cfg: CleanConfig,
-
-  /// The safety-countdown duration (seconds) captured when the clean overlay
-  /// opened (issue #325). Pinned alongside [`Self::clean_overlay_cfg`] so a
-  /// workspace config swap can't shorten — or clear to `0` — the delay
-  /// before an armed reclaim fires (Codex #333 review).
-  clean_overlay_countdown_secs: u32,
-
   /// Generic detail overlay content (issue #408) — filled by
   /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
   pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
-
-  /// The worktree the open detail overlay was built for — `(path, branch)`
-  /// captured at open so attach/detach pin against it even if an
-  /// auto-refresh drifts the live selection (clean-overlay pattern).
-  detail_overlay_target: Option<(PathBuf, Option<String>)>,
-
-  /// Forge-consumer counterpart of `detail_overlay_target` (Codex review
-  /// #455): the `(remote slug, side, number)` the open forge-linked
-  /// overlay was built for, captured by [`Self::enter_ci_checks`] and
-  /// [`Self::enter_rich_view`]. Any link mutation that disagrees — the PR
-  /// changed, disappeared, or (workspace mode) the slug moved to another
-  /// repo whose PR happens to share the number — closes the overlay up
-  /// front via [`Self::close_forge_overlay_if_link_disagrees`]; otherwise
-  /// the stale rows stay up through the new fetch, and forever if it
-  /// fails, with `Enter` opening an old PR's URL.
-  ///
-  /// The `LinkTarget` is part of the identity, not decoration (issue
-  /// #420): issue #42 and PR #42 are different things, and a tuple that
-  /// dropped the discriminant would reproduce the #138 bug class the
-  /// fetch cache already paid for once. The first element is the **forge
-  /// identity** (`<kind> <web origin>/<slug>`), not the bare slug, for
-  /// the reason `GitHubFetch::forge_identity` already documents: an
-  /// origin moving from `github.com/acme/widgets` to
-  /// `gitlab.com/acme/widgets` keeps the slug, so a slug-keyed tuple
-  /// compared equal and left `Enter` pointing at the old host (Codex
-  /// review #529).
-  detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
-  /// Whether the reader CHOSE the rich view's current side (issue #551).
-  ///
-  /// The view opens on the PR whenever one is linked and lets a landing PR
-  /// promote an issue that was only standing in for it (#529). Tabs make
-  /// those two rules collide: an issue the reader tabbed to must not be
-  /// yanked away by the next fetch, while an issue the view opened on by
-  /// default still must be. This is the bit that tells them apart, and it
-  /// belongs to one open overlay — `close_detail_overlay` clears it.
-  rich_tab_pinned: bool,
-  /// What the open confirmation modal is about (validation feedback on
-  /// issue #551).
-  ///
-  /// The modal was single-purpose — `View::Confirm` meant "delete a
-  /// worktree" and nothing else — and a merge needs the same ceremony:
-  /// countdown, danger border, a summary naming what is about to happen.
-  /// Discriminated the way `DetailKind` discriminates the detail overlay,
-  /// with exhaustive matches and no `_` arm, so a third use has to answer
-  /// the question rather than inherit the delete flow's behaviour.
-  confirm_kind: ConfirmKind,
-  /// The merge the confirmation is holding, snapshotted when it opened.
-  ///
-  /// A snapshot for the same reason `pending_delete` is one (#484): an
-  /// auto-refresh can land during the safety countdown, and the row under
-  /// the cursor is not necessarily the row the user aimed at.
-  pending_merge: Option<PendingMerge>,
-  /// The error banner a failed merge leaves in the modal, mirroring
-  /// `delete_failure`: the forge's own words, kept where the decision was
-  /// made rather than flashed on a status bar the reader may miss.
-  merge_failure: Option<String>,
-  /// The rich view to come back to when a modal opened FROM it closes
-  /// (validation feedback on issue #551).
-  ///
-  /// `c` and `m` are reached from inside the view, so returning to the
-  /// worktree table on `Esc` throws away where the reader was: they have to
-  /// re-select the row and press `I` again to get back to the thing they
-  /// were reading. The source is kept rather than re-fetched, for the
-  /// reason `rebuild_rich_rows` reads the overlay's own source: the merge
-  /// invalidates the cache on its way out.
-  rich_return: Option<(RichSource, bool)>,
-  /// How many columns the rich view is scrolled right (issue #551).
-  ///
-  /// Only the rows that cannot be reflowed are wide enough to need it — a
-  /// fenced code line, a diff hunk — and they are the reason it exists: in
-  /// code the column is the meaning, so the line is kept whole and this is
-  /// the only way to its tail. Every other row was wrapped to fit and simply
-  /// loses its left edge, which is why the offset is bounded by the widest
-  /// preformatted row rather than by the widest row.
-  rich_h_offset: usize,
 
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
@@ -831,15 +654,6 @@ pub struct App {
   /// window the reader is actually looking at, and only the frame knows how
   /// tall that is.
   term_height: u16,
-
-  /// The status the open rich view renders (issue #420 / Codex review
-  /// #529). The overlay owns its source rather than reading it back from
-  /// the fetch cache, for the same reason `ci_overlay_checks` does: the
-  /// manual refresh flushes that cache before re-requesting, so a rebuild
-  /// landing in that window would find nothing and, if the refresh then
-  /// failed, would never get another chance. Populated at open and on
-  /// every landing, cleared on close.
-  rich_overlay_source: Option<RichSource>,
 
   /// The `PrCheck`s the open CI overlay renders (Codex review #455): the
   /// duration tick used to read them back from the PR fetch cache, so an
@@ -853,20 +667,6 @@ pub struct App {
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
   pub should_exit_to: Option<PathBuf>,
-
-  /// The selected worktree's branch name captured when the rename modal
-  /// (`View::Edit`, #290) opens — the `<old>` in `git branch -m <old> <new>`.
-  /// `None` while the modal is closed.
-  pub edit_original_branch: Option<String>,
-
-  /// The selected worktree's on-disk path captured when the rename modal
-  /// opens — the source for `git worktree move <old_path> <new_path>`.
-  pub edit_original_path: Option<PathBuf>,
-
-  /// Last rename failure, surfaced inside the Edit modal (mirrors
-  /// [`Self::create_failure`]) so the user can correct and retry without
-  /// losing the form. Cleared when the modal reopens.
-  pub edit_failure: Option<String>,
 
   /// Whether the terminal's mouse reporting is on (issue #624).
   ///
@@ -953,20 +753,13 @@ impl App {
       pending_delete: Vec::new(),
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
-      create_failure: None,
       branch_types,
       report: None,
-      help_scroll: 0,
-      help_x_scroll: 0,
-      help_max_scroll: 0,
-      help_max_x_scroll: 0,
+      help: HelpOverlay::new(),
+      rich: RichView::default(),
+      agents: AgentState::default(),
+      confirm_ctx: ConfirmContext::default(),
       sidebar: SidebarState::new(),
-      agent_snapshot: None,
-      agent_snapshot_at: None,
-      agent_all_sessions: Vec::new(),
-      agent_pins: std::collections::BTreeMap::new(),
-      agent_pool_wanted: false,
-      agent_redetect_wanted: false,
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -978,7 +771,6 @@ impl App {
       picker_should_exit: false,
       should_quit: false,
       confirm: ConfirmModal::new(),
-      delete_failure: None,
       spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
@@ -996,32 +788,15 @@ impl App {
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
       note_editor: None,
-      exec_picker_cfg: ExecConfig::default(),
-      exec_picker_common_dir: PathBuf::new(),
-      exec_container_seq: 0,
       clean_overlay: CleanOverlay::new(),
-      clean_overlay_cfg: CleanConfig::default(),
-      clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
-      detail_overlay_target: None,
-      detail_overlay_link: None,
-      rich_tab_pinned: false,
-      confirm_kind: ConfirmKind::DeleteWorktree,
-      pending_merge: None,
-      merge_failure: None,
-      rich_return: None,
-      rich_h_offset: 0,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
       term_width: 80,
       term_height: 24,
-      rich_overlay_source: None,
       ci_overlay_checks: Vec::new(),
       should_exit_to: None,
-      edit_original_branch: None,
-      edit_original_path: None,
-      edit_failure: None,
       mouse_capture,
       mouse: crate::tui::mouse::MouseMap::new(),
     };
@@ -1615,7 +1390,7 @@ impl App {
       .collect();
     if old_keys != new_keys {
       self.tasks.invalidate(TaskKind::AgentSessions);
-      self.agent_snapshot_at = None;
+      self.agents.snapshot_at = None;
     }
     self.status = if spawned > 0 {
       format!(
@@ -1802,7 +1577,7 @@ impl App {
   /// in flight coalesces onto it — same no-timer debounce as the sidebar.
   pub fn maybe_refresh_agent_sessions(&mut self) {
     const REDETECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
-    let fresh = self.agent_snapshot_at.is_some_and(|at| at.elapsed() < REDETECT_PERIOD);
+    let fresh = self.agents.snapshot_at.is_some_and(|at| at.elapsed() < REDETECT_PERIOD);
     if fresh {
       return;
     }
@@ -1849,7 +1624,7 @@ impl App {
     // Queue it instead; `apply_agent_snapshot` chains it on landing
     // (round R).
     if self.tasks.is_loading(TaskKind::AgentSessions) {
-      self.agent_pool_wanted = true;
+      self.agents.pool_wanted = true;
       return;
     }
     let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
@@ -1916,20 +1691,20 @@ impl App {
     if !self.tasks.complete(TaskKind::AgentSessions, generation) {
       return false;
     }
-    self.agent_snapshot = Some(map);
-    self.agent_snapshot_at = Some(std::time::Instant::now());
+    self.agents.snapshot = Some(map);
+    self.agents.snapshot_at = Some(std::time::Instant::now());
     // `None` = summary-only run: the previous pool survives so an open
     // attach prompt keeps its candidates (round Q).
     let landed_pool = all.is_some();
     if let Some(all) = all {
-      self.agent_all_sessions = all;
+      self.agents.all_sessions = all;
     }
     // A pool scan queued while this run was in flight chains now that the
     // slot is free (round R); a landing that already carried the pool
     // satisfies the request outright, and a prompt closed in the meantime
     // abandons it — nobody would consume the sweep (round T).
-    if self.agent_pool_wanted {
-      self.agent_pool_wanted = false;
+    if self.agents.pool_wanted {
+      self.agents.pool_wanted = false;
       let prompt_open = self.view == View::DetailOverlay
         && self.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input;
       if !landed_pool && prompt_open {
@@ -1941,11 +1716,11 @@ impl App {
     // a pin changed while this run was in flight: its map predates the
     // change, so the fresh event-path read stands and a re-detection is
     // chained by clearing the snapshot timestamp (round U).
-    if self.agent_redetect_wanted {
-      self.agent_redetect_wanted = false;
-      self.agent_snapshot_at = None;
+    if self.agents.redetect_wanted {
+      self.agents.redetect_wanted = false;
+      self.agents.snapshot_at = None;
     } else {
-      self.agent_pins = pins;
+      self.agents.pins = pins;
     }
     // A landing detection refreshes the open overlay in place (user
     // feedback: attach/detach used to leave stale rows until reopened).
@@ -1955,7 +1730,7 @@ impl App {
     if self.view == View::DetailOverlay
       && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::Agents
     {
-      if let Some((path, _)) = self.detail_overlay_target.clone() {
+      if let Some((path, _)) = self.detail_overlay.target.clone() {
         if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
           let rows = self.build_agent_rows(&w);
           self.detail_overlay.set_rows(rows);
@@ -1969,7 +1744,8 @@ impl App {
   /// any (issue #408). Pure lookup — the render path's only entry point.
   pub fn agents_for(&self, w: &crate::worktree::WorktreeInfo) -> Option<&crate::agent_sessions::WorktreeAgents> {
     self
-      .agent_snapshot
+      .agents
+      .snapshot
       .as_ref()
       .and_then(|map| map.get(&crate::agent_sessions::path_display_key(&w.path)))
   }
@@ -1982,7 +1758,8 @@ impl App {
   /// the column flicker.
   pub fn any_agent_sessions(&self) -> bool {
     self
-      .agent_snapshot
+      .agents
+      .snapshot
       .as_ref()
       .is_some_and(|map| map.values().any(|a| !a.sessions.is_empty()))
   }
@@ -2055,7 +1832,7 @@ impl App {
           }
           match result {
             Ok(result) => {
-              self.create_failure = None;
+              self.create_form.create_failure = None;
               self.report = Some(result.report);
               self.view = View::Report;
               let refresh_result = self.refresh();
@@ -2070,7 +1847,7 @@ impl App {
               };
             }
             Err(e) => {
-              self.create_failure = Some(e.clone());
+              self.create_form.create_failure = Some(e.clone());
               self.view = View::Create;
               self.status = format!("create failed: {}", e);
             }
@@ -2215,8 +1992,8 @@ impl App {
           // retry is one keystroke (#484).
           let refresh_result = self.refresh();
           let status = outcome.status_line();
-          self.delete_failure = outcome.failure_banner();
-          match &self.delete_failure {
+          self.confirm_ctx.delete_failure = outcome.failure_banner();
+          match &self.confirm_ctx.delete_failure {
             None => {
               self.view = View::List;
               self.confirm.reset();
@@ -2299,9 +2076,9 @@ impl App {
               // stays on the row the user just edited (mapped through the
               // filter — Codex review on PR #292).
               self.reselect_by_path(&res.new_path);
-              self.edit_original_branch = None;
-              self.edit_original_path = None;
-              self.edit_failure = None;
+              self.create_form.edit_original_branch = None;
+              self.create_form.edit_original_path = None;
+              self.create_form.edit_failure = None;
               self.create_form.reset();
               self.view = View::List;
             }
@@ -2310,7 +2087,7 @@ impl App {
             // longer reads as in-progress (Codex review on PR #292, P3).
             Err(e) => {
               self.status = format!("rename failed: {}", e);
-              self.edit_failure = Some(e);
+              self.create_form.edit_failure = Some(e);
             }
           }
           applied = true;
@@ -2433,7 +2210,7 @@ impl App {
 
   /// The failure banner for the merge modal.
   pub fn merge_failure(&self) -> Option<&str> {
-    self.merge_failure.as_deref()
+    self.confirm_ctx.merge_failure.as_deref()
   }
 
   /// `true` when a requested quit can safely leave the event loop now.
@@ -2830,9 +2607,9 @@ impl App {
     match self.view {
       View::Help => {
         if down {
-          self.help_scroll_down()
+          self.help.scroll_down()
         } else {
-          self.help_scroll_up()
+          self.help.scroll_up()
         }
       }
       View::CommandLogs => {
@@ -3352,7 +3129,7 @@ impl App {
     use super::ui::HintContext;
     match self.view {
       View::Create => self.create_hint_context(),
-      View::Confirm => match self.confirm_kind {
+      View::Confirm => match self.confirm_ctx.kind {
         ConfirmKind::DeleteWorktree => HintContext::Confirm,
         ConfirmKind::MergePr => HintContext::ConfirmMerge,
       },
@@ -3493,8 +3270,7 @@ impl App {
   /// the scroll offset here keeps re-opens predictable.
   pub fn enter_help(&mut self) {
     self.view = View::Help;
-    self.help_scroll = 0;
-    self.help_x_scroll = 0;
+    self.help.rewind();
   }
 
   /// Open the Command Logs overlay (issue #226). Snapshots the global
@@ -3674,181 +3450,6 @@ impl App {
       _ => {}
     }
     false
-  }
-
-  /// Open the full-size commit listing (issue #593).
-  ///
-  /// The overlay opens immediately on a loader and the revwalk runs on a
-  /// [`TaskKind::Commits`] worker. It is deliberately NOT inline: the walk
-  /// sorts `TIME | TOPOLOGICAL`, so it traverses the whole reachable graph
-  /// before yielding a row. Measured on this repo, asking for 300 commits
-  /// costs the same as asking for all 2058 — the limit truncates the
-  /// output, it bounds nothing about the latency, so an inline call would
-  /// freeze the event loop for as long as the history is deep. Same
-  /// boundary as the sidebar's own preview (#343), reached from a keypress
-  /// rather than from navigation.
-  ///
-  /// The rows are read fresh rather than taken from `SidebarState::cache`:
-  /// that cache is keyed by `(path, mode)` and only rebuilt while the
-  /// sidebar is open and in commits mode, so it is empty in the two states
-  /// where the overlay is most useful. The read still goes through
-  /// [`crate::worktree::recent_commits_cached`] at [`COMMITS_PAGE`], which
-  /// is the sidebar's own limit, so a sidebar that already walked this tip
-  /// makes the worker a hash lookup.
-  ///
-  /// The tip comes from `WorktreeInfo.head`, the snapshot `worktree::list`
-  /// took at the last refresh, NOT from resolving HEAD here. A commit
-  /// landing between two refreshes is therefore invisible to the overlay
-  /// until the next one — which is exactly what the sidebar's Commits pane
-  /// shows, since it hands the same `WorktreeInfo` to the same memo
-  /// (`ui.rs`, `SidebarMode::Commits`). Resolving HEAD at open would make
-  /// the overlay disagree with the pane it is a full-size view of, and the
-  /// staleness window is one auto-refresh interval. Raised twice by Codex
-  /// on PR #614 and declined both times: the snapshot is the contract of
-  /// `recent_commits_cached`, not an oversight here.
-  ///
-  /// With nothing selected the overlay still opens, empty — the
-  /// [`Self::enter_config_panel`] precedent: a modal that refuses to open
-  /// reads as a dead key.
-  pub fn enter_commits(&mut self) {
-    let selected = self.selected().cloned();
-    let target = selected.as_ref().map(|w| w.path.as_path());
-    // Coalescing is only sound while the in-flight read is for the SAME
-    // worktree, at the SAME limit, on the SAME tip (the #592 lesson, PR
-    // #612; the tip added by a Codex review on PR #614 — a commit landing
-    // while the overlay is closed mid-read would otherwise be swallowed by
-    // a worker holding the old `head`). Otherwise the
-    // request would come back `None` because the slot is still the old
-    // read's, no worker would exist for this one, and the old payload is
-    // dropped by the checks in the drain — leaving the loader up with
-    // nothing left to clear it.
-    let tip = selected.as_ref().and_then(|w| w.head.clone());
-    if self.commits.loading
-      && (self.commits.path.as_deref() != target || self.commits.limit != COMMITS_PAGE || self.commits.head != tip)
-    {
-      self.tasks.invalidate(TaskKind::Commits);
-    }
-    self.commits.begin(target, COMMITS_PAGE, tip);
-    self.view = View::Commits;
-    if let Some(w) = selected {
-      self.request_commits_read(w, COMMITS_PAGE);
-    }
-  }
-
-  /// The worktree the commit overlay opened on, if it is still listed.
-  ///
-  /// Deliberately not [`Self::selected`]: the auto-refresh moves the
-  /// selection while the overlay is up, and the drain matches a payload
-  /// against `commits.path`, so a read fired for the newly-selected
-  /// worktree is dropped on the path check *after* `complete` freed the
-  /// slot, leaving nothing to clear the loader (Codex review, PR #614).
-  ///
-  /// `None` once another process removes the worktree and the refresh drops
-  /// it from the list: there is no longer anything to walk.
-  fn commits_target(&self) -> Option<&WorktreeInfo> {
-    let path = self.commits.path.as_deref()?;
-    self.worktrees.iter().find(|w| w.path == path)
-  }
-
-  /// Whether the commit overlay can page deeper: the listing says a page
-  /// exists AND the worktree it opened on is still there to read.
-  ///
-  /// [`CommitsModal::can_load_more`] owns the arithmetic and cannot see the
-  /// worktree list, so on its own it keeps saying yes for a worktree that
-  /// has been removed underneath the overlay. The renderer and
-  /// [`Self::load_more_commits`] both read *this*, so the advertised key
-  /// and the key that acts can never disagree.
-  pub fn commits_can_load_more(&self) -> bool {
-    self.commits.can_load_more() && self.commits_target().is_some()
-  }
-
-  /// Re-read the commit listing one page deeper (issue #593).
-  ///
-  /// A re-read rather than an append: the graph renderer resolves a row's
-  /// connectors against the parents of the rows below it, so a page tacked
-  /// onto the end would draw its topology against nothing. The memo in
-  /// [`crate::worktree::recent_commits_cached`] is keyed on the limit, so
-  /// the deeper read is a fresh entry rather than an invalidation of the
-  /// sidebar's.
-  ///
-  /// The rows already on screen stay up while the worker runs, so paging
-  /// keeps its place instead of blanking. A no-op when
-  /// [`Self::commits_can_load_more`] is false; the footer drops the `load
-  /// more` hint on that same predicate, so the key is never advertised
-  /// where it would do nothing.
-  pub fn load_more_commits(&mut self) {
-    if !self.commits_can_load_more() {
-      return;
-    }
-    let Some(w) = self.commits_target().cloned() else {
-      return;
-    };
-    let limit = self.commits.next_limit();
-    self.commits.begin_more(limit);
-    self.request_commits_read(w, limit);
-  }
-
-  /// Spawn the worker that walks `w`'s log to `limit` and renders it.
-  ///
-  /// A `None` from the slot means a read for this same worktree and limit
-  /// is already out: ride on it, which is what keeps a held `6` from
-  /// spawning a revwalk per repeat. Callers that need a *different* read
-  /// invalidate the slot first.
-  fn request_commits_read(&mut self, w: WorktreeInfo, limit: usize) {
-    let Some(generation) = self.tasks.request(TaskKind::Commits) else {
-      return;
-    };
-    let theme = self.theme;
-    let tx = self.task_tx.clone();
-    std::thread::spawn(move || {
-      let snap = crate::tui::ui::recent_commits_listing(&w, limit, crate::worktree::unix_now(), &theme);
-      let _ = tx.send(TaskMsg::Commits(generation, w.path, limit, snap));
-    });
-  }
-
-  /// `true` while the commit listing is waiting on its worker.
-  pub fn is_commits_loading(&self) -> bool {
-    self.commits.loading
-  }
-
-  /// Spawn the second, slower read: one `git log --raw --numstat` over the
-  /// oids already on screen, rebuilding the metadata columns with the diff
-  /// counts (issue #593).
-  ///
-  /// Chained after the rows rather than folded into them. The revwalk takes
-  /// about 0.4s and this takes one to three seconds depending on the page
-  /// depth, so folding the two would hold the whole listing behind the
-  /// slower half. The rows appear first and the column grows under them.
-  ///
-  /// A no-op with nothing to read, and when the stats for this listing are
-  /// already in place — the drain calls this on every landing, including
-  /// the ones that only re-installed the same rows.
-  pub fn request_commit_stats(&mut self) {
-    if self.commits.stats_loaded || self.commits.rows.is_empty() {
-      return;
-    }
-    let Some(path) = self.commits.path.clone() else {
-      return;
-    };
-    let (limit, tip) = (self.commits.limit, self.commits.head.clone());
-    let oids: Vec<git2::Oid> = self.commits.rows.iter().map(|r| r.hash).collect();
-    let rows = self.commits.rows.clone();
-    // A read for a different listing is still out: free the slot, or this
-    // one never starts and the columns never grow.
-    if self.tasks.is_loading(TaskKind::CommitStats) {
-      self.tasks.invalidate(TaskKind::CommitStats);
-    }
-    let Some(generation) = self.tasks.request(TaskKind::CommitStats) else {
-      return;
-    };
-    let theme = self.theme;
-    let tx = self.task_tx.clone();
-    std::thread::spawn(move || {
-      let stats = crate::worktree::commit_stats(&path, &oids).unwrap_or_default();
-      let now = crate::worktree::unix_now();
-      let tiers = crate::tui::ui::commit_meta_columns(&rows, now, &stats, &theme);
-      let _ = tx.send(TaskMsg::CommitStats(generation, path, limit, tip, tiers));
-    });
   }
 
   /// Open the Configuration panel (issue #232). Resolves the effective
@@ -4174,138 +3775,6 @@ impl App {
     matches!(self.view, View::ExecPicker | View::CleanReport)
   }
 
-  /// Open the exec profile picker (issue #325). Populates it from
-  /// `[exec.profiles.*]` and switches to [`View::ExecPicker`]. Refuses
-  /// (status-bar message, no transition) when nothing is selected or no
-  /// exec profiles are configured — there is nothing to pick.
-  pub fn enter_exec_picker(&mut self) {
-    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
-      self.status = "nothing selected".into();
-      return;
-    };
-    let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
-    if names.is_empty() {
-      self.status = "no [exec.profiles] configured: add one to .gwm.toml".into();
-      return;
-    }
-    // Capture the target worktree path AND the active repo's `[exec]` config
-    // now: an auto-refresh can drift the live selection (and, in workspace
-    // mode, the active repo) while the picker is open, so `Enter` must run in
-    // *this* worktree against *this* config — not whatever is live later
-    // (Codex #333 review).
-    self.exec_picker_cfg = self.config.exec.clone();
-    self.exec_picker_common_dir = self.repo.commondir().to_path_buf();
-    self.exec_picker.open(names, cwd);
-    self.view = View::ExecPicker;
-  }
-
-  /// Handle a key inside the exec picker overlay (issue #325). The
-  /// testable handler owns the highlight movement; the run loop owns the
-  /// two side effects (resolve + spawn, or close). Keys resolve through
-  /// [`KeyContext::ExecPicker`] so they honour `[tui.keys.modal.exec]`.
-  pub fn handle_exec_picker_key(&mut self, key: KeyEvent) -> ExecPickerKey {
-    match self.resolve_modal(KeyContext::ExecPicker, key) {
-      Some(ModalAction::ExecPickerCancel) => ExecPickerKey::Cancel,
-      Some(ModalAction::ExecPickerAccept) => ExecPickerKey::Submit,
-      Some(ModalAction::ExecPickerNext) => {
-        self.exec_picker.next();
-        ExecPickerKey::Handled
-      }
-      Some(ModalAction::ExecPickerPrev) => {
-        self.exec_picker.prev();
-        ExecPickerKey::Handled
-      }
-      _ => ExecPickerKey::Handled,
-    }
-  }
-
-  /// Resolve the highlighted exec profile to an `(argv, cwd, teardown)` triple
-  /// for the run loop to spawn in a PTY overlay (issue #325). `None` (with a
-  /// status-bar message) when nothing is selected or the profile fails to
-  /// resolve — e.g. an empty `command` array. The argv is the frozen
-  /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
-  /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
-  ///
-  /// `teardown` is `Some` only for a containerised profile (issue #421):
-  /// killing the pty leader kills the `docker` client, never the container it
-  /// asked the daemon for, so the overlay removes it by name on close.
-  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf, Option<Vec<String>>)> {
-    let profile = self.exec_picker.selected_profile()?.to_string();
-    // Resolve against the worktree captured when the picker opened, NOT the
-    // live selection (which an auto-refresh may have drifted) — #333 review.
-    let Some(cwd) = self.exec_picker.cwd().map(Path::to_path_buf) else {
-      self.status = "nothing selected".into();
-      return None;
-    };
-    // Resolve against the `[exec]` config captured at open, not the live one.
-    let mut teardown: Option<Vec<String>> = None;
-    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
-      Ok(mut argv) => {
-        // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
-        // the captured worktree, exactly like the CLI exec path — otherwise
-        // `argv[0]` would resolve against gwm's own cwd (Codex #333 review).
-        // A bare command (`cargo`) or an absolute path is returned unchanged
-        // (PATH lookup / as-is).
-        if let Some(first) = argv.first_mut() {
-          *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
-        }
-        // A profile carrying `[container]` runs in a container here too
-        // (issue #421) — the same profile must not mean "on the host" in the
-        // TUI and "in a container" on the CLI. The wrap comes AFTER the
-        // relative-program anchoring: host paths are mirrored inside the
-        // container, so the anchored absolute path is valid on both sides.
-        match crate::exec::resolve_exec_container(Some(&profile), &self.exec_picker_cfg) {
-          Ok(Some(container)) => {
-            match crate::exec::ContainerPlan::resolve(container, &self.exec_picker_common_dir, |bin| {
-              which::which(bin).is_ok()
-            }) {
-              // `wrap_interactive`: this overlay spawns into a real pty, so
-              // the container gets `-i -t` and a REPL / debugger / prompting
-              // command keeps working, exactly as it does when the same
-              // profile runs on the host here.
-              Ok(plan) => {
-                self.exec_container_seq += 1;
-                let name = crate::exec::container_run_name(&cwd, std::process::id(), self.exec_container_seq);
-                match plan.wrap_interactive(&cwd, &argv, &name) {
-                  Ok(wrapped) => {
-                    argv = wrapped;
-                    teardown = Some(plan.container_teardown_argv(&name));
-                  }
-                  Err(e) => {
-                    self.status = format!("exec profile {profile:?}: {e}");
-                    return None;
-                  }
-                }
-              }
-              Err(e) => {
-                self.status = format!("exec profile {profile:?}: {e}");
-                return None;
-              }
-            }
-          }
-          Ok(None) => {}
-          Err(e) => {
-            self.status = format!("exec profile {profile:?}: {e}");
-            return None;
-          }
-        }
-        Some((argv, cwd, teardown))
-      }
-      Err(e) => {
-        self.status = format!("exec profile {profile:?}: {e}");
-        None
-      }
-    }
-  }
-
-  /// Close the exec picker without running anything (issue #325). Returns
-  /// to [`View::List`].
-  pub fn close_exec_picker(&mut self) {
-    if self.view == View::ExecPicker {
-      self.view = View::List;
-    }
-  }
-
   // ── Clean overlay (issue #325) ─────────────────────────────────────────
 
   /// Open the clean overlay (issue #325). Populates the `[clean.profiles]`
@@ -4327,7 +3796,7 @@ impl App {
     // Capture the target now (clean-overlay pattern, Codex #333): an
     // auto-refresh can drift the live selection while the overlay is open,
     // and attach/detach must pin against THIS worktree's branch.
-    self.detail_overlay_target = Some((
+    self.detail_overlay.target = Some((
       sel.path.clone(),
       crate::github::pinnable_branch(sel.branch.as_deref()).map(str::to_string),
     ));
@@ -4455,11 +3924,11 @@ impl App {
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
-    self.detail_overlay_target = None;
+    self.detail_overlay.target = None;
     // Pin the overlay to the PR it renders, so a link mutation that
     // disagrees can close it (Codex review #455). The checks themselves
     // are kept too — the duration tick's cache-independent source.
-    self.detail_overlay_link = self
+    self.detail_overlay.link = self
       .github
       .link
       .pr
@@ -4565,9 +4034,9 @@ impl App {
     };
     // Drop the agents consumer's target; pin this overlay to the link it
     // renders so a disagreeing mutation can close it.
-    self.detail_overlay_target = None;
-    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
-    self.rich_overlay_source = Some(source);
+    self.detail_overlay.target = None;
+    self.detail_overlay.link = Some((self.github.forge_identity(), target, number));
+    self.rich.source = Some(source);
     self
       .detail_overlay
       .open(kind, crate::naming::sanitise_for_terminal(&title), rows);
@@ -4642,7 +4111,7 @@ impl App {
       return;
     }
     let width = self.rich_view_width();
-    let rows = match &self.rich_overlay_source {
+    let rows = match &self.rich.source {
       Some(RichSource::Pr(pr)) => crate::tui::state::rich_view::rich_pr_rows(
         pr,
         self.github.pr_threads_state(pr.number),
@@ -4675,7 +4144,7 @@ impl App {
     //
     // Only the DESTINATION has to be loaded, since it is the one a switch
     // has to render.
-    let (on_issue, active) = match (&self.rich_overlay_source, self.detail_overlay.kind) {
+    let (on_issue, active) = match (&self.rich.source, self.detail_overlay.kind) {
       (Some(RichSource::Issue(i)), DetailKind::RichIssue) => (true, format!("Issue #{}", i.number)),
       (Some(RichSource::Pr(p)), DetailKind::RichPr) => (false, format!("{} #{}", self.pr_noun_titlecase(), p.number)),
       _ => return Vec::new(),
@@ -4736,10 +4205,10 @@ impl App {
       let number = pr.number;
       self.spawn_github_pr_threads(number);
     }
-    self.rich_tab_pinned = true;
+    self.rich.tab_pinned = true;
     // The offset describes the side being left. Carried across, the other
     // tab would open already scrolled, with its first columns hidden.
-    self.rich_h_offset = 0;
+    self.rich.h_offset = 0;
     self.open_rich_overlay(source, title, width);
   }
 
@@ -4753,7 +4222,7 @@ impl App {
   /// with nothing on screen to explain it. One clamp here means a path
   /// added later inherits it instead of having to remember it.
   pub fn rich_h_offset(&self) -> usize {
-    self.rich_h_offset.min(self.rich_h_max())
+    self.rich.h_offset.min(self.rich_h_max())
   }
 
   /// The furthest right the view can usefully scroll: enough to bring the
@@ -4783,12 +4252,12 @@ impl App {
 
   /// `l` / `→` inside the rich view.
   pub fn rich_view_scroll_right(&mut self) {
-    self.rich_h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
+    self.rich.h_offset = (self.rich_h_offset() + RICH_H_STEP).min(self.rich_h_max());
   }
 
   /// `h` / `←` inside the rich view.
   pub fn rich_view_scroll_left(&mut self) {
-    self.rich_h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
+    self.rich.h_offset = self.rich_h_offset().saturating_sub(RICH_H_STEP);
   }
 
   /// Remember the open rich view so a child modal can come back to it.
@@ -4802,10 +4271,10 @@ impl App {
     let from_rich = self.view == View::DetailOverlay
       && matches!(self.detail_overlay.kind, DetailKind::RichIssue | DetailKind::RichPr);
     if !from_rich {
-      self.rich_return = None;
+      self.rich.return_to = None;
       return;
     }
-    self.rich_return = self.rich_overlay_source.clone().map(|s| (s, self.rich_tab_pinned));
+    self.rich.return_to = self.rich.source.clone().map(|s| (s, self.rich.tab_pinned));
   }
 
   /// Reopen the rich view a child modal was opened from, if there was one.
@@ -4813,7 +4282,7 @@ impl App {
   /// `true` when it took the view back, so the caller knows not to fall
   /// through to the worktree table.
   fn restore_rich_view(&mut self) -> bool {
-    let Some((source, pinned)) = self.rich_return.take() else {
+    let Some((source, pinned)) = self.rich.return_to.take() else {
       return false;
     };
     let width = self.rich_view_width();
@@ -4825,7 +4294,7 @@ impl App {
     // The tab the reader had chosen survives the round trip; without this a
     // PR landing right after would promote the issue tab out from under
     // them, which is the bug the pin exists to prevent.
-    self.rich_tab_pinned = pinned;
+    self.rich.tab_pinned = pinned;
     true
   }
 
@@ -4836,7 +4305,7 @@ impl App {
   /// cache, and a yank landing in that window would copy an empty string
   /// over whatever the user had.
   pub fn rich_yank_url(&self) -> Option<String> {
-    match self.rich_overlay_source.as_ref()? {
+    match self.rich.source.as_ref()? {
       RichSource::Pr(pr) => Some(pr.url.clone()),
       RichSource::Issue(issue) => Some(issue.url.clone()),
     }
@@ -4849,7 +4318,7 @@ impl App {
   /// over whatever was on the clipboard is worse than saying there is
   /// nothing to copy.
   pub fn rich_yank_body(&self) -> Option<String> {
-    let body = match self.rich_overlay_source.as_ref()? {
+    let body = match self.rich.source.as_ref()? {
       RichSource::Pr(pr) => &pr.detail.body,
       RichSource::Issue(issue) => &issue.detail.body,
     };
@@ -5014,7 +4483,8 @@ impl App {
     // does no branch-config I/O on the event loop (round P): the map is
     // refreshed by the landing itself and by every attach/detach.
     let pinned = self
-      .agent_pins
+      .agents
+      .pins
       .get(&crate::agent_sessions::path_display_key(&w.path))
       .cloned()
       .unwrap_or_default();
@@ -5063,7 +4533,7 @@ impl App {
       self.status = "agent pins are per-repo: not available in workspace mode".into();
       return false;
     }
-    let Some((path, _)) = self.detail_overlay_target.clone() else {
+    let Some((path, _)) = self.detail_overlay.target.clone() else {
       self.status = "cannot pin: no worktree captured".into();
       return false;
     };
@@ -5123,7 +4593,7 @@ impl App {
   /// The prompt's filtered candidate pool (owned clones — the borrow of
   /// `agent_all_sessions` must not outlive `&mut self` call sites).
   pub fn agent_input_candidates(&self) -> Vec<crate::agent_sessions::AgentSession> {
-    crate::tui::state::detail_overlay::filter_sessions(&self.agent_all_sessions, &self.detail_overlay.input)
+    crate::tui::state::detail_overlay::filter_sessions(&self.agents.all_sessions, &self.detail_overlay.input)
       .into_iter()
       .cloned()
       .collect()
@@ -5161,7 +4631,7 @@ impl App {
       self.status = "no session selected to unpin".into();
       return;
     };
-    let Some((path, _)) = self.detail_overlay_target.clone() else {
+    let Some((path, _)) = self.detail_overlay.target.clone() else {
       self.status = "cannot detach: no worktree captured".into();
       return;
     };
@@ -5188,16 +4658,17 @@ impl App {
   /// overlay is about**, resolved from the SAME pool the rows were built
   /// from.
   ///
-  /// That is the whole point of going through `detail_overlay_target`:
-  /// [`Self::agent_all_sessions`] is a *different* collection with a
+  /// That is the whole point of going through `DetailOverlay::target`:
+  /// [`AgentState::all_sessions`] is a *different* collection with a
   /// different refresh trigger (the attach-by-id prompt fills it on open),
   /// so reading the id back from there would hand out a session whose `cwd`
   /// is another repo, or nothing at all on a user who never pressed `i`.
   fn selected_agent_session(&self) -> Option<(crate::agent_sessions::AgentSession, PathBuf)> {
     let sid = self.detail_overlay.selected_meta()?;
-    let (path, _) = self.detail_overlay_target.as_ref()?;
+    let (path, _) = self.detail_overlay.target.as_ref()?;
     let session = self
-      .agent_snapshot
+      .agents
+      .snapshot
       .as_ref()?
       .get(&crate::agent_sessions::path_display_key(path))?
       .sessions
@@ -5341,9 +4812,9 @@ impl App {
   /// render-side pins copy (the Agents pane shows pinned-only), and push
   /// the new pin state to every other surface (snapshot re-detection).
   fn refresh_agent_overlay_rows(&mut self, path: &Path) {
-    // Map first: `build_agent_rows` reads the [`Self::agent_pins`] copy
+    // Map first: `build_agent_rows` reads the [`AgentState::pins`] copy
     // (round P), so the fresh read must land before the rows rebuild.
-    self.agent_pins = self.read_agent_pins();
+    self.agents.pins = self.read_agent_pins();
     if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
       let rows = self.build_agent_rows(&w);
       self.detail_overlay.set_rows(rows);
@@ -5353,21 +4824,21 @@ impl App {
       // dropped — invalidating here raced a second scan against it
       // (round U, same hazard as rounds P/R). Let it land and chain the
       // re-detection; its pre-change pins are skipped on landing.
-      self.agent_redetect_wanted = true;
+      self.agents.redetect_wanted = true;
     } else {
       self.tasks.invalidate(TaskKind::AgentSessions);
-      self.agent_snapshot_at = None;
+      self.agents.snapshot_at = None;
     }
   }
 
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
-    self.detail_overlay_target = None;
-    self.detail_overlay_link = None;
-    self.rich_tab_pinned = false;
-    self.rich_h_offset = 0;
+    self.detail_overlay.target = None;
+    self.detail_overlay.link = None;
+    self.rich.tab_pinned = false;
+    self.rich.h_offset = 0;
     self.ci_overlay_checks.clear();
-    self.rich_overlay_source = None;
+    self.rich.source = None;
     // Back to the rich view when this overlay was opened from it, rather
     // than all the way out to the table (validation feedback on #551).
     if self.restore_rich_view() {
@@ -5388,9 +4859,11 @@ impl App {
     // (Codex #333 review).
     let name = sel.name.clone();
     let path = sel.path.clone();
-    self.clean_overlay_cfg = self.config.clean.clone();
-    self.clean_overlay_countdown_secs = self.config.tui.effective_confirm_countdown_secs();
-    let names: Vec<String> = self.clean_overlay_cfg.profiles.keys().cloned().collect();
+    self.clean_overlay.capture_context(
+      self.config.clean.clone(),
+      self.config.tui.effective_confirm_countdown_secs(),
+    );
+    let names: Vec<String> = self.clean_overlay.cfg().profiles.keys().cloned().collect();
     self.clean_overlay.open(names, name, path);
     if let Err(e) = self.clean_overlay_rescan() {
       self.status = format!("clean: {e}");
@@ -5412,7 +4885,7 @@ impl App {
       return Ok(());
     };
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
-    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg)?;
+    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), self.clean_overlay.cfg())?;
     let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
     self.clean_overlay.set_scan(reclaim, skipped);
     Ok(())
@@ -5448,7 +4921,7 @@ impl App {
   pub fn clean_countdown_total(&self) -> Duration {
     // The value captured at open (Codex #333) — never the live config, which a
     // workspace refresh could swap (e.g. to `0`, erasing the safety delay).
-    Duration::from_secs(u64::from(self.clean_overlay_countdown_secs))
+    Duration::from_secs(u64::from(self.clean_overlay.countdown_secs()))
   }
 
   /// Handle the clean confirm key. Arms / disarms / fires the countdown via
@@ -5517,7 +4990,7 @@ impl App {
       return;
     };
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
-    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg) {
+    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), self.clean_overlay.cfg()) {
       Ok(d) => d,
       Err(e) => {
         self.status = format!("clean: {e}");
@@ -5758,20 +5231,20 @@ impl App {
   /// Scroll the help overlay down one row, clamped to the renderer-published
   /// `help_max_scroll` so it never scrolls past the last line.
   pub fn help_scroll_down(&mut self) {
-    self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+    self.help.scroll_down();
   }
 
   /// Scroll the help overlay up one row, clamped at the top.
   pub fn help_scroll_up(&mut self) {
-    self.help_scroll = self.help_scroll.saturating_sub(1);
+    self.help.scroll_up();
   }
 
   pub fn help_scroll_right(&mut self) {
-    self.help_x_scroll = (self.help_x_scroll + 1).min(self.help_max_x_scroll);
+    self.help.scroll_right();
   }
 
   pub fn help_scroll_left(&mut self) {
-    self.help_x_scroll = self.help_x_scroll.saturating_sub(1);
+    self.help.scroll_left();
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -6414,9 +5887,9 @@ impl App {
       self.create_form.mode = Mode::Freeform;
       self.create_form.name = branch.clone();
       self.create_form.field = Field::Name;
-      self.edit_original_branch = Some(branch);
-      self.edit_original_path = Some(path);
-      self.edit_failure = None;
+      self.create_form.edit_original_branch = Some(branch);
+      self.create_form.edit_original_path = Some(path);
+      self.create_form.edit_failure = None;
       self.view = View::Edit;
       return;
     };
@@ -6476,9 +5949,9 @@ impl App {
     // description, and naming `Field::Desc` here focused an input the renderer
     // does not draw on a pattern without one (#418).
     self.create_form.field = self.create_form.last_field();
-    self.edit_original_branch = Some(branch);
-    self.edit_original_path = Some(path);
-    self.edit_failure = None;
+    self.create_form.edit_original_branch = Some(branch);
+    self.create_form.edit_original_path = Some(path);
+    self.create_form.edit_failure = None;
     self.view = View::Edit;
   }
 
@@ -6579,7 +6052,7 @@ impl App {
     }
     match self.create_form.mode {
       Mode::Structured if self.create_form.name.is_empty() => {
-        if let Some(branch) = self.edit_original_branch.clone() {
+        if let Some(branch) = self.create_form.edit_original_branch.clone() {
           self.create_form.name = branch;
         }
       }
@@ -6602,9 +6075,9 @@ impl App {
   /// Cancel the rename modal (`Esc`): drop the captured original branch/path
   /// and return to the list without touching git.
   pub fn cancel_edit_worktree(&mut self) {
-    self.edit_original_branch = None;
-    self.edit_original_path = None;
-    self.edit_failure = None;
+    self.create_form.edit_original_branch = None;
+    self.create_form.edit_original_path = None;
+    self.create_form.edit_failure = None;
     self.create_form.reset();
     self.view = View::List;
   }
@@ -6669,12 +6142,13 @@ impl App {
     // added there is what actually makes the two agree.
     let written = self.required_segments();
     let writes = |segment: &str| written.contains(&segment);
-    let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
+    let opened_with = self.create_form.edit_original_branch.as_deref().and_then(|branch| {
       crate::naming::worktree_spec(
         &self.config,
         &self.repo_name,
         branch,
         self
+          .create_form
           .edit_original_path
           .as_ref()
           .and_then(|path| path.file_name())
@@ -6714,7 +6188,7 @@ impl App {
           // quoted is on screen anyway, in the `From :` row above (found
           // validating by hand).
           let _ = was;
-          self.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
+          self.create_form.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
           return true;
         }
       }
@@ -6753,7 +6227,7 @@ impl App {
     let name = match self.worktree_name_from_form() {
       Ok(n) => n,
       Err(e) => {
-        self.edit_failure = Some(e);
+        self.create_form.edit_failure = Some(e);
         return Ok(());
       }
     };
@@ -6764,23 +6238,23 @@ impl App {
     let (new_branch, new_name) = match self.edit_target() {
       Ok(target) => target,
       Err(e) => {
-        self.edit_failure = Some(e);
+        self.create_form.edit_failure = Some(e);
         return Ok(());
       }
     };
     let new_path = match name.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir) {
       Ok(p) => p,
       Err(e) => {
-        self.edit_failure = Some(e.to_string());
+        self.create_form.edit_failure = Some(e.to_string());
         return Ok(());
       }
     };
 
-    let Some(old_branch) = self.edit_original_branch.clone() else {
+    let Some(old_branch) = self.create_form.edit_original_branch.clone() else {
       self.cancel_edit_worktree();
       return Ok(());
     };
-    let Some(old_path) = self.edit_original_path.clone() else {
+    let Some(old_path) = self.create_form.edit_original_path.clone() else {
       self.cancel_edit_worktree();
       return Ok(());
     };
@@ -6803,7 +6277,7 @@ impl App {
     let Some(generation) = self.tasks.request(TaskKind::EditWorktree) else {
       return Ok(());
     };
-    self.edit_failure = None;
+    self.create_form.edit_failure = None;
     self.spinner.reset();
     self.status = TaskKind::EditWorktree.loading_label().into();
     self.spawn_edit_worktree(
@@ -6963,7 +6437,7 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
-    self.create_failure = None;
+    self.create_form.create_failure = None;
     // Open focused on the first field the user types into rather than the
     // cycle-only Type field (#217 UX): the first keypress then edits text
     // instead of being a silent no-op on Type. The type keeps its `reset()`
@@ -6988,7 +6462,7 @@ impl App {
   pub fn enter_create_from_issue(&mut self) {
     self.view = View::Create;
     self.create_form.enter_from_issue();
-    self.create_failure = None;
+    self.create_form.create_failure = None;
     self.status = "issue number, then enter: derive the branch from it · esc: cancel".into();
   }
 
@@ -7329,7 +6803,7 @@ impl App {
     let Some(generation) = self.tasks.request(TaskKind::CreateWorktree) else {
       return Ok(());
     };
-    self.create_failure = None;
+    self.create_form.create_failure = None;
     self.spinner.reset();
     self.status = TaskKind::CreateWorktree.loading_label().into();
     self.spawn_create_worktree(
@@ -7492,7 +6966,7 @@ impl App {
     self.pending_delete = targets;
     self.view = View::Confirm;
     self.confirm.reset();
-    self.delete_failure = None;
+    self.confirm_ctx.delete_failure = None;
     // Start the loader animation from a deterministic frame each time
     // the modal opens (#187).
     self.spinner.reset();
@@ -7528,7 +7002,7 @@ impl App {
       };
       return;
     };
-    self.pending_merge = Some(PendingMerge {
+    self.confirm_ctx.pending_merge = Some(PendingMerge {
       number: pr.number,
       title: crate::naming::sanitise_for_terminal(&pr.title),
       head_ref: crate::naming::sanitise_for_terminal(&pr.detail.head_ref),
@@ -7540,7 +7014,7 @@ impl App {
       noun: self.pr_noun_titlecase(),
     });
     self.remember_rich_view();
-    self.confirm_kind = ConfirmKind::MergePr;
+    self.confirm_ctx.kind = ConfirmKind::MergePr;
     self.view = View::Confirm;
     self.confirm.reset();
     self.spinner.reset();
@@ -7553,12 +7027,12 @@ impl App {
 
   /// What the open confirmation is about.
   pub fn confirm_kind(&self) -> ConfirmKind {
-    self.confirm_kind
+    self.confirm_ctx.kind
   }
 
   /// The merge the confirmation is holding, for the renderer.
   pub fn pending_merge(&self) -> Option<&PendingMerge> {
-    self.pending_merge.as_ref()
+    self.confirm_ctx.pending_merge.as_ref()
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
@@ -7584,7 +7058,7 @@ impl App {
       return Ok(());
     };
     let delete_branch = self.delete_branch_on_remove;
-    self.delete_failure = None;
+    self.confirm_ctx.delete_failure = None;
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::DeleteWorktree.loading_label().into();
@@ -7605,11 +7079,11 @@ impl App {
   pub fn apply_merge_result(&mut self, outcome: std::result::Result<(), String>) {
     match outcome {
       Ok(()) => {
-        let pending = self.pending_merge.take();
+        let pending = self.confirm_ctx.pending_merge.take();
         let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
         let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
-        self.confirm_kind = ConfirmKind::DeleteWorktree;
-        self.merge_failure = None;
+        self.confirm_ctx.kind = ConfirmKind::DeleteWorktree;
+        self.confirm_ctx.merge_failure = None;
         // A merged PR is still the thing the reader was looking at, and the
         // refresh below will bring its new state to the same view.
         if !self.restore_rich_view() {
@@ -7630,7 +7104,7 @@ impl App {
       // failure would throw that away and leave the reader to guess whether
       // to retry.
       Err(e) => {
-        self.merge_failure = Some(e.trim().to_string());
+        self.confirm_ctx.merge_failure = Some(e.trim().to_string());
         self.status = format!("merge failed: {}", e.trim());
       }
     }
@@ -7647,10 +7121,10 @@ impl App {
   /// different consequence, so the moment of friction is owed again.
   pub fn cycle_merge_method(&mut self) {
     use crate::forge::MergeMethod;
-    if self.confirm_kind != ConfirmKind::MergePr || self.is_merge_loading() {
+    if self.confirm_ctx.kind != ConfirmKind::MergePr || self.is_merge_loading() {
       return;
     }
-    let Some(pending) = self.pending_merge.as_mut() else {
+    let Some(pending) = self.confirm_ctx.pending_merge.as_mut() else {
       return;
     };
     pending.method = match pending.method {
@@ -7669,7 +7143,7 @@ impl App {
   /// talks to a server and takes seconds, and a synchronous call would
   /// freeze the frame for all of them.
   pub fn confirm_merge(&mut self) {
-    let Some(pending) = self.pending_merge.clone() else {
+    let Some(pending) = self.confirm_ctx.pending_merge.clone() else {
       return;
     };
     // Fire the SNAPSHOT taken when the modal opened, not a fresh lookup: an
@@ -7685,7 +7159,7 @@ impl App {
     // The modal STAYS UP (validation feedback), showing a loader the way
     // the delete flow does. Dismissing it here left the screen with only a
     // status line for an operation that talks to a server and can fail.
-    self.merge_failure = None;
+    self.confirm_ctx.merge_failure = None;
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::MergePr.loading_label().into();
@@ -7779,11 +7253,11 @@ impl App {
       return;
     }
     self.confirm.dismiss();
-    self.delete_failure = None;
+    self.confirm_ctx.delete_failure = None;
     self.pending_delete.clear();
-    self.pending_merge = None;
-    self.merge_failure = None;
-    self.confirm_kind = ConfirmKind::DeleteWorktree;
+    self.confirm_ctx.pending_merge = None;
+    self.confirm_ctx.merge_failure = None;
+    self.confirm_ctx.kind = ConfirmKind::DeleteWorktree;
     if self.restore_rich_view() {
       return;
     }
@@ -8074,7 +7548,7 @@ impl App {
 
   /// Close an open forge-linked overlay when the link no longer matches
   /// the `(slug, side, number)` it was built for — see
-  /// `detail_overlay_link`. Covers the CI checks list and the rich view
+  /// `DetailOverlay::link`. Covers the CI checks list and the rich view
   /// alike (issue #420): the failure is the same one, the rows describe a
   /// PR/issue that is no longer the linked one, so the membership test is
   /// `is_forge_linked` rather than an equality repeated per consumer.
@@ -8085,7 +7559,7 @@ impl App {
     // Compare against the side the overlay was opened for: a rich *issue*
     // view must not close because the PR link moved, and must close when
     // the issue link does.
-    let current = match self.detail_overlay_link {
+    let current = match self.detail_overlay.link {
       Some((_, LinkTarget::Issue, _)) => self
         .github
         .link
@@ -8097,7 +7571,7 @@ impl App {
         .pr
         .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n)),
     };
-    if current != self.detail_overlay_link {
+    if current != self.detail_overlay.link {
       self.close_detail_overlay();
     }
   }
@@ -8420,7 +7894,7 @@ impl App {
   /// The PR whose inline review threads the rich view is currently
   /// rendering, if that is what is on screen (issue #619).
   ///
-  /// Gated on the VIEW rather than on `rich_overlay_source` alone: the
+  /// Gated on the VIEW rather than on `RichView::source` alone: the
   /// source outlives the overlay until [`Self::close_detail_overlay`]
   /// clears it, and a keep that outlives the reader would pin one PR's
   /// threads in the cache for the rest of the session. `DetailOverlay`
@@ -8431,7 +7905,7 @@ impl App {
     if self.view != View::DetailOverlay {
       return None;
     }
-    match self.rich_overlay_source.as_ref()? {
+    match self.rich.source.as_ref()? {
       RichSource::Pr(pr) => Some(pr.number),
       RichSource::Issue(_) => None,
     }
@@ -8783,7 +8257,7 @@ impl App {
         // The reader is on the issue tab because they asked to be (#551).
         // Promoting here is right for an issue that was standing in for a
         // PR that had not landed yet, and wrong for one that was chosen.
-        if self.rich_tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
+        if self.rich.tab_pinned && self.detail_overlay.kind == DetailKind::RichIssue {
           return;
         }
         (
@@ -8826,10 +8300,10 @@ impl App {
     // left, and the new one would open already scrolled with its first
     // columns hidden and nothing saying why.
     if promoted {
-      self.rich_h_offset = 0;
+      self.rich.h_offset = 0;
     }
-    self.rich_overlay_source = Some(source);
-    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    self.rich.source = Some(source);
+    self.detail_overlay.link = Some((self.github.forge_identity(), target, number));
     if promoted {
       self.detail_overlay.open(kind, title, rows);
     } else {

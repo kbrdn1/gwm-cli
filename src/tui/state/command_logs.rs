@@ -7,7 +7,7 @@
 //! the global mid-frame — the same boundary the modal-render tests inject
 //! through.
 //!
-//! Scroll mirrors the help overlay (`App::help_scroll` / `help_max_scroll`):
+//! Scroll mirrors the help overlay (`HelpOverlay::scroll` / `max_scroll`):
 //! the cursor lives here, but `max_scroll` / `max_x_scroll` are republished
 //! by the renderer each frame against the real viewport, since only the
 //! renderer knows both the content length and the inner modal height. The

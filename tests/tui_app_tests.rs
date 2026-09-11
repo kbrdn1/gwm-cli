@@ -2011,7 +2011,7 @@ fn app_with_agent_overlay(kind: gwm::agent_sessions::AgentKind, id: &str, age_se
       }],
     },
   );
-  app.agent_snapshot = Some(map);
+  app.agents.snapshot = Some(map);
   app.worktrees = vec![w];
   app.list_state.select(Some(0));
   app.open_agent_overlay();
@@ -4173,7 +4173,7 @@ fn ci_checks_refresh_and_filter_mirror_the_list_view_keys() {
 #[test]
 fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
   // Codex review on PR #455: an agents overlay interrupted without a close
-  // (an async task flipping the view) leaves detail_overlay_target set; a
+  // (an async task flipping the view) leaves the overlay's target set; a
   // detection landing while the CI overlay is later open used to rebuild
   // the rows as agent sessions while the kind stayed CiChecks — Enter then
   // tried to open a session id as a URL. The landing rebuild is now gated
@@ -5053,7 +5053,7 @@ fn edit_worktree_failure_replaces_the_loading_status() {
     app.status
   );
   assert_eq!(
-    app.edit_failure.as_deref(),
+    app.create_form.edit_failure.as_deref(),
     Some("target path already exists"),
     "the modal keeps the failure for inline display"
   );
@@ -8651,52 +8651,52 @@ fn help_scroll_clamps_between_zero_and_max() {
   let (_dir, mut app) = make_app();
   app.enter_help();
   assert_eq!(app.view, View::Help);
-  assert_eq!(app.help_scroll, 0, "a freshly opened help starts at the top");
+  assert_eq!(app.help.scroll, 0, "a freshly opened help starts at the top");
 
   // Simulate the renderer having measured 3 rows of overflow.
-  app.help_max_scroll = 3;
+  app.help.max_scroll = 3;
   app.help_scroll_down();
   app.help_scroll_down();
-  assert_eq!(app.help_scroll, 2);
+  assert_eq!(app.help.scroll, 2);
   app.help_scroll_down();
   app.help_scroll_down();
-  assert_eq!(app.help_scroll, 3, "scroll-down clamps at the published max");
+  assert_eq!(app.help.scroll, 3, "scroll-down clamps at the published max");
 
   app.help_scroll_up();
-  assert_eq!(app.help_scroll, 2);
+  assert_eq!(app.help.scroll, 2);
   for _ in 0..10 {
     app.help_scroll_up();
   }
-  assert_eq!(app.help_scroll, 0, "scroll-up clamps at the top");
+  assert_eq!(app.help.scroll, 0, "scroll-up clamps at the top");
 
   // Re-opening help resets the offset.
-  app.help_scroll = 2;
+  app.help.scroll = 2;
   app.enter_help();
-  assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
+  assert_eq!(app.help.scroll, 0, "(re)opening help returns to the top");
 }
 
 #[test]
 fn help_horizontal_scroll_clamps_between_zero_and_max() {
   let (_dir, mut app) = make_app();
   app.enter_help();
-  assert_eq!(app.help_x_scroll, 0);
+  assert_eq!(app.help.x_scroll, 0);
 
-  app.help_max_x_scroll = 2;
+  app.help.max_x_scroll = 2;
   app.help_scroll_right();
-  assert_eq!(app.help_x_scroll, 1);
+  assert_eq!(app.help.x_scroll, 1);
   app.help_scroll_right();
   app.help_scroll_right();
-  assert_eq!(app.help_x_scroll, 2, "scroll-right clamps at the published max");
+  assert_eq!(app.help.x_scroll, 2, "scroll-right clamps at the published max");
 
   app.help_scroll_left();
-  assert_eq!(app.help_x_scroll, 1);
+  assert_eq!(app.help.x_scroll, 1);
   app.help_scroll_left();
   app.help_scroll_left();
-  assert_eq!(app.help_x_scroll, 0, "scroll-left clamps at the left edge");
+  assert_eq!(app.help.x_scroll, 0, "scroll-left clamps at the left edge");
 
-  app.help_x_scroll = 2;
+  app.help.x_scroll = 2;
   app.enter_help();
-  assert_eq!(app.help_x_scroll, 0, "(re)opening help returns to the left edge");
+  assert_eq!(app.help.x_scroll, 0, "(re)opening help returns to the left edge");
 }
 
 #[test]
@@ -9470,7 +9470,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
-  app.delete_failure = Some("old failure".into());
+  app.confirm_ctx.delete_failure = Some("old failure".into());
 
   app
     .task_result_sender()
@@ -9488,7 +9488,10 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
   assert!(applied, "delete result should be applied");
   assert!(!app.is_delete_worktree_loading(), "delete slot clears after success");
   assert_eq!(app.view, View::List);
-  assert!(app.delete_failure.is_none(), "old failure is cleared after success");
+  assert!(
+    app.confirm_ctx.delete_failure.is_none(),
+    "old failure is cleared after success"
+  );
   assert!(
     app.status.contains("removed alpha") && app.status.contains("/tmp/alpha"),
     "status reports the removed target: {:?}",
@@ -9523,7 +9526,7 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
   assert!(applied, "delete failure should still be applied");
   assert!(!app.is_delete_worktree_loading(), "delete slot clears after failure");
   assert_eq!(app.view, View::Confirm);
-  assert_eq!(app.delete_failure.as_deref(), Some("permission denied"));
+  assert_eq!(app.confirm_ctx.delete_failure.as_deref(), Some("permission denied"));
   assert!(
     app.status.contains("delete failed") && app.status.contains("permission denied"),
     "status reports the delete failure: {:?}",
@@ -10081,9 +10084,12 @@ fn enter_edit_worktree_prefills_create_form_from_branch() {
     app.branch_types[app.create_form.type_index].name, "fix",
     "the type selector must point at the parsed branch type"
   );
-  assert_eq!(app.edit_original_branch.as_deref(), Some("fix/#42-broken-thing"));
+  assert_eq!(
+    app.create_form.edit_original_branch.as_deref(),
+    Some("fix/#42-broken-thing")
+  );
   assert!(
-    app.edit_original_path.is_some(),
+    app.create_form.edit_original_path.is_some(),
     "the original path is captured for git worktree move"
   );
 }
@@ -10178,13 +10184,13 @@ fn the_rename_form_refuses_a_free_form_name_create_would_refuse() {
       "`{}` is documented as refused by create",
       refused
     );
-    app.edit_failure = None;
+    app.create_form.edit_failure = None;
     app
       .submit_edit_worktree()
       .expect("a refusal is a form failure, not an error");
     assert_eq!(app.view, View::Edit, "the form stays open on `{}`", refused);
     assert!(
-      app.edit_failure.is_some(),
+      app.create_form.edit_failure.is_some(),
       "`{}` must be refused by rename too, with a reason",
       refused
     );
@@ -10244,13 +10250,16 @@ fn a_corrected_rename_is_not_held_back_by_the_previous_attempt() {
   app
     .submit_edit_worktree()
     .expect("a refusal is a form failure, not an error");
-  assert!(app.edit_failure.is_some(), "an empty description is refused");
+  assert!(
+    app.create_form.edit_failure.is_some(),
+    "an empty description is refused"
+  );
 
   // Fixing it has to be enough.
   app.create_form.desc = "other-desc".into();
   app.submit_edit_worktree().expect("submits");
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "a corrected form must not be held back by the previous attempt's message"
   );
 }
@@ -10399,7 +10408,7 @@ fn enter_edit_worktree_opens_an_unparseable_branch_in_free_form() {
 
   assert_eq!(app.view, View::Edit, "free-form mode needs no decomposition");
   assert_eq!(app.create_form.mode, Mode::Freeform);
-  assert_eq!(app.edit_original_branch.as_deref(), Some("main"));
+  assert_eq!(app.create_form.edit_original_branch.as_deref(), Some("main"));
 }
 
 #[test]
@@ -10421,7 +10430,7 @@ fn enter_edit_worktree_refuses_the_main_worktree() {
   app.enter_edit_worktree();
 
   assert_eq!(app.view, View::List, "the main worktree is not renamed from here");
-  assert!(app.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
   assert!(
     app.status.contains("main worktree"),
     "the refusal names what it is protecting: {}",
@@ -10442,8 +10451,8 @@ fn cancel_edit_worktree_resets_state() {
   app.cancel_edit_worktree();
 
   assert_eq!(app.view, View::List);
-  assert!(app.edit_original_branch.is_none());
-  assert!(app.edit_original_path.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_path.is_none());
 }
 
 #[test]
@@ -10516,7 +10525,7 @@ fn enter_edit_worktree_refuses_unconfigured_branch_type() {
   app.enter_edit_worktree();
 
   assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
-  assert!(app.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
   assert!(
     app.status.contains("not configured") && app.status.contains("zzz"),
     "status must name the type and the reason: {}",
@@ -11318,7 +11327,7 @@ mod agent_sessions_pane {
     assert!(app.tasks.request(TaskKind::AgentSessions).is_none());
     let map = snapshot_for("/w/one", AgentKind::ClaudeCode, 10);
     assert!(app.apply_agent_snapshot(generation, map.clone(), None, BTreeMap::new()));
-    assert_eq!(app.agent_snapshot.as_ref(), Some(&map));
+    assert_eq!(app.agents.snapshot.as_ref(), Some(&map));
   }
 
   #[test]
@@ -11381,11 +11390,11 @@ mod agent_sessions_pane {
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
     assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()));
     assert_eq!(
-      app.agent_all_sessions.len(),
+      app.agents.all_sessions.len(),
       1,
       "the pool survived the summary-only landing"
     );
-    assert_eq!(app.agent_all_sessions[0].id, "pool-keep");
+    assert_eq!(app.agents.all_sessions[0].id, "pool-keep");
   }
 
   #[test]
@@ -11454,7 +11463,7 @@ mod agent_sessions_pane {
     app.tasks.invalidate(TaskKind::AgentSessions);
     assert!(!app.apply_agent_snapshot(stale, BTreeMap::new(), None, BTreeMap::new()));
     // The last authoritative snapshot survives.
-    assert_eq!(app.agent_snapshot.as_ref(), Some(&live));
+    assert_eq!(app.agents.snapshot.as_ref(), Some(&live));
   }
 
   #[test]
@@ -11718,9 +11727,9 @@ mod agent_detail_overlay {
     let stale_pins = BTreeMap::new();
     assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, stale_pins));
     assert!(
-      app.agent_pins.values().flatten().any(|sid| sid == "newest-session"),
+      app.agents.pins.values().flatten().any(|sid| sid == "newest-session"),
       "the fresh pin survived the stale landing: {:?}",
-      app.agent_pins
+      app.agents.pins
     );
     // …and the queued re-detection is due (snapshot cleared, slot free).
     assert!(
@@ -12200,6 +12209,7 @@ fn submit_edit_worktree_refuses_to_change_a_segment_no_pattern_writes() {
 
   assert_eq!(app.view, View::Edit, "the form stays open on a refusal");
   let failure = app
+    .create_form
     .edit_failure
     .clone()
     .expect("the refusal must be reported in the form");
@@ -12238,7 +12248,7 @@ fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
   app.submit_edit_worktree().expect("submits");
 
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "editing a segment the pattern writes is not a frozen-segment change"
   );
 }
@@ -12288,9 +12298,9 @@ fn submit_edit_worktree_lets_the_directory_carry_what_the_branch_cannot() {
   app.submit_edit_worktree().expect("submits");
 
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "`path_pattern` writes {{type}}, so there is somewhere to put `docs`: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12325,9 +12335,9 @@ fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
   app.create_form.desc = "other".into();
   app.submit_edit_worktree().expect("submits");
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "an untouched type read from the directory is not a change: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12361,9 +12371,9 @@ fn submit_edit_worktree_counts_worktree_base_as_a_destination() {
   app.submit_edit_worktree().expect("submits");
 
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "`base` writes {{type}}, so the worktree moves from `fix/` to `docs/`: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12396,9 +12406,13 @@ fn the_rename_form_still_refuses_to_change_what_neither_pattern_writes() {
     .submit_edit_worktree()
     .expect("the refusal is a form failure, not an error");
   assert!(
-    app.edit_failure.as_deref().is_some_and(|e| e.contains("{type}")),
+    app
+      .create_form
+      .edit_failure
+      .as_deref()
+      .is_some_and(|e| e.contains("{type}")),
     "changing a type the branch pattern cannot write must be refused: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12530,7 +12544,7 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
   app.create_form.issue = "43".into();
   app.submit_edit_worktree().expect("submits");
   assert_eq!(
-    app.edit_failure, None,
+    app.create_form.edit_failure, None,
     "an untouched frozen description must not read as a change"
   );
 
@@ -12541,9 +12555,13 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
     .submit_edit_worktree()
     .expect("the refusal is a form failure, not an error");
   assert!(
-    app.edit_failure.as_deref().is_some_and(|e| e.contains("{desc}")),
+    app
+      .create_form
+      .edit_failure
+      .as_deref()
+      .is_some_and(|e| e.contains("{desc}")),
     "editing the frozen description must still be refused: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
 }
 
@@ -12754,7 +12772,7 @@ fn the_rename_form_refuses_a_segment_it_cannot_read_back_from_the_name() {
   app.enter_edit_worktree();
 
   assert_eq!(app.view, View::List, "opening would overwrite the on-disk type");
-  assert!(app.edit_original_branch.is_none());
+  assert!(app.create_form.edit_original_branch.is_none());
   assert!(
     app.status.contains("{type}") && app.status.contains("worktree.base"),
     "the status must name the segment and where to look: {}",
@@ -12838,9 +12856,9 @@ fn a_hidden_segment_cannot_block_the_rename_it_is_not_part_of() {
 
   let out = app.submit_edit_worktree();
   assert!(
-    !app.edit_failure.as_deref().unwrap_or("").contains("{type}"),
+    !app.create_form.edit_failure.as_deref().unwrap_or("").contains("{type}"),
     "the hidden type must not be read as a change: {:?}",
-    app.edit_failure
+    app.create_form.edit_failure
   );
   assert!(
     !app.status.contains("no {type} to write"),
@@ -17781,4 +17799,203 @@ fn the_arrows_cycle_a_settings_choice_in_both_directions() {
   app.config_panel.x_scroll = 0;
   assert!(!app.handle_config_nav_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
   assert_eq!(app.config_panel.x_scroll, 1, "the All tab still pans");
+}
+
+// ── Commits key precedence (issues #613, #635) ───────────────────────────────
+//
+// These could not exist before #635: the routing was a `match` sitting inside
+// the run loop, and a `match` in the event loop is not reachable from a test.
+// The extraction into `App::handle_commits_key` is what makes the order the
+// arms resolve in assertable, which is the whole point of #613.
+
+#[test]
+fn the_commits_overlay_resolves_modal_verbs_only_no_global_toggle() {
+  // The Commits overlay deliberately does NOT open its routing with a
+  // `modal_toggle_stroke` block the way the Working Tree one does: `c`
+  // closes it as a bound `CommitsClose` alternative in the modal context,
+  // not as a rebindable global toggle.
+  //
+  // So with the global `commits` action rebound onto `j` — the key the
+  // modal context spends on `scroll_down` — `j` still SCROLLS. Put a
+  // toggle-first block at the head of `handle_commits_key` (the
+  // `handle_working_tree_key` shape) and both assertions below go red: it
+  // would close instead, and the scroll would never run.
+  let (_dir, mut app) = make_app();
+  rebind(&mut app, Action::Commits, &["j"]);
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 10;
+
+  let close = app.handle_commits_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+  assert!(!close, "a rebound global `commits` key does not close this overlay");
+  assert_eq!(app.commits.scroll, 1, "it reaches the modal scroll verb instead");
+}
+
+#[test]
+fn the_commits_close_arm_leaves_the_cursor_where_it_was() {
+  // Not arm ORDER — the patterns are disjoint, so moving `CommitsClose`
+  // down the `match` changes nothing and a test claiming otherwise would
+  // pin nothing. What is pinned is that the close arm returns without a
+  // side effect on the cursor: `CommitsClose => { self.commits
+  // .scroll_to_top(); return true }` would go red here. A reopen rewinds
+  // the scroll on its own (`begin`), so a rewind hidden in the close would
+  // be invisible until someone made the overlay remember its position.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 10;
+  app.commits.scroll = 4;
+
+  assert!(app.handle_commits_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+  assert_eq!(app.commits.scroll, 4, "closing did not also move the cursor");
+}
+
+#[test]
+fn every_commits_scroll_verb_routes_through_the_handler() {
+  // The rest of the arms, so a dropped one is caught rather than silently
+  // becoming a dead key. Each asserts the cursor the verb is supposed to
+  // move, and none of them closes.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 40;
+  app.commits.viewport = 10;
+
+  let press = |app: &mut App, c: char| app.handle_commits_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+
+  assert!(!press(&mut app, 'j'));
+  assert_eq!(app.commits.scroll, 1, "`j` scrolls down one row");
+  assert!(!press(&mut app, 'k'));
+  assert_eq!(app.commits.scroll, 0, "`k` scrolls back up");
+  assert!(!press(&mut app, 'G'));
+  assert_eq!(app.commits.scroll, 40, "`G` jumps to the last row");
+  assert!(!press(&mut app, 'g'));
+  assert_eq!(app.commits.scroll, 0, "`g` jumps back to the first");
+  assert!(!press(&mut app, 'D'));
+  assert_eq!(app.commits.scroll, 5, "`D` moves half the published viewport");
+  assert!(!press(&mut app, 'U'));
+  assert_eq!(app.commits.scroll, 0, "`U` moves half a viewport back");
+}
+
+#[test]
+fn an_unbound_key_inside_the_commits_overlay_is_inert() {
+  // The `_ => {}` arm: an unbound stroke neither closes nor moves anything,
+  // so a key with no meaning here cannot fall through to a global action.
+  let (_dir, mut app) = make_app();
+  app.enter_commits();
+  settle_commits(&mut app);
+  app.commits.max_scroll = 10;
+  app.commits.scroll = 3;
+
+  assert!(!app.handle_commits_key(KeyEvent::new(KeyCode::Char('%'), KeyModifiers::NONE)));
+  assert_eq!(app.commits.scroll, 3);
+  assert_eq!(app.view, View::Commits, "and the overlay is still up");
+}
+
+#[cfg(unix)] // `[container]` is refused on Windows.
+#[test]
+fn reopening_the_exec_picker_does_not_reuse_a_container_name() {
+  // Issue #635: the monotonic half of the container name moved from
+  // `App::exec_container_seq` onto `ExecPicker::container_seq`, and
+  // `ExecPicker::open` runs on every open. If it reset the counter the way
+  // it resets the highlight, two overlay runs on the same worktree in one
+  // session would ask the daemon for the same `--name` — and the second
+  // `docker run` fails, or worse, tears down the first one's container
+  // through the teardown argv that names it.
+  //
+  // The pid is the other half and is constant within a test process, so the
+  // names can only differ by the counter.
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.ci]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.ci.container]\nimage = \"rust:1.90\"\nruntime = \"docker\"\n",
+  );
+  let name_of = |app: &mut App| {
+    app.enter_exec_picker();
+    let (argv, _, _) = app.exec_picker_resolve().expect("a container profile resolves");
+    let name = argv
+      .windows(2)
+      .find(|w| w[0] == "--name")
+      .map(|w| w[1].clone())
+      .expect("the run is named");
+    app.close_exec_picker();
+    name
+  };
+
+  let first = name_of(&mut app);
+  let second = name_of(&mut app);
+  assert_ne!(first, second, "a reopened picker names its run something new");
+}
+
+#[test]
+fn opening_a_detail_overlay_keeps_the_identity_its_consumer_just_pinned() {
+  // Issue #635: `target` and `link` moved from `App` onto `DetailOverlay`,
+  // where they now sit next to the fields `DetailOverlay::open` resets. Every
+  // consumer pins them BEFORE calling `open` (`enter_ci_checks`,
+  // `enter_rich_view`, `open_agent_overlay`), so clearing them in `open`
+  // would wipe the worktree or the PR the overlay is about to act on — the
+  // agents overlay would attach against nothing, and
+  // `close_forge_overlay_if_link_disagrees` would see `None` and never fire.
+  //
+  // Same shape as the exec picker's `container_seq`: a field that must
+  // survive the call that resets its neighbours.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, mut app) = make_app();
+  let path = std::path::PathBuf::from("/tmp/some-worktree");
+  app.detail_overlay.target = Some((path.clone(), Some("feat/x".to_string())));
+  app.detail_overlay.link = Some((Some("github github.com/acme/widgets".to_string()), LinkTarget::Pr, 42));
+
+  app
+    .detail_overlay
+    .open(DetailKind::Agents, "Agent Sessions".into(), Vec::new());
+
+  assert_eq!(
+    app.detail_overlay.target,
+    Some((path, Some("feat/x".to_string()))),
+    "`open` resets the rows, not the worktree the consumer pinned"
+  );
+  assert_eq!(
+    app.detail_overlay.link.map(|(_, t, n)| (t, n)),
+    Some((LinkTarget::Pr, 42)),
+    "nor the forge link it pinned"
+  );
+}
+
+#[test]
+fn resetting_the_create_form_leaves_the_failure_banner_up() {
+  // Issue #635: the two failure banners and the Edit origin moved off `App`
+  // onto `CreateForm`, where they now sit next to the fields
+  // `CreateForm::reset` clears. Folding them into `reset` looks tidy and is
+  // a behaviour change: `App` clears each banner at its own explicit sites,
+  // and `open_create_form_from_issue` resets the form WITHOUT clearing it.
+  // Add them to `reset` and that path starts wiping an error the user has
+  // not read yet.
+  let (_dir, mut app) = make_app();
+  app.create_form.create_failure = Some("branch already exists".into());
+  app.create_form.edit_failure = Some("refused: unfetched commits".into());
+  app.create_form.edit_original_branch = Some("feat/#1-old".into());
+  app.create_form.edit_original_path = Some(std::path::PathBuf::from("/tmp/old-worktree"));
+  app.create_form.issue = "42".into();
+
+  app.create_form.reset();
+
+  assert_eq!(app.create_form.issue, "", "`reset` does clear what the user typed");
+  assert_eq!(
+    app.create_form.create_failure.as_deref(),
+    Some("branch already exists"),
+    "but not the banner its caller has not dismissed"
+  );
+  assert_eq!(
+    app.create_form.edit_failure.as_deref(),
+    Some("refused: unfetched commits"),
+    "nor the Edit banner"
+  );
+  assert_eq!(
+    app.create_form.edit_original_branch.as_deref(),
+    Some("feat/#1-old"),
+    "nor the branch the Edit form is renaming away from"
+  );
+  assert!(
+    app.create_form.edit_original_path.is_some(),
+    "nor the worktree it is moving"
+  );
 }

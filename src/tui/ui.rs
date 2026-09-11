@@ -3,11 +3,12 @@ use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::mouse::{MouseMap, PaneId, RowList, SidebarPane, Spot};
 use super::state::async_task::TaskKind;
-use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
 use super::state::working_tree::WorkingTreeSnapshot;
+use super::views::commits::{draw_commits, recent_commits_lines};
+use super::views::exec_picker::draw_exec_picker;
 use std::collections::HashMap;
 
 /// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
@@ -1481,10 +1482,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
   let prefix_lines = vec![sidebar_header_line(&w, app)];
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
   // Agents pane body (issue #408): per-frame pure snapshot + pins lookup
-  // (no config I/O — `app.agent_pins` is refreshed off-render), its
+  // (no config I/O — `app.agents.pins` is refreshed off-render), its
   // bordered block collapses to zero height when nothing is pinned.
   let agent_pins: &[String] = app
-    .agent_pins
+    .agents
+    .pins
     .get(&crate::agent_sessions::path_display_key(&w.path))
     .map(|v| v.as_slice())
     .unwrap_or(&[]);
@@ -2480,6 +2482,23 @@ impl WtRows {
   }
 }
 
+/// One right-hand metadata column: its rows and the width they need.
+///
+/// The width is measured once, when the column is built, so it cannot jump
+/// while the user scrolls: every row is padded to the same column.
+///
+/// A rendering type, not the state of any one view: the commit listing
+/// carries three of these and the working tree two, and
+/// `meta_column` below is the only thing that builds one. It lived in
+/// `state::commits` until #635 moved the Commits view out, which would
+/// otherwise have left the working tree importing its own metadata column
+/// from another view.
+#[derive(Debug, Default, Clone)]
+pub struct MetaColumn {
+  pub lines: Vec<Line<'static>>,
+  pub width: usize,
+}
+
 /// Package a set of parallel rows into a [`MetaColumn`], measuring the
 /// width once so the column cannot jump while the listing scrolls.
 fn meta_column(lines: Vec<Line<'static>>) -> MetaColumn {
@@ -2820,59 +2839,8 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
 /// dense on tall terminals without paginating.
 pub const RECENT_COMMITS_LIMIT: usize = 300;
 
-/// Number of hex chars rendered for each commit's SHA in the sidebar.
-/// Matches lazygit's `Gui.CommitHashLength` default of 8.
-pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
-
-/// Produce the styled rows of the Recent Commits sidebar block for a
-/// worktree, limited to `limit` entries. Each `Line` mirrors lazygit's
-/// per-row format:
-///
-/// ```text
-/// <8-char hash>  <author initials>  <graph>  <subject>
-/// ```
-///
-/// where `<graph>` is the per-row output of the topology renderer in
-/// [`super::commit_graph`] — a sequence of `2 * (max_pos + 1)` cells
-/// drawing `○` / `◎` nodes plus the `│ ─ ╮ ╭ ╯ ╰ …` connectors that
-/// link consecutive commits across branch / merge boundaries. The
-/// graph width is deterministic on the commit list — independent of
-/// terminal width — so the cache stays valid across resizes.
-///
-/// The subject is **not** truncated here — the renderer relies on
-/// ratatui's view-level hard-clip (no `Wrap`) to match lazygit's gocui
-/// behaviour: one commit per visual line, overflow cut at the right
-/// edge without `…`.
-pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
-  // The sidebar pane paints rows only, so the metadata columns it never
-  // shows are built and dropped. Cheap next to the revwalk that precedes
-  // them, and one listing routine is one place for the row format to live.
-  recent_commits_listing(w, limit, worktree::unix_now(), theme).lines
-}
-
 /// Gap, in cells, between the commit subject and the metadata column.
 pub const META_GAP: usize = 2;
-
-/// Cells the subject must keep for the metadata column to be worth showing.
-///
-/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
-/// topology), so what the left side needs cannot be derived from a
-/// constant: the policy is stated as a floor on what survives instead. A
-/// merge-heavy history at 80 columns would otherwise leave a subject of ten
-/// cells to buy an author column, which is a worse listing than no column.
-pub const COMMITS_SUBJECT_FLOOR: usize = 30;
-
-/// Pick the widest metadata column that leaves the subject its floor.
-///
-/// `body_w` is the text area AFTER the scrollbar column is reserved. The
-/// tiers are tried widest first; `None` means even the narrowest does not
-/// fit and the listing renders full-width as it did before.
-///
-/// A pure function on widths so the policy is testable without a terminal:
-/// the render path only decides which `MetaColumn` this names.
-pub fn commits_meta_pick(body_w: usize, tiers: [usize; 3]) -> Option<usize> {
-  meta_pick(body_w, &tiers, COMMITS_SUBJECT_FLOOR)
-}
 
 /// Pick the widest metadata column that leaves the left side `floor` cells.
 ///
@@ -2887,8 +2855,8 @@ pub fn meta_pick(body_w: usize, tiers: &[usize], floor: usize) -> Option<usize> 
 /// Cells a Working Tree row must keep for its `+N -M` column to be worth
 /// showing.
 ///
-/// Lower than [`COMMITS_SUBJECT_FLOOR`] because the row is a leaf name
-/// under a connector prefix, not a sentence: `ui.rs` stays readable at a
+/// Lower than [`crate::tui::COMMITS_SUBJECT_FLOOR`] because the row is a leaf
+/// name under a connector prefix, not a sentence: `ui.rs` stays readable at a
 /// width where a commit subject would be a fragment. The connectors grow
 /// with the nesting depth, so what a row needs cannot be derived from a
 /// constant here either — the floor states the policy instead.
@@ -2907,173 +2875,6 @@ pub const WT_NAME_FLOOR: usize = 24;
 /// its three-cell connector); under that the row is unreadable whether or
 /// not it says `M`.
 pub const WT_BADGE_FLOOR: usize = 8;
-
-/// Build the two right-hand metadata columns for a commit listing.
-///
-/// `wide` carries `author · age`, `narrow` the age alone — the initials are
-/// already on the left, so the full author is the second tier of
-/// information, not the first. The age is what the listing genuinely lacks
-/// today.
-///
-/// Ages are computed against `now` HERE, not stored on the row: the rows
-/// are memoised by `(repo, tip, limit)`, so an age baked into them would be
-/// frozen at the first read. They are still a snapshot in the sense that
-/// the overlay does not re-read itself while open, so a listing left up for
-/// an hour keeps saying `2m`.
-pub fn commit_meta_columns(
-  rows: &[worktree::CommitRow],
-  now: i64,
-  stats: &HashMap<git2::Oid, worktree::CommitStat>,
-  theme: &Theme,
-) -> [MetaColumn; 3] {
-  let mut wide = MetaColumn::default();
-  let mut mid = MetaColumn::default();
-  let mut narrow = MetaColumn::default();
-  let sep = || Span::styled(" · ".to_string(), Style::default().fg(theme.muted));
-
-  for row in rows {
-    let age_d = worktree::commit_age(row.time, now);
-    let age = worktree::format_relative_duration(age_d);
-    let age_style = Style::default().fg(freshness_color(age_d, theme));
-    let age_span = || Span::styled(age.clone(), age_style);
-    let author = row.author.trim();
-    // Absent means "not read yet", which is not the same as a commit that
-    // changed nothing — the second read fills the map and the columns are
-    // rebuilt from it.
-    let stat = stats.get(&row.hash).copied();
-
-    narrow.lines.push(Line::from(age_span()));
-
-    let mut mid_spans: Vec<Span<'static>> = Vec::new();
-    if let Some(s) = stat {
-      mid_spans.extend(commit_stat_spans(s, theme));
-      mid_spans.push(sep());
-    }
-    mid_spans.push(age_span());
-    mid.lines.push(Line::from(mid_spans));
-
-    let mut wide_spans: Vec<Span<'static>> = Vec::new();
-    if !author.is_empty() {
-      wide_spans.push(Span::styled(author.to_string(), Style::default().fg(theme.muted)));
-      wide_spans.push(sep());
-    }
-    if let Some(s) = stat {
-      wide_spans.extend(commit_stat_spans(s, theme));
-      wide_spans.push(sep());
-    }
-    wide_spans.push(age_span());
-    wide.lines.push(Line::from(wide_spans));
-  }
-
-  for col in [&mut wide, &mut mid, &mut narrow] {
-    col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
-  }
-  [wide, mid, narrow]
-}
-
-/// One commit's diff counts as coloured spans: `3~ 1+ 1- +120 -34`.
-///
-/// The file counts reuse the working-tree pane's roles (#287) so a created
-/// file reads the same colour here as it does there, and the line counts
-/// reuse the diff pair. A category with nothing in it is omitted rather
-/// than printed as a zero: five zeroes on every quiet commit is noise, and
-/// the row is competing with the subject for width.
-pub fn commit_stat_spans(s: worktree::CommitStat, theme: &Theme) -> Vec<Span<'static>> {
-  let mut spans: Vec<Span<'static>> = Vec::new();
-  let mut push = |text: String, color: Color| {
-    if !spans.is_empty() {
-      spans.push(Span::raw(" "));
-    }
-    spans.push(Span::styled(text, Style::default().fg(color)));
-  };
-  if s.files_modified > 0 {
-    push(format!("{}~", s.files_modified), theme.dirty);
-  }
-  if s.files_added > 0 {
-    push(format!("{}+", s.files_added), theme.clean);
-  }
-  if s.files_deleted > 0 {
-    push(format!("{}-", s.files_deleted), theme.prunable);
-  }
-  if s.insertions > 0 {
-    push(format!("+{}", s.insertions), theme.clean);
-  }
-  if s.deletions > 0 {
-    push(format!("-{}", s.deletions), theme.prunable);
-  }
-  if spans.is_empty() {
-    // An empty commit, or a merge that brought nothing onto its first
-    // parent. Silence would read as "not loaded yet".
-    spans.push(Span::styled("0".to_string(), Style::default().fg(theme.muted)));
-  }
-  spans
-}
-
-/// The full result of one read of the log: the rows, the commit count, and
-/// the two right-hand metadata columns.
-///
-/// The count is not `lines.len()` and the difference is not cosmetic: an
-/// unborn HEAD, an empty history or a failed read all paint exactly ONE
-/// sentinel row, so a caller inferring the count from the rows reads them
-/// as a repository with one commit (Codex review, PR #614). The
-/// commit-listing overlay (issue #593) titles itself with this count and
-/// decides whether a page is full from it.
-///
-/// `now` is passed in rather than read here so the ages are deterministic
-/// under test.
-pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, now: i64, theme: &Theme) -> CommitsSnapshot {
-  match worktree::recent_commits_cached(w, limit) {
-    Ok(rows) if !rows.is_empty() => {
-      let loaded = rows.len();
-      let tiers = commit_meta_columns(&rows, now, &HashMap::new(), theme);
-      let graphs = super::commit_graph::render_commits(&rows, theme);
-      let lines = rows
-        .iter()
-        .cloned()
-        .zip(graphs)
-        .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
-        .collect();
-      CommitsSnapshot {
-        lines,
-        loaded,
-        rows,
-        tiers,
-      }
-    }
-    Ok(_) => CommitsSnapshot {
-      lines: vec![Line::from(Span::styled(
-        "(no commits)".to_string(),
-        Style::default().fg(theme.muted),
-      ))],
-      ..Default::default()
-    },
-    Err(e) => CommitsSnapshot {
-      lines: vec![Line::from(Span::styled(
-        format!("! {}", e),
-        Style::default().fg(theme.prunable),
-      ))],
-      ..Default::default()
-    },
-  }
-}
-
-fn commit_row_line(row: worktree::CommitRow, graph: Vec<Span<'static>>, theme: &Theme) -> Line<'static> {
-  let mut short_hash = row.hash.to_string();
-  short_hash.truncate(COMMIT_HASH_DISPLAY_LEN);
-  let initials = author_initials(&row.author);
-  let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + graph.len());
-  spans.push(Span::styled(short_hash, Style::default().fg(theme.dirty)));
-  spans.push(Span::raw("  "));
-  spans.push(Span::styled(
-    format!("{:<2}", initials),
-    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-  ));
-  spans.push(Span::raw("  "));
-  spans.extend(graph);
-  spans.push(Span::raw(" "));
-  spans.push(Span::raw(row.subject));
-  Line::from(spans)
-}
 
 /// Derive lazygit-style author initials from a full name. Closely
 /// mirrors `getInitials` in lazygit's
@@ -4302,38 +4103,6 @@ pub fn working_tree_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   hints
 }
 
-/// Commit-listing overlay footer hints (issue #593). `load more` / `close`
-/// resolve from the `Commits*` modal bindings so a rebind of
-/// `[tui.keys.modal.commits]` shows through; the scroll / top-bottom
-/// movement pairs stay literal, as the Command Logs footer does.
-///
-/// `load more` is dropped when `more` is false — there is no deeper page,
-/// either because the revwalk ran out of history or because the paging cap
-/// was reached. Advertising a key that does nothing is how a working
-/// overlay reads as broken. While `loading`, the slot says so instead: the
-/// key is equally inert there, but for a reason that resolves on its own.
-pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> Vec<(String, String)> {
-  let mut hints: Vec<(String, String)> = vec![
-    ("j/k".to_string(), "scroll".to_string()),
-    ("D/U".to_string(), "half page".to_string()),
-    ("g/G".to_string(), "top/bottom".to_string()),
-  ];
-  if loading {
-    // `more` is false while a read is out, so without this the hint slot
-    // would simply go blank and a deeper page would look refused rather
-    // than under way.
-    hints.push(("…".to_string(), "loading".to_string()));
-  } else if more {
-    if let Some(k) = modal.primary_key(ModalAction::CommitsLoadMore) {
-      hints.push((k, "load more".to_string()));
-    }
-  }
-  if let Some(k) = modal.primary_key(ModalAction::CommitsClose) {
-    hints.push((k, "close".to_string()));
-  }
-  hints
-}
-
 pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   modal_hint_for_context_with_fields(ctx, keymap, modal, theme, &CANONICAL_TRIPLE)
 }
@@ -4421,7 +4190,7 @@ pub fn modal_hint_for_context_with_fields(
   modal_hint_line(&hints, theme)
 }
 
-fn push_modal_hint(
+pub(crate) fn push_modal_hint(
   lines: &mut Vec<Line<'static>>,
   ctx: HintContext,
   keymap: &Keymap,
@@ -5400,16 +5169,16 @@ fn draw_help(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   // not the whole inner height — so the clamp matches what actually scrolls
   // and the last body rows stay reachable.
   let body_viewport = body_area.height as usize;
-  app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
-  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let scroll = app.help_scroll;
+  app.help.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  app.help.scroll = app.help.scroll.min(app.help.max_scroll);
+  let scroll = app.help.scroll;
   // Reserve the scrollbar column FIRST, then bound the horizontal pan against
   // the reduced text width so the final cell stays reachable (review P3).
   let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
   let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
-  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
-  let x_scroll = app.help_x_scroll;
+  app.help.max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
+  app.help.x_scroll = app.help.x_scroll.min(app.help.max_x_scroll);
+  let x_scroll = app.help.x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_for_context(HintContext::Help, &app.keymap, &app.modal_keymap, &app.theme),
@@ -5427,35 +5196,9 @@ fn draw_help(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
 ///
 /// `None` once another process removes the worktree and the refresh drops it
 /// from the list. The row degrades rather than lying.
-fn overlay_worktree<'a>(app: &'a App, path: Option<&std::path::Path>) -> Option<&'a WorktreeInfo> {
+pub(crate) fn overlay_worktree<'a>(app: &'a App, path: Option<&std::path::Path>) -> Option<&'a WorktreeInfo> {
   let path = path?;
   app.worktrees.iter().find(|w| w.path == path)
-}
-
-/// The fixed context row above the Commits listing (issue #629): the branch
-/// the log was walked on.
-///
-/// Both full-size overlays paint a snapshot with no statement of what it is a
-/// snapshot *of* — a commit graph could be any branch's. The modal title
-/// cannot carry it: it is centred, so it is clipped from the LEFT, and this
-/// one already spends itself on the row count.
-///
-/// The branch wears the same worst-state colour it wears in the table and the
-/// identity card (PR #73), so the overlay reads as the same block at a
-/// different size. `-` on a detached HEAD, and on a worktree the refresh
-/// dropped from the list.
-fn commits_context_line(w: Option<&WorktreeInfo>, theme: &Theme) -> Line<'static> {
-  let muted = Style::default().fg(theme.muted);
-  let mut value = Span::styled("-".to_string(), muted);
-  if let Some(w) = w {
-    if let Some(b) = w.branch.as_deref() {
-      value = Span::styled(
-        crate::naming::sanitise_for_terminal(b),
-        Style::default().fg(branch_name_color(&w.status, theme)),
-      );
-    }
-  }
-  Line::from(vec![Span::styled("Branch  ".to_string(), muted), value])
 }
 
 /// The fixed context row above the Working Tree listing (issue #629): the
@@ -5636,113 +5379,6 @@ fn draw_working_tree(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
-/// Render the full-size commit listing (issue #593).
-///
-/// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the
-/// snapshot `App::enter_commits` took — one row per commit, short hash /
-/// author initials / `o`-`@` graph / subject, exactly as the sidebar pane
-/// paints them.
-///
-/// No horizontal pan: `recent_commits_lines` deliberately leaves subjects
-/// untruncated and relies on ratatui's hard clip at the right edge, which is
-/// lazygit's behaviour. The whole point of the overlay is that the canvas is
-/// wide enough for that clip to stop mattering.
-///
-/// The title carries the row count so `load more` has visible feedback; a
-/// trailing `+` means a deeper page exists. It rides the top rule, which is
-/// clipped from the LEFT when centred, so the count sits last on purpose.
-fn draw_commits(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
-  let area = centered(90, 85, f.area());
-  let accent = app.theme.accent;
-  let muted = app.theme.muted;
-
-  let more = app.commits_can_load_more();
-  let loading = app.commits.loading;
-  // The `+` tracks "a deeper page exists", which is true while one is being
-  // read too: `can_load_more` is false then only because the read is out.
-  let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
-  let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
-  let frame = ModalFrame::resolve_for(app, accent);
-  let inner = frame.render(f, map, area, &title, None);
-
-  // The branch this log was walked on, pinned above the scroll region
-  // (issue #629). Built before the mutable borrows below.
-  let context = commits_context_line(overlay_worktree(app, app.commits.path.as_deref()), &app.theme);
-
-  // A blank row between the listing and the hints, the gap every other
-  // modal already leaves: content never sits flush against the footer.
-  let [context_area, body_area, _gap, footer_area] = Layout::vertical([
-    Constraint::Length(1),
-    Constraint::Min(1),
-    Constraint::Length(1),
-    Constraint::Length(1),
-  ])
-  .areas(inner);
-  f.render_widget(Paragraph::new(context), context_area);
-
-  // A muted loader rather than an empty canvas while the first page is
-  // being walked: blank reads as "no commits", which is the one answer this
-  // overlay must not give by accident. A deeper page keeps the rows it
-  // already has on screen instead, and says `loading` in the footer.
-  let lines: Vec<Line<'static>> = if !app.commits.lines.is_empty() {
-    app.commits.lines.clone()
-  } else if loading {
-    vec![Line::from(Span::styled(
-      " loading…".to_string(),
-      Style::default().fg(muted),
-    ))]
-  } else {
-    vec![Line::from(Span::styled(
-      "No commits.".to_string(),
-      Style::default().fg(muted),
-    ))]
-  };
-
-  // Publish the scroll bound against the BODY viewport only (issue #279).
-  let body_viewport = body_area.height as usize;
-  app.commits.viewport = body_area.height;
-  app.commits.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
-  app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
-  let scroll = app.commits.scroll;
-  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
-
-  // The metadata rides its own rect on the right rather than being appended
-  // to each row: the subject is deliberately hard-clipped without an
-  // ellipsis (lazygit's gocui behaviour, documented on
-  // `recent_commits_lines` and shared with the sidebar pane), so narrowing
-  // the left rect IS that same rule applied at a nearer edge. Both
-  // paragraphs take the same scroll offset, so the columns stay aligned.
-  let widths = [
-    app.commits.tiers[0].width,
-    app.commits.tiers[1].width,
-    app.commits.tiers[2].width,
-  ];
-  let meta = commits_meta_pick(text_area.width as usize, widths);
-
-  match meta {
-    Some(meta_w) => {
-      let column = &app.commits.tiers[widths.iter().position(|&w| w == meta_w).unwrap_or(2)];
-      let meta_w = meta_w as u16;
-      let [left, _gap, right] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(META_GAP as u16),
-        Constraint::Length(meta_w),
-      ])
-      .areas(text_area);
-      f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), left);
-      f.render_widget(
-        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
-        right,
-      );
-    }
-    None => f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area),
-  }
-
-  let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
-  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
-  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
-}
-
 fn draw_command_logs(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
@@ -5842,7 +5478,7 @@ fn draw_command_logs(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
 /// area shrunk by one column to make room. When everything fits, the area
 /// is returned unchanged and no scrollbar is drawn. The thumb tracks the
 /// theme `accent`; the track reads `muted`.
-fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
+pub(crate) fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
   let viewport = area.height as usize;
   if scrollbar_reserve(area, content_len) == 0 {
     return area;
@@ -6881,7 +6517,7 @@ fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.create_failure.as_deref() {
+  } else if let Some(error) = app.create_form.create_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("create failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
@@ -7688,7 +7324,7 @@ fn draw_confirm(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.delete_failure.as_deref() {
+  } else if let Some(error) = app.confirm_ctx.delete_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("delete failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
@@ -8111,7 +7747,7 @@ fn viewport_height(pct_y: u16, area: Rect) -> u16 {
 /// has — the PTY overlay, the command-log transcript and the note editor. Every
 /// other overlay goes through [`centered_viewport`] or [`modal_width`], which
 /// bound the width (issue #550).
-fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+pub(crate) fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
   let v = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -8819,7 +8455,7 @@ pub fn picker_window(len: usize, selected: usize, max_visible: usize) -> (usize,
 /// the labels start at the same column and the selection highlight reads as a
 /// full-width bar — and the visible window follows `selected` with
 /// `↑ / ↓ N more` markers (centred) when the list overflows `max_visible`.
-fn picker_lines(
+pub(crate) fn picker_lines(
   labels: &[&str],
   selected: usize,
   max_visible: usize,
@@ -8866,58 +8502,6 @@ fn picker_lines(
     );
   }
   out
-}
-
-/// Render the exec profile picker overlay (issue #325). A small centred
-/// modal listing the `[exec.profiles.*]` names; the highlighted row reads in
-/// the accent (with a selection bar) and a `▸` marker, the rest muted. The
-/// list is aligned, same-width, and scrolls to keep the highlight in view.
-/// `Enter` resolves the highlight and the run loop spawns it in a PTY overlay.
-fn draw_exec_picker(f: &mut Frame, app: &App, map: &mut MouseMap) {
-  let accent = app.theme.accent;
-  let term = f.area();
-  let width = overlay_modal_width(term.width);
-  let frame = ModalFrame::resolve_for(app, accent);
-  let inner = width.saturating_sub(frame.cols()) as usize;
-  let mut lines: Vec<Line<'static>> = Vec::new();
-  // Leave room for the title + hint + borders; the picker scrolls past that.
-  let max_visible = (term.height as usize).saturating_sub(8).max(3);
-  let labels: Vec<&str> = app.exec_picker.profiles().iter().map(String::as_str).collect();
-  lines.extend(picker_lines(
-    &labels,
-    app.exec_picker.selected_index(),
-    max_visible,
-    inner,
-    &app.theme,
-  ));
-  push_modal_hint(
-    &mut lines,
-    HintContext::ExecPicker,
-    &app.keymap,
-    &app.modal_keymap,
-    &app.theme,
-  );
-  let height = lines.len() as u16 + frame.rows();
-  let area = centered_abs(width, height, term);
-  let content = frame.render(f, map, area, "Run an exec profile", None);
-  f.render_widget(Paragraph::new(lines), content);
-
-  // The rows `picker_lines` painted, resolved through the same
-  // `picker_window` it used: a `↑ N more` marker takes the first line when
-  // the window is scrolled, so the profiles start one row lower (issue #624).
-  let (start, end) = picker_window(labels.len(), app.exec_picker.selected_index(), max_visible);
-  if end > start {
-    map.push_rows(
-      Rect {
-        y: content.y + u16::from(start > 0),
-        height: (end - start) as u16,
-        ..content
-      },
-      RowList::ExecPicker,
-      start,
-      labels.len(),
-    );
-  }
 }
 
 /// Render the generic detail overlay (issue #408). A centred modal listing
@@ -9479,8 +9063,8 @@ fn draw_clean_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
 /// same Create form state (Type / Issue / Desc) pre-filled from the current
 /// branch — plus a `From :` line showing the original branch, an async
 /// "renaming…" loader, and an inline failure surfaced from
-/// `App::edit_failure`. State lives on `App::create_form` +
-/// `App::edit_original_branch`.
+/// `CreateForm::edit_failure`. State lives on `App::create_form` +
+/// `CreateForm::edit_original_branch`.
 fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -9504,6 +9088,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
 
   let label = |s: &str| format!("{:<label_w$}", s);
   let old_branch = app
+    .create_form
     .edit_original_branch
     .as_deref()
     .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
@@ -9595,7 +9180,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.edit_failure.as_deref() {
+  } else if let Some(error) = app.create_form.edit_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("rename failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
