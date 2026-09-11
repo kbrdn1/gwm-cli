@@ -599,12 +599,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Keybindings overlay when it outgrows the modal (#217).
       View::Help => match app.resolve_modal(KeyContext::Help, key) {
         Some(ModalAction::HelpClose) => app.view = View::List,
-        Some(ModalAction::HelpScrollDown) => app.help_scroll_down(),
-        Some(ModalAction::HelpScrollUp) => app.help_scroll_up(),
-        Some(ModalAction::HelpScrollRight) => app.help_scroll_right(),
-        Some(ModalAction::HelpScrollLeft) => app.help_scroll_left(),
-        Some(ModalAction::HelpScrollTop) => app.help_scroll = 0,
-        Some(ModalAction::HelpScrollBottom) => app.help_scroll = app.help_max_scroll,
+        Some(ModalAction::HelpScrollDown) => app.help.scroll_down(),
+        Some(ModalAction::HelpScrollUp) => app.help.scroll_up(),
+        Some(ModalAction::HelpScrollRight) => app.help.scroll_right(),
+        Some(ModalAction::HelpScrollLeft) => app.help.scroll_left(),
+        Some(ModalAction::HelpScrollTop) => app.help.scroll = 0,
+        Some(ModalAction::HelpScrollBottom) => app.help.scroll = app.help.max_scroll,
         _ => {}
       },
       // Command Logs overlay (issue #226). Scrolls like the help overlay;

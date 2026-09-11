@@ -255,9 +255,9 @@ fn the_wheel_over_a_modal_body_scrolls_the_modal_that_is_open() {
   assert_eq!(app.command_logs.scroll, 1);
 
   app.view = View::Help;
-  app.help_max_scroll = 20;
+  app.help.max_scroll = 20;
   app.handle_mouse(MouseKind::WheelDown, 10, 6);
-  assert_eq!(app.help_scroll, 1);
+  assert_eq!(app.help.scroll, 1);
   assert_eq!(app.command_logs.scroll, 1, "the other modal did not move");
 }
 

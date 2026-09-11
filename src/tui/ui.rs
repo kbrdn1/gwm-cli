@@ -5168,16 +5168,16 @@ fn draw_help(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   // not the whole inner height — so the clamp matches what actually scrolls
   // and the last body rows stay reachable.
   let body_viewport = body_area.height as usize;
-  app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
-  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let scroll = app.help_scroll;
+  app.help.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  app.help.scroll = app.help.scroll.min(app.help.max_scroll);
+  let scroll = app.help.scroll;
   // Reserve the scrollbar column FIRST, then bound the horizontal pan against
   // the reduced text width so the final cell stays reachable (review P3).
   let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
   let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
-  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
-  let x_scroll = app.help_x_scroll;
+  app.help.max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
+  app.help.x_scroll = app.help.x_scroll.min(app.help.max_x_scroll);
+  let x_scroll = app.help.x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_for_context(HintContext::Help, &app.keymap, &app.modal_keymap, &app.theme),

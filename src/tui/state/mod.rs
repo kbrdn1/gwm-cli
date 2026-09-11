@@ -28,6 +28,7 @@ pub mod create_form;
 pub mod detail_overlay;
 pub mod filter;
 pub mod github_fetch;
+pub mod help;
 pub mod link_prompt;
 pub mod markdown;
 pub mod note_editor;

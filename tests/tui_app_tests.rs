@@ -8651,52 +8651,52 @@ fn help_scroll_clamps_between_zero_and_max() {
   let (_dir, mut app) = make_app();
   app.enter_help();
   assert_eq!(app.view, View::Help);
-  assert_eq!(app.help_scroll, 0, "a freshly opened help starts at the top");
+  assert_eq!(app.help.scroll, 0, "a freshly opened help starts at the top");
 
   // Simulate the renderer having measured 3 rows of overflow.
-  app.help_max_scroll = 3;
+  app.help.max_scroll = 3;
   app.help_scroll_down();
   app.help_scroll_down();
-  assert_eq!(app.help_scroll, 2);
+  assert_eq!(app.help.scroll, 2);
   app.help_scroll_down();
   app.help_scroll_down();
-  assert_eq!(app.help_scroll, 3, "scroll-down clamps at the published max");
+  assert_eq!(app.help.scroll, 3, "scroll-down clamps at the published max");
 
   app.help_scroll_up();
-  assert_eq!(app.help_scroll, 2);
+  assert_eq!(app.help.scroll, 2);
   for _ in 0..10 {
     app.help_scroll_up();
   }
-  assert_eq!(app.help_scroll, 0, "scroll-up clamps at the top");
+  assert_eq!(app.help.scroll, 0, "scroll-up clamps at the top");
 
   // Re-opening help resets the offset.
-  app.help_scroll = 2;
+  app.help.scroll = 2;
   app.enter_help();
-  assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
+  assert_eq!(app.help.scroll, 0, "(re)opening help returns to the top");
 }
 
 #[test]
 fn help_horizontal_scroll_clamps_between_zero_and_max() {
   let (_dir, mut app) = make_app();
   app.enter_help();
-  assert_eq!(app.help_x_scroll, 0);
+  assert_eq!(app.help.x_scroll, 0);
 
-  app.help_max_x_scroll = 2;
+  app.help.max_x_scroll = 2;
   app.help_scroll_right();
-  assert_eq!(app.help_x_scroll, 1);
+  assert_eq!(app.help.x_scroll, 1);
   app.help_scroll_right();
   app.help_scroll_right();
-  assert_eq!(app.help_x_scroll, 2, "scroll-right clamps at the published max");
+  assert_eq!(app.help.x_scroll, 2, "scroll-right clamps at the published max");
 
   app.help_scroll_left();
-  assert_eq!(app.help_x_scroll, 1);
+  assert_eq!(app.help.x_scroll, 1);
   app.help_scroll_left();
   app.help_scroll_left();
-  assert_eq!(app.help_x_scroll, 0, "scroll-left clamps at the left edge");
+  assert_eq!(app.help.x_scroll, 0, "scroll-left clamps at the left edge");
 
-  app.help_x_scroll = 2;
+  app.help.x_scroll = 2;
   app.enter_help();
-  assert_eq!(app.help_x_scroll, 0, "(re)opening help returns to the left edge");
+  assert_eq!(app.help.x_scroll, 0, "(re)opening help returns to the left edge");
 }
 
 #[test]

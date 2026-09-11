@@ -187,7 +187,7 @@ fn help_modal_keeps_title_and_footer_fixed_while_body_scrolls() {
   app.enter_help();
   // Drive the scroll cursor past the end; the renderer clamps it to the
   // body's max-scroll, i.e. "scrolled to the bottom".
-  app.help_scroll = u16::MAX;
+  app.help.scroll = u16::MAX;
 
   let backend = TestBackend::new(100, 18);
   let mut terminal = Terminal::new(backend).unwrap();

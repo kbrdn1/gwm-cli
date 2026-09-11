@@ -15,6 +15,7 @@ use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::detail_overlay::DetailKind;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
+use super::state::help::HelpOverlay;
 use super::state::link_prompt::LinkPrompt;
 use super::state::pty_overlay::PtyOverlay;
 use super::state::sidebar::SidebarState;
@@ -473,17 +474,8 @@ pub struct App {
   // Bootstrap report
   pub report: Option<BootstrapReport>,
 
-  /// Keybindings (help) overlay scroll offset, in rows. Reset to 0 every
-  /// time the overlay opens; clamped to `help_max_scroll` (#217).
-  pub help_scroll: u16,
-  /// Keybindings (help) overlay horizontal scroll offset, in columns (#222).
-  pub help_x_scroll: u16,
-  /// Maximum help scroll offset, republished by [`super::ui::draw_help`]
-  /// each frame as `content_rows.saturating_sub(viewport_rows)` so the
-  /// offset can never scroll past the last line into the void.
-  pub help_max_scroll: u16,
-  /// Maximum horizontal help scroll offset, republished by the renderer.
-  pub help_max_x_scroll: u16,
+  /// Keybindings (help) overlay scroll state (#217, #222).
+  pub help: HelpOverlay,
 
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
@@ -882,10 +874,7 @@ impl App {
       create_form: CreateForm::new(),
       branch_types,
       report: None,
-      help_scroll: 0,
-      help_x_scroll: 0,
-      help_max_scroll: 0,
-      help_max_x_scroll: 0,
+      help: HelpOverlay::new(),
       sidebar: SidebarState::new(),
       agent_snapshot: None,
       agent_snapshot_at: None,
@@ -2746,9 +2735,9 @@ impl App {
     match self.view {
       View::Help => {
         if down {
-          self.help_scroll_down()
+          self.help.scroll_down()
         } else {
-          self.help_scroll_up()
+          self.help.scroll_up()
         }
       }
       View::CommandLogs => {
@@ -3409,8 +3398,7 @@ impl App {
   /// the scroll offset here keeps re-opens predictable.
   pub fn enter_help(&mut self) {
     self.view = View::Help;
-    self.help_scroll = 0;
-    self.help_x_scroll = 0;
+    self.help.rewind();
   }
 
   /// Open the Command Logs overlay (issue #226). Snapshots the global
@@ -5369,20 +5357,20 @@ impl App {
   /// Scroll the help overlay down one row, clamped to the renderer-published
   /// `help_max_scroll` so it never scrolls past the last line.
   pub fn help_scroll_down(&mut self) {
-    self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+    self.help.scroll_down();
   }
 
   /// Scroll the help overlay up one row, clamped at the top.
   pub fn help_scroll_up(&mut self) {
-    self.help_scroll = self.help_scroll.saturating_sub(1);
+    self.help.scroll_up();
   }
 
   pub fn help_scroll_right(&mut self) {
-    self.help_x_scroll = (self.help_x_scroll + 1).min(self.help_max_x_scroll);
+    self.help.scroll_right();
   }
 
   pub fn help_scroll_left(&mut self) {
-    self.help_x_scroll = self.help_x_scroll.saturating_sub(1);
+    self.help.scroll_left();
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
