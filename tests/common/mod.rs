@@ -198,12 +198,25 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
     seen.push(dep);
   }
 
+  // A waiver names one step, so it has to land on one step. The label comes
+  // from `name:`, which anyone can edit: renaming a second step to the label a
+  // waiver was written for hands that step the exemption too. That is not
+  // theoretical, it was found by mutation on this very helper: relabelling
+  // `cargo nextest run` as `cargo test --doc` and giving it the ubuntu `if:`
+  // narrows the whole suite to one runner with every test still green.
+  for (name, cond) in steps_allowed_an_if {
+    let hits = steps.iter().filter(|s| step_label(s) == *name).count();
+    assert_eq!(
+      hits, 1,
+      "the `{job_name}` job allows step {name:?} the condition {cond:?}, and exactly one step \
+       must answer to that label, found {hits}. Zero means the step was renamed and the waiver \
+       now covers nothing; more than one means a second step inherited an exemption written \
+       for its neighbour"
+    );
+  }
+
   for step in &steps {
-    let label = step["name"]
-      .as_str()
-      .or_else(|| step["uses"].as_str())
-      .or_else(|| step["run"].as_str())
-      .unwrap_or("<unnamed step>");
+    let label = step_label(step);
     assert!(
       step["continue-on-error"].is_null(),
       "no step of the `{job_name}` job may swallow its own failure: step {label:?} carries \
@@ -242,4 +255,17 @@ fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
     serde_yaml_ng::Value::Null => Vec::new(),
     other => panic!("`needs:` must be a job name or a list of them, got {other:?}"),
   }
+}
+
+/// How a step is named in an assertion message, and the key a waiver in
+/// `steps_allowed_an_if` is matched on. `name:` first because that is what the
+/// workflow author reads, then `uses:` for the action-only steps that carry no
+/// name, then the script itself.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+fn step_label(step: &serde_yaml_ng::Value) -> &str {
+  step["name"]
+    .as_str()
+    .or_else(|| step["uses"].as_str())
+    .or_else(|| step["run"].as_str())
+    .unwrap_or("<unnamed step>")
 }
