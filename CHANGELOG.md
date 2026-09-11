@@ -165,6 +165,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Two TUI views move to `src/tui/views/`, one module each for their
+  state, their rendering and their keys**
+  ([#635](https://github.com/kbrdn1/gwm-cli/issues/635)). `state/` was
+  already split one module per view, but the behaviour lived in `app.rs`
+  (9765 lines) and the rendering in `ui.rs` (10366), so adding or changing
+  a view meant editing three files, two of them enormous. The layering was
+  horizontal while the variability is vertical. `views/commits.rs` and
+  `views/exec_picker.rs` are the pilot.
+
+  No behaviour change, and no test was edited to make it land: the whole
+  move is invisible from outside the crate, because `views` is a private
+  module and every `gwm::tui::*` path resolves through the same re-exports
+  as before.
+
+  The Commits overlay's key routing was a `match` sitting inside the run
+  loop, which is the one shape a test cannot reach — the hole
+  [#613](https://github.com/kbrdn1/gwm-cli/issues/613) named. It is now
+  `App::handle_commits_key`, and four tests pin what it does, including
+  the thing that distinguishes it from the Working Tree overlay: Commits
+  resolves modal verbs only, with no global-toggle block in front, so a
+  global `commits` key rebound onto `j` still scrolls here.
+
+  `exec_picker_cfg`, `exec_picker_common_dir` and `exec_container_seq`
+  come home to `ExecPicker`, taking `App` from 85 fields to 82. The
+  counter is the one that carries a real invariant: it is the monotonic
+  half of a containerised run's `--name`, and `ExecPicker::open` runs on
+  every open right next to where the highlight is reset. Reset it too and
+  two overlay runs on one worktree in one session collide. That is now a
+  test.
+
+  **The churn the pilot was meant to measure did not move, and the reason
+  is worth writing down.** Of 2251 commits, 512 touch `app.rs` or `ui.rs`;
+  21 of those touch either of the two moved surfaces — 4%. Measured per
+  view over the same 512 commits, the ranking is roughly the inverse of
+  the "most independent first" order the issue proposed: `sidebar` 61,
+  `create_form` 41, header/footer 36, `detail_overlay` 33,
+  `working_tree` 32, `config_panel` 27, against `commits` 13 and
+  `exec_picker` 9. The views that are cheap to extract are cheap precisely
+  because nothing changes them. So the mechanism works and the two pilot
+  files are the right shape, but continuing down the independence list
+  buys nothing: the next extraction worth doing is `sidebar` or
+  `create_form`, and those are coupled, which is a different and larger
+  piece of work than this one. Not folded in here.
+
 - **CI runs the test suite under `cargo-nextest`**
   ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)). `cargo test` runs
   110 test binaries in sequence, each with its own thread pool.
