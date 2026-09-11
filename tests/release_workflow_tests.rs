@@ -1026,12 +1026,37 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
 /// asserted, because it is not true and never was: `doctor`'s checkout, its
 /// toolchain install and its `cargo build` all fail hard, and should. Only the
 /// report is advisory.
+///
+/// `DOCTOR_CONDITION` is the condition spelled on one line: `ci.yml` writes it
+/// as a block scalar across two.
+const DOCTOR_CONDITION: &str = "(github.event_name == 'push' && github.ref == 'refs/heads/dev') || \
+                                (github.event_name == 'pull_request' && github.base_ref == 'dev')";
+
 fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
-  assert!(
-    !job["if"].is_null(),
-    "the `doctor` job is exempt from the blocking guard because it is advisory, and it has \
-     lost the `if:` that restricts it to `dev`. It is no longer the job this exemption was \
-     written for: guard it like the rest, or restore the condition"
+  // By value, not by presence. `!job["if"].is_null()` is satisfied by any
+  // condition at all, `if: always()` included, while the message below claims
+  // the restriction to `dev` is what it checks. That is the same overstatement
+  // the `continue-on-error` assertion made before it was pinned to its step,
+  // and the same by-value standard `steps_allowed_an_if` already holds its
+  // waivers to.
+  //
+  // Whitespace is normalised first because the condition is a YAML block
+  // scalar: reflowing it across lines is a formatting change and must not be a
+  // red test, whereas changing what it admits must be.
+  let condition = job["if"]
+    .as_str()
+    .unwrap_or_default()
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert_eq!(
+    condition, DOCTOR_CONDITION,
+    "the `doctor` job is exempt from the blocking guard because it is advisory, and its \
+     `if:` no longer restricts it to `dev`. `main` is meant to be stable and the doctor \
+     exists to catch in-development regressions, so widening this runs an advisory job on \
+     every release path; narrowing it stops the only thing that exercises `gwm doctor` at \
+     all. Either way it is no longer the job this exemption was written for: guard it like \
+     the rest, or restore the condition"
   );
 
   let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
@@ -1106,7 +1131,31 @@ fn ci_fmt_job_checks_formatting_rather_than_rewriting_it() {
     "the fmt job must check every crate in the workspace (`--all`): a single-package check \
      leaves the rest unformatted while the job name still reads `rustfmt`. Got {fmt:?}"
   );
+
+  // The two assertions above name the flags and why they matter, which is the
+  // diagnostic half. They do not close the command, because `contains` reads a
+  // line where a later flag overrides an earlier one: `cargo fmt --all --
+  // --check --config=disable_all_formatting=true` keeps both substrings, is
+  // one bare invocation, and exits 0 over a file rustfmt would otherwise
+  // reject. So the command is pinned by value, the same statement already made
+  // about the `RUSTFLAGS` that reaches `clippy`.
+  assert_eq!(
+    fmt, EXPECTED_FMT,
+    "the fmt job must run exactly `{EXPECTED_FMT}`. Appending to it is enough to undo it, \
+     since rustfmt takes `--config` on the command line and the last setting wins, so \
+     neither `--check` nor `--all` surviving in the line says the line still checks \
+     anything. Changing what CI formats is a conscious decision in a reviewed diff"
+  );
 }
+
+/// The formatting command, pinned. `CLAUDE.md`: "CI enforces `cargo fmt
+/// --check`".
+const EXPECTED_FMT: &str = "cargo fmt --all -- --check";
+
+/// The lint command, pinned. `CLAUDE.md`: "`cargo clippy --all-targets -- -D
+/// warnings` must pass". `--all-features` on top, because a lint behind a
+/// non-default feature is still a lint.
+const EXPECTED_CLIPPY: &str = "cargo clippy --all-targets --all-features -- -D warnings";
 
 /// Issue #655. The same hole one job over. `cargo clippy --all-targets` with
 /// `-D warnings` dropped exits 0 on every lint it finds, and `cargo clippy -D
@@ -1164,6 +1213,20 @@ fn ci_clippy_job_denies_warnings_across_all_targets() {
     "the clippy job must lint every target (`--all-targets`): the default leaves `tests/`, \
      `benches/` and `examples/` unlinted, which here is 110 test binaries and three benches \
      the job would report clean without having read. Got {clippy:?}"
+  );
+
+  // Same reason as the fmt job: `contains` reads a line whose last flag wins.
+  // `cargo clippy --all-targets --all-features -- -D warnings --cap-lints=allow`
+  // keeps both substrings, is one bare invocation, touches no `env:`, and exits
+  // 0 on every lint in the tree. Pinning `RUSTFLAGS` below while leaving the
+  // command open would refuse the neutralisation in the variable and hand it
+  // over on the line beside it.
+  assert_eq!(
+    clippy, EXPECTED_CLIPPY,
+    "the clippy job must run exactly `{EXPECTED_CLIPPY}`. `-D warnings` surviving in the \
+     line does not mean the line denies anything: `--cap-lints=allow` appended after it \
+     caps every lint in the tree and the job exits 0. Changing what CI lints is a conscious \
+     decision in a reviewed diff"
   );
 
   assert_eq!(
