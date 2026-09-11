@@ -19,7 +19,6 @@
 pub mod async_task;
 pub mod clean_overlay;
 pub mod command_logs;
-pub mod commits;
 pub mod config_panel;
 pub mod confirm;
 pub mod create_form;

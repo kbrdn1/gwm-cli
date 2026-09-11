@@ -37,11 +37,11 @@
 use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
-use crate::tui::state::commits::CommitsSnapshot;
 use crate::tui::state::sidebar::SidebarMode;
 use crate::tui::state::working_tree::WorkingTreeSnapshot;
 use crate::tui::ui::MetaColumn;
 use crate::tui::ui::SidebarSections;
+use crate::tui::views::commits::CommitsSnapshot;
 use crate::worktree::WorktreeInfo;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
