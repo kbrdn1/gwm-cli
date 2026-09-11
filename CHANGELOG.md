@@ -156,11 +156,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what separates enforcing from reporting here, the same class as `cargo
   bench --no-run` (#634) and a `cargo audit` without `--deny warnings` (#340).
   So `--check`, `--all`, `-D warnings` and `--all-targets` are asserted on the
-  commands themselves, where `CLAUDE.md` already states them. The workflow's
-  own `RUSTFLAGS: -D warnings` is not leant on for clippy: it is set once for
-  all eight jobs, and `msrv` already overrides it to `""` at job level.
+  commands themselves, where `CLAUDE.md` already states them.
 
-  Eighteen mutations, each applied alone and each read back to confirm it
+  For clippy the command is only half of it, and the other half wins. The lint
+  level is the command *and* `RUSTFLAGS`, so `env: RUSTFLAGS:
+  "--cap-lints=allow"` on the job exits it 0 on every lint in the tree with
+  the denial sitting there untouched, on a required check, and takes half the
+  MSRV guarantee (`clippy::incompatible_msrv`) with it. The flags reaching the
+  job are pinned by value at the three levels `env:` exists, rather than
+  screened for weakening spellings: `--cap-lints`, `-A warnings`,
+  `--force-warn` and a `-D warnings` cancelled by an earlier flag are not a
+  closed set, which is the denylist #652 already walked through.
+  `CARGO_ENCODED_RUSTFLAGS` is refused outright, since cargo reads it instead
+  of `RUSTFLAGS` and would leave the pin describing a variable nothing reads.
+
+  The `doctor` exemption is pinned to the step that carries it, never asserted
+  existentially over the job's steps. "Some step of `doctor` is
+  `continue-on-error`" is satisfied by any of them, so moving the marker onto
+  `cargo build` keeps such an assertion green while `gwm doctor` itself
+  becomes able to fail the job, which is the exact drift the exemption claims
+  to catch. "The job cannot turn the workflow red" is deliberately not the
+  property asserted either, because it is not true and never was: `doctor`'s
+  checkout, toolchain install and `cargo build` all fail hard, and should.
+
+  Twenty-four mutations, each applied alone and each read back to confirm it
   fired the assertion it was aimed at and not an earlier one. Applying them
   together proves less than it looks, since the job-level `if:` is checked
   before `continue-on-error:` and both before the command, so a combined
