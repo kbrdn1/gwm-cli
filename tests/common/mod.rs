@@ -289,6 +289,49 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 /// space, so `cargo\tcheck --locked || true` opted out of it entirely. A
 /// prefix test is no good either, since `env VAR=x cargo …` defeats it.
 /// `Cargo.toml` is not a `cargo` token, so the reader step stays out.
+///
+/// ## Where this stops (issue #656)
+///
+/// The property being reached for is "the command fails the job when the code
+/// is broken". Between this file and that property sit cargo's own argument
+/// parsing, the process environment and `.cargo/config.toml`, and a reader of
+/// the workflow does not cross that gap. It can only make a crossing visible
+/// in a diff, which is what the shape above does. Three surfaces measured
+/// while reviewing #654 sit on the far side, and #656 records the decision to
+/// name them here rather than chase them: each review pass opened a surface
+/// the previous fix did not touch instead of a variant of it, which is a
+/// domain with no last entry.
+///
+/// - **a filter that matches nothing.** Every guarded runner has one, all
+///   measured locally at exit 0. `cargo test --doc zzz_no_such_doctest`
+///   reports `0 passed`; `cargo nextest run --no-tests pass zzz_no_such_test`
+///   reports `0 tests run`, and bare nextest 0.9.143 exits 4 on no tests, so
+///   it is `--no-tests pass` that silences it; `cargo bench --benches --
+///   --test zzz_no_such_bench` runs the three bench binaries, prints nothing
+///   and exits 0. Each one is a single bare line of allowed characters.
+///   Telling a filter from the value of a flag means re-implementing cargo's
+///   argument parsing on both sides of `--`, which is the mistake #634 already
+///   paid for, a model written in place of the oracle;
+/// - **the environment.** `CARGO_TARGET_<TRIPLE>_RUNNER: "true"` has every
+///   test binary executed by `true`:
+///   `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=true cargo test --test
+///   msrv_tests` never launches the binary and exits 0. Walking the `env:`
+///   mappings would not close it either, because a step can write the same
+///   variable into `$GITHUB_ENV`, which GitHub documents as inherited by every
+///   later step of the job;
+/// - **configuration on disk.** The same override lives in
+///   `.cargo/config.toml`, which a step can write before the cargo step runs.
+///
+/// The last two are one shape: a step this guard leaves free-form
+/// reconfigures what cargo reads, and the cargo line it does guard is
+/// untouched. Closing them means constraining every step of a job rather than
+/// its cargo steps, which is a different guard with a different cost.
+///
+/// So a green run here says the workflow carries no visible off switch on the
+/// cargo commands it guards. It does not say CI is honest. The instrument that
+/// would say that is observational, a canary that breaks a test on a scratch
+/// branch and watches the checks turn red, and it costs a CI run every time it
+/// runs. #656 holds that trade-off.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 fn assert_run_cannot_swallow_its_failure(
   workflow: &serde_yaml_ng::Value,
