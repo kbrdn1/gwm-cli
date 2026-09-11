@@ -263,8 +263,15 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 /// - a pipe, since a shell pipeline reports its last element's exit status;
 /// - `set +e` anywhere in the block, which disarms the `bash -e` GitHub runs
 ///   `run:` under and leaves every following failure unreported;
-/// - `exit 0` anywhere after the command, which overrides whatever it returned.
-///   Not "at the end of the block": one on any later line does the same thing.
+/// - a `shell:` whose command line drops `-e`, which disarms the same thing
+///   from outside the script. GitHub's own line for `shell: bash` is `bash
+///   --noprofile --norc -eo pipefail {0}`; writing that minus `-e` as a custom
+///   `shell:` is a one-word edit the `set +e` check cannot see, so only the
+///   built-in keywords that keep errexit are allowed;
+/// - `exit 0` anywhere in the block, before the command as well as on or after
+///   it. Before means cargo never runs, on or after means its status is
+///   discarded, and `cargo nextest run; exit 0` is the shortest spelling of
+///   the second.
 ///
 /// Matched with `contains("cargo ")` rather than `starts_with`, on purpose.
 /// `starts_with` tests a position, and a line prefixes: `env CARGO_TERM_COLOR=always
@@ -282,9 +289,23 @@ fn assert_run_cannot_swallow_its_failure(step: &serde_yaml_ng::Value, job_name: 
   let joined = script.replace("\\\n", " ");
   let lines: Vec<&str> = joined.lines().collect();
 
-  let Some(at) = lines.iter().position(|l| l.contains("cargo ")) else {
+  if !lines.iter().any(|l| l.contains("cargo ")) {
     return;
-  };
+  }
+
+  // Built-in keywords only. GitHub expands each into a command line that keeps
+  // errexit on (`bash --noprofile --norc -eo pipefail {0}`, `sh -e {0}`, and
+  // pwsh's `$ErrorActionPreference = 'stop'`), where a custom line is free to
+  // drop it. That is `set +e` written one level out, where the check below
+  // cannot reach.
+  let shell = &step["shell"];
+  assert!(
+    shell.is_null() || matches!(shell.as_str(), Some("bash" | "sh" | "pwsh")),
+    "step {label:?} of the `{job_name}` job runs cargo under `shell: {shell:?}`. Only the \
+     built-in `bash`, `sh` and `pwsh` keywords are allowed: a custom shell line is free to \
+     drop the `-e` that makes the step fail when cargo does, which is `set +e` moved out of \
+     the script where this guard cannot see it"
+  );
 
   for line in lines.iter().filter(|l| l.contains("cargo ")) {
     assert!(
@@ -300,14 +321,15 @@ fn assert_run_cannot_swallow_its_failure(step: &serde_yaml_ng::Value, job_name: 
      `bash -e`, and disarming it lets every later failure go unreported while the step \
      still reports success. Got {script:?}"
   );
-  for line in &lines[at + 1..] {
-    assert!(
-      !line.contains("exit 0"),
-      "step {label:?} of the `{job_name}` job must not `exit 0` after running cargo: it \
-       overrides whatever cargo returned. `exit 1` stays allowed, the MSRV reader uses it to \
-       fail loudly. Got {line:?}"
-    );
-  }
+  // The whole block, not the lines after the command. `exit 0` before it means
+  // cargo never runs, on the same line (`cargo nextest run; exit 0`) means its
+  // status is discarded, and a window opened at `at + 1` sees neither.
+  assert!(
+    !joined.contains("exit 0"),
+    "step {label:?} of the `{job_name}` job must not carry `exit 0`: before the cargo line it \
+     stops cargo from running at all, on or after it the status cargo returned is discarded. \
+     `exit 1` stays allowed, the MSRV reader uses it to fail loudly. Got {script:?}"
+  );
 }
 
 /// The matrix rows a job actually runs, after `exclude` is applied (issue
@@ -353,6 +375,21 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
     .iter()
     .filter_map(|e| e["os"].as_str().map(str::to_owned))
     .collect();
+
+  // `runs-on:` is what actually decides where a row executes, and it sits one
+  // line above the matrix this function reads. Pinning it to the matrix is what
+  // makes the returned list mean anything: a literal `runs-on: ubuntu-latest`
+  // leaves `test (windows-latest)` in the checks list, satisfying the required
+  // contexts on `main`, while nothing ever compiles the
+  // `[target."cfg(windows)".dependencies]` block. Worse than the `exclude:`
+  // this function exists to catch, which at least deletes the row.
+  let runs_on = job["runs-on"].as_str().unwrap_or_default();
+  assert_eq!(
+    runs_on, "${{ matrix.os }}",
+    "the `{job_name}` job has a matrix, so its `runs-on:` must derive from it. A literal \
+     runner makes every row execute on the same machine while the rows keep their per-OS \
+     names, so the checks list still advertises the platform nobody tested on"
+  );
 
   declared.into_iter().filter(|os| !excluded.contains(os)).collect()
 }

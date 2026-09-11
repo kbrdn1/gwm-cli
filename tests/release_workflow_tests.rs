@@ -874,12 +874,35 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
          stays green"
       );
     }
-    for filter in ["paths", "paths-ignore"] {
+    // `types:` belongs beside the path filters and is the sharpest of the
+    // three, because it has defaults (`opened`, `synchronize`, `reopened`):
+    // `types: [labeled]` stops CI on every ordinary pull request while the
+    // event and its branches still read exactly as they do now.
+    //
+    // Each carries its own reason. A shared message would describe a path
+    // filter while firing on `types:`, which is an assertion lying about what
+    // it checks.
+    for (filter, why) in [
+      (
+        "paths",
+        "a path filter skips the whole workflow on a change it does not match, so a pull \
+         request touching only `tests/` would run no CI at all",
+      ),
+      (
+        "paths-ignore",
+        "an ignore filter skips the whole workflow on a change it does match, which is the \
+         same hole written the other way round",
+      ),
+      (
+        "types",
+        "restricting the activity types replaces the defaults (`opened`, `synchronize`, \
+         `reopened`), so something like `types: [labeled]` runs no CI on an ordinary pull \
+         request while the branches above still read as they do now",
+      ),
+    ] {
       assert!(
         on[event][filter].is_null(),
-        "ci.yml must not filter `{event}` by `{filter}`: a path filter skips the whole \
-         workflow on a change it does not match, so a pull request touching only `tests/` \
-         would run no CI at all. Got `{filter}: {:?}`",
+        "ci.yml must not filter `{event}` by `{filter}`: {why}. Got `{filter}: {:?}`",
         on[event][filter]
       );
     }
