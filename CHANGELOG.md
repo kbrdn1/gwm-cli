@@ -124,10 +124,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflow and each leaving the whole suite green.
 
   **Below.** A command can be made unable to fail without touching any of the
-  keys #646 reads: `cargo nextest run || true`, a pipe, `set +e`, an `exit 0`
-  anywhere in the block, or a custom `shell:` line that drops the `-e` GitHub
-  normally passes. All five are now rejected on any step that invokes cargo,
-  in every guarded job. Scoped to cargo lines rather than every
+  keys #646 reads: `cargo nextest run || true`, a pipe, `set +e`, `exit 0`,
+  `if ! cargo audit …; then …; fi`, a trailing `&`, a custom `shell:` line with
+  the `-e` dropped, or that same line moved to `defaults.run.shell`. Listing
+  those spellings does not converge, because the shell is a programming
+  language and the list is its grammar, so the guard states the property
+  instead: a `run:` block that invokes cargo is exactly one bare cargo
+  invocation, one line, no shell operators. Every spelling above fails that,
+  including the ones nobody has thought of yet, and all eight cargo commands
+  in `ci.yml` pass it unchanged. Scoped to cargo lines rather than every
   line on purpose, since the property is not "no pipe": the `read the declared
   MSRV` step legitimately pipes `grep` into `cut`, and `exit 1` stays allowed
   because that same step uses it to fail loudly. Matched on `contains` rather
@@ -146,7 +151,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes all eight jobs at once, so the events and branches it fires on are
   pinned, and `paths:`, `paths-ignore:` and `types:` are asserted absent: a
   path filter skips CI on a change it does not match, and `types:` has
-  defaults, so replacing them runs no CI on an ordinary pull request.
+  defaults, so replacing them runs no CI on an ordinary pull request. Branch
+  membership alone was not enough either, since GitHub reads those entries as
+  patterns and a later `!dev` cancels an earlier `dev`.
 
 - **Three CI jobs could be switched off without a test going red**
   ([#646](https://github.com/kbrdn1/gwm-cli/issues/646)). GitHub Actions
