@@ -21,6 +21,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+mod common;
+use common::assert_job_is_blocking;
+
 fn repo_file(rel: &str) -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
@@ -195,4 +198,21 @@ fn ci_checks_the_msrv_locked_and_without_default_features() {
      `cmd_daemon` / `cmd_statusline`, and that build is documented as supported. \
      Got: {checks:?}"
   );
+}
+
+/// Issue #646. The four guards above read `strategy`, `steps`, `uses`, `with`
+/// and `run`, and none of them reads the job's own `if:` or
+/// `continue-on-error:`. `if: false` was mutated onto the `msrv` job and all
+/// four stayed green.
+///
+/// What that job holds off is the whole point of #491: it is the only thing
+/// that compiles at the declared floor, so a dependency raising its own
+/// `rust-version` reaches users as a broken `cargo install gwm-cli` and
+/// nothing else in the repo says a word. Reading the graph through `cargo
+/// metadata` does not settle it either, since metadata said `1.88` where a
+/// build said `1.95`, so a job that does not run leaves no second oracle
+/// behind.
+#[test]
+fn ci_msrv_job_cannot_be_switched_off_or_made_advisory() {
+  assert_job_is_blocking(&msrv_job(), "msrv", &[]);
 }
