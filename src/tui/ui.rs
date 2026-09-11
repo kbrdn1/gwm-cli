@@ -2488,7 +2488,7 @@ impl WtRows {
 ///
 /// A rendering type, not the state of any one view: the commit listing
 /// carries three of these and the working tree two, and
-/// [`meta_column`] below is the only thing that builds one. It lived in
+/// `meta_column` below is the only thing that builds one. It lived in
 /// `state::commits` until #635 moved the Commits view out, which would
 /// otherwise have left the working tree importing its own metadata column
 /// from another view.

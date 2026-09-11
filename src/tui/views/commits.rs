@@ -112,7 +112,7 @@ pub struct CommitsModal {
   /// Commits the listing describes. NOT `lines.len()`: an unborn HEAD, an
   /// empty history and a failed read each paint one sentinel row, which
   /// would read as a repository with one commit (Codex review, PR #614).
-  /// [`super::super::ui::recent_commits_listing`] carries the real number.
+  /// [`recent_commits_listing`] carries the real number.
   pub loaded: usize,
   /// The commits themselves, kept so [`Self::tiers`] can be rebuilt when
   /// the diff stats land without a second revwalk.

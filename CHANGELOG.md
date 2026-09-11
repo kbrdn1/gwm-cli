@@ -197,17 +197,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **The churn the pilot was meant to measure did not move, and the reason
   is worth writing down.** Of 2251 commits, 512 touch `app.rs` or `ui.rs`;
-  21 of those touch either of the two moved surfaces — 4%. Measured per
-  view over the same 512 commits, the ranking is roughly the inverse of
-  the "most independent first" order the issue proposed: `sidebar` 61,
+  21 of those touch either of the two moved surfaces, about 4%. Measured
+  per view over the same 512, the ranking is roughly the inverse of the
+  "most independent first" order the issue proposed: `sidebar` 61,
   `create_form` 41, header/footer 36, `detail_overlay` 33,
   `working_tree` 32, `config_panel` 27, against `commits` 13 and
-  `exec_picker` 9. The views that are cheap to extract are cheap precisely
-  because nothing changes them. So the mechanism works and the two pilot
-  files are the right shape, but continuing down the independence list
-  buys nothing: the next extraction worth doing is `sidebar` or
-  `create_form`, and those are coupled, which is a different and larger
-  piece of work than this one. Not folded in here.
+  `exec_picker` 9.
+
+  Those integers are upper bounds, not clean counts, and the method is
+  why. They come from `git log -G` over identifiers named after each view,
+  restricted to those two files, so a commit that only touched
+  `app.commits.scroll` in the run loop counts for the Commits view even
+  though that line is not moving. They over-count rather than under-count,
+  which cuts the same direction as the conclusion. `git log -L
+  :funcname:` would have been exact and works on `ui.rs`, but git's Rust
+  funcname pattern does not match a method indented inside an `impl`, so
+  it returns zero for every method in `app.rs` — a silent zero, not an
+  error. The ordering is what carries the argument, and the ordering
+  survives the imprecision.
+
+  The views that are cheap to extract are cheap precisely because nothing
+  changes them. So the mechanism works and the two pilot files are the
+  right shape, but continuing down the independence list buys nothing:
+  the next extraction worth doing is `sidebar` or `create_form`, and
+  those are coupled, which is a different and larger piece of work than
+  this one. Not folded in here.
 
 - **CI runs the test suite under `cargo-nextest`**
   ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)). `cargo test` runs
