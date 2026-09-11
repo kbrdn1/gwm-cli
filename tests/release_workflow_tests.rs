@@ -927,3 +927,163 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
      pushing a commit"
   );
 }
+
+/// Issue #655. `assert_job_is_blocking` had four callers for eight jobs, and
+/// the four were the ones #646's own audit happened to name. `fmt` and
+/// `clippy` are two of the seven contexts `main` requires and neither was
+/// among them: `grep -rn '"fmt"\|"clippy"' tests/` returned nothing for the
+/// jobs. `hook-smoke` is a required context too and was equally unnamed.
+///
+/// So the caller list is replaced by a sweep. A list is what produced this
+/// issue: #646 guarded what it had looked at, #652 and #653 widened the
+/// helper without widening its callers, and a ninth job added tomorrow would
+/// arrive unguarded exactly the same way. Walking `jobs:` instead means a new
+/// job is covered the moment it exists, and switching one off is a diff
+/// against this test rather than against nothing.
+///
+/// `doctor` is the one exemption, and it is pinned rather than waived. It is
+/// advisory by design: `continue-on-error: true` on the `gwm doctor` step and
+/// an `if:` restricting the job to `dev`, both deliberate (the report wants
+/// eyes, not a blocked merge, and `lazygit` is absent on the runner so a
+/// Warning is its floor). What is asserted here is that it is *still* that
+/// job. Should it ever lose either property it stops being advisory, the
+/// assertion below fails, and it has to move into the guarded set rather than
+/// sit in an exemption written for a job it no longer is.
+///
+/// The three per-job callers elsewhere in this file and in `msrv_tests` stay:
+/// each carries a rationale and properties this sweep cannot express (the
+/// `test` job's one legitimate doctest `if:`, `audit`'s `--deny warnings`).
+/// They overlap with the sweep on purpose. Redundant coverage costs a
+/// millisecond; a gap costs nine months, which is what RUSTSEC-2025-0068 did.
+#[test]
+fn ci_every_job_is_blocking_except_the_advisory_doctor() {
+  let workflow = ci_workflow();
+  let jobs: Vec<String> = workflow["jobs"]
+    .as_mapping()
+    .expect("ci.yml must define a `jobs:` mapping")
+    .keys()
+    .filter_map(|k| k.as_str().map(str::to_owned))
+    .collect();
+
+  // An empty `jobs:` parses to a mapping with no keys, and a loop over it
+  // asserts nothing at all. The count is deliberately a floor and not an
+  // equality: adding a job must not be a red test, only removing the guard
+  // from one.
+  assert!(
+    jobs.len() >= 8,
+    "ci.yml must still define its eight jobs: a `jobs:` block emptied down to one leaves \
+     this sweep iterating over nothing while reporting success. Got {jobs:?}"
+  );
+
+  for job_name in &jobs {
+    if job_name == "doctor" {
+      let job = &workflow["jobs"]["doctor"];
+      assert!(
+        !job["if"].is_null(),
+        "the `doctor` job is exempt from the blocking guard because it is advisory, and it \
+         has lost the `if:` that restricts it to `dev`. It is no longer the job this \
+         exemption was written for: guard it like the rest, or restore the condition"
+      );
+      let advisory = job["steps"]
+        .as_sequence()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .any(|s| s["continue-on-error"].as_bool() == Some(true));
+      assert!(
+        advisory,
+        "the `doctor` job is exempt from the blocking guard because it is advisory, and no \
+         step of it carries `continue-on-error: true` any more. A job that can turn the \
+         workflow red does not belong in an exemption for one that cannot"
+      );
+      continue;
+    }
+    assert_job_is_blocking(&workflow, job_name, steps_allowed_an_if(job_name));
+  }
+}
+
+/// The `if:` conditions the sweep above allows, by job. Everything not listed
+/// gets `&[]`, which is the helper refusing every step-level `if:`.
+///
+/// One entry today: doctests behave identically on the three runners and are
+/// paid for once, on the row with the slack against windows. The waiver
+/// carries the condition by value, so widening it to `false` is caught here
+/// and not left to whichever other test happens to pin that step.
+fn steps_allowed_an_if(job_name: &str) -> &'static [(&'static str, &'static str)] {
+  match job_name {
+    "test" => &[("cargo test --doc", "matrix.os == 'ubuntu-latest'")],
+    _ => &[],
+  }
+}
+
+/// Issue #655. Being blocking is not enough for `fmt`: `cargo fmt --all`
+/// without `--check` **rewrites the tree and exits 0**. It is one bare cargo
+/// invocation on one line under a built-in shell, so it satisfies every
+/// assertion in `assert_job_is_blocking` including the bare-command
+/// invariant, and it is not `--no-run` or `--dry-run` either. The job goes
+/// green forever while formatting drift lands, on a runner whose working tree
+/// is thrown away a minute later.
+///
+/// That is the same class as `cargo bench --no-run` (#634) and `cargo audit`
+/// without `--deny warnings` (#340): a flag, not a shell operator, is what
+/// separates a command that enforces from one that reports. The shape of the
+/// command cannot see it, so it is asserted here, where `CLAUDE.md` states
+/// it: "CI enforces `cargo fmt --check`".
+#[test]
+fn ci_fmt_job_checks_formatting_rather_than_rewriting_it() {
+  let runs = run_steps(&ci_job("fmt"));
+  let fmt = runs
+    .iter()
+    .find(|r| r.contains("cargo fmt"))
+    .unwrap_or_else(|| panic!("the fmt job must run `cargo fmt`, got {runs:?}"));
+
+  assert!(
+    fmt.contains("--check"),
+    "the fmt job must run `cargo fmt` with `--check`: without it cargo rewrites the tree in \
+     place and exits 0, so the job reports success over formatting it silently fixed on a \
+     runner and threw away. Got {fmt:?}"
+  );
+  assert!(
+    fmt.contains("--all"),
+    "the fmt job must check every crate in the workspace (`--all`): a single-package check \
+     leaves the rest unformatted while the job name still reads `rustfmt`. Got {fmt:?}"
+  );
+}
+
+/// Issue #655. The same hole one job over. `cargo clippy --all-targets` with
+/// `-D warnings` dropped exits 0 on every lint it finds, and `cargo clippy -D
+/// warnings` without `--all-targets` never lints `tests/`, `benches/` or
+/// `examples/` at all, which in this repo is 110 test binaries and three
+/// benches, the larger half of the code. Both are one bare cargo invocation
+/// and both pass `assert_job_is_blocking` unchanged.
+///
+/// Neither flag is incidental: `CLAUDE.md` states the command as `cargo
+/// clippy --all-targets -- -D warnings` and the house rule that an
+/// `#[allow(...)]` needs a comment only means anything while the lint would
+/// otherwise have failed the build.
+///
+/// The workflow-level `RUSTFLAGS: -D warnings` is not a second line of
+/// defence to lean on here. It is set once at the top of `ci.yml` for every
+/// job, so it is one edit away from being gone for all eight of them, and the
+/// `msrv` job already overrides it to `""` at job level, which is precedent
+/// that it does get overridden. The command has to carry its own denial.
+#[test]
+fn ci_clippy_job_denies_warnings_across_all_targets() {
+  let runs = run_steps(&ci_job("clippy"));
+  let clippy = runs
+    .iter()
+    .find(|r| r.contains("cargo clippy"))
+    .unwrap_or_else(|| panic!("the clippy job must run `cargo clippy`, got {runs:?}"));
+
+  assert!(
+    clippy.contains("-D warnings"),
+    "the clippy job must pass `-D warnings`: clippy exits 0 on a lint it only warns about, \
+     so dropping the denial leaves the job green over every lint in the tree. Got {clippy:?}"
+  );
+  assert!(
+    clippy.contains("--all-targets"),
+    "the clippy job must lint every target (`--all-targets`): the default leaves `tests/`, \
+     `benches/` and `examples/` unlinted, which here is 110 test binaries and three benches \
+     the job would report clean without having read. Got {clippy:?}"
+  );
+}
