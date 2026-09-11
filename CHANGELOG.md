@@ -134,7 +134,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assertion walks past null. A step that needs a condition passes its exact
   value rather than a waiver, so the one legitimate `if:` in the tree, the
   doctest step narrowed to the ubuntu matrix row, is still pinned to that
-  condition. The `audit` guard adds `--deny warnings` and rejects a pipe on
+  condition. That allowance also has to land on exactly one step: the label
+  it is keyed on comes from `name:`, so relabelling a second step to match
+  would otherwise hand it the same exemption, and renaming the step it was
+  written for would leave a waiver covering nothing. The `audit` guard adds `--deny warnings` and rejects a pipe on
   the command, since a pipeline reports its last element's exit status.
 
   A fifth way to switch a job off is covered as well, found while reviewing
