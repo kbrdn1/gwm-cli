@@ -11,7 +11,9 @@ use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::SettingsTab;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
-use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+use super::state::confirm::{
+  ConfirmContext, ConfirmKeyAction, ConfirmKind, ConfirmModal, CountdownTickOutcome, PendingMerge,
+};
 use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::detail_overlay::DetailKind;
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -68,39 +70,6 @@ pub struct LauncherPlan {
   /// `None` for the git_tui launcher. Surfaced so the status bar /
   /// caller can mention which ref was used.
   pub base: Option<String>,
-}
-
-/// What an open [`View::Confirm`] is asking about.
-///
-/// Exhaustive matches, no `_` arm: the modal carries a safety countdown and
-/// a danger border because what follows cannot be taken back, and a third
-/// use must state its own answer rather than inherit the delete flow's.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
-pub enum ConfirmKind {
-  #[default]
-  DeleteWorktree,
-  /// Landing a PR / MR on its base branch (issue #551).
-  MergePr,
-}
-
-/// The merge a confirmation is holding, snapshotted when it opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingMerge {
-  pub number: u64,
-  pub title: String,
-  pub head_ref: String,
-  pub base_ref: String,
-  pub method: crate::forge::MergeMethod,
-  /// The CI rollup as it stood when the modal opened, rendered in the
-  /// summary. Merging on a red CI is the case the confirmation earns its
-  /// cost, and gwm shows it rather than deciding for the forge: `main` here
-  /// carries required checks, so the server refuses on its own and its
-  /// error is more accurate than a rule invented in this process.
-  pub ci: crate::forge::CiState,
-  pub checks_passed: u32,
-  pub checks_total: u32,
-  /// `PR` / `MR`, resolved by the caller.
-  pub noun: String,
 }
 
 /// Outcome of [`App::handle_command_logs_key`] (issue #613): the two side
@@ -475,6 +444,10 @@ pub struct App {
   /// Agent-session detection state (issue #408).
   pub agents: AgentState,
 
+  /// What the open confirmation modal is about, what it holds, and what
+  /// the attempt left behind (issues #257, #551).
+  pub confirm_ctx: ConfirmContext,
+
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
   /// cached pre-rendered sections keyed by the selected worktree's
@@ -556,11 +529,6 @@ pub struct App {
   /// API; this `App` keeps the side-effecting wrappers below that compose
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
-
-  /// Last delete-worktree failure shown inside the confirm modal (issue
-  /// #257). Kept on `App`, not `ConfirmModal`, because it is the outcome of
-  /// the async worktree deletion side effect rather than countdown state.
-  pub delete_failure: Option<String>,
 
   /// Animated loader for overlays (issue #187). Advanced by the event
   /// loop's 200ms poll tick while the confirm countdown is armed and
@@ -676,27 +644,6 @@ pub struct App {
   /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
   pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
 
-  /// What the open confirmation modal is about (validation feedback on
-  /// issue #551).
-  ///
-  /// The modal was single-purpose — `View::Confirm` meant "delete a
-  /// worktree" and nothing else — and a merge needs the same ceremony:
-  /// countdown, danger border, a summary naming what is about to happen.
-  /// Discriminated the way `DetailKind` discriminates the detail overlay,
-  /// with exhaustive matches and no `_` arm, so a third use has to answer
-  /// the question rather than inherit the delete flow's behaviour.
-  confirm_kind: ConfirmKind,
-  /// The merge the confirmation is holding, snapshotted when it opened.
-  ///
-  /// A snapshot for the same reason `pending_delete` is one (#484): an
-  /// auto-refresh can land during the safety countdown, and the row under
-  /// the cursor is not necessarily the row the user aimed at.
-  pending_merge: Option<PendingMerge>,
-  /// The error banner a failed merge leaves in the modal, mirroring
-  /// `delete_failure`: the forge's own words, kept where the decision was
-  /// made rather than flashed on a status bar the reader may miss.
-  merge_failure: Option<String>,
-
   /// Terminal width in columns as of the last draw (issue #420). The rich
   /// view wraps its bodies against the modal's inner width, which only the
   /// renderer knows, so the event loop stamps it here — see
@@ -811,6 +758,7 @@ impl App {
       help: HelpOverlay::new(),
       rich: RichView::default(),
       agents: AgentState::default(),
+      confirm_ctx: ConfirmContext::default(),
       sidebar: SidebarState::new(),
       pending_g: false,
       pending_chord: Vec::new(),
@@ -823,7 +771,6 @@ impl App {
       picker_should_exit: false,
       should_quit: false,
       confirm: ConfirmModal::new(),
-      delete_failure: None,
       spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
@@ -843,9 +790,6 @@ impl App {
       note_editor: None,
       clean_overlay: CleanOverlay::new(),
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
-      confirm_kind: ConfirmKind::DeleteWorktree,
-      pending_merge: None,
-      merge_failure: None,
       // Overwritten by the event loop on the first draw; the default is
       // the classic 80-column terminal so a headless `App` (every state
       // test) still wraps against something sane.
@@ -2048,8 +1992,8 @@ impl App {
           // retry is one keystroke (#484).
           let refresh_result = self.refresh();
           let status = outcome.status_line();
-          self.delete_failure = outcome.failure_banner();
-          match &self.delete_failure {
+          self.confirm_ctx.delete_failure = outcome.failure_banner();
+          match &self.confirm_ctx.delete_failure {
             None => {
               self.view = View::List;
               self.confirm.reset();
@@ -2266,7 +2210,7 @@ impl App {
 
   /// The failure banner for the merge modal.
   pub fn merge_failure(&self) -> Option<&str> {
-    self.merge_failure.as_deref()
+    self.confirm_ctx.merge_failure.as_deref()
   }
 
   /// `true` when a requested quit can safely leave the event loop now.
@@ -3185,7 +3129,7 @@ impl App {
     use super::ui::HintContext;
     match self.view {
       View::Create => self.create_hint_context(),
-      View::Confirm => match self.confirm_kind {
+      View::Confirm => match self.confirm_ctx.kind {
         ConfirmKind::DeleteWorktree => HintContext::Confirm,
         ConfirmKind::MergePr => HintContext::ConfirmMerge,
       },
@@ -7022,7 +6966,7 @@ impl App {
     self.pending_delete = targets;
     self.view = View::Confirm;
     self.confirm.reset();
-    self.delete_failure = None;
+    self.confirm_ctx.delete_failure = None;
     // Start the loader animation from a deterministic frame each time
     // the modal opens (#187).
     self.spinner.reset();
@@ -7058,7 +7002,7 @@ impl App {
       };
       return;
     };
-    self.pending_merge = Some(PendingMerge {
+    self.confirm_ctx.pending_merge = Some(PendingMerge {
       number: pr.number,
       title: crate::naming::sanitise_for_terminal(&pr.title),
       head_ref: crate::naming::sanitise_for_terminal(&pr.detail.head_ref),
@@ -7070,7 +7014,7 @@ impl App {
       noun: self.pr_noun_titlecase(),
     });
     self.remember_rich_view();
-    self.confirm_kind = ConfirmKind::MergePr;
+    self.confirm_ctx.kind = ConfirmKind::MergePr;
     self.view = View::Confirm;
     self.confirm.reset();
     self.spinner.reset();
@@ -7083,12 +7027,12 @@ impl App {
 
   /// What the open confirmation is about.
   pub fn confirm_kind(&self) -> ConfirmKind {
-    self.confirm_kind
+    self.confirm_ctx.kind
   }
 
   /// The merge the confirmation is holding, for the renderer.
   pub fn pending_merge(&self) -> Option<&PendingMerge> {
-    self.pending_merge.as_ref()
+    self.confirm_ctx.pending_merge.as_ref()
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
@@ -7114,7 +7058,7 @@ impl App {
       return Ok(());
     };
     let delete_branch = self.delete_branch_on_remove;
-    self.delete_failure = None;
+    self.confirm_ctx.delete_failure = None;
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::DeleteWorktree.loading_label().into();
@@ -7135,11 +7079,11 @@ impl App {
   pub fn apply_merge_result(&mut self, outcome: std::result::Result<(), String>) {
     match outcome {
       Ok(()) => {
-        let pending = self.pending_merge.take();
+        let pending = self.confirm_ctx.pending_merge.take();
         let noun = pending.as_ref().map(|p| p.noun.clone()).unwrap_or_else(|| "PR".into());
         let number = pending.as_ref().map(|p| p.number).unwrap_or(0);
-        self.confirm_kind = ConfirmKind::DeleteWorktree;
-        self.merge_failure = None;
+        self.confirm_ctx.kind = ConfirmKind::DeleteWorktree;
+        self.confirm_ctx.merge_failure = None;
         // A merged PR is still the thing the reader was looking at, and the
         // refresh below will bring its new state to the same view.
         if !self.restore_rich_view() {
@@ -7160,7 +7104,7 @@ impl App {
       // failure would throw that away and leave the reader to guess whether
       // to retry.
       Err(e) => {
-        self.merge_failure = Some(e.trim().to_string());
+        self.confirm_ctx.merge_failure = Some(e.trim().to_string());
         self.status = format!("merge failed: {}", e.trim());
       }
     }
@@ -7177,10 +7121,10 @@ impl App {
   /// different consequence, so the moment of friction is owed again.
   pub fn cycle_merge_method(&mut self) {
     use crate::forge::MergeMethod;
-    if self.confirm_kind != ConfirmKind::MergePr || self.is_merge_loading() {
+    if self.confirm_ctx.kind != ConfirmKind::MergePr || self.is_merge_loading() {
       return;
     }
-    let Some(pending) = self.pending_merge.as_mut() else {
+    let Some(pending) = self.confirm_ctx.pending_merge.as_mut() else {
       return;
     };
     pending.method = match pending.method {
@@ -7199,7 +7143,7 @@ impl App {
   /// talks to a server and takes seconds, and a synchronous call would
   /// freeze the frame for all of them.
   pub fn confirm_merge(&mut self) {
-    let Some(pending) = self.pending_merge.clone() else {
+    let Some(pending) = self.confirm_ctx.pending_merge.clone() else {
       return;
     };
     // Fire the SNAPSHOT taken when the modal opened, not a fresh lookup: an
@@ -7215,7 +7159,7 @@ impl App {
     // The modal STAYS UP (validation feedback), showing a loader the way
     // the delete flow does. Dismissing it here left the screen with only a
     // status line for an operation that talks to a server and can fail.
-    self.merge_failure = None;
+    self.confirm_ctx.merge_failure = None;
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::MergePr.loading_label().into();
@@ -7309,11 +7253,11 @@ impl App {
       return;
     }
     self.confirm.dismiss();
-    self.delete_failure = None;
+    self.confirm_ctx.delete_failure = None;
     self.pending_delete.clear();
-    self.pending_merge = None;
-    self.merge_failure = None;
-    self.confirm_kind = ConfirmKind::DeleteWorktree;
+    self.confirm_ctx.pending_merge = None;
+    self.confirm_ctx.merge_failure = None;
+    self.confirm_ctx.kind = ConfirmKind::DeleteWorktree;
     if self.restore_rich_view() {
       return;
     }

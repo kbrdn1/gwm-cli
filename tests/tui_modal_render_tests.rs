@@ -394,7 +394,7 @@ fn confirm_modal_renders_delete_failure_after_async_delete_fails() {
   app.worktrees.push(deletable_worktree("feat-257-loader"));
   app.list_state.select(Some(app.worktrees.len() - 1));
   app.enter_confirm_delete();
-  app.delete_failure = Some("permission denied".into());
+  app.confirm_ctx.delete_failure = Some("permission denied".into());
 
   let buf = render(&mut app);
 

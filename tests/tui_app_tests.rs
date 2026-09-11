@@ -9470,7 +9470,7 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
   let (_dir, mut app) = make_app();
   let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
   app.view = View::Confirm;
-  app.delete_failure = Some("old failure".into());
+  app.confirm_ctx.delete_failure = Some("old failure".into());
 
   app
     .task_result_sender()
@@ -9488,7 +9488,10 @@ fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
   assert!(applied, "delete result should be applied");
   assert!(!app.is_delete_worktree_loading(), "delete slot clears after success");
   assert_eq!(app.view, View::List);
-  assert!(app.delete_failure.is_none(), "old failure is cleared after success");
+  assert!(
+    app.confirm_ctx.delete_failure.is_none(),
+    "old failure is cleared after success"
+  );
   assert!(
     app.status.contains("removed alpha") && app.status.contains("/tmp/alpha"),
     "status reports the removed target: {:?}",
@@ -9523,7 +9526,7 @@ fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
   assert!(applied, "delete failure should still be applied");
   assert!(!app.is_delete_worktree_loading(), "delete slot clears after failure");
   assert_eq!(app.view, View::Confirm);
-  assert_eq!(app.delete_failure.as_deref(), Some("permission denied"));
+  assert_eq!(app.confirm_ctx.delete_failure.as_deref(), Some("permission denied"));
   assert!(
     app.status.contains("delete failed") && app.status.contains("permission denied"),
     "status reports the delete failure: {:?}",

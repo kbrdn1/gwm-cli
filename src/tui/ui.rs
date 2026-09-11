@@ -7324,7 +7324,7 @@ fn draw_confirm(f: &mut Frame, app: &App, map: &mut MouseMap) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.delete_failure.as_deref() {
+  } else if let Some(error) = app.confirm_ctx.delete_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("delete failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],

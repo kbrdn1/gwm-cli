@@ -37,9 +37,9 @@ use std::time::{Duration, Instant};
 
 pub use app::{
   agent_pane_status, detached_browser_status, mux_pane_status, plan_agent_pane, plan_terminal_browser,
-  read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey,
-  LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, MouseOutcome, NoteKey, OpenTarget, PendingMerge, RepoMeta,
-  ToggleStroke, View, WorkspaceState,
+  read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, CreateKey, ExecPickerKey, LauncherPlan,
+  LinkPromptKey, LinkPromptStage, LinkTarget, MouseOutcome, NoteKey, OpenTarget, RepoMeta, ToggleStroke, View,
+  WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
@@ -49,7 +49,9 @@ pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
 };
-pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+pub use state::confirm::{
+  ConfirmButton, ConfirmContext, ConfirmKeyAction, ConfirmKind, ConfirmModal, CountdownTickOutcome, PendingMerge,
+};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
