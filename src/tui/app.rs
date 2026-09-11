@@ -2,6 +2,7 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::mouse::{Hit, MouseKind, PaneId, RowList, SidebarPane, Spot};
 use super::palette::PaletteState;
+use super::state::agents::AgentState;
 use super::state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, EditWorktreeResult, TaskKind, TaskMsg,
   TaskRunner,
@@ -471,6 +472,9 @@ pub struct App {
   /// Rich PR / Issue view state (issues #420, #551).
   pub rich: RichView,
 
+  /// Agent-session detection state (issue #408).
+  pub agents: AgentState,
+
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
   /// cached pre-rendered sections keyed by the selected worktree's
@@ -482,33 +486,6 @@ pub struct App {
   /// Recent Commits height; [`SidebarState::scroll_down`] clamps
   /// against it.
   pub sidebar: SidebarState,
-
-  /// Last completed agent-session snapshot, keyed by worktree path string
-  /// (issue #408). `None` until the first detection lands — the table then
-  /// renders without agent cells, no placeholder noise. Replaced atomically
-  /// by [`Self::apply_agent_snapshot`]; the render path only reads it.
-  pub agent_snapshot: Option<std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>>,
-  /// When the current snapshot was taken — drives the periodic re-detection
-  /// in [`Self::maybe_refresh_agent_sessions`] so freshness colours do not
-  /// fossilise at their startup value.
-  pub agent_snapshot_at: Option<std::time::Instant>,
-  /// Every session the last detection saw, matched or not — the candidate
-  /// pool of the overlay's attach-by-id prompt (user feedback 2026-07-22).
-  pub agent_all_sessions: Vec<crate::agent_sessions::AgentSession>,
-  /// Pinned session ids per worktree path — the sidebar Agents pane shows
-  /// ONLY these (user feedback 2026-07-22), and the render path must not
-  /// read git config, so the map is refreshed off-render (each detection
-  /// cycle + immediately after attach/detach). Empty in workspace mode
-  /// (same single-repo ceiling as the pins themselves).
-  pub agent_pins: std::collections::BTreeMap<String, Vec<String>>,
-  /// A full pool scan was requested while a detection run was in flight —
-  /// it chains after that run lands instead of walking the store
-  /// concurrently (Codex review round R).
-  agent_pool_wanted: bool,
-  /// A pin changed while a detection run was in flight — the re-scan (and
-  /// the pins refresh) chains after that run lands instead of racing a
-  /// second walk against it (Codex review round U).
-  agent_redetect_wanted: bool,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
@@ -833,13 +810,8 @@ impl App {
       report: None,
       help: HelpOverlay::new(),
       rich: RichView::default(),
+      agents: AgentState::default(),
       sidebar: SidebarState::new(),
-      agent_snapshot: None,
-      agent_snapshot_at: None,
-      agent_all_sessions: Vec::new(),
-      agent_pins: std::collections::BTreeMap::new(),
-      agent_pool_wanted: false,
-      agent_redetect_wanted: false,
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -1474,7 +1446,7 @@ impl App {
       .collect();
     if old_keys != new_keys {
       self.tasks.invalidate(TaskKind::AgentSessions);
-      self.agent_snapshot_at = None;
+      self.agents.snapshot_at = None;
     }
     self.status = if spawned > 0 {
       format!(
@@ -1661,7 +1633,7 @@ impl App {
   /// in flight coalesces onto it — same no-timer debounce as the sidebar.
   pub fn maybe_refresh_agent_sessions(&mut self) {
     const REDETECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
-    let fresh = self.agent_snapshot_at.is_some_and(|at| at.elapsed() < REDETECT_PERIOD);
+    let fresh = self.agents.snapshot_at.is_some_and(|at| at.elapsed() < REDETECT_PERIOD);
     if fresh {
       return;
     }
@@ -1708,7 +1680,7 @@ impl App {
     // Queue it instead; `apply_agent_snapshot` chains it on landing
     // (round R).
     if self.tasks.is_loading(TaskKind::AgentSessions) {
-      self.agent_pool_wanted = true;
+      self.agents.pool_wanted = true;
       return;
     }
     let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
@@ -1775,20 +1747,20 @@ impl App {
     if !self.tasks.complete(TaskKind::AgentSessions, generation) {
       return false;
     }
-    self.agent_snapshot = Some(map);
-    self.agent_snapshot_at = Some(std::time::Instant::now());
+    self.agents.snapshot = Some(map);
+    self.agents.snapshot_at = Some(std::time::Instant::now());
     // `None` = summary-only run: the previous pool survives so an open
     // attach prompt keeps its candidates (round Q).
     let landed_pool = all.is_some();
     if let Some(all) = all {
-      self.agent_all_sessions = all;
+      self.agents.all_sessions = all;
     }
     // A pool scan queued while this run was in flight chains now that the
     // slot is free (round R); a landing that already carried the pool
     // satisfies the request outright, and a prompt closed in the meantime
     // abandons it — nobody would consume the sweep (round T).
-    if self.agent_pool_wanted {
-      self.agent_pool_wanted = false;
+    if self.agents.pool_wanted {
+      self.agents.pool_wanted = false;
       let prompt_open = self.view == View::DetailOverlay
         && self.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input;
       if !landed_pool && prompt_open {
@@ -1800,11 +1772,11 @@ impl App {
     // a pin changed while this run was in flight: its map predates the
     // change, so the fresh event-path read stands and a re-detection is
     // chained by clearing the snapshot timestamp (round U).
-    if self.agent_redetect_wanted {
-      self.agent_redetect_wanted = false;
-      self.agent_snapshot_at = None;
+    if self.agents.redetect_wanted {
+      self.agents.redetect_wanted = false;
+      self.agents.snapshot_at = None;
     } else {
-      self.agent_pins = pins;
+      self.agents.pins = pins;
     }
     // A landing detection refreshes the open overlay in place (user
     // feedback: attach/detach used to leave stale rows until reopened).
@@ -1828,7 +1800,8 @@ impl App {
   /// any (issue #408). Pure lookup — the render path's only entry point.
   pub fn agents_for(&self, w: &crate::worktree::WorktreeInfo) -> Option<&crate::agent_sessions::WorktreeAgents> {
     self
-      .agent_snapshot
+      .agents
+      .snapshot
       .as_ref()
       .and_then(|map| map.get(&crate::agent_sessions::path_display_key(&w.path)))
   }
@@ -1841,7 +1814,8 @@ impl App {
   /// the column flicker.
   pub fn any_agent_sessions(&self) -> bool {
     self
-      .agent_snapshot
+      .agents
+      .snapshot
       .as_ref()
       .is_some_and(|map| map.values().any(|a| !a.sessions.is_empty()))
   }
@@ -4565,7 +4539,8 @@ impl App {
     // does no branch-config I/O on the event loop (round P): the map is
     // refreshed by the landing itself and by every attach/detach.
     let pinned = self
-      .agent_pins
+      .agents
+      .pins
       .get(&crate::agent_sessions::path_display_key(&w.path))
       .cloned()
       .unwrap_or_default();
@@ -4674,7 +4649,7 @@ impl App {
   /// The prompt's filtered candidate pool (owned clones — the borrow of
   /// `agent_all_sessions` must not outlive `&mut self` call sites).
   pub fn agent_input_candidates(&self) -> Vec<crate::agent_sessions::AgentSession> {
-    crate::tui::state::detail_overlay::filter_sessions(&self.agent_all_sessions, &self.detail_overlay.input)
+    crate::tui::state::detail_overlay::filter_sessions(&self.agents.all_sessions, &self.detail_overlay.input)
       .into_iter()
       .cloned()
       .collect()
@@ -4740,7 +4715,7 @@ impl App {
   /// from.
   ///
   /// That is the whole point of going through `DetailOverlay::target`:
-  /// [`Self::agent_all_sessions`] is a *different* collection with a
+  /// [`AgentState::all_sessions`] is a *different* collection with a
   /// different refresh trigger (the attach-by-id prompt fills it on open),
   /// so reading the id back from there would hand out a session whose `cwd`
   /// is another repo, or nothing at all on a user who never pressed `i`.
@@ -4748,7 +4723,8 @@ impl App {
     let sid = self.detail_overlay.selected_meta()?;
     let (path, _) = self.detail_overlay.target.as_ref()?;
     let session = self
-      .agent_snapshot
+      .agents
+      .snapshot
       .as_ref()?
       .get(&crate::agent_sessions::path_display_key(path))?
       .sessions
@@ -4892,9 +4868,9 @@ impl App {
   /// render-side pins copy (the Agents pane shows pinned-only), and push
   /// the new pin state to every other surface (snapshot re-detection).
   fn refresh_agent_overlay_rows(&mut self, path: &Path) {
-    // Map first: `build_agent_rows` reads the [`Self::agent_pins`] copy
+    // Map first: `build_agent_rows` reads the [`AgentState::pins`] copy
     // (round P), so the fresh read must land before the rows rebuild.
-    self.agent_pins = self.read_agent_pins();
+    self.agents.pins = self.read_agent_pins();
     if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
       let rows = self.build_agent_rows(&w);
       self.detail_overlay.set_rows(rows);
@@ -4904,10 +4880,10 @@ impl App {
       // dropped — invalidating here raced a second scan against it
       // (round U, same hazard as rounds P/R). Let it land and chain the
       // re-detection; its pre-change pins are skipped on landing.
-      self.agent_redetect_wanted = true;
+      self.agents.redetect_wanted = true;
     } else {
       self.tasks.invalidate(TaskKind::AgentSessions);
-      self.agent_snapshot_at = None;
+      self.agents.snapshot_at = None;
     }
   }
 

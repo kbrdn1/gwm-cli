@@ -1482,10 +1482,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
   let prefix_lines = vec![sidebar_header_line(&w, app)];
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
   // Agents pane body (issue #408): per-frame pure snapshot + pins lookup
-  // (no config I/O — `app.agent_pins` is refreshed off-render), its
+  // (no config I/O — `app.agents.pins` is refreshed off-render), its
   // bordered block collapses to zero height when nothing is pinned.
   let agent_pins: &[String] = app
-    .agent_pins
+    .agents
+    .pins
     .get(&crate::agent_sessions::path_display_key(&w.path))
     .map(|v| v.as_slice())
     .unwrap_or(&[]);

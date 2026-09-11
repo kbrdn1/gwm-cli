@@ -19,6 +19,7 @@
 //! in `tui::views::<view>`, next to that view's rendering and its key
 //! handling, rather than one slice here and two more in `app.rs` / `ui.rs`.
 
+pub mod agents;
 pub mod async_task;
 pub mod clean_overlay;
 pub mod command_logs;

@@ -2011,7 +2011,7 @@ fn app_with_agent_overlay(kind: gwm::agent_sessions::AgentKind, id: &str, age_se
       }],
     },
   );
-  app.agent_snapshot = Some(map);
+  app.agents.snapshot = Some(map);
   app.worktrees = vec![w];
   app.list_state.select(Some(0));
   app.open_agent_overlay();
@@ -11324,7 +11324,7 @@ mod agent_sessions_pane {
     assert!(app.tasks.request(TaskKind::AgentSessions).is_none());
     let map = snapshot_for("/w/one", AgentKind::ClaudeCode, 10);
     assert!(app.apply_agent_snapshot(generation, map.clone(), None, BTreeMap::new()));
-    assert_eq!(app.agent_snapshot.as_ref(), Some(&map));
+    assert_eq!(app.agents.snapshot.as_ref(), Some(&map));
   }
 
   #[test]
@@ -11387,11 +11387,11 @@ mod agent_sessions_pane {
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
     assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()));
     assert_eq!(
-      app.agent_all_sessions.len(),
+      app.agents.all_sessions.len(),
       1,
       "the pool survived the summary-only landing"
     );
-    assert_eq!(app.agent_all_sessions[0].id, "pool-keep");
+    assert_eq!(app.agents.all_sessions[0].id, "pool-keep");
   }
 
   #[test]
@@ -11460,7 +11460,7 @@ mod agent_sessions_pane {
     app.tasks.invalidate(TaskKind::AgentSessions);
     assert!(!app.apply_agent_snapshot(stale, BTreeMap::new(), None, BTreeMap::new()));
     // The last authoritative snapshot survives.
-    assert_eq!(app.agent_snapshot.as_ref(), Some(&live));
+    assert_eq!(app.agents.snapshot.as_ref(), Some(&live));
   }
 
   #[test]
@@ -11724,9 +11724,9 @@ mod agent_detail_overlay {
     let stale_pins = BTreeMap::new();
     assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, stale_pins));
     assert!(
-      app.agent_pins.values().flatten().any(|sid| sid == "newest-session"),
+      app.agents.pins.values().flatten().any(|sid| sid == "newest-session"),
       "the fresh pin survived the stale landing: {:?}",
-      app.agent_pins
+      app.agents.pins
     );
     // …and the queued re-detection is due (snapshot cleared, slot free).
     assert!(
