@@ -22,7 +22,7 @@ use std::fs;
 use std::path::PathBuf;
 
 mod common;
-use common::assert_job_is_blocking;
+use common::{assert_job_is_blocking, effective_matrix_os};
 
 fn repo_file(rel: &str) -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -107,14 +107,11 @@ fn steps(job: &serde_yaml_ng::Value) -> Vec<serde_yaml_ng::Value> {
 
 #[test]
 fn ci_runs_the_msrv_check_on_every_supported_platform() {
+  // Through `effective_matrix_os` and not `strategy.matrix.os` (issue #653):
+  // an `exclude:` deletes rows without touching that list, so this guard would
+  // keep passing over a matrix that no longer holds the rows it names.
   let job = msrv_job();
-  let matrix = job["strategy"]["matrix"]["os"]
-    .as_sequence()
-    .cloned()
-    .unwrap_or_default()
-    .iter()
-    .filter_map(|v| v.as_str().map(str::to_owned))
-    .collect::<Vec<_>>();
+  let matrix = effective_matrix_os(&job, "msrv");
   for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
     assert!(
       matrix.iter().any(|m| m == os),

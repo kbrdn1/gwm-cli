@@ -117,6 +117,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI could still be silenced, below the job and above it**
+  ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
+  [#653](https://github.com/kbrdn1/gwm-cli/issues/653)). #646 pinned the job
+  level. Three ways around it were left, each found by mutating the real
+  workflow and each leaving the whole suite green.
+
+  **Below.** A command can be made unable to fail without touching any of the
+  keys #646 reads: `cargo nextest run || true`, a pipe, `set +e`, `exit 0`,
+  `if ! cargo audit …; then …; fi`, a trailing `&`. Listing those spellings
+  does not converge, because the shell is a programming language and the list
+  is its grammar, so the guard states the property instead: a `run:` block
+  that invokes cargo is exactly one bare cargo invocation, one line, made only
+  of characters that carry no shell meaning. Every spelling above fails that,
+  including the ones nobody has thought of yet, and all eight cargo commands
+  in `ci.yml` pass it unchanged.
+
+  Two things the shape alone does not reach are named separately. The `shell:`
+  that runs the command, because `shell:` takes a whole command line rather
+  than a keyword, so `true {0}` never runs the script and `bash -n {0}` only
+  parses it: the built-ins that do run it are whitelisted, at step level and in
+  `defaults.run` at job and workflow level. And the cargo flags that compile
+  without executing, because `cargo bench --no-run --benches -- --test`
+  satisfies the shape while being issue #634 verbatim.
+
+  Steps that do not invoke cargo stay free-form, which is what keeps the `read
+  the declared MSRV` step legal: it pipes `grep` into `cut` and uses `exit 1`
+  to fail loudly, both correct. A step is recognised by a whitespace-delimited
+  `cargo` token, so neither `Cargo.toml` nor a prefixed `env VAR=x cargo …`
+  fools it.
+
+  **Above.** `strategy.matrix.exclude` deletes matrix rows, which defeated the
+  two guards whose entire subject is the matrix: they read
+  `strategy.matrix.os` and never the `exclude` beside it, so
+  `test (windows-latest)` could stop existing while
+  `ci_test_matrix_runs_on_windows_latest` kept passing. Both now read the
+  effective matrix, and `runs-on:` is pinned to it: a literal runner keeps
+  `test (windows-latest)` in the checks list, satisfying the required contexts
+  on `main`, while nothing ever compiles the
+  `[target."cfg(windows)".dependencies]` block. The workflow's own `on:` block
+  takes all eight jobs at once, so the events and branches it fires on are
+  pinned, and `paths:`, `paths-ignore:` and `types:` are asserted absent: a
+  path filter skips CI on a change it does not match, and `types:` has
+  defaults, so replacing them runs no CI on an ordinary pull request. Branch
+  membership alone was not enough either, since GitHub reads those entries as
+  patterns and a later `!dev` cancels an earlier `dev`.
+
 - **Three CI jobs could be switched off without a test going red**
   ([#646](https://github.com/kbrdn1/gwm-cli/issues/646)). GitHub Actions
   resolves `if:` and `continue-on-error:` at the job level as well as the

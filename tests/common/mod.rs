@@ -113,8 +113,8 @@ pub fn git_only_bin() -> &'static Path {
 /// stopped running, and `continue-on-error` on the `audit` job is what hid
 /// RUSTSEC-2025-0068 for nine months.
 ///
-/// Five ways to neutralise a job, plus the two assertions that keep this from
-/// passing over nothing:
+/// Five ways to neutralise a job, one invariant on the commands it runs, and
+/// the two assertions that keep this from passing over nothing:
 ///
 /// - the job must **exist**, and hold at least one step. An absent job parses
 ///   to `Value::Null`, and `null["if"]` is null, `null["steps"]` yields an
@@ -130,6 +130,12 @@ pub fn git_only_bin() -> &'static Path {
 ///   why this is checked rather than assumed. A `continue-on-error:` on a
 ///   dependency is deliberately not an error: it makes the dependency report
 ///   success, which lets the dependent run rather than skipping it.
+///
+/// - no command the job exists to run may swallow its own failure (issue
+///   #652). A `run:` block that invokes cargo must be **exactly one bare
+///   cargo invocation**, which is an invariant rather than a list of forbidden
+///   spellings. See `assert_run_cannot_swallow_its_failure` for why that
+///   distinction is the whole point.
 ///
 /// The whole closure is walked, not just the direct dependencies: a job two
 /// hops away from a conditional one is skipped exactly the same way.
@@ -234,7 +240,201 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
       "step {label:?} of the `{job_name}` job may not be conditioned away: it carries \
        `if: {cond:?}` and the only condition allowed for it is {allowed:?}"
     );
+
+    assert_run_cannot_swallow_its_failure(workflow, job, step, job_name, label);
   }
+}
+
+/// A `run:` block that invokes cargo must be **exactly one bare cargo
+/// invocation**, run by a shell that actually runs it (issue #652).
+///
+/// This started as a denylist, `||`, a pipe, `set +e`, `exit 0`, and review
+/// walked straight through it: `if ! cargo audit --deny warnings; then echo
+/// 'advisories found'; fi` leaves the `audit` job green on a red audit, which
+/// is the RUSTSEC-2025-0068 scenario itself, and `cargo bench --benches --
+/// --test &` leaves `bench` green without waiting. Neither carries any of the
+/// four. Enumerating the ways a shell can discard an exit status does not
+/// converge, because the shell is a programming language and the list is its
+/// grammar.
+///
+/// So the shape of the command is stated positively: one line, starting with
+/// `cargo `, made only of characters that carry no shell meaning. That closes
+/// the spellings nobody has thought of yet, and all eight cargo commands in
+/// `ci.yml` pass it unchanged.
+///
+/// Two things the shape alone does not cover, both found by mutating this
+/// helper against itself:
+///
+/// - **the shell that runs it.** An earlier revision dropped the `shell:`
+///   assertion, reasoning that a single command's exit status becomes the
+///   step's "under every shell GitHub offers". That reasoning was an
+///   enumeration in disguise, and `shell:` also takes an arbitrary command
+///   line: `shell: 'true {0}'` never runs the script at all, and `shell: bash
+///   -n {0}` parses it without executing. Both are green against the shape.
+///   So the built-in keywords that do run the script are allowed and nothing
+///   else, at step level and in `defaults.run` at job and workflow level,
+///   which are the only two places `defaults` exists;
+/// - **flags that compile without running.** `cargo bench --no-run --benches
+///   -- --test` is one bare invocation and satisfies the shape, while being
+///   issue #634 verbatim: the benches build and never run. Unlike shell
+///   grammar, the set of cargo flags meaning "do not execute" is finite and
+///   documented by cargo, so naming them is a bounded list rather than an
+///   open-ended one, and it backs an invariant instead of standing alone.
+///
+/// Steps that do not invoke cargo are out of scope and stay free-form: the
+/// `read the declared MSRV` step pipes `grep -m1 '^rust-version = ' Cargo.toml`
+/// into `cut -d'"' -f2` and uses `exit 1` to fail loudly, both correct. The
+/// step is detected by a whitespace-delimited `cargo` **token**, not by
+/// `contains("cargo ")`: that spelling hangs the whole check on one literal
+/// space, so `cargo\tcheck --locked || true` opted out of it entirely. A
+/// prefix test is no good either, since `env VAR=x cargo …` defeats it.
+/// `Cargo.toml` is not a `cargo` token, so the reader step stays out.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+fn assert_run_cannot_swallow_its_failure(
+  workflow: &serde_yaml_ng::Value,
+  job: &serde_yaml_ng::Value,
+  step: &serde_yaml_ng::Value,
+  job_name: &str,
+  label: &str,
+) {
+  let Some(script) = step["run"].as_str() else {
+    return;
+  };
+  let lines: Vec<&str> = script.lines().collect();
+  let invokes_cargo = |l: &&str| l.split_whitespace().any(|tok| tok == "cargo");
+  if !lines.iter().any(invokes_cargo) {
+    return;
+  }
+
+  // Whitelist, not a denylist: `shell:` accepts an arbitrary command line
+  // (`shell: command [...options] {0} [...more_options]`), so anything that is
+  // not a built-in keyword known to execute the script has to be refused
+  // rather than inspected. `defaults.run.shell` sets the same thing for a
+  // whole job or the whole workflow, and those are the only two levels it
+  // exists at.
+  for (shell, where_) in [
+    (&step["shell"], "on this step".to_string()),
+    (
+      &job["defaults"]["run"]["shell"],
+      format!("in `defaults.run` on the `{job_name}` job"),
+    ),
+    (
+      &workflow["defaults"]["run"]["shell"],
+      "in the workflow's `defaults.run`".to_string(),
+    ),
+  ] {
+    assert!(
+      shell.is_null() || matches!(shell.as_str(), Some("bash" | "sh" | "pwsh")),
+      "step {label:?} of the `{job_name}` job runs cargo under `shell: {shell:?}` set \
+       {where_}. Only the built-in `bash`, `sh` and `pwsh` keywords are allowed, because \
+       `shell:` otherwise takes a whole command line: `true {{0}}` never runs the script and \
+       `bash -n {{0}}` only parses it, both leaving a green step over a command that never \
+       executed"
+    );
+  }
+
+  assert_eq!(
+    lines.len(),
+    1,
+    "step {label:?} of the `{job_name}` job invokes cargo, so its `run:` must be that one \
+     command and nothing else. A second line is where the exit status gets discarded, by an \
+     `exit 0`, by an `echo` that reports its own status, or by a `set +e` that stops errexit \
+     from ever reaching it. Got {script:?}"
+  );
+
+  // Bare invocation: the characters allowed are the ones that appear in a
+  // cargo command line and carry no meaning to the shell. Everything else,
+  // `|`, `&`, `;`, `>`, backtick, `$`, `(`, `!`, `#`, quotes and even a tab,
+  // is either a way to discard the status or a way to run something that is
+  // not this command.
+  let line = lines[0];
+  let bare = line.starts_with("cargo ")
+    && line
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || " ._:/@=+-".contains(c));
+  assert!(
+    bare,
+    "step {label:?} of the `{job_name}` job must run cargo as a bare command: one \
+     invocation, no shell operators. `if ! cargo audit …; then …; fi` and `cargo bench … &` \
+     both report success over a failure while carrying no `||`, no pipe, no `set +e` and no \
+     `exit 0`, which is why this is stated as an invariant and not as a list of forbidden \
+     spellings. A `${{{{ … }}}}` expression is refused too, deliberately: the runner splices it \
+     into the line before any shell sees it, so an attacker-controlled value becomes shell \
+     source. Pass it through `env:` and read it as `$VAR`, which is GitHub's own advice, in a \
+     step this guard leaves free-form. Got {line:?}"
+  );
+
+  for flag in ["--no-run", "--dry-run"] {
+    assert!(
+      !line.split_whitespace().any(|tok| tok == flag),
+      "step {label:?} of the `{job_name}` job must not pass `{flag}`: it compiles the \
+       target and never executes it, so the step reports success over work that never ran. \
+       `cargo bench --no-run --benches -- --test` is issue #634 verbatim, a bench that \
+       builds and is never run. Got {line:?}"
+    );
+  }
+}
+
+/// The matrix rows a job actually runs, after `exclude` is applied (issue
+/// #653).
+///
+/// Reading `strategy.matrix.os` alone is what `ci_test_matrix_runs_on_windows_latest`
+/// did, and an `exclude:` beside it deletes rows without touching that list:
+/// `test (windows-latest)` stops existing while the guard whose entire subject
+/// is the matrix keeps passing.
+///
+/// Anything this cannot reason about panics rather than answering vaguely. A
+/// second matrix dimension makes `exclude` a filter over combinations and not
+/// over names, and `include:` can add a row back after `exclude` removed it,
+/// so either one silently changes what the returned list means.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<String> {
+  let matrix = &job["strategy"]["matrix"];
+  let keys: Vec<String> = matrix
+    .as_mapping()
+    .map(|m| m.keys().filter_map(|k| k.as_str().map(str::to_owned)).collect())
+    .unwrap_or_default();
+  for key in &keys {
+    assert!(
+      key == "os" || key == "exclude",
+      "the `{job_name}` matrix grew a `{key}` key, and this helper only knows how to apply \
+       `exclude` over a single `os` dimension. A second dimension makes `exclude` a filter \
+       over combinations, and `include:` adds rows back after `exclude` removed them, so \
+       the list returned here would no longer mean what its callers read it as"
+    );
+  }
+
+  let declared: Vec<String> = matrix["os"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|v| v.as_str().map(str::to_owned))
+    .collect();
+  let excluded: Vec<String> = matrix["exclude"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|e| e["os"].as_str().map(str::to_owned))
+    .collect();
+
+  // `runs-on:` is what actually decides where a row executes, and it sits one
+  // line above the matrix this function reads. Pinning it to the matrix is what
+  // makes the returned list mean anything: a literal `runs-on: ubuntu-latest`
+  // leaves `test (windows-latest)` in the checks list, satisfying the required
+  // contexts on `main`, while nothing ever compiles the
+  // `[target."cfg(windows)".dependencies]` block. Worse than the `exclude:`
+  // this function exists to catch, which at least deletes the row.
+  let runs_on = job["runs-on"].as_str().unwrap_or_default();
+  assert_eq!(
+    runs_on, "${{ matrix.os }}",
+    "the `{job_name}` job has a matrix, so its `runs-on:` must derive from it. A literal \
+     runner makes every row execute on the same machine while the rows keep their per-OS \
+     names, so the checks list still advertises the platform nobody tested on"
+  );
+
+  declared.into_iter().filter(|os| !excluded.contains(os)).collect()
 }
 
 /// The `needs:` of a job, as a list. The Actions schema allows both a bare
