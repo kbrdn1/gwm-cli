@@ -296,9 +296,11 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 /// is broken". Between this file and that property sit cargo's own argument
 /// parsing, the process environment and `.cargo/config.toml`, and a reader of
 /// the workflow does not cross that gap. It can only make a crossing visible
-/// in a diff, which is what the shape above does. Three surfaces measured
-/// while reviewing #654 sit on the far side, and #656 records the decision to
-/// name them here rather than chase them: each review pass opened a surface
+/// in a diff, which is what the shape above does. Three surfaces sit on the
+/// far side. Reviewing #654 found them; they are listed below as this branch
+/// re-measured them against the commands the workflow actually runs, which
+/// moved two of them away from where #656 put them. #656 records the decision
+/// to name them here rather than chase them: each review pass opened a surface
 /// the previous fix did not touch instead of a variant of it, which is a
 /// domain with no last entry.
 ///
