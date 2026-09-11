@@ -2,6 +2,9 @@ use std::fs;
 #[cfg(unix)]
 use std::{path::Path, process::Command};
 
+mod common;
+use common::assert_job_is_blocking;
+
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
 
@@ -381,10 +384,12 @@ fn docs_sync_watches_every_root_the_site_reads() {
 /// `\n  hook-smoke:` markers, so inserting any job between the two silently
 /// emptied what the assertions ran against, the same failure mode the `msrv`
 /// tests already parse the YAML to avoid.
+fn ci_workflow() -> serde_yaml_ng::Value {
+  serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).expect("ci.yml must be valid YAML")
+}
+
 fn ci_job(name: &str) -> serde_yaml_ng::Value {
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap())
-      .expect("ci.yml must be valid YAML");
+  let workflow = ci_workflow();
   let job = workflow["jobs"][name].clone();
   assert!(!job.is_null(), "ci.yml must define a `{name}` job");
   job
@@ -499,27 +504,11 @@ fn ci_runs_the_benches_and_can_fail_on_one() {
     "piping the bench command reports the pipe's exit code, not the bench runner's, \
      the panic this job exists to catch would be swallowed, got {bench_run:?}"
   );
-  assert!(
-    job["continue-on-error"].is_null(),
-    "the bench job must be able to fail the workflow: a dead bench is what #634 is about"
-  );
-  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
-  assert!(
-    steps.iter().all(|s| s["continue-on-error"].is_null()),
-    "no step of the bench job may swallow its own failure"
-  );
-  // The `doctor` job in this same file is narrowed with an `if:`. Doing that
-  // here would keep all the assertions above green while the benches quietly
-  // stop running on pull requests, which is the state #634 exists to close.
-  assert!(
-    job["if"].is_null(),
-    "the bench job must not be narrowed with an `if:`: it has to run on every event this \
-     workflow runs on, or a dead bench goes unseen again"
-  );
-  assert!(
-    steps.iter().all(|s| s["if"].is_null()),
-    "no step of the bench job may be conditioned away"
-  );
+  // A dead bench is what #634 is about, so the job has to be able to go red,
+  // and it has to run at all: the `doctor` job in this same file is narrowed
+  // with an `if:`, and doing that here would keep every assertion above green
+  // while the benches quietly stopped running on pull requests.
+  assert_job_is_blocking(&ci_workflow(), "bench", &[]);
 }
 
 #[test]
@@ -768,5 +757,79 @@ fn ci_runs_doctests_since_nextest_cannot() {
   assert!(
     cond.is_null() || cond.as_str() == Some("matrix.os == 'ubuntu-latest'"),
     "the doctest step may only be narrowed to the ubuntu matrix row, got `if: {cond:?}`"
+  );
+}
+
+/// Issue #646. The `test` job is the one carrying `cargo build`, `cargo
+/// nextest run` and `cargo test --doc`, so switching it off takes the whole
+/// suite with it. `if: false` on this job was mutated into `ci.yml` and all 19
+/// tests in this binary stayed green, because every guard here reads
+/// `step[...]` and GitHub Actions resolves `if:` at the job level too.
+///
+/// The doctest step keeps its one legitimate `if:`, because doctests behave
+/// identically on the three runners and are paid for once on the row with the
+/// slack. The helper pins that condition by value rather than waiving the
+/// check for the step.
+#[test]
+fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
+  assert_job_is_blocking(
+    &ci_workflow(),
+    "test",
+    &[("cargo test --doc", "matrix.os == 'ubuntu-latest'")],
+  );
+}
+
+/// Issue #646. `cargo audit` had no test naming it at all: `grep -rn '"audit"'
+/// tests/*.rs` returned nothing, while `tests/release_workflow_tests.rs` cited
+/// the job twice to justify guards placed elsewhere. Three simultaneous
+/// neutralisations, `continue-on-error: true` on the job and `cargo audit
+/// --deny warnings` rewritten to `cargo audit || true`, left 23 tests green
+/// across the two binaries that parse `ci.yml`.
+///
+/// Two properties on top of the job being blocking:
+///
+/// - `--deny warnings`, without which warning-class advisories (unmaintained /
+///   unsound / yanked) exit 0. That is half of how RUSTSEC-2025-0068
+///   (`serde_yml`, unsound + unmaintained) slipped past for nine months;
+/// - no pipe on the command. A shell pipeline reports the exit status of its
+///   last element, so `cargo audit --deny warnings || true` and `cargo audit |
+///   tee log` both report success over a failing audit. Testing for `|` covers
+///   `||` as well.
+///
+/// Accepted advisories belong in `audit.toml` (`[advisories] ignore = […]`)
+/// with a rationale, which is a conscious decision in a reviewed diff (#340),
+/// not a job that cannot fail.
+#[test]
+fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
+  let job = ci_job("audit");
+  assert_job_is_blocking(&ci_workflow(), "audit", &[]);
+
+  let step = job["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .find(|s| s["name"].as_str() == Some("cargo audit"))
+    .expect("the audit job needs a step named `cargo audit` that runs the audit");
+  let run = step["run"]
+    .as_str()
+    .expect("the `cargo audit` step must carry a `run:` script")
+    .to_string();
+
+  assert!(
+    run.contains("cargo audit"),
+    "the `cargo audit` step must actually run cargo-audit, got {run:?}"
+  );
+  assert!(
+    run.contains("--deny warnings"),
+    "cargo audit must run with `--deny warnings`: plain `cargo audit` exits 0 on \
+     unmaintained, unsound and yanked advisories, which is how RUSTSEC-2025-0068 went \
+     unseen for nine months. Got {run:?}"
+  );
+  assert!(
+    !run.contains('|'),
+    "the audit command must carry no pipe and no `||`: a shell pipeline reports its last \
+     element's exit status, so `cargo audit --deny warnings || true` succeeds over a \
+     failing audit exactly as the `continue-on-error` this guard also forbids. Got {run:?}"
   );
 }

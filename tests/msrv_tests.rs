@@ -21,6 +21,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+mod common;
+use common::assert_job_is_blocking;
+
 fn repo_file(rel: &str) -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
@@ -90,10 +93,12 @@ fn every_live_msrv_claim_matches_cargo_toml() {
 /// `toolchain: 1.95` while keeping that step would have kept the old guard
 /// green, reintroducing exactly the drift it exists to block. The value of the
 /// input is now compared to the step output it must reference.
+fn ci_workflow() -> serde_yaml_ng::Value {
+  serde_yaml_ng::from_str(&read(".github/workflows/ci.yml")).expect("ci.yml must be valid YAML")
+}
+
 fn msrv_job() -> serde_yaml_ng::Value {
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&read(".github/workflows/ci.yml")).expect("ci.yml must be valid YAML");
-  workflow["jobs"]["msrv"].clone()
+  ci_workflow()["jobs"]["msrv"].clone()
 }
 
 fn steps(job: &serde_yaml_ng::Value) -> Vec<serde_yaml_ng::Value> {
@@ -195,4 +200,21 @@ fn ci_checks_the_msrv_locked_and_without_default_features() {
      `cmd_daemon` / `cmd_statusline`, and that build is documented as supported. \
      Got: {checks:?}"
   );
+}
+
+/// Issue #646. The four guards above read `strategy`, `steps`, `uses`, `with`
+/// and `run`, and none of them reads the job's own `if:` or
+/// `continue-on-error:`. `if: false` was mutated onto the `msrv` job and all
+/// four stayed green.
+///
+/// What that job holds off is the whole point of #491: it is the only thing
+/// that compiles at the declared floor, so a dependency raising its own
+/// `rust-version` reaches users as a broken `cargo install gwm-cli` and
+/// nothing else in the repo says a word. Reading the graph through `cargo
+/// metadata` does not settle it either, since metadata said `1.88` where a
+/// build said `1.95`, so a job that does not run leaves no second oracle
+/// behind.
+#[test]
+fn ci_msrv_job_cannot_be_switched_off_or_made_advisory() {
+  assert_job_is_blocking(&ci_workflow(), "msrv", &[]);
 }

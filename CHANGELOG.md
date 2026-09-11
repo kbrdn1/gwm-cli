@@ -117,6 +117,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Three CI jobs could be switched off without a test going red**
+  ([#646](https://github.com/kbrdn1/gwm-cli/issues/646)). GitHub Actions
+  resolves `if:` and `continue-on-error:` at the job level as well as the
+  step level, and the job wins. Every guard covering `msrv`, `test` and
+  `audit` read `step[...]` and never the job containing it, so `if: false`
+  on the `test` job left all 19 tests in `release_workflow_tests` green
+  while `cargo build`, `cargo nextest run` and `cargo test --doc` had
+  stopped running. `audit` had no test naming it at all, which is the job
+  whose `continue-on-error` hid RUSTSEC-2025-0068 for nine months.
+
+  The triplet already written for `bench` is now one helper,
+  `assert_job_is_blocking`, shared by the two test binaries that parse
+  `ci.yml` and applied to all four jobs. It also refuses an absent job and
+  an empty `steps:`, because a deleted job parses to null and every
+  assertion walks past null. A step that needs a condition passes its exact
+  value rather than a waiver, so the one legitimate `if:` in the tree, the
+  doctest step narrowed to the ubuntu matrix row, is still pinned to that
+  condition. That allowance also has to land on exactly one step: the label
+  it is keyed on comes from `name:`, so relabelling a second step to match
+  would otherwise hand it the same exemption, and renaming the step it was
+  written for would leave a waiver covering nothing. The `audit` guard adds `--deny warnings` and rejects a pipe on
+  the command, since a pipeline reports its last element's exit status.
+
+  A fifth way to switch a job off is covered as well, found while reviewing
+  the first four: GitHub skips a job whose dependency was skipped, so
+  `needs: doctor` on any of the four stops it on every event that does not
+  target `dev` while its own `if:` and `continue-on-error:` stay clean.
+  `doctor` sits one screen below `audit` in the same file and is narrowed
+  exactly that way. The whole `needs:` closure is walked, since a job two
+  hops from a conditional one is skipped the same way.
+
+  Each guard was proved by mutating `ci.yml` and rerunning the two affected
+  binaries, `bench` included, so the refactor cannot have traded coverage
+  for a shared definition.
+
 - **The warm-cache sidebar bench runs again, and a CI job now runs the
   benches** ([#634](https://github.com/kbrdn1/gwm-cli/issues/634)).
   `benches/sidebar_cache_hit.rs` drew one frame and asserted the sidebar
