@@ -132,7 +132,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead: a `run:` block that invokes cargo is exactly one bare cargo
   invocation, one line, no shell operators. Every spelling above fails that,
   including the ones nobody has thought of yet, and all eight cargo commands
-  in `ci.yml` pass it unchanged. Scoped to cargo lines rather than every
+  in `ci.yml` pass it unchanged. Two things the shape alone does not reach are
+  named separately: the `shell:` that runs the command, since `shell:` takes a
+  whole command line and `true {0}` never runs the script at all (read at step
+  level and in `defaults.run` at job and workflow level), and the cargo flags
+  that compile without executing, since `cargo bench --no-run --benches --
+  --test` satisfies the shape while being issue #634 verbatim. Scoped to cargo lines rather than every
   line on purpose, since the property is not "no pipe": the `read the declared
   MSRV` step legitimately pipes `grep` into `cut`, and `exit 1` stays allowed
   because that same step uses it to fail loudly. Matched on `contains` rather
