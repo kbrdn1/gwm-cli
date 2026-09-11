@@ -25,7 +25,7 @@ use super::views::commits::CommitsModal;
 use super::views::exec_picker::ExecPicker;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
-use crate::config::{CleanConfig, Config, TuiOpenConfig, TuiOpenMode};
+use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
@@ -711,48 +711,10 @@ pub struct App {
   /// fires [`crate::clean::delete_reclaim`] when the countdown elapses.
   pub clean_overlay: CleanOverlay,
 
-  /// The `[clean]` config captured when the clean overlay opened (issue
-  /// #325) — every re-scan and the delete resolve their dir-set against this
-  /// snapshot, not the live `self.config.clean`, which a workspace
-  /// auto-refresh could swap to another repo's (Codex #333 review).
-  clean_overlay_cfg: CleanConfig,
-
-  /// The safety-countdown duration (seconds) captured when the clean overlay
-  /// opened (issue #325). Pinned alongside [`Self::clean_overlay_cfg`] so a
-  /// workspace config swap can't shorten — or clear to `0` — the delay
-  /// before an armed reclaim fires (Codex #333 review).
-  clean_overlay_countdown_secs: u32,
-
   /// Generic detail overlay content (issue #408) — filled by
   /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
   pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
 
-  /// The worktree the open detail overlay was built for — `(path, branch)`
-  /// captured at open so attach/detach pin against it even if an
-  /// auto-refresh drifts the live selection (clean-overlay pattern).
-  detail_overlay_target: Option<(PathBuf, Option<String>)>,
-
-  /// Forge-consumer counterpart of `detail_overlay_target` (Codex review
-  /// #455): the `(remote slug, side, number)` the open forge-linked
-  /// overlay was built for, captured by [`Self::enter_ci_checks`] and
-  /// [`Self::enter_rich_view`]. Any link mutation that disagrees — the PR
-  /// changed, disappeared, or (workspace mode) the slug moved to another
-  /// repo whose PR happens to share the number — closes the overlay up
-  /// front via [`Self::close_forge_overlay_if_link_disagrees`]; otherwise
-  /// the stale rows stay up through the new fetch, and forever if it
-  /// fails, with `Enter` opening an old PR's URL.
-  ///
-  /// The `LinkTarget` is part of the identity, not decoration (issue
-  /// #420): issue #42 and PR #42 are different things, and a tuple that
-  /// dropped the discriminant would reproduce the #138 bug class the
-  /// fetch cache already paid for once. The first element is the **forge
-  /// identity** (`<kind> <web origin>/<slug>`), not the bare slug, for
-  /// the reason `GitHubFetch::forge_identity` already documents: an
-  /// origin moving from `github.com/acme/widgets` to
-  /// `gitlab.com/acme/widgets` keeps the slug, so a slug-keyed tuple
-  /// compared equal and left `Enter` pointing at the old host (Codex
-  /// review #529).
-  detail_overlay_link: Option<(Option<String>, LinkTarget, u64)>,
   /// Whether the reader CHOSE the rich view's current side (issue #551).
   ///
   /// The view opens on the PR whenever one is linked and lets a landing PR
@@ -978,11 +940,7 @@ impl App {
       exec_picker: ExecPicker::new(),
       note_editor: None,
       clean_overlay: CleanOverlay::new(),
-      clean_overlay_cfg: CleanConfig::default(),
-      clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
-      detail_overlay_target: None,
-      detail_overlay_link: None,
       rich_tab_pinned: false,
       confirm_kind: ConfirmKind::DeleteWorktree,
       pending_merge: None,
@@ -1933,7 +1891,7 @@ impl App {
     if self.view == View::DetailOverlay
       && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::Agents
     {
-      if let Some((path, _)) = self.detail_overlay_target.clone() {
+      if let Some((path, _)) = self.detail_overlay.target.clone() {
         if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
           let rows = self.build_agent_rows(&w);
           self.detail_overlay.set_rows(rows);
@@ -3998,7 +3956,7 @@ impl App {
     // Capture the target now (clean-overlay pattern, Codex #333): an
     // auto-refresh can drift the live selection while the overlay is open,
     // and attach/detach must pin against THIS worktree's branch.
-    self.detail_overlay_target = Some((
+    self.detail_overlay.target = Some((
       sel.path.clone(),
       crate::github::pinnable_branch(sel.branch.as_deref()).map(str::to_string),
     ));
@@ -4126,11 +4084,11 @@ impl App {
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
-    self.detail_overlay_target = None;
+    self.detail_overlay.target = None;
     // Pin the overlay to the PR it renders, so a link mutation that
     // disagrees can close it (Codex review #455). The checks themselves
     // are kept too — the duration tick's cache-independent source.
-    self.detail_overlay_link = self
+    self.detail_overlay.link = self
       .github
       .link
       .pr
@@ -4236,8 +4194,8 @@ impl App {
     };
     // Drop the agents consumer's target; pin this overlay to the link it
     // renders so a disagreeing mutation can close it.
-    self.detail_overlay_target = None;
-    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    self.detail_overlay.target = None;
+    self.detail_overlay.link = Some((self.github.forge_identity(), target, number));
     self.rich_overlay_source = Some(source);
     self
       .detail_overlay
@@ -4734,7 +4692,7 @@ impl App {
       self.status = "agent pins are per-repo: not available in workspace mode".into();
       return false;
     }
-    let Some((path, _)) = self.detail_overlay_target.clone() else {
+    let Some((path, _)) = self.detail_overlay.target.clone() else {
       self.status = "cannot pin: no worktree captured".into();
       return false;
     };
@@ -4832,7 +4790,7 @@ impl App {
       self.status = "no session selected to unpin".into();
       return;
     };
-    let Some((path, _)) = self.detail_overlay_target.clone() else {
+    let Some((path, _)) = self.detail_overlay.target.clone() else {
       self.status = "cannot detach: no worktree captured".into();
       return;
     };
@@ -4859,14 +4817,14 @@ impl App {
   /// overlay is about**, resolved from the SAME pool the rows were built
   /// from.
   ///
-  /// That is the whole point of going through `detail_overlay_target`:
+  /// That is the whole point of going through `DetailOverlay::target`:
   /// [`Self::agent_all_sessions`] is a *different* collection with a
   /// different refresh trigger (the attach-by-id prompt fills it on open),
   /// so reading the id back from there would hand out a session whose `cwd`
   /// is another repo, or nothing at all on a user who never pressed `i`.
   fn selected_agent_session(&self) -> Option<(crate::agent_sessions::AgentSession, PathBuf)> {
     let sid = self.detail_overlay.selected_meta()?;
-    let (path, _) = self.detail_overlay_target.as_ref()?;
+    let (path, _) = self.detail_overlay.target.as_ref()?;
     let session = self
       .agent_snapshot
       .as_ref()?
@@ -5033,8 +4991,8 @@ impl App {
 
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
-    self.detail_overlay_target = None;
-    self.detail_overlay_link = None;
+    self.detail_overlay.target = None;
+    self.detail_overlay.link = None;
     self.rich_tab_pinned = false;
     self.rich_h_offset = 0;
     self.ci_overlay_checks.clear();
@@ -5059,9 +5017,11 @@ impl App {
     // (Codex #333 review).
     let name = sel.name.clone();
     let path = sel.path.clone();
-    self.clean_overlay_cfg = self.config.clean.clone();
-    self.clean_overlay_countdown_secs = self.config.tui.effective_confirm_countdown_secs();
-    let names: Vec<String> = self.clean_overlay_cfg.profiles.keys().cloned().collect();
+    self.clean_overlay.capture_context(
+      self.config.clean.clone(),
+      self.config.tui.effective_confirm_countdown_secs(),
+    );
+    let names: Vec<String> = self.clean_overlay.cfg().profiles.keys().cloned().collect();
     self.clean_overlay.open(names, name, path);
     if let Err(e) = self.clean_overlay_rescan() {
       self.status = format!("clean: {e}");
@@ -5083,7 +5043,7 @@ impl App {
       return Ok(());
     };
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
-    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg)?;
+    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), self.clean_overlay.cfg())?;
     let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
     self.clean_overlay.set_scan(reclaim, skipped);
     Ok(())
@@ -5119,7 +5079,7 @@ impl App {
   pub fn clean_countdown_total(&self) -> Duration {
     // The value captured at open (Codex #333) — never the live config, which a
     // workspace refresh could swap (e.g. to `0`, erasing the safety delay).
-    Duration::from_secs(u64::from(self.clean_overlay_countdown_secs))
+    Duration::from_secs(u64::from(self.clean_overlay.countdown_secs()))
   }
 
   /// Handle the clean confirm key. Arms / disarms / fires the countdown via
@@ -5188,7 +5148,7 @@ impl App {
       return;
     };
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
-    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg) {
+    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), self.clean_overlay.cfg()) {
       Ok(d) => d,
       Err(e) => {
         self.status = format!("clean: {e}");
@@ -7745,7 +7705,7 @@ impl App {
 
   /// Close an open forge-linked overlay when the link no longer matches
   /// the `(slug, side, number)` it was built for — see
-  /// `detail_overlay_link`. Covers the CI checks list and the rich view
+  /// `DetailOverlay::link`. Covers the CI checks list and the rich view
   /// alike (issue #420): the failure is the same one, the rows describe a
   /// PR/issue that is no longer the linked one, so the membership test is
   /// `is_forge_linked` rather than an equality repeated per consumer.
@@ -7756,7 +7716,7 @@ impl App {
     // Compare against the side the overlay was opened for: a rich *issue*
     // view must not close because the PR link moved, and must close when
     // the issue link does.
-    let current = match self.detail_overlay_link {
+    let current = match self.detail_overlay.link {
       Some((_, LinkTarget::Issue, _)) => self
         .github
         .link
@@ -7768,7 +7728,7 @@ impl App {
         .pr
         .map(|n| (self.github.forge_identity(), LinkTarget::Pr, n)),
     };
-    if current != self.detail_overlay_link {
+    if current != self.detail_overlay.link {
       self.close_detail_overlay();
     }
   }
@@ -8500,7 +8460,7 @@ impl App {
       self.rich_h_offset = 0;
     }
     self.rich_overlay_source = Some(source);
-    self.detail_overlay_link = Some((self.github.forge_identity(), target, number));
+    self.detail_overlay.link = Some((self.github.forge_identity(), target, number));
     if promoted {
       self.detail_overlay.open(kind, title, rows);
     } else {

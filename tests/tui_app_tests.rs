@@ -4173,7 +4173,7 @@ fn ci_checks_refresh_and_filter_mirror_the_list_view_keys() {
 #[test]
 fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
   // Codex review on PR #455: an agents overlay interrupted without a close
-  // (an async task flipping the view) leaves detail_overlay_target set; a
+  // (an async task flipping the view) leaves the overlay's target set; a
   // detection landing while the CI overlay is later open used to rebuild
   // the rows as agent sessions while the kind stayed CiChecks — Enter then
   // tried to open a session id as a URL. The landing rebuild is now gated
@@ -17906,4 +17906,38 @@ fn reopening_the_exec_picker_does_not_reuse_a_container_name() {
   let first = name_of(&mut app);
   let second = name_of(&mut app);
   assert_ne!(first, second, "a reopened picker names its run something new");
+}
+
+#[test]
+fn opening_a_detail_overlay_keeps_the_identity_its_consumer_just_pinned() {
+  // Issue #635: `target` and `link` moved from `App` onto `DetailOverlay`,
+  // where they now sit next to the fields `DetailOverlay::open` resets. Every
+  // consumer pins them BEFORE calling `open` (`enter_ci_checks`,
+  // `enter_rich_view`, `open_agent_overlay`), so clearing them in `open`
+  // would wipe the worktree or the PR the overlay is about to act on — the
+  // agents overlay would attach against nothing, and
+  // `close_forge_overlay_if_link_disagrees` would see `None` and never fire.
+  //
+  // Same shape as the exec picker's `container_seq`: a field that must
+  // survive the call that resets its neighbours.
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, mut app) = make_app();
+  let path = std::path::PathBuf::from("/tmp/some-worktree");
+  app.detail_overlay.target = Some((path.clone(), Some("feat/x".to_string())));
+  app.detail_overlay.link = Some((Some("github github.com/acme/widgets".to_string()), LinkTarget::Pr, 42));
+
+  app
+    .detail_overlay
+    .open(DetailKind::Agents, "Agent Sessions".into(), Vec::new());
+
+  assert_eq!(
+    app.detail_overlay.target,
+    Some((path, Some("feat/x".to_string()))),
+    "`open` resets the rows, not the worktree the consumer pinned"
+  );
+  assert_eq!(
+    app.detail_overlay.link.map(|(_, t, n)| (t, n)),
+    Some((LinkTarget::Pr, 42)),
+    "nor the forge link it pinned"
+  );
 }

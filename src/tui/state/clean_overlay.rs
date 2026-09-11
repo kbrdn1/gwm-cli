@@ -14,6 +14,7 @@
 
 use super::confirm::ConfirmModal;
 use crate::clean::WorktreeReclaim;
+use crate::config::CleanConfig;
 use std::path::{Path, PathBuf};
 
 /// The picker label for the no-`--profile` choice — the directory set
@@ -50,11 +51,43 @@ pub struct CleanOverlay {
   /// Safety countdown for the delete. Armed by the confirm key; the run
   /// loop fires `clean::delete_reclaim` when it elapses.
   pub confirm: ConfirmModal,
+  /// The `[clean]` config captured when the overlay opened (issue #325).
+  /// In workspace mode `sync_active_repo` can swap `App::config` to another
+  /// repo while the overlay sits open or armed, so every re-scan and the
+  /// delete resolve their directory set against *this* snapshot rather than
+  /// the live config (Codex #333 review).
+  cfg: CleanConfig,
+  /// `[tui] confirm_countdown_secs` as it read at open, pinned alongside
+  /// [`Self::cfg`] for the same reason: an armed countdown must not change
+  /// length underneath the user because the active repo drifted.
+  countdown_secs: u32,
 }
 
 impl CleanOverlay {
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// Pin the `[clean]` config and the countdown length the overlay will
+  /// resolve against (issue #325). Called by `App::enter_clean_overlay`
+  /// **before** [`Self::open`], which needs the profile names off this
+  /// config, and kept separate from it so the capture reads as the distinct
+  /// question it is: `open` repopulates the picker on every open, this pins
+  /// what an auto-refresh or a workspace repo swap must not drift.
+  pub fn capture_context(&mut self, cfg: CleanConfig, countdown_secs: u32) {
+    self.cfg = cfg;
+    self.countdown_secs = countdown_secs;
+  }
+
+  /// The `[clean]` config captured at open. Profile resolution goes through
+  /// this, never `App::config`.
+  pub fn cfg(&self) -> &CleanConfig {
+    &self.cfg
+  }
+
+  /// The countdown length captured at open, in seconds.
+  pub fn countdown_secs(&self) -> u32 {
+    self.countdown_secs
   }
 
   /// Populate the picker from the configured profile names, reset the
