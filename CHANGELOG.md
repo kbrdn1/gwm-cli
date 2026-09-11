@@ -131,7 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The caller list is replaced by a sweep over `jobs:`, because a list is what
   produced this in the first place: #646 guarded what it had looked at, #652
   and #653 widened the helper without widening its callers, and a ninth job
-  would arrive unguarded the same way. `doctor` is the one exemption and it is
+  would arrive unguarded the same way. A sweep guards what it finds and says
+  nothing about what stopped existing, so the eight jobs are also named: that
+  enumeration is bounded, covering what `ci.yml` ships today while the sweep
+  covers what it does not, which is the inverse of the caller list it replaces.
+  A missing job is not always a blocked merge either, since only five of the
+  eight are required contexts on `main`. `doctor` is the one exemption and it is
   pinned rather than waived. It is advisory by design, `continue-on-error:
   true` on its step and an `if:` restricting it to `dev`, and should it lose
   either property the exemption goes red instead of quietly covering a job it
@@ -155,12 +160,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own `RUSTFLAGS: -D warnings` is not leant on for clippy: it is set once for
   all eight jobs, and `msrv` already overrides it to `""` at job level.
 
-  Fourteen mutations, each applied alone and each read back to confirm it
+  Eighteen mutations, each applied alone and each read back to confirm it
   fired the assertion it was aimed at and not an earlier one. Applying them
   together proves less than it looks, since the job-level `if:` is checked
   before `continue-on-error:` and both before the command, so a combined
   mutation panics on the first and never reaches the one it is meant to
-  demonstrate.
+  demonstrate. Four of the eighteen mutate the test rather than the workflow,
+  since moving the step-level `if:` waivers out of a call argument and into a
+  lookup is plumbing that can break on its own.
 
 - **CI could still be silenced, below the job and above it**
   ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
