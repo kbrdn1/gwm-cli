@@ -8,6 +8,7 @@ use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
 use super::state::working_tree::WorkingTreeSnapshot;
 use super::views::commits::{draw_commits, recent_commits_lines};
+use super::views::exec_picker::draw_exec_picker;
 use std::collections::HashMap;
 
 /// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
@@ -4201,7 +4202,7 @@ pub fn modal_hint_for_context_with_fields(
   modal_hint_line(&hints, theme)
 }
 
-fn push_modal_hint(
+pub(crate) fn push_modal_hint(
   lines: &mut Vec<Line<'static>>,
   ctx: HintContext,
   keymap: &Keymap,
@@ -8459,7 +8460,7 @@ pub fn picker_window(len: usize, selected: usize, max_visible: usize) -> (usize,
 /// the labels start at the same column and the selection highlight reads as a
 /// full-width bar — and the visible window follows `selected` with
 /// `↑ / ↓ N more` markers (centred) when the list overflows `max_visible`.
-fn picker_lines(
+pub(crate) fn picker_lines(
   labels: &[&str],
   selected: usize,
   max_visible: usize,
@@ -8506,58 +8507,6 @@ fn picker_lines(
     );
   }
   out
-}
-
-/// Render the exec profile picker overlay (issue #325). A small centred
-/// modal listing the `[exec.profiles.*]` names; the highlighted row reads in
-/// the accent (with a selection bar) and a `▸` marker, the rest muted. The
-/// list is aligned, same-width, and scrolls to keep the highlight in view.
-/// `Enter` resolves the highlight and the run loop spawns it in a PTY overlay.
-fn draw_exec_picker(f: &mut Frame, app: &App, map: &mut MouseMap) {
-  let accent = app.theme.accent;
-  let term = f.area();
-  let width = overlay_modal_width(term.width);
-  let frame = ModalFrame::resolve_for(app, accent);
-  let inner = width.saturating_sub(frame.cols()) as usize;
-  let mut lines: Vec<Line<'static>> = Vec::new();
-  // Leave room for the title + hint + borders; the picker scrolls past that.
-  let max_visible = (term.height as usize).saturating_sub(8).max(3);
-  let labels: Vec<&str> = app.exec_picker.profiles().iter().map(String::as_str).collect();
-  lines.extend(picker_lines(
-    &labels,
-    app.exec_picker.selected_index(),
-    max_visible,
-    inner,
-    &app.theme,
-  ));
-  push_modal_hint(
-    &mut lines,
-    HintContext::ExecPicker,
-    &app.keymap,
-    &app.modal_keymap,
-    &app.theme,
-  );
-  let height = lines.len() as u16 + frame.rows();
-  let area = centered_abs(width, height, term);
-  let content = frame.render(f, map, area, "Run an exec profile", None);
-  f.render_widget(Paragraph::new(lines), content);
-
-  // The rows `picker_lines` painted, resolved through the same
-  // `picker_window` it used: a `↑ N more` marker takes the first line when
-  // the window is scrolled, so the profiles start one row lower (issue #624).
-  let (start, end) = picker_window(labels.len(), app.exec_picker.selected_index(), max_visible);
-  if end > start {
-    map.push_rows(
-      Rect {
-        y: content.y + u16::from(start > 0),
-        height: (end - start) as u16,
-        ..content
-      },
-      RowList::ExecPicker,
-      start,
-      labels.len(),
-    );
-  }
 }
 
 /// Render the generic detail overlay (issue #408). A centred modal listing

@@ -13,7 +13,6 @@ use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::detail_overlay::DetailKind;
-use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
@@ -23,9 +22,10 @@ use super::state::spinner::Spinner;
 use super::state::working_tree::WorkingTreeModal;
 use super::theme::Theme;
 use super::views::commits::CommitsModal;
+use super::views::exec_picker::ExecPicker;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
-use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode};
+use crate::config::{CleanConfig, Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
@@ -705,25 +705,6 @@ pub struct App {
   /// editor owns a branch and a path it can only have while open.
   pub note_editor: Option<crate::tui::state::note_editor::NoteEditor>,
 
-  /// The `[exec]` config captured when the exec picker opened (issue #325).
-  /// In workspace mode `sync_active_repo` can swap `self.config` to another
-  /// repo while the overlay is open, so `Enter` resolves the argv against
-  /// this snapshot — the active repo's `[exec]` at open time — not the live
-  /// config (Codex #333 review).
-  exec_picker_cfg: ExecConfig,
-
-  /// The active repo's `commondir` (`<main>/.git`), captured alongside
-  /// [`Self::exec_picker_cfg`] for the same reason: in workspace mode the
-  /// active repo can swap while the overlay is open. Only read when the
-  /// picked profile carries a `[container]` block (issue #421), which mounts
-  /// it so git answers inside the container.
-  exec_picker_common_dir: PathBuf,
-
-  /// Monotonic counter behind the container name of an overlay run (issue
-  /// #421). The pid alone would collide across two overlays opened on the
-  /// same worktree within one session.
-  exec_container_seq: u64,
-
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
   /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
@@ -996,9 +977,6 @@ impl App {
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
       note_editor: None,
-      exec_picker_cfg: ExecConfig::default(),
-      exec_picker_common_dir: PathBuf::new(),
-      exec_container_seq: 0,
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
@@ -3997,138 +3975,6 @@ impl App {
   /// depth against an already-in-flight refresh landing its result.
   pub fn destructive_overlay_open(&self) -> bool {
     matches!(self.view, View::ExecPicker | View::CleanReport)
-  }
-
-  /// Open the exec profile picker (issue #325). Populates it from
-  /// `[exec.profiles.*]` and switches to [`View::ExecPicker`]. Refuses
-  /// (status-bar message, no transition) when nothing is selected or no
-  /// exec profiles are configured — there is nothing to pick.
-  pub fn enter_exec_picker(&mut self) {
-    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
-      self.status = "nothing selected".into();
-      return;
-    };
-    let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
-    if names.is_empty() {
-      self.status = "no [exec.profiles] configured: add one to .gwm.toml".into();
-      return;
-    }
-    // Capture the target worktree path AND the active repo's `[exec]` config
-    // now: an auto-refresh can drift the live selection (and, in workspace
-    // mode, the active repo) while the picker is open, so `Enter` must run in
-    // *this* worktree against *this* config — not whatever is live later
-    // (Codex #333 review).
-    self.exec_picker_cfg = self.config.exec.clone();
-    self.exec_picker_common_dir = self.repo.commondir().to_path_buf();
-    self.exec_picker.open(names, cwd);
-    self.view = View::ExecPicker;
-  }
-
-  /// Handle a key inside the exec picker overlay (issue #325). The
-  /// testable handler owns the highlight movement; the run loop owns the
-  /// two side effects (resolve + spawn, or close). Keys resolve through
-  /// [`KeyContext::ExecPicker`] so they honour `[tui.keys.modal.exec]`.
-  pub fn handle_exec_picker_key(&mut self, key: KeyEvent) -> ExecPickerKey {
-    match self.resolve_modal(KeyContext::ExecPicker, key) {
-      Some(ModalAction::ExecPickerCancel) => ExecPickerKey::Cancel,
-      Some(ModalAction::ExecPickerAccept) => ExecPickerKey::Submit,
-      Some(ModalAction::ExecPickerNext) => {
-        self.exec_picker.next();
-        ExecPickerKey::Handled
-      }
-      Some(ModalAction::ExecPickerPrev) => {
-        self.exec_picker.prev();
-        ExecPickerKey::Handled
-      }
-      _ => ExecPickerKey::Handled,
-    }
-  }
-
-  /// Resolve the highlighted exec profile to an `(argv, cwd, teardown)` triple
-  /// for the run loop to spawn in a PTY overlay (issue #325). `None` (with a
-  /// status-bar message) when nothing is selected or the profile fails to
-  /// resolve — e.g. an empty `command` array. The argv is the frozen
-  /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
-  /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
-  ///
-  /// `teardown` is `Some` only for a containerised profile (issue #421):
-  /// killing the pty leader kills the `docker` client, never the container it
-  /// asked the daemon for, so the overlay removes it by name on close.
-  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf, Option<Vec<String>>)> {
-    let profile = self.exec_picker.selected_profile()?.to_string();
-    // Resolve against the worktree captured when the picker opened, NOT the
-    // live selection (which an auto-refresh may have drifted) — #333 review.
-    let Some(cwd) = self.exec_picker.cwd().map(Path::to_path_buf) else {
-      self.status = "nothing selected".into();
-      return None;
-    };
-    // Resolve against the `[exec]` config captured at open, not the live one.
-    let mut teardown: Option<Vec<String>> = None;
-    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
-      Ok(mut argv) => {
-        // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
-        // the captured worktree, exactly like the CLI exec path — otherwise
-        // `argv[0]` would resolve against gwm's own cwd (Codex #333 review).
-        // A bare command (`cargo`) or an absolute path is returned unchanged
-        // (PATH lookup / as-is).
-        if let Some(first) = argv.first_mut() {
-          *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
-        }
-        // A profile carrying `[container]` runs in a container here too
-        // (issue #421) — the same profile must not mean "on the host" in the
-        // TUI and "in a container" on the CLI. The wrap comes AFTER the
-        // relative-program anchoring: host paths are mirrored inside the
-        // container, so the anchored absolute path is valid on both sides.
-        match crate::exec::resolve_exec_container(Some(&profile), &self.exec_picker_cfg) {
-          Ok(Some(container)) => {
-            match crate::exec::ContainerPlan::resolve(container, &self.exec_picker_common_dir, |bin| {
-              which::which(bin).is_ok()
-            }) {
-              // `wrap_interactive`: this overlay spawns into a real pty, so
-              // the container gets `-i -t` and a REPL / debugger / prompting
-              // command keeps working, exactly as it does when the same
-              // profile runs on the host here.
-              Ok(plan) => {
-                self.exec_container_seq += 1;
-                let name = crate::exec::container_run_name(&cwd, std::process::id(), self.exec_container_seq);
-                match plan.wrap_interactive(&cwd, &argv, &name) {
-                  Ok(wrapped) => {
-                    argv = wrapped;
-                    teardown = Some(plan.container_teardown_argv(&name));
-                  }
-                  Err(e) => {
-                    self.status = format!("exec profile {profile:?}: {e}");
-                    return None;
-                  }
-                }
-              }
-              Err(e) => {
-                self.status = format!("exec profile {profile:?}: {e}");
-                return None;
-              }
-            }
-          }
-          Ok(None) => {}
-          Err(e) => {
-            self.status = format!("exec profile {profile:?}: {e}");
-            return None;
-          }
-        }
-        Some((argv, cwd, teardown))
-      }
-      Err(e) => {
-        self.status = format!("exec profile {profile:?}: {e}");
-        None
-      }
-    }
-  }
-
-  /// Close the exec picker without running anything (issue #325). Returns
-  /// to [`View::List`].
-  pub fn close_exec_picker(&mut self) {
-    if self.view == View::ExecPicker {
-      self.view = View::List;
-    }
   }
 
   // ── Clean overlay (issue #325) ─────────────────────────────────────────

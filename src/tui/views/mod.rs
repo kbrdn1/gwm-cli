@@ -12,3 +12,4 @@
 //! follow is a decision to take on measured churn rather than up front.
 
 pub mod commits;
+pub mod exec_picker;
