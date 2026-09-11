@@ -113,7 +113,7 @@ pub fn git_only_bin() -> &'static Path {
 /// stopped running, and `continue-on-error` on the `audit` job is what hid
 /// RUSTSEC-2025-0068 for nine months.
 ///
-/// Five ways to neutralise a job, plus the two assertions that keep this from
+/// Six ways to neutralise a job, plus the two assertions that keep this from
 /// passing over nothing:
 ///
 /// - the job must **exist**, and hold at least one step. An absent job parses
@@ -130,6 +130,13 @@ pub fn git_only_bin() -> &'static Path {
 ///   why this is checked rather than assumed. A `continue-on-error:` on a
 ///   dependency is deliberately not an error: it makes the dependency report
 ///   success, which lets the dependent run rather than skipping it.
+///
+/// - no command the job exists to run may swallow its own failure (issue
+///   #652). `cargo nextest run || true` needs none of the five keys above and
+///   produces the same dead job: the step reports success over a failing
+///   suite. Four shapes are rejected on any line that invokes cargo, `||`, a
+///   pipe, `set +e` anywhere in the same block, and `exit 0` anywhere after
+///   it.
 ///
 /// The whole closure is walked, not just the direct dependencies: a job two
 /// hops away from a conditional one is skipped exactly the same way.
@@ -234,7 +241,120 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
       "step {label:?} of the `{job_name}` job may not be conditioned away: it carries \
        `if: {cond:?}` and the only condition allowed for it is {allowed:?}"
     );
+
+    assert_run_cannot_swallow_its_failure(step, job_name, label);
   }
+}
+
+/// A `run:` block must let the command the job exists to run decide the step's
+/// exit status (issue #652).
+///
+/// The property is not "no pipe", which is why this is scoped rather than
+/// applied to every line: the `read the declared MSRV` step legitimately pipes
+/// `grep -m1 '^rust-version = ' Cargo.toml` into `cut -d'"' -f2`, and a guard
+/// that breaks it is the wrong guard. What matters is the command the job
+/// exists for, so only lines invoking cargo are read, and `exit 1` stays
+/// allowed, since that same step uses it to fail loudly.
+///
+/// The four shapes, each verified against the real workflow:
+///
+/// - `||`, which is how `cargo nextest run || true` reports success over a
+///   failing suite. `!line.contains('|')` covers the pipe case too;
+/// - a pipe, since a shell pipeline reports its last element's exit status;
+/// - `set +e` anywhere in the block, which disarms the `bash -e` GitHub runs
+///   `run:` under and leaves every following failure unreported;
+/// - `exit 0` anywhere after the command, which overrides whatever it returned.
+///   Not "at the end of the block": one on any later line does the same thing.
+///
+/// Matched with `contains("cargo ")` rather than `starts_with`, on purpose.
+/// `starts_with` tests a position, and a line prefixes: `env CARGO_TERM_COLOR=always
+/// cargo nextest run || true` and `timeout 600 cargo test --doc || true` are
+/// exactly the case this exists to catch and neither starts with `cargo `.
+/// `Cargo.toml` does not match it, capital C and no trailing space, which is
+/// checked against the real reader step rather than assumed.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+fn assert_run_cannot_swallow_its_failure(step: &serde_yaml_ng::Value, job_name: &str, label: &str) {
+  let Some(script) = step["run"].as_str() else {
+    return;
+  };
+  // Line continuations first: `cargo test \` then `|| true` on the next line is
+  // one command to the shell, and would read as two clean lines here.
+  let joined = script.replace("\\\n", " ");
+  let lines: Vec<&str> = joined.lines().collect();
+
+  let Some(at) = lines.iter().position(|l| l.contains("cargo ")) else {
+    return;
+  };
+
+  for line in lines.iter().filter(|l| l.contains("cargo ")) {
+    assert!(
+      !line.contains('|'),
+      "step {label:?} of the `{job_name}` job must let cargo decide the step's exit status: \
+       `||` reports success over a failure and a pipeline reports its last element's status, \
+       so the job goes green over a red command. Got {line:?}"
+    );
+  }
+  assert!(
+    !joined.contains("set +e"),
+    "step {label:?} of the `{job_name}` job must not `set +e`: GitHub runs `run:` under \
+     `bash -e`, and disarming it lets every later failure go unreported while the step \
+     still reports success. Got {script:?}"
+  );
+  for line in &lines[at + 1..] {
+    assert!(
+      !line.contains("exit 0"),
+      "step {label:?} of the `{job_name}` job must not `exit 0` after running cargo: it \
+       overrides whatever cargo returned. `exit 1` stays allowed, the MSRV reader uses it to \
+       fail loudly. Got {line:?}"
+    );
+  }
+}
+
+/// The matrix rows a job actually runs, after `exclude` is applied (issue
+/// #653).
+///
+/// Reading `strategy.matrix.os` alone is what `ci_test_matrix_runs_on_windows_latest`
+/// did, and an `exclude:` beside it deletes rows without touching that list:
+/// `test (windows-latest)` stops existing while the guard whose entire subject
+/// is the matrix keeps passing.
+///
+/// Anything this cannot reason about panics rather than answering vaguely. A
+/// second matrix dimension makes `exclude` a filter over combinations and not
+/// over names, and `include:` can add a row back after `exclude` removed it,
+/// so either one silently changes what the returned list means.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
+pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<String> {
+  let matrix = &job["strategy"]["matrix"];
+  let keys: Vec<String> = matrix
+    .as_mapping()
+    .map(|m| m.keys().filter_map(|k| k.as_str().map(str::to_owned)).collect())
+    .unwrap_or_default();
+  for key in &keys {
+    assert!(
+      key == "os" || key == "exclude",
+      "the `{job_name}` matrix grew a `{key}` key, and this helper only knows how to apply \
+       `exclude` over a single `os` dimension. A second dimension makes `exclude` a filter \
+       over combinations, and `include:` adds rows back after `exclude` removed them, so \
+       the list returned here would no longer mean what its callers read it as"
+    );
+  }
+
+  let declared: Vec<String> = matrix["os"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|v| v.as_str().map(str::to_owned))
+    .collect();
+  let excluded: Vec<String> = matrix["exclude"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .filter_map(|e| e["os"].as_str().map(str::to_owned))
+    .collect();
+
+  declared.into_iter().filter(|os| !excluded.contains(os)).collect()
 }
 
 /// The `needs:` of a job, as a list. The Actions schema allows both a bare
