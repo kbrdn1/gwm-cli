@@ -117,6 +117,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four of the eight CI jobs were guarded, and two of the unguarded ones are
+  required checks on `main`**
+  ([#655](https://github.com/kbrdn1/gwm-cli/issues/655)).
+  `assert_job_is_blocking` had four callers for eight jobs, and the four were
+  the ones #646's own audit happened to name. `fmt`, `clippy` and `hook-smoke`
+  were not among them, and all three are contexts `main` requires: `if: false`,
+  `continue-on-error: true` and `|| true` on the command, applied to `clippy`
+  at once, left all 27 tests across the two binaries that parse `ci.yml` green.
+  Those are exactly the neutralisations #646, #652 and #653 exist to close,
+  pointed at jobs nobody had pointed the guard at.
+
+  The caller list is replaced by a sweep over `jobs:`, because a list is what
+  produced this in the first place: #646 guarded what it had looked at, #652
+  and #653 widened the helper without widening its callers, and a ninth job
+  would arrive unguarded the same way. A sweep guards what it finds and says
+  nothing about what stopped existing, so the eight jobs are also named: that
+  enumeration is bounded, covering what `ci.yml` ships today while the sweep
+  covers what it does not, which is the inverse of the caller list it replaces.
+  A missing job is not always a blocked merge either, since only five of the
+  eight are required contexts on `main`. `doctor` is the one exemption and it is
+  pinned rather than waived. It is advisory by design, `continue-on-error:
+  true` on its step and an `if:` restricting it to `dev`, and should it lose
+  either property the exemption goes red instead of quietly covering a job it
+  was not written for. `hook-smoke` had been written down as exempt too, on
+  the reasoning that its shell gates are legitimately multi-line with pipes;
+  running the guard against it before believing that said otherwise, since a
+  `run:` block invoking no cargo is outside the command invariant's scope to
+  begin with. It costs one iteration of the sweep and it is a required check,
+  so it is guarded.
+
+  Being blocking is not the whole property for these two. `cargo fmt --all`
+  without `--check` rewrites the tree and exits 0, and `cargo clippy` without
+  `-D warnings` exits 0 on every lint it finds. Both are one bare cargo
+  invocation on one line under a built-in shell, so they satisfy every
+  assertion the helper makes, and neither is `--no-run` or `--dry-run`, which
+  is the bounded list it already carries. A flag, not a shell operator, is
+  what separates enforcing from reporting here, the same class as `cargo
+  bench --no-run` (#634) and a `cargo audit` without `--deny warnings` (#340).
+  So `--check`, `--all`, `-D warnings` and `--all-targets` are asserted on the
+  commands themselves, where `CLAUDE.md` already states them.
+
+  For clippy the command is only half of it, and the other half wins. The lint
+  level is the command *and* `RUSTFLAGS`, so `env: RUSTFLAGS:
+  "--cap-lints=allow"` on the job exits it 0 on every lint in the tree with
+  the denial sitting there untouched, on a required check, and takes half the
+  MSRV guarantee (`clippy::incompatible_msrv`) with it. The flags reaching the
+  job are pinned by value at the three levels `env:` exists, rather than
+  screened for weakening spellings: `--cap-lints`, `-A warnings`,
+  `--force-warn` and a `-D warnings` cancelled by an earlier flag are not a
+  closed set, which is the denylist #652 already walked through.
+  `CARGO_ENCODED_RUSTFLAGS` is refused outright, since cargo reads it instead
+  of `RUSTFLAGS` and would leave the pin describing a variable nothing reads.
+
+  The `doctor` exemption is pinned to the step that carries it, never asserted
+  existentially over the job's steps. "Some step of `doctor` is
+  `continue-on-error`" is satisfied by any of them, so moving the marker onto
+  `cargo build` keeps such an assertion green while `gwm doctor` itself
+  becomes able to fail the job, which is the exact drift the exemption claims
+  to catch. "The job cannot turn the workflow red" is deliberately not the
+  property asserted either, because it is not true and never was: `doctor`'s
+  checkout, toolchain install and `cargo build` all fail hard, and should.
+
+  Both commands are pinned by value rather than screened flag by flag, for the
+  same reason `RUSTFLAGS` is. A `contains` reads a line whose last flag wins:
+  `cargo clippy --all-targets --all-features -- -D warnings --cap-lints=allow`
+  keeps every substring a screen would look for, is one bare invocation,
+  touches no `env:`, and exits 0 on every lint in the tree;
+  `--config=disable_all_formatting=true` does the same to `fmt`. Refusing the
+  neutralisation inside the variable while handing it over on the line beside
+  it is not a guard. The `doctor` exemption is pinned by value too, since
+  `if: always()` satisfies a presence check while losing the restriction the
+  message names.
+
+  Twenty-six mutations, each applied alone and each read back to confirm it
+  fired the assertion it was aimed at and not an earlier one. Applying them
+  together proves less than it looks, since the job-level `if:` is checked
+  before `continue-on-error:` and both before the command, so a combined
+  mutation panics on the first and never reaches the one it is meant to
+  demonstrate. Two of the twenty-six mutate the test rather than the workflow,
+  since moving the step-level `if:` waivers out of a call argument and into a
+  lookup is plumbing that can break on its own. The set was replayed in full
+  against the final code rather than accumulated across passes: a table quoting
+  an assertion an earlier commit has since rewritten documents a guard nobody
+  ships.
+
 - **CI could still be silenced, below the job and above it**
   ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
   [#653](https://github.com/kbrdn1/gwm-cli/issues/653)). #646 pinned the job
