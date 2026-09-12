@@ -179,14 +179,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   property asserted either, because it is not true and never was: `doctor`'s
   checkout, toolchain install and `cargo build` all fail hard, and should.
 
-  Twenty-four mutations, each applied alone and each read back to confirm it
+  Both commands are pinned by value rather than screened flag by flag, for the
+  same reason `RUSTFLAGS` is. A `contains` reads a line whose last flag wins:
+  `cargo clippy --all-targets --all-features -- -D warnings --cap-lints=allow`
+  keeps every substring a screen would look for, is one bare invocation,
+  touches no `env:`, and exits 0 on every lint in the tree;
+  `--config=disable_all_formatting=true` does the same to `fmt`. Refusing the
+  neutralisation inside the variable while handing it over on the line beside
+  it is not a guard. The `doctor` exemption is pinned by value too, since
+  `if: always()` satisfies a presence check while losing the restriction the
+  message names.
+
+  Twenty-six mutations, each applied alone and each read back to confirm it
   fired the assertion it was aimed at and not an earlier one. Applying them
   together proves less than it looks, since the job-level `if:` is checked
   before `continue-on-error:` and both before the command, so a combined
   mutation panics on the first and never reaches the one it is meant to
-  demonstrate. Four of the eighteen mutate the test rather than the workflow,
+  demonstrate. Two of the twenty-six mutate the test rather than the workflow,
   since moving the step-level `if:` waivers out of a call argument and into a
-  lookup is plumbing that can break on its own.
+  lookup is plumbing that can break on its own. The set was replayed in full
+  against the final code rather than accumulated across passes: a table quoting
+  an assertion an earlier commit has since rewritten documents a guard nobody
+  ships.
 
 - **CI could still be silenced, below the job and above it**
   ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
