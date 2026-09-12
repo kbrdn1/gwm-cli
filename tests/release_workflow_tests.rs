@@ -950,11 +950,14 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
 /// assertion below fails, and it has to move into the guarded set rather than
 /// sit in an exemption written for a job it no longer is.
 ///
-/// The three per-job callers elsewhere in this file and in `msrv_tests` stay:
-/// each carries a rationale and properties this sweep cannot express (the
-/// `test` job's one legitimate doctest `if:`, `audit`'s `--deny warnings`).
-/// They overlap with the sweep on purpose. Redundant coverage costs a
-/// millisecond; a gap costs nine months, which is what RUSTSEC-2025-0068 did.
+/// The four per-job callers stay: `bench`, `test` and `audit` elsewhere in
+/// this file, `msrv` in `msrv_tests`. Each carries a rationale the sweep
+/// cannot hold, and two carry a property it cannot express either, `audit`'s
+/// `--deny warnings` and `bench`'s `--benches -- --test`. The `test` job's
+/// doctest `if:` is not one of them: that waiver moved into
+/// `steps_allowed_an_if` and the sweep enforces it by value now. They overlap
+/// with the sweep on purpose. Redundant coverage costs a millisecond; a gap
+/// costs nine months, which is what RUSTSEC-2025-0068 did.
 #[test]
 fn ci_every_job_is_blocking_except_the_advisory_doctor() {
   let workflow = ci_workflow();
