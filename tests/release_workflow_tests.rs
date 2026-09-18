@@ -3,7 +3,7 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os};
+use common::{assert_job_is_blocking, effective_matrix_os, step_label};
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -925,5 +925,353 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
     on.as_mapping().is_some_and(|m| m.contains_key("workflow_dispatch")),
     "ci.yml must keep `workflow_dispatch:`: it is the only way to re-run the suite without \
      pushing a commit"
+  );
+}
+
+/// Issue #655. `assert_job_is_blocking` had four callers for eight jobs, and
+/// the four were the ones #646's own audit happened to name. `fmt` and
+/// `clippy` are two of the seven contexts `main` requires and neither was
+/// among them: `grep -rn '"fmt"\|"clippy"' tests/` returned nothing for the
+/// jobs. `hook-smoke` is a required context too and was equally unnamed.
+///
+/// So the caller list is replaced by a sweep. A list is what produced this
+/// issue: #646 guarded what it had looked at, #652 and #653 widened the
+/// helper without widening its callers, and a ninth job added tomorrow would
+/// arrive unguarded exactly the same way. Walking `jobs:` instead means a new
+/// job is covered the moment it exists, and switching one off is a diff
+/// against this test rather than against nothing.
+///
+/// `doctor` is the one exemption, and it is pinned rather than waived. It is
+/// advisory by design: `continue-on-error: true` on the `gwm doctor` step and
+/// an `if:` restricting the job to `dev`, both deliberate (the report wants
+/// eyes, not a blocked merge, and `lazygit` is absent on the runner so a
+/// Warning is its floor). What is asserted here is that it is *still* that
+/// job. Should it ever lose either property it stops being advisory, the
+/// assertion below fails, and it has to move into the guarded set rather than
+/// sit in an exemption written for a job it no longer is.
+///
+/// The four per-job callers stay: `bench`, `test` and `audit` elsewhere in
+/// this file, `msrv` in `msrv_tests`. Each carries a rationale the sweep
+/// cannot hold, and two carry a property it cannot express either, `audit`'s
+/// `--deny warnings` and `bench`'s `--benches -- --test`. The `test` job's
+/// doctest `if:` is not one of them: that waiver moved into
+/// `steps_allowed_an_if` and the sweep enforces it by value now. They overlap
+/// with the sweep on purpose. Redundant coverage costs a millisecond; a gap
+/// costs nine months, which is what RUSTSEC-2025-0068 did.
+#[test]
+fn ci_every_job_is_blocking_except_the_advisory_doctor() {
+  let workflow = ci_workflow();
+  let jobs: Vec<String> = workflow["jobs"]
+    .as_mapping()
+    .expect("ci.yml must define a `jobs:` mapping")
+    .keys()
+    .filter_map(|k| k.as_str().map(str::to_owned))
+    .collect();
+
+  // A sweep guards the jobs it finds and says nothing about the ones that
+  // stopped existing. An emptied `jobs:` leaves it iterating over nothing
+  // while reporting success, and a count-based floor does not close that
+  // either: deleting one job while adding another satisfies any count. So the
+  // eight are named.
+  //
+  // This is an enumeration, and deliberately so, because it is a **bounded**
+  // one. It covers the jobs `ci.yml` ships today; the sweep below covers the
+  // ones it does not, which is the exact inverse of the caller list this test
+  // replaces, a list that could only ever cover what someone remembered to add
+  // to it. Membership is a floor and never an equality: a ninth job has to be
+  // a green test that the sweep then guards, not a red one.
+  for expected in [
+    "fmt",
+    "clippy",
+    "msrv",
+    "test",
+    "bench",
+    "hook-smoke",
+    "audit",
+    "doctor",
+  ] {
+    assert!(
+      jobs.iter().any(|j| j == expected),
+      "ci.yml must still define the `{expected}` job. Deleting or renaming it is invisible to \
+       the sweep below, which guards whatever jobs it finds, and a job going quiet is not \
+       always a blocked merge either: only five of the eight are required contexts on `main`, \
+       so `msrv`, `bench` and `doctor` can vanish with nothing on GitHub's side objecting. \
+       Got {jobs:?}"
+    );
+  }
+
+  for job_name in &jobs {
+    if job_name == "doctor" {
+      assert_doctor_is_still_the_advisory_job(&workflow["jobs"]["doctor"]);
+      continue;
+    }
+    assert_job_is_blocking(&workflow, job_name, steps_allowed_an_if(job_name));
+  }
+}
+
+/// What the sweep's one exemption is exempt *as*: the advisory job, its `if:`
+/// restricting it to `dev` and its report step marked `continue-on-error:
+/// true`. Both are deliberate, the report wants eyes rather than a blocked
+/// merge and `lazygit` is absent on the runner so a Warning is its floor. Lose
+/// either and it is no longer the job the exemption was written for, so it
+/// goes red here and has to join the guarded set instead.
+///
+/// The marker is pinned to the step that carries it, never asserted
+/// existentially over the job's steps. "some step of `doctor` is
+/// `continue-on-error`" is satisfied by any of them, so moving the marker off
+/// `gwm doctor` and onto `cargo build` leaves an existential assertion green
+/// while `gwm doctor` itself becomes able to fail the job, which is the exact
+/// drift the exemption claims to catch. `assert_job_is_blocking` already
+/// closes that shape for its `if:` waivers by requiring exactly one step to
+/// answer to the label; it is closed the same way here.
+///
+/// "The job cannot turn the workflow red" is deliberately *not* the property
+/// asserted, because it is not true and never was: `doctor`'s checkout, its
+/// toolchain install and its `cargo build` all fail hard, and should. Only the
+/// report is advisory.
+///
+/// `DOCTOR_CONDITION` is the condition spelled on one line: `ci.yml` writes it
+/// as a block scalar across two.
+const DOCTOR_CONDITION: &str = "(github.event_name == 'push' && github.ref == 'refs/heads/dev') || \
+                                (github.event_name == 'pull_request' && github.base_ref == 'dev')";
+
+fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
+  // By value, not by presence. `!job["if"].is_null()` is satisfied by any
+  // condition at all, `if: always()` included, while the message below claims
+  // the restriction to `dev` is what it checks. That is the same overstatement
+  // the `continue-on-error` assertion made before it was pinned to its step,
+  // and the same by-value standard `steps_allowed_an_if` already holds its
+  // waivers to.
+  //
+  // Whitespace is normalised first because the condition is a YAML block
+  // scalar: reflowing it across lines is a formatting change and must not be a
+  // red test, whereas changing what it admits must be.
+  let condition = job["if"]
+    .as_str()
+    .unwrap_or_default()
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert_eq!(
+    condition, DOCTOR_CONDITION,
+    "the `doctor` job is exempt from the blocking guard because it is advisory, and its \
+     `if:` no longer restricts it to `dev`. `main` is meant to be stable and the doctor \
+     exists to catch in-development regressions, so widening this runs an advisory job on \
+     every release path; narrowing it stops the only thing that exercises `gwm doctor` at \
+     all. Either way it is no longer the job this exemption was written for: guard it like \
+     the rest, or restore the condition"
+  );
+
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  let reports: Vec<&serde_yaml_ng::Value> = steps
+    .iter()
+    .filter(|s| s["name"].as_str() == Some("gwm doctor"))
+    .collect();
+  assert_eq!(
+    reports.len(),
+    1,
+    "the `doctor` job must hold exactly one step named `gwm doctor`, found {}. Zero means \
+     the step this exemption is written around was renamed or removed and the exemption now \
+     covers nothing; more than one means a second step answers to the label and inherits \
+     the advisory marker written for its neighbour",
+    reports.len()
+  );
+  assert_eq!(
+    reports[0]["continue-on-error"].as_bool(),
+    Some(true),
+    "the `gwm doctor` step must carry `continue-on-error: true`: that one step being \
+     advisory is the whole reason this job sits outside the blocking guard. Asserting it of \
+     the step rather than of the job as a whole is deliberate, since `some step is \
+     continue-on-error` stays green when the marker moves onto `cargo build` and `gwm \
+     doctor` quietly becomes able to fail the job. Got `continue-on-error: {:?}`",
+    reports[0]["continue-on-error"]
+  );
+}
+
+/// The `if:` conditions the sweep above allows, by job. Everything not listed
+/// gets `&[]`, which is the helper refusing every step-level `if:`.
+///
+/// One entry today: doctests behave identically on the three runners and are
+/// paid for once, on the row with the slack against windows. The waiver
+/// carries the condition by value, so widening it to `false` is caught here
+/// and not left to whichever other test happens to pin that step.
+fn steps_allowed_an_if(job_name: &str) -> &'static [(&'static str, &'static str)] {
+  match job_name {
+    "test" => &[("cargo test --doc", "matrix.os == 'ubuntu-latest'")],
+    _ => &[],
+  }
+}
+
+/// Issue #655. Being blocking is not enough for `fmt`: `cargo fmt --all`
+/// without `--check` **rewrites the tree and exits 0**. It is one bare cargo
+/// invocation on one line under a built-in shell, so it satisfies every
+/// assertion in `assert_job_is_blocking` including the bare-command
+/// invariant, and it is not `--no-run` or `--dry-run` either. The job goes
+/// green forever while formatting drift lands, on a runner whose working tree
+/// is thrown away a minute later.
+///
+/// That is the same class as `cargo bench --no-run` (#634) and `cargo audit`
+/// without `--deny warnings` (#340): a flag, not a shell operator, is what
+/// separates a command that enforces from one that reports. The shape of the
+/// command cannot see it, so it is asserted here, where `CLAUDE.md` states
+/// it: "CI enforces `cargo fmt --check`".
+#[test]
+fn ci_fmt_job_checks_formatting_rather_than_rewriting_it() {
+  let runs = run_steps(&ci_job("fmt"));
+  let fmt = runs
+    .iter()
+    .find(|r| r.contains("cargo fmt"))
+    .unwrap_or_else(|| panic!("the fmt job must run `cargo fmt`, got {runs:?}"));
+
+  assert!(
+    fmt.contains("--check"),
+    "the fmt job must run `cargo fmt` with `--check`: without it cargo rewrites the tree in \
+     place and exits 0, so the job reports success over formatting it silently fixed on a \
+     runner and threw away. Got {fmt:?}"
+  );
+  assert!(
+    fmt.contains("--all"),
+    "the fmt job must check every crate in the workspace (`--all`): a single-package check \
+     leaves the rest unformatted while the job name still reads `rustfmt`. Got {fmt:?}"
+  );
+
+  // The two assertions above name the flags and why they matter, which is the
+  // diagnostic half. They do not close the command, because `contains` reads a
+  // line where a later flag overrides an earlier one: `cargo fmt --all --
+  // --check --config=disable_all_formatting=true` keeps both substrings, is
+  // one bare invocation, and exits 0 over a file rustfmt would otherwise
+  // reject. So the command is pinned by value, the same statement already made
+  // about the `RUSTFLAGS` that reaches `clippy`.
+  assert_eq!(
+    fmt, EXPECTED_FMT,
+    "the fmt job must run exactly `{EXPECTED_FMT}`. Appending to it is enough to undo it, \
+     since rustfmt takes `--config` on the command line and the last setting wins, so \
+     neither `--check` nor `--all` surviving in the line says the line still checks \
+     anything. Changing what CI formats is a conscious decision in a reviewed diff"
+  );
+}
+
+/// The formatting command, pinned. `CLAUDE.md`: "CI enforces `cargo fmt
+/// --check`".
+const EXPECTED_FMT: &str = "cargo fmt --all -- --check";
+
+/// The lint command, pinned. `CLAUDE.md`: "`cargo clippy --all-targets -- -D
+/// warnings` must pass". `--all-features` on top, because a lint behind a
+/// non-default feature is still a lint.
+const EXPECTED_CLIPPY: &str = "cargo clippy --all-targets --all-features -- -D warnings";
+
+/// Issue #655. The same hole one job over. `cargo clippy --all-targets` with
+/// `-D warnings` dropped exits 0 on every lint it finds, and `cargo clippy -D
+/// warnings` without `--all-targets` never lints `tests/`, `benches/` or
+/// `examples/` at all, which in this repo is 110 test binaries and three
+/// benches, the larger half of the code. Both are one bare cargo invocation
+/// and both pass `assert_job_is_blocking` unchanged.
+///
+/// Neither flag is incidental: `CLAUDE.md` states the command as `cargo
+/// clippy --all-targets -- -D warnings` and the house rule that an
+/// `#[allow(...)]` needs a comment only means anything while the lint would
+/// otherwise have failed the build.
+///
+/// The workflow-level `RUSTFLAGS: -D warnings` is not a second line of
+/// defence to lean on here. It is set once at the top of `ci.yml` for every
+/// job, so it is one edit away from being gone for all eight of them, and the
+/// `msrv` job already overrides it to `""` at job level, which is precedent
+/// that it does get overridden. The command has to carry its own denial.
+///
+/// It is also not inert, which is the other half of the same fact and the
+/// hole the paragraph above left open. The lint level clippy runs at is the
+/// command *and* `RUSTFLAGS`, and `RUSTFLAGS` wins: `env: RUSTFLAGS:
+/// "--cap-lints=allow"` on this job makes `cargo clippy --all-targets
+/// --all-features -- -D warnings` exit 0 on every lint in the tree, denial
+/// intact, one bare invocation, job green. So the flags that reach the job are
+/// pinned rather than left to the command alone, at the two levels `env:`
+/// exists above a step and on the steps themselves.
+///
+/// Pinned by value, not screened for weakening spellings. `--cap-lints=allow`,
+/// `-A warnings`, `--force-warn`, a `-D warnings` cancelled by an earlier
+/// `--cap-lints`: rustc's flags are not a fixed set and enumerating the ones
+/// that weaken is the denylist #652 already walked through. The exact value is
+/// the only statement that also closes the ones nobody has thought of.
+///
+/// `CARGO_ENCODED_RUSTFLAGS` is refused outright rather than pinned, because
+/// cargo reads it *instead of* `RUSTFLAGS` when it is set: a job carrying it
+/// would leave the pin above describing a variable nothing reads.
+#[test]
+fn ci_clippy_job_denies_warnings_across_all_targets() {
+  let workflow = ci_workflow();
+  let job = ci_job("clippy");
+  let runs = run_steps(&job);
+  let clippy = runs
+    .iter()
+    .find(|r| r.contains("cargo clippy"))
+    .unwrap_or_else(|| panic!("the clippy job must run `cargo clippy`, got {runs:?}"));
+
+  assert!(
+    clippy.contains("-D warnings"),
+    "the clippy job must pass `-D warnings`: clippy exits 0 on a lint it only warns about, \
+     so dropping the denial leaves the job green over every lint in the tree. Got {clippy:?}"
+  );
+  assert!(
+    clippy.contains("--all-targets"),
+    "the clippy job must lint every target (`--all-targets`): the default leaves `tests/`, \
+     `benches/` and `examples/` unlinted, which here is 110 test binaries and three benches \
+     the job would report clean without having read. Got {clippy:?}"
+  );
+
+  // Same reason as the fmt job: `contains` reads a line whose last flag wins.
+  // `cargo clippy --all-targets --all-features -- -D warnings --cap-lints=allow`
+  // keeps both substrings, is one bare invocation, touches no `env:`, and exits
+  // 0 on every lint in the tree. Pinning `RUSTFLAGS` below while leaving the
+  // command open would refuse the neutralisation in the variable and hand it
+  // over on the line beside it.
+  assert_eq!(
+    clippy, EXPECTED_CLIPPY,
+    "the clippy job must run exactly `{EXPECTED_CLIPPY}`. `-D warnings` surviving in the \
+     line does not mean the line denies anything: `--cap-lints=allow` appended after it \
+     caps every lint in the tree and the job exits 0. Changing what CI lints is a conscious \
+     decision in a reviewed diff"
+  );
+
+  assert_eq!(
+    workflow["env"]["RUSTFLAGS"].as_str(),
+    Some("-D warnings"),
+    "the workflow-wide `RUSTFLAGS` must stay exactly `-D warnings`, because it is half of \
+     the lint level `cargo clippy` runs at and the half that wins: `--cap-lints=allow` here \
+     exits the job 0 on every lint in the tree while the `-D warnings` on the command sits \
+     there untouched. Changing what clippy is allowed to ignore is a conscious decision in \
+     a reviewed diff, not a one-word edit to a shared `env:` block. Got {:?}",
+    workflow["env"]["RUSTFLAGS"]
+  );
+
+  // Below the workflow, `env:` exists at exactly two levels, and either one
+  // shadows the value pinned above for this job alone. `msrv` overriding
+  // `RUSTFLAGS` to `""` two jobs away is the precedent that this does happen.
+  let mut envs: Vec<(&serde_yaml_ng::Value, String)> = vec![(&job["env"], "the `clippy` job".to_string())];
+  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  for step in &steps {
+    envs.push((&step["env"], format!("step {:?} of the `clippy` job", step_label(step))));
+  }
+  for (env, where_) in &envs {
+    assert!(
+      env["RUSTFLAGS"].is_null(),
+      "`RUSTFLAGS` must not be set on {where_}: it shadows the workflow-wide `-D warnings` \
+       for this job alone, and it decides the lint level over the command's own denial. Got \
+       `RUSTFLAGS: {:?}`",
+      env["RUSTFLAGS"]
+    );
+    assert!(
+      env["CARGO_ENCODED_RUSTFLAGS"].is_null(),
+      "`CARGO_ENCODED_RUSTFLAGS` must not be set on {where_}: cargo reads it *instead of* \
+       `RUSTFLAGS`, so it silently replaces the value pinned above rather than adding to it. \
+       Got `CARGO_ENCODED_RUSTFLAGS: {:?}`",
+      env["CARGO_ENCODED_RUSTFLAGS"]
+    );
+  }
+  assert!(
+    workflow["env"]["CARGO_ENCODED_RUSTFLAGS"].is_null(),
+    "`CARGO_ENCODED_RUSTFLAGS` must not be set workflow-wide either, for the same reason: \
+     cargo reads it instead of `RUSTFLAGS`, so the pin above would describe a variable \
+     nothing reads. Got {:?}",
+    workflow["env"]["CARGO_ENCODED_RUSTFLAGS"]
   );
 }
