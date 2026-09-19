@@ -279,11 +279,14 @@ two of the seven checks `main` requires, had no guard at all
 [#656](https://github.com/kbrdn1/gwm-cli/issues/656) then drew the line where
 static guards stop: a test that reads the workflow file cannot see every way the
 workflow can be neutralised, so that ceiling is accepted and documented rather
-than chased one vector at a time.
+than chased one vector at a time. Measuring that ceiling turned up one step with
+nothing to run at all: `cargo test --doc` ran zero doctests, so it could not
+fail. The step is gone and the lib declares `doctest = false`, since it is an
+internal test seam rather than an API to write examples for
+([#659](https://github.com/kbrdn1/gwm-cli/issues/659)).
 
 **What is queued next** is what that audit left open, all in the same family:
-the `cargo test --doc` step runs zero doctests, so nothing can make it fail
-([#659](https://github.com/kbrdn1/gwm-cli/issues/659)); two release publication
+two release publication
 guards pass by subsumption, a prefix and a branch
 ([#647](https://github.com/kbrdn1/gwm-cli/issues/647)); the flake version guard
 is satisfied by the MSRV read, so #393 can come back
