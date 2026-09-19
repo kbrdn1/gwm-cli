@@ -125,13 +125,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pinnedVersion = "0.3.0-rc.3";` above it, the literal #393 let drift for
   eight releases, passed.
 
-  The guard now reads the right-hand side of every `version =` binding,
-  several on one line or one nested in an attribute set included, and
-  requires the `package.version` of an expression that reads `./Cargo.toml`,
-  inline or through a name bound to that read. Six mutations of `flake.nix`,
-  each applied alone: the previous guard catches only the bare literal, the
-  new one fails all six at the same assertion, naming the binding. The
-  inline spelling #396 shipped stays accepted.
+  The guard now reads the right-hand side of every `version` binding, several
+  on one line, one nested in an attribute set, one spelled
+  `package.version =`, or one continued over several lines included, and
+  requires the `package.version` of the `./Cargo.toml` read, inline or
+  through a name every binding of which is exactly
+  `builtins.fromTOML (builtins.readFile ./Cargo.toml)`. A name whose binding
+  merely contains the read does not count, since what wraps it can override
+  the version. Nine mutations of `flake.nix`, each applied alone: the
+  previous guard catches only the bare literal, the new one fails all nine at
+  the same assertion, naming the binding. The inline spelling #396 shipped
+  stays accepted.
 
   What it does not read is how the derivation consumes the version: an
   `inherit (pin) version;` whose `pin` gets its version from anything but a
