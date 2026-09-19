@@ -729,9 +729,11 @@ fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
 /// model of rustdoc.
 #[test]
 fn doctests_are_declared_off_rather_than_run_empty() {
-  let manifest: toml::Value = toml::from_str(&fs::read_to_string("Cargo.toml").unwrap()).expect("Cargo.toml must parse");
-  // By value: an absent key and `doctest = "false"` must both fail, and a
-  // lookup that stops at "is there a key" would take the first for granted.
+  let manifest: toml::Value =
+    toml::from_str(&fs::read_to_string("Cargo.toml").unwrap()).expect("Cargo.toml must parse");
+  // By value: `doctest = true` must fail like an absent key does, and a
+  // lookup that stops at "is there a key" would pass it. A string such as
+  // `"false"` never reaches this line, cargo refuses the manifest first.
   let doctest = manifest.get("lib").and_then(|lib| lib.get("doctest"));
   assert_eq!(
     doctest,
