@@ -540,6 +540,83 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
   );
 }
 
+/// The jobs of `release.yml` allowed to inherit the workflow's `contents:
+/// write`: `release` publishes, and `build` runs before it (see
+/// `release_workflow_grants_write_only_to_build_and_publish`).
+const INHERITS_THE_WRITE_TOKEN: [&str; 2] = ["build", "release"];
+
+/// Issue #669. `release.yml` grants `contents: write` at the workflow level,
+/// and every job inherits it unless it says otherwise. `homebrew-tap-update`
+/// and `scoop-bucket-update` run after the publish with that token and a
+/// `GH_TOKEN: ${{ github.token }}` in one of their steps, so one line added to
+/// either, `gh release edit "$TAG" --notes ""`, empties the notes #665 pins on
+/// the publish job, with every guard green. Neither needs to write here: its
+/// `GITHUB_TOKEN` checks out this repository and downloads a published
+/// sidecar, and its push goes to the tap or the bucket through the PAT of its
+/// second checkout, which `permissions:` does not govern.
+///
+/// A job-level `permissions:` replaces the workflow-level one for that job,
+/// and every scope it does not name is `none` (workflow syntax,
+/// `jobs.<job_id>.permissions`). So every job carries exactly `contents:
+/// read`, compared by value, unless it is one of the two named jobs allowed
+/// to inherit the write token. By value, because a presence check is
+/// satisfied by `write-all`. A sweep, because a job added later with no
+/// `permissions:` inherits the write token by default, which is how these
+/// two got it: it arrives red here, not unguarded.
+///
+/// `build` inherits on purpose and is out of this issue's scope: it finishes
+/// before the publish starts, and the publish job's `edit` branch rewrites
+/// the notes from `changelogs/<version>.md` anyway. `release` keeps its
+/// access, and `assert_job_as_written` pins the absence of a job-level
+/// `permissions:` there.
+///
+/// What no reader of this file can check is whether `contents: read` is
+/// enough at run time. Both jobs are `continue-on-error: true`, so a missing
+/// permission would leave the release green and the tap and the bucket
+/// silently stale: the next stable tag is the check.
+#[test]
+fn release_workflow_grants_write_only_to_build_and_publish() {
+  let path = ".github/workflows/release.yml";
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&fs::read_to_string(path).unwrap()).unwrap_or_else(|e| panic!("{path}: {e}"));
+  let write: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: write").unwrap();
+  assert_eq!(
+    workflow["permissions"], write,
+    "{path} must grant `contents: write` at the workflow level and nothing else: the publish \
+     job inherits it, and the jobs below are checked against it"
+  );
+
+  let jobs: Vec<String> = workflow["jobs"]
+    .as_mapping()
+    .expect("release.yml must define a `jobs:` mapping")
+    .keys()
+    .filter_map(|k| k.as_str().map(str::to_owned))
+    .collect();
+  // A sweep guards the jobs it finds and says nothing about the ones that
+  // stopped existing: renaming either job this issue restricts would leave
+  // the loop below with nothing to check for it. So the four are named, as a
+  // floor and never an equality.
+  for expected in ["build", "release", "homebrew-tap-update", "scoop-bucket-update"] {
+    assert!(
+      jobs.iter().any(|j| j == expected),
+      "{path} must still define the `{expected}` job, got {jobs:?}"
+    );
+  }
+
+  let read: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: read").unwrap();
+  for job in jobs.iter().filter(|j| !INHERITS_THE_WRITE_TOKEN.contains(&j.as_str())) {
+    assert_eq!(
+      workflow["jobs"][job.as_str()]["permissions"],
+      read,
+      "{path} job `{job}` must carry `permissions: contents: read` (issue #669). Without it the \
+       job inherits the workflow's `contents: write`, and one step added to it can edit the \
+       release notes after the publish. Only {INHERITS_THE_WRITE_TOKEN:?} may inherit it. \
+       Got `permissions: {:?}`",
+      workflow["jobs"][job.as_str()]["permissions"]
+    );
+  }
+}
+
 /// Every workflow in the directory, so a file added later is audited by
 /// construction rather than by remembering to extend a hand-written list. The
 /// three sweeps below all enumerate from here: naming files individually is
