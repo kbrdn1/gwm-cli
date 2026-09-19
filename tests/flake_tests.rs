@@ -24,47 +24,55 @@ fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
   s.lines().any(|line| line.starts_with(&prefix))
 }
 
-// `(name, rhs)` for every `name = rhs` outside a `#` comment line: each `;`
-// ends a statement and each `=` in it binds the word just before it, so
-// `pname = "gwm"; version = …;` and `pin = { version = …; };` both yield their
-// `version`. `rhs` stops at the `;` or the end of the line, so a right-hand
-// side running over several lines, or a `;` inside a string, cuts it short
-// and fails the version guard rather than passing it.
-fn bindings(s: &str) -> impl Iterator<Item = (&str, &str)> {
-  s.lines()
-    .map(str::trim)
-    .filter(|l| !l.starts_with('#'))
-    .flat_map(|l| l.split(';'))
-    .flat_map(|stmt| {
-      stmt.match_indices('=').filter_map(move |(i, _)| {
-        let (before, rhs) = (&stmt[..i], &stmt[i + 1..]);
-        if before.ends_with(['=', '<', '>', '!']) || rhs.starts_with('=') {
-          return None;
-        }
-        let name = before
-          .trim_end()
-          .rsplit(|c: char| c.is_whitespace() || c == '{' || c == '(')
-          .next()?;
-        Some((name, rhs.trim()))
-      })
+// `(name, rhs)` for every `name = rhs` in `code`, a Nix source stripped of
+// its `#` comment lines. Each `;` ends a statement and each `=` in it binds
+// the last segment of the attribute path just before it, so
+// `pname = "gwm"; version = …;`, `pin = { version = …; };` and
+// `{ package.version = …; }` all yield a `version`. `rhs` runs to the `;`,
+// over as many lines as it takes; a `;` inside a string cuts it short, which
+// fails the version guard rather than passing it.
+fn bindings(code: &str) -> impl Iterator<Item = (&str, &str)> {
+  code.split(';').flat_map(|stmt| {
+    stmt.match_indices('=').filter_map(move |(i, _)| {
+      let (before, rhs) = (&stmt[..i], &stmt[i + 1..]);
+      if before.ends_with(['=', '<', '>', '!']) || rhs.starts_with('=') {
+        return None;
+      }
+      let path = before
+        .trim_end()
+        .rsplit(|c: char| c.is_whitespace() || c == '{' || c == '(')
+        .next()?;
+      Some((path.rsplit('.').next()?, rhs.trim()))
     })
+  })
 }
 
-fn reads_cargo_toml(expr: &str) -> bool {
-  expr.contains("fromTOML") && expr.contains("./Cargo.toml")
+const CARGO_TOML_READ: &str = "builtins.fromTOML (builtins.readFile ./Cargo.toml)";
+
+// Exactly the read, whitespace aside: an expression that merely contains it,
+// `recursiveUpdate (<read>) { … }` for one, can override what it returns.
+fn is_cargo_toml_read(expr: &str) -> bool {
+  let expr = expr.split_whitespace().collect::<Vec<_>>().join(" ");
+  expr == CARGO_TOML_READ || expr == format!("({CARGO_TOML_READ})")
 }
 
-// Every `version =` binding in `s`, each of which must be the
-// `.package.version` of an expression that reads `./Cargo.toml`: inline,
+// Every `version` binding in `s`, each of which must be the `.package.version`
+// of the Cargo.toml read: inline,
 // `(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version`, or
-// through a name bound to that read, `cargoToml.package.version`. One hop
-// only: `a = cargoToml; version = a.package.version;` fails.
+// through a name every binding of which is that read,
+// `cargoToml.package.version`. One hop only:
+// `a = cargoToml; version = a.package.version;` fails.
 fn version_derives_from_cargo_toml(s: &str) -> Result<(), String> {
-  let readers: Vec<&str> = bindings(s)
-    .filter(|(_, rhs)| reads_cargo_toml(rhs))
-    .map(|(name, _)| name)
-    .collect();
-  let versions: Vec<&str> = bindings(s)
+  let code: String = s
+    .lines()
+    .filter(|l| !l.trim_start().starts_with('#'))
+    .collect::<Vec<_>>()
+    .join("\n");
+  let only_reads = |name: &str| {
+    let mut rhs = bindings(&code).filter(|(n, _)| *n == name).peekable();
+    rhs.peek().is_some() && rhs.all(|(_, rhs)| is_cargo_toml_read(rhs))
+  };
+  let versions: Vec<&str> = bindings(&code)
     .filter(|(name, _)| *name == "version")
     .map(|(_, rhs)| rhs)
     .collect();
@@ -74,7 +82,7 @@ fn version_derives_from_cargo_toml(s: &str) -> Result<(), String> {
   match versions.iter().find(|rhs| {
     !rhs
       .strip_suffix(".package.version")
-      .is_some_and(|src| reads_cargo_toml(src) || readers.contains(&src))
+      .is_some_and(|src| is_cargo_toml_read(src) || only_reads(src))
   }) {
     Some(rhs) => Err(format!(
       "`version = {rhs};` is not the `package.version` of a Cargo.toml read"
@@ -163,6 +171,29 @@ fn the_version_guard_can_actually_fire() {
     "a binding nested in an attribute set on the same line"
   );
   assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\npin = {{ package.version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a binding through an attribute path ending in `version`"
+  );
+  assert!(
+    !ok(&format!("{read}version = cargoToml.package.version\n  + \"-rc.3\";\n")),
+    "a right-hand side continued on the next line"
+  );
+  assert!(
+    !ok(
+      "cargoToml = lib.recursiveUpdate (builtins.fromTOML (builtins.readFile ./Cargo.toml)) \
+       (builtins.fromJSON \"{}\");\nversion = cargoToml.package.version;\n"
+    ),
+    "a read wrapped in something that can override what it returns"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\ncargoToml = builtins.fromJSON \"{{}}\";\n"
+    )),
+    "the read's name bound a second time, to something else"
+  );
+  assert!(
     !ok(&format!("{read}# version = cargoToml.package.version;\n")),
     "a commented-out binding is no binding"
   );
@@ -174,6 +205,13 @@ fn the_version_guard_can_actually_fire() {
   assert!(
     ok("version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;\n"),
     "the inline spelling #396 shipped"
+  );
+  assert!(
+    ok(
+      "cargoToml =\n  builtins.fromTOML\n    (builtins.readFile ./Cargo.toml);\n\
+       version = cargoToml.package.version;\n"
+    ),
+    "the read broken over several lines"
   );
 }
 
