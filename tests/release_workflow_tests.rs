@@ -1577,8 +1577,8 @@ fn ci_evaluates_the_flake_version_against_cargo_toml() {
   assert_eq!(
     workflow["env"], env,
     "ci.yml's workflow-level `env:` changed. It reaches the flake job's step, and \
-     `SHELLOPTS: noexec` there has bash parse the comparison and exit 0 without running it. \
-     {FLAKE_JOB_WHY}"
+     `SHELLOPTS: noexec` there has bash parse the comparison and exit 0 without running it \
+     (#672). If the change is intended, update the `env` this test expects in the same diff"
   );
   assert!(
     workflow["defaults"].is_null(),

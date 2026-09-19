@@ -252,8 +252,8 @@ fn flake_derives_its_version_from_cargo_toml() {
     panic!(
       "flake.nix must derive its version from Cargo.toml: {why}. Write \
        `version = cargoToml.package.version;` with \
-       `cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);` so it \
-       cannot drift again (#393)"
+       `cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);` (#393). \
+       Whether the derivation receives that binding is the `flake` CI job's check (#672)"
     );
   }
   // Only the *version* is derived. Cargo.toml's `name` is `gwm-cli` (the bare
