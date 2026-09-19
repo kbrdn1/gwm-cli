@@ -165,18 +165,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   green run. The publish job must wait on `build`, and both must carry
   exactly the stable-tags condition, or none on the pre-release side, and no
   `continue-on-error:`. And the environment is pinned where it reaches the
-  publish step: an action reads its inputs back from `INPUT_*` variables, so
-  `INPUT_GENERATE_RELEASE_NOTES: true` in an `env:` generated notes with the
-  pinned `with:` intact, and `SHELLOPTS: noexec` on a resolver step has bash
-  run nothing and exit 0 with the path never written. Every pinned `run:`
-  step has its `env:` pinned with its script, as a required argument of the
-  check rather than a line each caller has to remember, the pre-release step
-  and both publish jobs carry no `env:`, and the workflow-level one is
-  `CARGO_TERM_COLOR` alone. A step writing to `$GITHUB_ENV` is out of reach
-  of any reader of the workflow file, the ceiling #656 names.
+  steps that resolve and publish the notes: `SHELLOPTS: noexec` has bash run
+  nothing and exit 0, the path never written. Every pinned `run:` step has
+  its `env:` pinned with its script, as a required argument of the check
+  rather than a line each caller has to remember, both publish jobs carry no
+  `env:`, and the workflow-level one is `CARGO_TERM_COLOR` alone. An action's
+  inputs cannot be reached that way, since the runner writes `INPUT_<NAME>`
+  for every declared input over whatever `env:` set. Two things stay out of
+  reach of any reader of the workflow file, the ceiling #656 names: a step
+  writing to `$GITHUB_ENV`, and the other steps of the publish job, which
+  are free-form.
 
-  Thirty-one mutations, each applied alone, all fail the guard they aim at.
-  Thirty of them leave the previous guards green; the other, a second step
+  Thirty mutations, each applied alone, all fail the guard they aim at.
+  Twenty-nine of them leave the previous guards green; the other, a second step
   named `publish release`, failed them by accident, since the old text slice
   read whichever of the two came first.
 
