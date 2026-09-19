@@ -127,21 +127,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The guard now reads the right-hand side of every `version = …` binding,
   several on one line, one nested in an attribute set, one spelled
-  `package.version =`, or one continued over several lines included, and
-  requires the `package.version` of the `./Cargo.toml` read, inline or
-  through a name every `name = …` binding of which is exactly
+  `package.version =` or `"version" =`, one with a comment before its `=`,
+  or one continued over several lines included, and requires the
+  `package.version` of the `./Cargo.toml` read, bare or interpolated into a
+  string, inline or through a name every binding under which is exactly
   `builtins.fromTOML (builtins.readFile ./Cargo.toml)`. A name whose binding
   merely contains the read does not count, since what wraps it can override
-  the version. Nine mutations of `flake.nix`, each applied alone: the
-  previous guard catches only the bare literal, the new one fails all nine at
-  the same assertion, naming the binding. The inline spelling #396 shipped
-  stays accepted.
+  the version. Comments are removed by following the file's strings, so a
+  `#` inside one is text and a comment after the binding quoting an old pin
+  is no binding. `passthru.tests.version`, the nixpkgs smoke test, is not a
+  version and is left alone. Eleven mutations of `flake.nix`, each applied
+  alone: the previous guard catches only the bare literal, the new one fails
+  all eleven at the same assertion, naming the binding. The inline spelling
+  #396 shipped stays accepted, and so do three correct flakes the review
+  found refused along the way.
 
-  It is a text guard, and it reads only the `name = …` form of a binding.
+  It is a text guard, and it reads only the `path = …` form of a binding.
   An `inherit` does not count, whether it hands the derivation its version
   (`inherit (pin) version;`) or rebinds the read's name
-  (`inherit (pins) cargoToml;`), and neither does a quoted name or a comment
-  between a name and its `=`; each of these can pin the version with the
+  (`inherit (pins) cargoToml;`), and either can pin the version with the
   guard green ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). Three
   review passes each found a new such form, which is the sign that text does
   not bound Nix: `nix eval .#gwm.version` against `Cargo.toml` is the
