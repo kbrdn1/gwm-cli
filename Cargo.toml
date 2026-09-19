@@ -149,6 +149,12 @@ assets = [
 [lib]
 name = "gwm"
 path = "src/lib.rs"
+# No doctests (issue #659). The lib is the internal test seam behind
+# `#![doc(hidden)]`, its doc comments carry `text`, `toml` and `go` blocks and
+# no Rust example, and behaviour is tested under `tests/`. Declared so plain
+# `cargo test` skips an empty phase and CI keeps no step with nothing to run;
+# `doctests_are_declared_off_rather_than_run_empty` holds the two together.
+doctest = false
 
 [[bin]]
 name = "gwm"

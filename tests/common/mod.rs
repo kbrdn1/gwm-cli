@@ -143,7 +143,9 @@ pub fn git_only_bin() -> &'static Path {
 /// `steps_allowed_an_if` carries the **value**, not a dispensation: a step
 /// listed here still has to match the condition it was allowed, so widening
 /// `matrix.os == 'ubuntu-latest'` into `false` is caught here and not left to
-/// whichever other test happens to pin that step today.
+/// whichever other test happens to pin that step. No caller passes a waiver
+/// since #659 removed the doctest step, the one step that held one; the
+/// mechanism stays for the next condition that is legitimate.
 ///
 /// The `if:` comparisons go through the `Value`, never `as_str()`: `if: false`
 /// is a YAML boolean, so `as_str()` hands back `None` for it exactly as it
@@ -336,9 +338,9 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
 /// non-matching filter and the runner override leave `cargo test --doc` at
 /// `0 passed`, exit 0, and so does a plain `cargo test --doc` on this tree:
 /// the crate has no Rust doctests, every fenced block in its doc comments
-/// being `text`, `toml` or `go`. Nothing is being silenced there, the step
-/// has nothing to run, which is a defect of its own and not a limit of this
-/// guard, filed as #659.
+/// being `text`, `toml` or `go`. Nothing was being silenced there, the step
+/// had nothing to run, which was a defect of its own and not a limit of this
+/// guard: #659 removed the step and declared `doctest = false` on the lib.
 ///
 /// The last two surfaces are one shape: a step this guard leaves free-form
 /// reconfigures what cargo reads, and the cargo line it does guard is

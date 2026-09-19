@@ -117,6 +117,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI no longer keeps a doctest step that ran zero doctests**
+  ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
+  nextest (#634) left `cargo test --doc` running beside it, because nextest
+  cannot run doctests, and a guard held the step in place. The guard
+  asserted the step was present and unconditioned, never that it ran
+  anything, and it ran nothing: every fenced block in the doc comments is
+  `text`, `toml` or `go`, and `cargo test --doc -- --list` answers
+  `0 tests`. It could not fail.
+
+  Writing doctests to give it a subject was the other way out, and it does
+  not fit: the lib is the `#![doc(hidden)]` test seam, with no SemVer
+  guarantee and a doc comment telling readers not to build on it, and
+  behaviour is tested under `tests/`. A guard failing on a zero count has
+  nowhere to live either, since #652 makes every cargo step one bare
+  invocation. So the step is gone, with the reason written where it stood,
+  and `Cargo.toml` declares `doctest = false` on the lib, which also stops a
+  plain `cargo test` from compiling an empty doctest phase. The two halves
+  are pinned together, because the key only covers a plain `cargo test`:
+  an explicit `cargo test --doc` still runs doctests with it set. What no
+  test sees is a Rust fence written under the declaration, which nothing
+  compiles. Telling which fences rustdoc would run from the source is the
+  scanner #634 threw away after finding it wrong ten ways.
+
 - **Four of the eight CI jobs were guarded, and two of the unguarded ones are
   required checks on `main`**
   ([#655](https://github.com/kbrdn1/gwm-cli/issues/655)).
@@ -263,9 +286,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ci.yml` and applied to all four jobs. It also refuses an absent job and
   an empty `steps:`, because a deleted job parses to null and every
   assertion walks past null. A step that needs a condition passes its exact
-  value rather than a waiver, so the one legitimate `if:` in the tree, the
-  doctest step narrowed to the ubuntu matrix row, is still pinned to that
-  condition. That allowance also has to land on exactly one step: the label
+  value rather than a waiver, which pinned the one legitimate `if:` in the
+  tree, the doctest step narrowed to the ubuntu matrix row, to that
+  condition until #659 removed the step. That allowance also has to land
+  on exactly one step: the label
   it is keyed on comes from `name:`, so relabelling a second step to match
   would otherwise hand it the same exemption, and renaming the step it was
   written for would leave a waiver covering nothing. The `audit` guard adds `--deny warnings` and rejects a pipe on
@@ -436,12 +460,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   race an unlink-then-symlink. The link is staged and renamed into place
   now, which is atomic.
 
-  Doctests are the one thing nextest gives up, so `cargo test --doc` runs
-  next to it. On ubuntu only: a doctest behaves the same on all three
-  runners, and that job carries minutes of slack against windows in the same
-  matrix, so the roughly 35 seconds it costs never reaches the workflow's
-  critical path. The MSRV job still compiles at the declared floor and runs
-  no tests.
+  Doctests are the one thing nextest gives up, and the crate has none, so
+  nothing runs beside it: the lib declares `doctest = false` (#659). The
+  MSRV job still compiles at the declared floor and runs no tests.
 
 - **`gwm list` scans its worktrees in parallel**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Every row opens

@@ -160,29 +160,18 @@ jobs:
       # it from source on every runner, minutes against seconds, which a swap
       # that is time-neutral on wall-clock cannot afford.
       #
-      # nextest does not run doctests: they have no test binary for it to
-      # schedule. So `cargo test --doc` runs next to it, below.
+      # nextest does not run doctests, and there are none to run (issue
+      # #659). A `cargo test --doc` step stood here and ran zero: every
+      # fenced block in the doc comments is `text`, `toml` or `go`, so it
+      # could not fail. The lib is the internal test seam behind
+      # `#![doc(hidden)]`, not an API anyone is meant to read examples for,
+      # so Cargo.toml declares `doctest = false` instead of the step keeping
+      # an empty check alive. Adding doctests means flipping that key and
+      # restoring the step together; `doctests_are_declared_off_rather_than_run_empty`
+      # fails on either half alone.
       - uses: taiki-e/install-action@nextest
       - name: cargo nextest run
         run: cargo nextest run
-      # Doctests, the one thing nextest gives up. ubuntu only: a doctest is
-      # the same on all three runners, and this job has roughly three minutes
-      # of slack against windows in the same matrix, so the ~35s it costs
-      # never reaches the workflow's critical path.
-      #
-      # This step IS the check. Two review passes were spent watching a
-      # hand-written scanner try to decide which fences rustdoc compiles, and
-      # it was wrong ten different ways: indented blocks with no fence at all,
-      # fences inside a blockquote, `~~~`, `/** */` blocks, `#[doc = "..."]`
-      # attributes, `{.rust}`, and the tag rules, which are order-sensitive
-      # (```` ```no_run,text ```` is a doctest, ```` ```text,no_run ```` is
-      # not). Every one of those was found by probing rustdoc, which is the
-      # tell: the oracle was available the whole time and cost 35 seconds off
-      # the critical path. `ci_runs_doctests_since_nextest_cannot` pins that
-      # this step stays.
-      - name: cargo test --doc
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --doc
 
   bench:
     name: benches
