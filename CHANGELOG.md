@@ -125,12 +125,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pinnedVersion = "0.3.0-rc.3";` above it, the literal #393 let drift for
   eight releases, passed.
 
-  The guard now reads the right-hand side of every `version =` binding and
+  The guard now reads the right-hand side of every `version =` binding,
+  several on one line or one nested in an attribute set included, and
   requires the `package.version` of an expression that reads `./Cargo.toml`,
-  inline or through a name bound to that read. Four mutations of `flake.nix`,
+  inline or through a name bound to that read. Six mutations of `flake.nix`,
   each applied alone: the previous guard catches only the bare literal, the
-  new one fails all four at the same assertion, naming the binding. The
-  inline spelling #396 shipped stays accepted. Comparing against
+  new one fails all six at the same assertion, naming the binding. The
+  inline spelling #396 shipped stays accepted.
+
+  What it does not read is how the derivation consumes the version: an
+  `inherit (pin) version;` whose `pin` gets its version from anything but a
+  `version =` binding, a `fromJSON` for one, still passes
+  ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). Comparing against
   `nix eval .#gwm.version` would be the real oracle, but no CI runner has
   nix.
 
