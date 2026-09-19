@@ -134,12 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both publish jobs are now pinned whole: every key of the job but `if:`,
   which #647 already compares, then the step labels as an ordered list, so an
   added, removed or reordered step reads as a list in the failure, then every
-  step by value. The one thing left free is an action's `@ref`, because
-  Dependabot bumps `github-actions` here and pinning the ref would turn each
-  of its pull requests red. What stays out of reach is what the actions do
-  inside, and the rest of the workflow: `homebrew-tap-update` and
-  `scoop-bucket-update` run after the publish with the workflow's write token
-  and a `GH_TOKEN` in one of their steps.
+  step by value. An action's `@ref` is left free, because Dependabot bumps
+  `github-actions` here and pinning the ref would turn each of its pull
+  requests red. What stays out of reach is what the actions and the scripts
+  do inside: the rc duplicate check is pinned as a step, not the
+  `check-rc-changelog-dupes.sh` it runs between the resolver and the publish,
+  whose tests cover what it detects and not what else it does. So is the
+  rest of the workflow: `homebrew-tap-update` and `scoop-bucket-update` run
+  after the publish with the workflow's write token and a `GH_TOKEN` in one
+  of their steps.
 
   Thirteen mutations, each applied alone, fail the new guard at the
   assertion they aim at. Twelve leave the previous guards green; the

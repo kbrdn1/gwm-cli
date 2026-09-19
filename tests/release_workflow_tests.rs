@@ -180,16 +180,20 @@ steps:
 /// same index. Ordered, because a step's output is unset for the steps above
 /// it, and a set would accept the resolver moved below its reader.
 ///
-/// The `@ref` of an action is the one thing left free: Dependabot bumps
-/// `github-actions` on this repo, and pinning the ref would turn each of its
-/// pull requests red for a change it exists to make. The action's name is
-/// pinned, and so is everything passed to it.
+/// The `@ref` of an action is left free: Dependabot bumps `github-actions` on
+/// this repo, and pinning the ref would turn each of its pull requests red for
+/// a change it exists to make. The action's name is pinned, and so is
+/// everything passed to it.
 ///
-/// What this leaves out is what the actions do inside, and the rest of the
-/// workflow: `homebrew-tap-update` and `scoop-bucket-update` run after the
-/// publish with the workflow's `contents: write` token and a `GH_TOKEN` in one
-/// of their steps, so a line added there can still edit the notes. A reader of
-/// one job cannot close that, the ceiling #656 names.
+/// What this leaves out is what the actions and the scripts do inside. The
+/// step is pinned, not the file it calls: `check-rc-changelog-dupes.sh` runs
+/// between the resolver and the publish, and its own tests pin what it
+/// detects, not what else it does, so a line added to it can still truncate
+/// the rc notes. And the rest of the workflow: `homebrew-tap-update` and
+/// `scoop-bucket-update` run after the publish with the workflow's `contents:
+/// write` token and a `GH_TOKEN` in one of their steps, so a line added there
+/// can still edit the notes. A reader of one job cannot close that, the
+/// ceiling #656 names.
 fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
