@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The jobs that run after the release publish no longer hold a write
+  token** ([#669](https://github.com/kbrdn1/gwm-cli/issues/669)).
+  `release.yml` grants `contents: write` at the workflow level for the
+  publish, and every job inherited it. `homebrew-tap-update` and
+  `scoop-bucket-update` run after the publish with that token and a
+  `GH_TOKEN` in one of their steps, so one added line, `gh release edit`
+  with empty notes, could undo the notes #665 pins, with every guard green.
+  Neither writes to this repository: the token checks out the sources and
+  downloads a published checksum, and the push to the tap or the bucket
+  goes through the PAT of the job's second checkout, which `permissions:`
+  does not govern. Both now carry `permissions: contents: read`.
+
+  A test sweeps the jobs of `release.yml`: each carries exactly `contents:
+  read`, compared by value, unless it is `build` or `release`, the two
+  allowed to inherit the write token. A job added later without
+  `permissions:` inherits write by default, which is how these two got it,
+  so it arrives red. `build` keeps its token, out of this issue's scope: it
+  finishes before the publish starts, so it cannot undo the notes of the tag
+  being released, which the publish writes after it. It can still edit the
+  notes of an earlier release, and restricting it is the same one-line
+  change.
+
+  What no test can check is whether `contents: read` is enough at run time.
+  Both jobs are `continue-on-error: true`, so a missing permission would
+  leave the release green and the tap and the bucket silently stale: the
+  next stable tag is the check.
+
 ### Added
 
 - **`gwm doctor` reports the config a deleted branch left behind, and
@@ -151,6 +180,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not bound Nix: `nix eval .#gwm.version` against `Cargo.toml` is the
   oracle, and no CI runner has nix.
 
+- **Two workflow guards skipped a key the YAML parser reads as a boolean**
+  ([#673](https://github.com/kbrdn1/gwm-cli/issues/673)). serde_yaml_ng
+  reads `true:` and `false:` as booleans, where GitHub Actions reads the
+  job, or the matrix dimension, named `true` or `false`. The `ci.yml` sweep
+  (#655) and `effective_matrix_os` (#653) collected keys with
+  `filter_map(as_str)`, which drops them: a job keyed `true:` carrying
+  `continue-on-error: true` left the sweep green, and a `true:` matrix
+  dimension got past the check that refuses any key but `os` and `exclude`.
+  Review of #669 found the same shape in the `release.yml` permissions
+  sweep, fixed there inline.
+
+  The three now read keys through one helper, `string_keys`, which panics
+  on a non-string key instead of skipping it. Four mutations, a `true:` and
+  a `false:` job in `ci.yml` and a `true:` or `false:` dimension on the
+  `test` and `msrv` matrices, each applied alone, fail the guard they aim
+  at and all left the previous guards green; a fifth, the `true:` job in
+  `release.yml`, stays red through the helper.
+
 - **One added step could empty the release notes with every publish guard
   green** ([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). #647
   pinned the steps of the publish path by name and left the rest of each
@@ -174,9 +221,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   do inside: the rc duplicate check is pinned as a step, not the
   `check-rc-changelog-dupes.sh` it runs between the resolver and the publish,
   whose tests cover what it detects and not what else it does. So is the
-  rest of the workflow: `homebrew-tap-update` and `scoop-bucket-update` run
+  rest of the workflow: `homebrew-tap-update` and `scoop-bucket-update` ran
   after the publish with the workflow's write token and a `GH_TOKEN` in one
-  of their steps.
+  of their steps, until #669 made them read-only. What stays out of reach
+  there is the scope of the PATs they push with, which only CONTRIBUTING.md
+  states, and the other workflows of this repository.
 
   Thirteen mutations, each applied alone, fail the new guard at the
   assertion they aim at. Twelve leave the previous guards green; the
