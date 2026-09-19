@@ -588,11 +588,19 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
      job inherits it, and the jobs below are checked against it"
   );
 
+  // A key the parser does not read as a string is refused, not skipped:
+  // `true:` is a boolean to serde_yaml_ng and the job `true` to GitHub, so
+  // filtering it out would hand that job the write token with this test
+  // green.
   let jobs: Vec<String> = workflow["jobs"]
     .as_mapping()
     .expect("release.yml must define a `jobs:` mapping")
     .keys()
-    .filter_map(|k| k.as_str().map(str::to_owned))
+    .map(|k| {
+      k.as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("{path}: every job key must be a string, got {k:?}"))
+    })
     .collect();
   // A sweep guards the jobs it finds and says nothing about the ones that
   // stopped existing: renaming either job this issue restricts would leave
