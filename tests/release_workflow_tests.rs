@@ -113,7 +113,18 @@ const STABLE_TAGS_ONLY: &str = "!contains(github.event.inputs.tag || github.ref_
 /// positional argument, uploaded as an asset instead of read as the notes. Each is a model
 /// of bash written in place of bash, the mistake #634 already paid for. As
 /// written, the only cost is that reformatting the step reformats the pin.
-fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, script: &str, why: &str) {
+fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, env: &serde_yaml_ng::Value, script: &str, why: &str) {
+  // The environment is part of what a script does, so it is pinned with it,
+  // for every step pinned here rather than wherever someone remembers to:
+  // `SHELLOPTS: noexec` has bash parse the script, run nothing and exit 0,
+  // leaving `path=` unwritten, and an `INPUT_*` variable switches an action's
+  // inputs. Review found the resolver steps unpinned while a comment said
+  // every step was, which is why this is a parameter and not a call site.
+  assert_eq!(
+    step["env"], *env,
+    "the {label} step's `env:` changed. It is pinned by value (issue #647): a variable there \
+     changes what the script does without touching it"
+  );
   assert!(
     step["if"].is_null() && step["continue-on-error"].is_null(),
     "the {label} step must run and be able to fail its job, got `if: {:?}` and \
@@ -161,8 +172,8 @@ fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>
   // travel through it: an action reads `INPUT_<NAME>` from the process
   // environment, so `INPUT_GENERATE_RELEASE_NOTES: true` on the job or the
   // workflow switches softprops' generated notes on with its `with:` intact.
-  // The step level is pinned where each step is; the two above are pinned
-  // here. What no reader of this file closes is a step writing to
+  // The step level is pinned where each step is, through the `env`
+  // argument of `assert_run_step`; the two above are pinned here. What no reader of this file closes is a step writing to
   // `$GITHUB_ENV`, the environment surface #656 names as the ceiling.
   let workflow_env: serde_yaml_ng::Value = serde_yaml_ng::from_str("CARGO_TERM_COLOR: always").unwrap();
   assert_eq!(
@@ -253,16 +264,14 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
   );
 
   let (publish_at, step) = workflow_step(".github/workflows/release.yml", "release", "publish release");
+  // `gh` authenticates with the workflow token and publishes the tag that
+  // triggered the run, and nothing else sits in its environment.
   let env: serde_yaml_ng::Value =
     serde_yaml_ng::from_str("GH_TOKEN: ${{ github.token }}\nTAG: ${{ github.ref_name }}").unwrap();
-  assert_eq!(
-    step["env"], env,
-    "the publish release step must authenticate `gh` with the workflow token and publish the tag \
-     that triggered the run, and nothing else in its environment"
-  );
   assert_run_step(
     &step,
     "publish release",
+    &env,
     PUBLISH_RELEASE_SCRIPT,
     "release.yml's publish release script changed. It is pinned by value (issue #647): the notes \
      must come from `changelogs/<version>.md` in BOTH the `create` and the `edit` branch, `create` \
@@ -286,6 +295,7 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
   assert_run_step(
     &resolve,
     "resolve changelog path",
+    &serde_yaml_ng::Value::Null,
     RESOLVE_STABLE_CHANGELOG,
     "release.yml's changelog path changed. It is pinned by value (issue #647): the notes must be \
      `changelogs/<version>.md` and the job must fail when that file is missing, never fall back \
@@ -630,6 +640,7 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
   assert_run_step(
     &resolve,
     "resolve changelog path",
+    &serde_yaml_ng::Value::Null,
     RESOLVE_RC_CHANGELOG,
     "pre-release.yml's changelog path changed. It is pinned by value (issue #647): an rc's notes \
      must be `changelogs/pre-releases/<version>.md` and the job must fail when that file is \

@@ -99,11 +99,17 @@ fn release_workflow_publishes_both_linux_packages() {
     .as_str()
     .expect("the publish release step must carry a `run:` script");
   let lines: Vec<&str> = script.lines().map(str::trim_start).collect();
+  // A bare glob ends the command in bash, so it only counts as uploaded on
+  // the script's last line; anywhere else it has to carry the continuation.
+  let last = lines.iter().rposition(|l| !l.is_empty());
   for glob in ["dist/*.deb", "dist/*.deb.sha256", "dist/*.rpm", "dist/*.rpm.sha256"] {
     let continued = format!("{glob} \\");
     assert!(
-      lines.iter().any(|l| *l == glob || *l == continued),
-      "the release upload must publish {glob} on a line of its own, got {lines:?}"
+      lines
+        .iter()
+        .enumerate()
+        .any(|(i, l)| *l == continued || (*l == glob && Some(i) == last)),
+      "the release upload must publish {glob} as a continued argument or the last one, got {lines:?}"
     );
   }
 }
