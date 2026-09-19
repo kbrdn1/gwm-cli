@@ -562,32 +562,46 @@ pub fn workflow_step(path: &str, job: &str, name: &str) -> serde_yaml_ng::Value 
   hits.remove(0)
 }
 
-/// The logical lines of a `run:` script, for comparing it by value: a line
-/// ending in `\` is joined with the next, runs of whitespace collapse to one
-/// space, blank lines are dropped. That is all the normalisation there is, so
-/// reflowing a command across lines stays green and any change to what it
-/// says does not.
+/// The logical lines of a `run:` script, for comparing it by value: physical
+/// lines joined across a continuation, each piece trimmed, blank lines
+/// dropped. That is all the normalisation there is, so reflowing a command
+/// across lines or re-indenting it stays green, and any change to what it
+/// says does not. Whitespace inside a line is kept as written, since inside
+/// quotes it is part of the value.
+///
+/// A line continues only when it ends in an odd run of backslashes, tested
+/// before anything is trimmed, which is how bash reads it: `\\` is an escaped
+/// backslash, and `\ ` escapes the space and ends the command. Trimming first
+/// read `dist/*.rpm \ ` as a continuation, so a script that bash splits into
+/// two commands, one of them uploading nothing, compared equal to the pin.
 #[allow(dead_code)] // used by the suites that pin a release workflow step.
 pub fn logical_lines(script: &str) -> Vec<String> {
   let mut lines = Vec::new();
-  let mut pending = String::new();
+  let mut pending: Vec<&str> = Vec::new();
   for raw in script.lines() {
-    let raw = raw.trim_end();
-    let (body, continued) = match raw.strip_suffix('\\') {
-      Some(body) => (body, true),
-      None => (raw, false),
-    };
-    pending.push(' ');
-    pending.push_str(body);
+    let backslashes = raw.len() - raw.trim_end_matches('\\').len();
+    let continued = backslashes % 2 == 1;
+    let body = if continued { &raw[..raw.len() - 1] } else { raw };
+    pending.push(body.trim());
     if !continued {
-      let line = pending.split_whitespace().collect::<Vec<_>>().join(" ");
+      let line = pending
+        .iter()
+        .filter(|p| !p.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
       if !line.is_empty() {
         lines.push(line);
       }
       pending.clear();
     }
   }
-  let tail = pending.split_whitespace().collect::<Vec<_>>().join(" ");
+  let tail = pending
+    .iter()
+    .filter(|p| !p.is_empty())
+    .copied()
+    .collect::<Vec<_>>()
+    .join(" ");
   if !tail.is_empty() {
     lines.push(tail);
   }

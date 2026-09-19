@@ -106,6 +106,12 @@ fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, lines: &[&str], why
 /// is not reused because it refuses any job-level `if:`, and the stable jobs
 /// carry one on purpose. The condition is compared by value, with whitespace
 /// collapsed because the workflow writes it as a block scalar.
+///
+/// `continue-on-error:` is refused on the dependencies too, which is where
+/// this parts from `assert_job_is_blocking` on purpose. On a CI dependency it
+/// makes the dependency report success so the dependent runs; here the
+/// dependent is the publish, and `build` reporting success over a failed
+/// build is a release going out without its artifacts.
 fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
