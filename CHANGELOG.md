@@ -117,6 +117,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The release publish guards were satisfied by something other than what
+  they named** ([#647](https://github.com/kbrdn1/gwm-cli/issues/647)). Three
+  of them, on the path that publishes a release.
+
+  The stable publish step holds two exclusive branches, `gh release edit`
+  for a recovery rerun and `gh release create` for a fresh tag, and
+  `--notes-file` was asserted once over both. Dropping it from `create`, the
+  branch a real release takes, stayed green, and that release would have
+  gone out with `gh`'s generated notes instead of `changelogs/<version>.md`,
+  which is the v0.6.0 incident the guard was written against.
+  `--verify-tag`, `--draft=false`, `--prerelease=false` and the `.tar.gz` /
+  `.zip` uploads were asserted by nothing. The Linux package check ran
+  `contains("dist/*.deb")` over the whole file, which `dist/*.deb.sha256`
+  satisfies on its own, as does the build job's `upload-artifact` step,
+  which publishes nothing. With the `.deb` and `.rpm` lines removed from
+  `release.yml`, both suites that read it stayed green. And `pre-release.yml`'s
+  `body_path`, which is what keeps an rc's notes on
+  `changelogs/pre-releases/<version>.md`, had no test at all.
+
+  The steps are now read from the parsed workflow and pinned by value: the
+  stable script line for line (continuations joined, whitespace collapsed),
+  with its `env` and `shell`, and the whole `with:` of the pre-release step.
+  By value rather than by flag, because a presence check loses to an
+  addition: `gh` keeps the last value of a repeated flag, so
+  `--draft=false --draft=true` publishes a draft with the substring still
+  there, and softprops takes `generate_release_notes`, `append_body` and
+  `body`, any of which changes the notes without touching `body_path`. The
+  Linux check compares whole tokens of the one `gh release upload` command.
+  Seven mutations, each applied alone, all fail the guard they aim at. Four
+  of them, replayed against the previous guards, left those green.
+
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
   nextest (#634) left `cargo test --doc` running beside it, because nextest
