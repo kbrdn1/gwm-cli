@@ -117,6 +117,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One added step could empty the release notes with every publish guard
+  green** ([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). #647
+  pinned the steps of the publish path by name and left the rest of each
+  publish job free-form. Review measured two ways through with every pin
+  intact: `gh release edit "$TAG" --notes ""` added after the stable
+  publish, and the notes file truncated by a step inserted between the
+  resolver and the publish. A line appended to `$GITHUB_ENV` does the same,
+  since it sets the environment of every later step, and the two `run:`
+  steps nothing pinned, `resolve tag` and the rc duplicate check in
+  `pre-release.yml`, could carry any of the three unseen.
+
+  Both publish jobs are now pinned whole: the step labels as an ordered list
+  first, so an added, removed or reordered step reads as a list in the
+  failure, then every step by value. The one thing left free is an action's
+  `@ref`, because Dependabot bumps `github-actions` here and pinning the ref
+  would turn each of its pull requests red. What stays out of reach is what
+  the actions do inside, and the rest of the workflow: `homebrew-tap-update`
+  runs after the publish with the workflow's write token and a `GH_TOKEN` in
+  one of its steps.
+
+  Nine mutations, each applied alone, fail the new guard at the assertion
+  they aim at. Eight leave the previous guards green; the ninth, the
+  duplicate check removed, was already caught by the test that requires it.
+  Two controls, the checkout and softprops refs bumped a major version, stay
+  green.
+
+  `assert_job_is_blocking` also loses its step-level waiver parameter
+  ([#664](https://github.com/kbrdn1/gwm-cli/issues/664)). #659 removed the
+  doctest step, the one step that held a waiver, and every caller has passed
+  an empty list since, so the waiver checks ran against nothing and would
+  have passed vacuously the day they were needed. A step-level `if:` is now
+  refused outright, and a condition that becomes legitimate comes back with
+  a test of its own.
+
 - **The release publish guards were satisfied by something other than what
   they named** ([#647](https://github.com/kbrdn1/gwm-cli/issues/647)). Two
   guards on the path that publishes a release, and a third surface of it
@@ -171,10 +205,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than a line each caller has to remember, both publish jobs carry no
   `env:`, and the workflow-level one is `CARGO_TERM_COLOR` alone. An action's
   inputs cannot be reached that way, since the runner writes `INPUT_<NAME>`
-  for every declared input over whatever `env:` set. Two things stay out of
-  reach of any reader of the workflow file, the ceiling #656 names: a step
-  writing to `$GITHUB_ENV`, and the other steps of the publish job, which
-  are free-form.
+  for every declared input over whatever `env:` set. The other steps of the
+  publish job, a step writing to `$GITHUB_ENV` among them, were left
+  free-form here and are pinned under #665.
 
   Thirty mutations, each applied alone, all fail the guard they aim at.
   Twenty-nine of them leave the previous guards green; the other, a second step
@@ -282,12 +315,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   together proves less than it looks, since the job-level `if:` is checked
   before `continue-on-error:` and both before the command, so a combined
   mutation panics on the first and never reaches the one it is meant to
-  demonstrate. Two of the twenty-six mutate the test rather than the workflow,
-  since moving the step-level `if:` waivers out of a call argument and into a
-  lookup is plumbing that can break on its own. The set was replayed in full
-  against the final code rather than accumulated across passes: a table quoting
-  an assertion an earlier commit has since rewritten documents a guard nobody
-  ships.
+  demonstrate. Two of the twenty-six mutated the test rather than the
+  workflow, the lookup the step-level `if:` waivers went through at the time,
+  plumbing that could break on its own; #659 and #664 have since removed the
+  waivers, and those two mutations have nothing left to aim at. The set was
+  replayed in full against the final code rather than accumulated across
+  passes: a table quoting an assertion an earlier commit has since rewritten
+  documents a guard nobody ships.
 
 - **CI could still be silenced, below the job and above it**
   ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
@@ -349,15 +383,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `assert_job_is_blocking`, shared by the two test binaries that parse
   `ci.yml` and applied to all four jobs. It also refuses an absent job and
   an empty `steps:`, because a deleted job parses to null and every
-  assertion walks past null. A step that needs a condition passes its exact
-  value rather than a waiver, which pinned the one legitimate `if:` in the
-  tree, the doctest step narrowed to the ubuntu matrix row, to that
-  condition until #659 removed the step. That allowance also has to land
-  on exactly one step: the label
-  it is keyed on comes from `name:`, so relabelling a second step to match
-  would otherwise hand it the same exemption, and renaming the step it was
-  written for would leave a waiver covering nothing. The `audit` guard adds `--deny warnings` and rejects a pipe on
-  the command, since a pipeline reports its last element's exit status.
+  assertion walks past null. No step may carry an `if:` either. The one
+  legitimate one in the tree, the doctest step narrowed to the ubuntu matrix
+  row, was pinned to its exact value until #659 removed the step, and #664
+  removed the allowance with it rather than keep a path no caller drove. The
+  `audit` guard adds `--deny warnings` and rejects a pipe on the command,
+  since a pipeline reports its last element's exit status.
 
   A fifth way to switch a job off is covered as well, found while reviewing
   the first four: GitHub skips a job whose dependency was skipped, so
