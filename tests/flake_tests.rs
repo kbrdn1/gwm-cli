@@ -24,17 +24,50 @@ fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
   s.lines().any(|line| line.starts_with(&prefix))
 }
 
-// True iff a line assigns a *literal* version, e.g. `version = "0.3.0-rc.3";`.
-// A derived version (`version = (builtins.fromTOML ...).package.version;`) has
-// no opening quote, and an interpolated one does not start with a digit, so
-// neither trips this.
-fn has_hardcoded_version_literal(s: &str) -> bool {
-  s.lines().any(|line| {
-    line
-      .trim()
-      .strip_prefix("version = \"")
-      .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-  })
+// `(name, rhs)` for every `name = rhs;` line outside a `#` comment, `rhs` cut
+// at its `;`. Line-based: a binding split over several lines is not seen,
+// which makes the version guard fail rather than pass.
+fn bindings(s: &str) -> impl Iterator<Item = (&str, &str)> {
+  s.lines()
+    .map(str::trim)
+    .filter(|l| !l.starts_with('#'))
+    .filter_map(|l| {
+      let (name, rhs) = l.split_once('=')?;
+      Some((name.trim(), rhs.split(';').next().unwrap_or(rhs).trim()))
+    })
+}
+
+fn reads_cargo_toml(expr: &str) -> bool {
+  expr.contains("fromTOML") && expr.contains("./Cargo.toml")
+}
+
+// Every `version =` binding in `s`, each of which must be the
+// `.package.version` of an expression that reads `./Cargo.toml`: inline,
+// `(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version`, or
+// through a name bound to that read, `cargoToml.package.version`. One hop
+// only: `a = cargoToml; version = a.package.version;` fails.
+fn version_derives_from_cargo_toml(s: &str) -> Result<(), String> {
+  let readers: Vec<&str> = bindings(s)
+    .filter(|(_, rhs)| reads_cargo_toml(rhs))
+    .map(|(name, _)| name)
+    .collect();
+  let versions: Vec<&str> = bindings(s)
+    .filter(|(name, _)| *name == "version")
+    .map(|(_, rhs)| rhs)
+    .collect();
+  if versions.is_empty() {
+    return Err("no `version = …;` binding found".into());
+  }
+  match versions.iter().find(|rhs| {
+    !rhs
+      .strip_suffix(".package.version")
+      .is_some_and(|src| reads_cargo_toml(src) || readers.contains(&src))
+  }) {
+    Some(rhs) => Err(format!(
+      "`version = {rhs};` is not the `package.version` of a Cargo.toml read"
+    )),
+    None => Ok(()),
+  }
 }
 
 #[test]
@@ -56,22 +89,67 @@ fn flake_derives_its_version_from_cargo_toml() {
   // test pins the mechanism rather than comparing two numbers (which would be
   // tautological once derived). It fails if someone later "simplifies" the
   // expression back into a literal.
+  //
+  // Issue #648: the first version of this guard asked whether `fromTOML` and
+  // `./Cargo.toml` appeared anywhere in the file, and the MSRV read provides
+  // both. `pinnedVersion = "0.3.0-rc.3"; version = pinnedVersion;` passed it.
+  // So the guard reads the right-hand side of the `version` binding itself.
+  // The oracle would be `nix eval .#gwm.version` against Cargo.toml, but no CI
+  // runner has nix, and a test that skips when its tool is missing is the
+  // vacuous green this fixes; a Nix parser crate for one guard is not worth
+  // the dependency.
   let s = read_flake();
-  assert!(
-    !has_hardcoded_version_literal(&s),
-    "flake.nix must not hardcode a version literal — derive it with \
-     `version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;` \
-     so it cannot drift from Cargo.toml again (#393)"
-  );
-  assert!(
-    s.contains("fromTOML") && s.contains("./Cargo.toml"),
-    "flake.nix must read its version out of Cargo.toml"
-  );
+  if let Err(why) = version_derives_from_cargo_toml(&s) {
+    panic!(
+      "flake.nix must derive its version from Cargo.toml: {why}. Write \
+       `version = cargoToml.package.version;` with \
+       `cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);` so it \
+       cannot drift again (#393)"
+    );
+  }
   // Only the *version* is derived. Cargo.toml's `name` is `gwm-cli` (the bare
   // `gwm` crate name was taken on crates.io) while the binary — and so the
   // package — is `gwm`. `flake_exposes_gwm_package_via_build_rust_package`
   // pins `pname = "gwm"`, which is what stops a well-meaning "derive
   // everything from Cargo.toml" from renaming the package.
+}
+
+#[test]
+fn the_version_guard_can_actually_fire() {
+  let ok = |s: &str| version_derives_from_cargo_toml(s).is_ok();
+  let read = "cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);\n\
+              msrv = cargoToml.package.rust-version;\n";
+
+  assert!(
+    !ok(&format!(
+      "{read}pinnedVersion = \"0.3.0-rc.3\";\nversion = pinnedVersion;\n"
+    )),
+    "a pin one binding away, which the MSRV read hid from the previous guard (#648)"
+  );
+  assert!(!ok(&format!("{read}version = \"1.10.0\";\n")), "a literal");
+  assert!(
+    !ok(&format!("{read}version = cargoToml.package.rust-version;\n")),
+    "the wrong field of the right read"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\nversion = pinnedVersion;\n"
+    )),
+    "a second binding, the derivation's own, overriding the derived one"
+  );
+  assert!(
+    !ok(&format!("{read}# version = cargoToml.package.version;\n")),
+    "a commented-out binding is no binding"
+  );
+
+  assert!(
+    ok(&format!("{read}version = cargoToml.package.version;\n")),
+    "today's flake"
+  );
+  assert!(
+    ok("version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;\n"),
+    "the inline spelling #396 shipped"
+  );
 }
 
 #[test]
