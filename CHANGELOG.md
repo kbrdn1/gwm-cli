@@ -146,6 +146,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two workflow guards skipped a key the YAML parser reads as a boolean**
+  ([#673](https://github.com/kbrdn1/gwm-cli/issues/673)). serde_yaml_ng
+  reads `true:` and `false:` as booleans, where GitHub Actions reads the
+  job, or the matrix dimension, named `true` or `false`. The `ci.yml` sweep
+  (#655) and `effective_matrix_os` (#653) collected keys with
+  `filter_map(as_str)`, which drops them: a job keyed `true:` carrying
+  `continue-on-error: true` left the sweep green, and a `true:` matrix
+  dimension got past the check that refuses any key but `os` and `exclude`.
+  Review of #669 found the same shape in the `release.yml` permissions
+  sweep, fixed there inline.
+
+  The three now read keys through one helper, `string_keys`, which panics
+  on a non-string key instead of skipping it. Four mutations, a `true:` and
+  a `false:` job in `ci.yml` and a `true:` or `false:` dimension on the
+  `test` and `msrv` matrices, each applied alone, fail the guard they aim
+  at and all left the previous guards green; a fifth, the `true:` job in
+  `release.yml`, stays red through the helper.
+
 - **One added step could empty the release notes with every publish guard
   green** ([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). #647
   pinned the steps of the publish path by name and left the rest of each

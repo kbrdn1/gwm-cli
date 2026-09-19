@@ -431,7 +431,7 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
   let matrix = &job["strategy"]["matrix"];
   let keys: Vec<String> = matrix
     .as_mapping()
-    .map(|m| m.keys().filter_map(|k| k.as_str().map(str::to_owned)).collect())
+    .map(|m| string_keys(m, &format!("the `{job_name}` matrix")))
     .unwrap_or_default();
   for key in &keys {
     assert!(
@@ -474,6 +474,27 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
   );
 
   declared.into_iter().filter(|os| !excluded.contains(os)).collect()
+}
+
+/// The keys of a YAML mapping, as strings, in document order (issue #673).
+///
+/// A key the parser does not read as a string panics instead of being
+/// skipped. serde_yaml_ng reads `true:` and `false:` as booleans, where GitHub
+/// Actions reads the job, or the matrix dimension, named `true` or `false`. A
+/// sweep collecting keys through `filter_map(as_str)` drops that job and
+/// passes over it green: review measured it on the permissions sweep of
+/// `release.yml` (#669), where a `true:` job kept the workflow's write token.
+/// `what` names the mapping in the panic.
+#[allow(dead_code)] // used by the test binaries that sweep a workflow's keys.
+pub fn string_keys(mapping: &serde_yaml_ng::Mapping, what: &str) -> Vec<String> {
+  mapping
+    .keys()
+    .map(|k| {
+      k.as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("{what}: every key must be a string, got {k:?}"))
+    })
+    .collect()
 }
 
 /// The `needs:` of a job, as a list. The Actions schema allows both a bare
