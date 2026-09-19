@@ -294,7 +294,9 @@ each publish job with them, its keys and every step, since one step added
 beside the publish could still empty the notes
 ([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). The CI guard helper
 lost a waiver path no caller drove any more
-([#664](https://github.com/kbrdn1/gwm-cli/issues/664)).
+([#664](https://github.com/kbrdn1/gwm-cli/issues/664)), and the jobs that run
+after the publish lost a write token they never needed
+([#669](https://github.com/kbrdn1/gwm-cli/issues/669)).
 
 **What is queued next** is what that audit left open, all in the same family:
 the flake version guard is satisfied by the MSRV read, so #393 can come back
