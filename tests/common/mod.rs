@@ -503,8 +503,8 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
 /// The `needs:` of a job, as a list. The Actions schema allows both a bare
 /// string and a sequence, and a job with no dependency parses to null, so the
 /// three shapes are read here rather than at each call site.
-#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
+#[allow(dead_code)] // used by the test binaries that parse a workflow's jobs.
+pub fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
   match &job["needs"] {
     serde_yaml_ng::Value::String(one) => vec![one.clone()],
     serde_yaml_ng::Value::Sequence(many) => many
