@@ -126,8 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a recovery rerun and `gh release create` for a fresh tag, and
   `--notes-file` was asserted once over both. Dropping it from `create`, the
   branch a real release takes, stayed green, and that release would have
-  gone out with `gh`'s generated notes instead of `changelogs/<version>.md`,
-  which is the v0.6.0 incident the guard was written against.
+  gone out with an empty body instead of `changelogs/<version>.md`: without
+  `--notes-file`, `gh` has no prompt to fall back on in CI and sends no body
+  at all. Notes missing from a release is what the guard was written
+  against, after v0.6.0.
   `--verify-tag`, `--draft=false`, `--prerelease=false` and the `.tar.gz` /
   `.zip` uploads were asserted by nothing. The Linux package check ran
   `contains("dist/*.deb")` over the whole file, which `dist/*.deb.sha256`
@@ -162,8 +164,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `continue-on-error: true` on the release job turned a failed publish into a
   green run. The publish job must wait on `build`, and both must carry
   exactly the stable-tags condition, or none on the pre-release side, and no
-  `continue-on-error:`. Twenty mutations, each applied alone: all twenty
-  leave the previous guards green and fail the one they aim at.
+  `continue-on-error:`. And the environment is pinned where it reaches the
+  publish step: an action reads its inputs back from `INPUT_*` variables, so
+  `INPUT_GENERATE_RELEASE_NOTES: true` in an `env:` generated notes with the
+  pinned `with:` intact. The pre-release step and both publish jobs carry no
+  `env:`, and the workflow-level one is `CARGO_TERM_COLOR` alone. A step
+  writing to `$GITHUB_ENV` is out of reach of any reader of the workflow file,
+  the ceiling #656 names.
+
+  Twenty-eight mutations, each applied alone, all fail the guard they aim at.
+  Twenty-seven of them leave the previous guards green; the twenty-eighth, a
+  second step named `publish release`, failed them by accident, since the old
+  text slice read whichever of the two came first.
 
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
