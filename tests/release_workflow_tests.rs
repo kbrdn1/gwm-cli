@@ -97,57 +97,65 @@ const STABLE_TAGS_ONLY: &str = "!contains(github.event.inputs.tag || github.ref_
                                 !contains(github.event.inputs.tag || github.ref_name, '-alpha.') && \
                                 !contains(github.event.inputs.tag || github.ref_name, '-beta.')";
 
-/// Every step of the stable publish job, in order (issue #665). The `run:` of
-/// the two steps pinned above and the publish step's `env:` are filled in from
-/// what the test already pins, so each is written once. An action is named
-/// without its `@ref`, see `assert_job_steps`.
-const STABLE_RELEASE_STEPS: &str = r##"
-- uses: actions/checkout
-  with:
-    persist-credentials: false
-- name: download all artifacts
-  uses: actions/download-artifact
-  with:
-    path: dist
-    merge-multiple: true
-- name: resolve changelog path
-  id: changelog
-  shell: bash
-- name: publish release
-  shell: bash
+/// The stable publish job, every key but `if:` and every step in order (issue
+/// #665). The `run:` of the two steps pinned above and the publish step's
+/// `env:` are filled in from what the test already pins, so each is written
+/// once. An action is named without its `@ref`, see `assert_job_as_written`.
+const STABLE_RELEASE_JOB: &str = r##"
+name: github release
+needs: [build]
+runs-on: ubuntu-latest
+steps:
+  - uses: actions/checkout
+    with:
+      persist-credentials: false
+  - name: download all artifacts
+    uses: actions/download-artifact
+    with:
+      path: dist
+      merge-multiple: true
+  - name: resolve changelog path
+    id: changelog
+    shell: bash
+  - name: publish release
+    shell: bash
 "##;
 
-/// Every step of the pre-release publish job, in order (issue #665). Same
-/// convention: the resolver's `run:` and the publish step's `with:` come from
-/// the test, and `resolve tag` is written out here because nothing else pins
-/// it, although `tag_name` and `name` read its output.
-const PRE_RELEASE_STEPS: &str = r##"
-- name: resolve tag
-  id: tag
-  shell: bash
-  run: |
-    if [ -n "${{ inputs.tag }}" ]; then
-      echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-    else
-      echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-    fi
-- uses: actions/checkout
-  with:
-    ref: ${{ steps.tag.outputs.name }}
-    persist-credentials: false
-- name: download all artifacts
-  uses: actions/download-artifact
-  with:
-    path: dist
-    merge-multiple: true
-- name: resolve changelog path
-  id: changelog
-  shell: bash
-- name: check unreleased changelog against previous rc
-  shell: bash
-  run: ./.github/scripts/check-rc-changelog-dupes.sh "${{ steps.tag.outputs.name }}"
-- name: publish pre-release
-  uses: softprops/action-gh-release
+/// The pre-release publish job, same convention: the resolver's `run:` and the
+/// publish step's `with:` come from the test, and `resolve tag` is written out
+/// here because nothing else pins it, although `tag_name` and `name` read its
+/// output.
+const PRE_RELEASE_JOB: &str = r##"
+name: github pre-release
+needs: [build]
+runs-on: ubuntu-latest
+steps:
+  - name: resolve tag
+    id: tag
+    shell: bash
+    run: |
+      if [ -n "${{ inputs.tag }}" ]; then
+        echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+      else
+        echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+      fi
+  - uses: actions/checkout
+    with:
+      ref: ${{ steps.tag.outputs.name }}
+      persist-credentials: false
+  - name: download all artifacts
+    uses: actions/download-artifact
+    with:
+      path: dist
+      merge-multiple: true
+  - name: resolve changelog path
+    id: changelog
+    shell: bash
+  - name: check unreleased changelog against previous rc
+    shell: bash
+    run: ./.github/scripts/check-rc-changelog-dupes.sh "${{ steps.tag.outputs.name }}"
+  - name: publish pre-release
+    uses: softprops/action-gh-release
 "##;
 
 /// Issue #665. The steps pinned by name leave the rest of the publish job
@@ -156,8 +164,16 @@ const PRE_RELEASE_STEPS: &str = r##"
 /// publish, and the notes file truncated by a step inserted between the
 /// resolver and the publish. A line appended to `$GITHUB_ENV` by any earlier
 /// step is the same shape, since it sets the environment of every step after
-/// it. So the whole job is pinned: the list of steps in order, then each step
-/// by value.
+/// it. So the whole job is pinned: its keys, then the list of steps in order,
+/// then each step by value.
+///
+/// The keys, because a step is not the only thing that reaches a `run:`. A
+/// `container:` with an `env:` runs every step through `docker exec` inside it,
+/// `SHELLOPTS: noexec` included, and `defaults:` changes where and how they
+/// run. Review measured the first with every step pinned and the suite green.
+/// The one key compared elsewhere is `if:`, which `assert_publish_job_blocks`
+/// reads with its whitespace collapsed, since the stable job writes it as a
+/// block scalar.
 ///
 /// The labels are compared first so that an added, removed or reordered step
 /// reads as a list in the message, not as two unrelated steps compared at the
@@ -170,14 +186,28 @@ const PRE_RELEASE_STEPS: &str = r##"
 /// pinned, and so is everything passed to it.
 ///
 /// What this leaves out is what the actions do inside, and the rest of the
-/// workflow: `homebrew-tap-update` runs after the publish with the workflow's
-/// `contents: write` token and a `GH_TOKEN` in one of its steps, so a line
-/// added there can still edit the notes. A reader of one job cannot close
-/// that, the ceiling #656 names.
-fn assert_job_steps(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
+/// workflow: `homebrew-tap-update` and `scoop-bucket-update` run after the
+/// publish with the workflow's `contents: write` token and a `GH_TOKEN` in one
+/// of their steps, so a line added there can still edit the notes. A reader of
+/// one job cannot close that, the ceiling #656 names.
+fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  let outside_steps = |job: &serde_yaml_ng::Value| {
+    let mut keys = job.as_mapping().cloned().unwrap_or_default();
+    keys.remove("steps");
+    keys.remove("if");
+    keys
+  };
+  assert_eq!(
+    outside_steps(&workflow["jobs"][job]),
+    outside_steps(expected),
+    "{path} job `{job}` changed outside its steps (issue #665). Every key of the publish job is \
+     pinned but `if:`, which `assert_publish_job_blocks` compares: a `container:` carries its \
+     `env:` into every `run:` step, `SHELLOPTS: noexec` included, and `defaults:` changes where \
+     and how they run. If the change is intended, update the expected job in the same diff"
+  );
   let actual: Vec<serde_yaml_ng::Value> = workflow["jobs"][job]["steps"]
     .as_sequence()
     .cloned()
@@ -194,7 +224,9 @@ fn assert_job_steps(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
       step
     })
     .collect();
-  let expected = expected.as_sequence().expect("the expected steps must be a list");
+  let expected = expected["steps"]
+    .as_sequence()
+    .expect("the expected job must list its steps");
   let labels = |steps: &[serde_yaml_ng::Value]| steps.iter().map(|s| step_label(s).to_owned()).collect::<Vec<_>>();
   assert_eq!(
     labels(&actual),
@@ -288,17 +320,18 @@ fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
-  // The environment reaches a `run:` step from three levels, and
+  // The environment reaches a `run:` step from three `env:` levels, and
   // `SHELLOPTS: noexec` at any of them has bash run nothing and exit 0. The
   // step level is pinned through the `env` argument of `assert_run_step`, the
-  // job and the workflow levels here. An action's inputs are not reachable
+  // job and the workflow levels here, and the `env:` of a job `container:`, a
+  // fourth, by `assert_job_as_written`. An action's inputs are not reachable
   // this way: the runner writes `INPUT_<NAME>` for every declared input, the
   // empty string when it has no default, over whatever `env:` set (verified
   // in actions/runner, `ActionManifestManager.cs` and `Handler.cs`).
   //
   // The other steps of the publish job, a step writing to `$GITHUB_ENV`
-  // among them, are pinned by `assert_job_steps` (issue #665), which also
-  // says what stays out of reach.
+  // among them, and the job's own keys are pinned by `assert_job_as_written`
+  // (issue #665), which also says what stays out of reach.
   let workflow_env: serde_yaml_ng::Value = serde_yaml_ng::from_str("CARGO_TERM_COLOR: always").unwrap();
   assert_eq!(
     workflow["env"], workflow_env,
@@ -427,11 +460,11 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
      to the `CHANGELOG.md` index",
   );
 
-  let mut steps: serde_yaml_ng::Value = serde_yaml_ng::from_str(STABLE_RELEASE_STEPS).unwrap();
-  steps[2]["run"] = RESOLVE_STABLE_CHANGELOG.into();
-  steps[3]["env"] = env;
-  steps[3]["run"] = PUBLISH_RELEASE_SCRIPT.into();
-  assert_job_steps(".github/workflows/release.yml", "release", &steps);
+  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(STABLE_RELEASE_JOB).unwrap();
+  job["steps"][2]["run"] = RESOLVE_STABLE_CHANGELOG.into();
+  job["steps"][3]["env"] = env;
+  job["steps"][3]["run"] = PUBLISH_RELEASE_SCRIPT.into();
+  assert_job_as_written(".github/workflows/release.yml", "release", &job);
 
   assert_publish_job_blocks(
     ".github/workflows/release.yml",
@@ -766,10 +799,10 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
      missing, never fall back to the `CHANGELOG.md` index",
   );
 
-  let mut steps: serde_yaml_ng::Value = serde_yaml_ng::from_str(PRE_RELEASE_STEPS).unwrap();
-  steps[3]["run"] = RESOLVE_RC_CHANGELOG.into();
-  steps[5]["with"] = with;
-  assert_job_steps(".github/workflows/pre-release.yml", "release", &steps);
+  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(PRE_RELEASE_JOB).unwrap();
+  job["steps"][3]["run"] = RESOLVE_RC_CHANGELOG.into();
+  job["steps"][5]["with"] = with;
+  assert_job_as_written(".github/workflows/pre-release.yml", "release", &job);
 
   assert_publish_job_blocks(".github/workflows/pre-release.yml", "release", None, &["build"]);
 }
