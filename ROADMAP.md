@@ -315,9 +315,10 @@ German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/52
 is roughly 155,000 words with no native reviewer lined up, so it stays a
 decision rather than a plan.
 
-**The lot below shipped in the v1.7.0 cut** (2026-08-12); it is kept here with
-its reasoning rather than folded into a one-line highlight, because the sequence
-is the point. It is not ordered by size.
+**The lot below shipped in the v1.6.0 and v1.7.0 cuts** (naming flexibility in
+the first, the rest on 2026-08-12), except the translations in section 8; it is
+kept here with its reasoning rather than folded into a one-line highlight,
+because the sequence is the point. It is not ordered by size.
 Each step sits where it is cheapest to land, which usually means ahead of the
 thing that would otherwise have to be reopened to accommodate it.
 
