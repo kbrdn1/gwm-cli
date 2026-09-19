@@ -112,9 +112,12 @@ fn strip_comments(s: &str) -> String {
 // `version = …` written in one is checked as a binding, which fails closed
 // too.
 //
-// Only the `path = rhs` form of a binding is read. `inherit` is not, and
-// neither is anything else Nix binds without spelling it (#672): this is a
-// text guard, and the oracle for Nix is `nix eval`.
+// Only the `path = rhs` form of a binding is read, and nothing traces which
+// binding the derivation actually receives. `inherit` is not read, a
+// dynamic name (`${"version"} = …`) is not a path, and a `pin.version = …`
+// merged into the derivation's arguments (`pin // { … }`) is a path the
+// version guard does not check (#672): this is a text guard, and the oracle
+// for Nix is `nix eval`.
 fn bindings(code: &str) -> impl Iterator<Item = (Vec<&str>, &str)> {
   code.split(';').flat_map(|stmt| {
     stmt.match_indices('=').filter_map(move |(i, _)| {
