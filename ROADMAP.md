@@ -233,14 +233,15 @@ additive work: new subcommands / flags, new opt-in `.gwm.toml` sections,
 additive JSON fields under the same `SCHEMA_VERSION`. Anything that would break
 a frozen surface waits for a future major.
 
-The next feature line is queued from a comparative read of the field
+The feature lines after 1.0 came from a comparative read of the field
 (`chmouel/lazyworktree` and `d-kuro/gwq`) against the actual gwm codebase. Four
-capability gaps came out of it. Two have shipped: the agent session pane
-([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) in v1.3.0 with its
-follow-ups, and multi-forge support
+capability gaps came out of it, and all four have shipped: the agent session
+pane ([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) in v1.3.0 with its
+follow-ups, multi-forge support
 ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)) in v1.5.0, which landed
-deliberately ahead of the rich PR/Issue view so that view is born multi-forge
-instead of being rewritten later. See the table above for both.
+deliberately ahead of the rich PR/Issue view so that view was born multi-forge
+instead of being rewritten later, and the last two in v1.7.0, which is why the
+[comparison page](docs/8.comparison.md) reports parity. See the table above.
 
 **What is on `dev` now**, unreleased, is two lots since the v1.10.0 cut.
 
@@ -340,8 +341,7 @@ Sequenced cheapest-first, each step shippable on its own:
 - [x] [#479](https://github.com/kbrdn1/gwm-cli/issues/479) : rename a free-form worktree, either freely again or into the pattern
 - [x] [#418](https://github.com/kbrdn1/gwm-cli/issues/418) : token-driven create form with a live branch/path preview
 
-Everything checked above is on `dev` and unreleased, so none of it has shipped to a
-stable line yet. **The original sequence is complete**; everything else listed below is
+Everything checked above shipped in v1.6.0. **The original sequence is complete**; everything else listed below is
 follow-up work that came out of building the first three, not a widening of the plan.
 
 Two of #418's three asks turned out to have shipped ahead of it, which is worth
@@ -639,7 +639,7 @@ What shipped:
 - [#547](https://github.com/kbrdn1/gwm-cli/issues/547) ✅: **the Status block folds onto one line**, under `[tui] status_one_line` (default on). Four labelled rows for four values of a handful of characters each was the largest waste left in the sidebar once #545 cut the chrome. A knob rather than a compact-mode behaviour, so `bordered` folds too.
 - [#548](https://github.com/kbrdn1/gwm-cli/issues/548) ✅: the cursor-position read that failed on return from a fullscreen overlay.
 
-Found by the same pass, all cheap, and all shipped since:
+Found by the same pass, all cheap, and the three TUI items shipped since:
 
 - [#553](https://github.com/kbrdn1/gwm-cli/issues/553) ✅: the two form modals drop a field below 18 rows. The horizontal policy landed with #550; the vertical one did not, so a short terminal silently hides an input rather than scrolling it.
 - [#554](https://github.com/kbrdn1/gwm-cli/issues/554) ✅: `ellipsize_middle` counts characters where the terminal counts cells, so a CJK or emoji title overflows the box it was measured into.
