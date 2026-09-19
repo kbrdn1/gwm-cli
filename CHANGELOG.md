@@ -28,8 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read`, compared by value, unless it is `build` or `release`, the two
   allowed to inherit the write token. A job added later without
   `permissions:` inherits write by default, which is how these two got it,
-  so it arrives red. `build` keeps its token on purpose: it finishes before
-  the publish starts, and the publish rewrites the notes anyway.
+  so it arrives red. `build` keeps its token, out of this issue's scope: it
+  finishes before the publish starts, so it cannot undo the notes of the tag
+  being released, which the publish writes after it. It can still edit the
+  notes of an earlier release, and restricting it is the same one-line
+  change.
 
   What no test can check is whether `contents: read` is enough at run time.
   Both jobs are `continue-on-error: true`, so a missing permission would
@@ -168,7 +171,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose tests cover what it detects and not what else it does. So is the
   rest of the workflow: `homebrew-tap-update` and `scoop-bucket-update` ran
   after the publish with the workflow's write token and a `GH_TOKEN` in one
-  of their steps, until #669 made them read-only.
+  of their steps, until #669 made them read-only. What stays out of reach
+  there is the scope of the PATs they push with, which only CONTRIBUTING.md
+  states, and the other workflows of this repository.
 
   Thirteen mutations, each applied alone, fail the new guard at the
   assertion they aim at. Twelve leave the previous guards green; the

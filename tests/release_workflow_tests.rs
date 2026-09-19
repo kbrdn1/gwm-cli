@@ -566,9 +566,12 @@ const INHERITS_THE_WRITE_TOKEN: [&str; 2] = ["build", "release"];
 /// `permissions:` inherits the write token by default, which is how these
 /// two got it: it arrives red here, not unguarded.
 ///
-/// `build` inherits on purpose and is out of this issue's scope: it finishes
-/// before the publish starts, and the publish job's `edit` branch rewrites
-/// the notes from `changelogs/<version>.md` anyway. `release` keeps its
+/// `build` inherits on purpose and is out of this issue's scope. It finishes
+/// before the publish starts, so it cannot undo the notes of the tag being
+/// released: the publish job writes them after it, from
+/// `changelogs/<version>.md`, in both its branches. It can still edit the
+/// notes of any earlier release, which nothing rewrites; restricting it is
+/// the same one-line change, left out of this issue. `release` keeps its
 /// access, and `assert_job_as_written` pins the absence of a job-level
 /// `permissions:` there.
 ///
@@ -602,10 +605,11 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
         .unwrap_or_else(|| panic!("{path}: every job key must be a string, got {k:?}"))
     })
     .collect();
-  // A sweep guards the jobs it finds and says nothing about the ones that
-  // stopped existing: renaming either job this issue restricts would leave
-  // the loop below with nothing to check for it. So the four are named, as a
-  // floor and never an equality.
+  // The loop below catches a rename, since it holds every job but `build`
+  // and `release` to `contents: read` under whatever name. What a sweep does
+  // not see is a job that stopped existing, down to a `jobs:` mapping it
+  // reads nothing in. So the four are named, as a floor and never an
+  // equality; the cost is that a harmless rename goes red too.
   for expected in ["build", "release", "homebrew-tap-update", "scoop-bucket-update"] {
     assert!(
       jobs.iter().any(|j| j == expected),
