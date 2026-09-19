@@ -167,15 +167,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `continue-on-error:`. And the environment is pinned where it reaches the
   publish step: an action reads its inputs back from `INPUT_*` variables, so
   `INPUT_GENERATE_RELEASE_NOTES: true` in an `env:` generated notes with the
-  pinned `with:` intact. The pre-release step and both publish jobs carry no
-  `env:`, and the workflow-level one is `CARGO_TERM_COLOR` alone. A step
-  writing to `$GITHUB_ENV` is out of reach of any reader of the workflow file,
-  the ceiling #656 names.
+  pinned `with:` intact, and `SHELLOPTS: noexec` on a resolver step has bash
+  run nothing and exit 0 with the path never written. Every pinned `run:`
+  step has its `env:` pinned with its script, as a required argument of the
+  check rather than a line each caller has to remember, the pre-release step
+  and both publish jobs carry no `env:`, and the workflow-level one is
+  `CARGO_TERM_COLOR` alone. A step writing to `$GITHUB_ENV` is out of reach
+  of any reader of the workflow file, the ceiling #656 names.
 
-  Twenty-eight mutations, each applied alone, all fail the guard they aim at.
-  Twenty-seven of them leave the previous guards green; the twenty-eighth, a
-  second step named `publish release`, failed them by accident, since the old
-  text slice read whichever of the two came first.
+  Thirty-one mutations, each applied alone, all fail the guard they aim at.
+  Thirty of them leave the previous guards green; the other, a second step
+  named `publish release`, failed them by accident, since the old text slice
+  read whichever of the two came first.
 
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
