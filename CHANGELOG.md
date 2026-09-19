@@ -146,6 +146,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The flake could pin its version again with the guard written for it
+  green** ([#648](https://github.com/kbrdn1/gwm-cli/issues/648)). The test
+  added for #393 asked whether `fromTOML` and `./Cargo.toml` appeared
+  anywhere in `flake.nix`, and the MSRV read, which binds the same parsed
+  `Cargo.toml`, provides both. `version = pinnedVersion;` with
+  `pinnedVersion = "0.3.0-rc.3";` above it, the literal #393 let drift for
+  eight releases, passed.
+
+  The guard now reads the right-hand side of every binding whose path is
+  `version` or ends in `package.version`, several on one line, one nested in
+  an attribute set, one spelled `"version" =`, one with a comment before its
+  `=`, or one continued over several lines included, and requires the
+  `package.version` of the `./Cargo.toml` read, bare or interpolated into a
+  string, inline or through a name every binding under which is exactly
+  `builtins.fromTOML (builtins.readFile ./Cargo.toml)`. A name whose binding
+  merely contains the read does not count, since what wraps it can override
+  the version. Comments are removed by following the file's strings, so a
+  `#` inside one is text and a comment after the binding quoting an old pin
+  is no binding. `passthru.tests.version`, the nixpkgs smoke test, is not a
+  version and is left alone. Eleven mutations of `flake.nix`, each applied
+  alone: the previous guard catches only the bare literal, the new one fails
+  all eleven at the same assertion, naming the binding. The inline spelling
+  #396 shipped stays accepted, and so do three correct flakes the review
+  found refused along the way.
+
+  It is a text guard: it checks those bindings, and nothing traces which one
+  the derivation actually receives. An `inherit` does not count, whether it
+  hands the derivation its version (`inherit (pin) version;`) or rebinds the
+  read's name (`inherit (pins) cargoToml;`), nor does a dynamic name
+  (`${"version"} = …`) or a `pin.version = …` merged into the derivation's
+  arguments (`pin // { … }`); each can pin the version with the guard green
+  ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). Four review passes
+  each found a new such form, which is the sign that text does not bound
+  Nix: `nix eval .#gwm.version` against `Cargo.toml` is the oracle, and no
+  CI runner has nix.
+
 - **Two workflow guards skipped a key the YAML parser reads as a boolean**
   ([#673](https://github.com/kbrdn1/gwm-cli/issues/673)). serde_yaml_ng
   reads `true:` and `false:` as booleans, where GitHub Actions reads the

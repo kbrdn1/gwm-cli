@@ -24,17 +24,161 @@ fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
   s.lines().any(|line| line.starts_with(&prefix))
 }
 
-// True iff a line assigns a *literal* version, e.g. `version = "0.3.0-rc.3";`.
-// A derived version (`version = (builtins.fromTOML ...).package.version;`) has
-// no opening quote, and an interpolated one does not start with a digit, so
-// neither trips this.
-fn has_hardcoded_version_literal(s: &str) -> bool {
-  s.lines().any(|line| {
-    line
-      .trim()
-      .strip_prefix("version = \"")
-      .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+// `s` with its `#` and `/* */` comments turned into a space. A `#` inside a
+// `"…"` or `''…''` string is text, so strings are followed, escapes
+// included, and so are the `${…}` inside them, which are code again.
+fn strip_comments(s: &str) -> String {
+  #[derive(Clone, Copy)]
+  enum Ctx {
+    Code(usize), // `{` depth, to find the `}` that closes an interpolation
+    Str,
+    Ind,
+  }
+  let mut stack = vec![Ctx::Code(0)];
+  let mut out = String::with_capacity(s.len());
+  let mut it = s.chars().peekable();
+  while let Some(c) = it.next() {
+    let top = stack.len() - 1;
+    match (stack[top], c) {
+      (Ctx::Code(_), '#') => {
+        while it.next_if(|&n| n != '\n').is_some() {}
+        out.push(' ');
+      }
+      (Ctx::Code(_), '/') if it.next_if_eq(&'*').is_some() => {
+        let mut prev = ' ';
+        for n in it.by_ref() {
+          if prev == '*' && n == '/' {
+            break;
+          }
+          prev = n;
+        }
+        out.push(' ');
+      }
+      (Ctx::Code(_), '"') => {
+        out.push(c);
+        stack.push(Ctx::Str);
+      }
+      (Ctx::Code(_), '\'') if it.next_if_eq(&'\'').is_some() => {
+        out.push_str("''");
+        stack.push(Ctx::Ind);
+      }
+      (Ctx::Code(depth), '{') => {
+        out.push(c);
+        stack[top] = Ctx::Code(depth + 1);
+      }
+      (Ctx::Code(depth), '}') => {
+        out.push(c);
+        if depth > 0 {
+          stack[top] = Ctx::Code(depth - 1);
+        } else if top > 0 {
+          stack.pop();
+        }
+      }
+      (Ctx::Str, '\\') => {
+        out.push(c);
+        out.extend(it.next());
+      }
+      (Ctx::Str, '"') => {
+        out.push(c);
+        stack.pop();
+      }
+      (Ctx::Ind, '\'') if it.next_if_eq(&'\'').is_some() => {
+        out.push_str("''");
+        // `'''`, `''$` and `''\` are escapes; any other `''` ends the string.
+        match it.next_if(|&n| matches!(n, '\'' | '$' | '\\')) {
+          Some(n) => out.push(n),
+          None => {
+            stack.pop();
+          }
+        }
+      }
+      (Ctx::Str | Ctx::Ind, '$') if it.next_if_eq(&'{').is_some() => {
+        out.push_str("${");
+        stack.push(Ctx::Code(0));
+      }
+      _ => out.push(c),
+    }
+  }
+  out
+}
+
+// `(path, rhs)` for every `path = rhs` in `code`, a Nix source without its
+// comments, the path split into its segments, quotes dropped. Each `;` ends
+// a statement and each `=` in it binds the attribute path just before it, so
+// `pname = "gwm"; version = …;`, `pin = { version = …; };` and
+// `{ package.version = …; }` are all read. `rhs` runs to the `;`, over as
+// many lines as it takes; a `;` inside a string cuts it short, which fails
+// the version guard rather than passing it. A string is read as code, so a
+// `version = …` written in one is checked as a binding, which fails closed
+// too.
+//
+// Only the `path = rhs` form of a binding is read, and nothing traces which
+// binding the derivation actually receives. `inherit` is not read, a
+// dynamic name (`${"version"} = …`) is not a path, and a `pin.version = …`
+// merged into the derivation's arguments (`pin // { … }`) is a path the
+// version guard does not check (#672): this is a text guard, and the oracle
+// for Nix is `nix eval`.
+fn bindings(code: &str) -> impl Iterator<Item = (Vec<&str>, &str)> {
+  code.split(';').flat_map(|stmt| {
+    stmt.match_indices('=').filter_map(move |(i, _)| {
+      let (before, rhs) = (&stmt[..i], &stmt[i + 1..]);
+      if before.ends_with(['=', '<', '>', '!']) || rhs.starts_with('=') {
+        return None;
+      }
+      let path = before
+        .trim_end()
+        .rsplit(|c: char| c.is_whitespace() || c == '{' || c == '(')
+        .next()?;
+      Some((path.split('.').map(|seg| seg.trim_matches('"')).collect(), rhs.trim()))
+    })
   })
+}
+
+const CARGO_TOML_READ: &str = "builtins.fromTOML (builtins.readFile ./Cargo.toml)";
+
+// Exactly the read, whitespace aside: an expression that merely contains it,
+// `recursiveUpdate (<read>) { … }` for one, can override what it returns.
+fn is_cargo_toml_read(expr: &str) -> bool {
+  let expr = expr.split_whitespace().collect::<Vec<_>>().join(" ");
+  expr == CARGO_TOML_READ || expr == format!("({CARGO_TOML_READ})")
+}
+
+// Every version binding in `s`, a path that is `version` or ends in
+// `package.version` (so not `passthru.tests.version`), each of which must be
+// the `.package.version` of the Cargo.toml read, bare or interpolated into a
+// string: inline,
+// `(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version`, or
+// through a name every `name… = …` binding of which is that read,
+// `cargoToml.package.version`. One hop only:
+// `a = cargoToml; version = a.package.version;` fails.
+fn version_derives_from_cargo_toml(s: &str) -> Result<(), String> {
+  let code = strip_comments(s);
+  let only_reads = |name: &str| {
+    let mut rhs = bindings(&code).filter(|(path, _)| path[0] == name).peekable();
+    rhs.peek().is_some() && rhs.all(|(_, rhs)| is_cargo_toml_read(rhs))
+  };
+  let versions: Vec<_> = bindings(&code)
+    .filter(|(path, _)| path == &["version"] || path.ends_with(&["package", "version"]))
+    .collect();
+  if versions.is_empty() {
+    return Err("no `version = …;` binding found".into());
+  }
+  match versions.iter().find(|(_, rhs)| {
+    let rhs = rhs
+      .strip_prefix("\"${")
+      .and_then(|r| r.strip_suffix("}\""))
+      .unwrap_or(rhs);
+    !rhs
+      .trim()
+      .strip_suffix(".package.version")
+      .is_some_and(|src| is_cargo_toml_read(src) || only_reads(src))
+  }) {
+    Some((path, rhs)) => Err(format!(
+      "`{} = {rhs};` is not the `package.version` of a Cargo.toml read",
+      path.join(".")
+    )),
+    None => Ok(()),
+  }
 }
 
 #[test]
@@ -56,22 +200,189 @@ fn flake_derives_its_version_from_cargo_toml() {
   // test pins the mechanism rather than comparing two numbers (which would be
   // tautological once derived). It fails if someone later "simplifies" the
   // expression back into a literal.
+  //
+  // Issue #648: the first version of this guard asked whether `fromTOML` and
+  // `./Cargo.toml` appeared anywhere in the file, and the MSRV read provides
+  // both. `pinnedVersion = "0.3.0-rc.3"; version = pinnedVersion;` passed it.
+  // So the guard reads the right-hand side of the `version` binding itself.
+  // The oracle would be `nix eval .#gwm.version` against Cargo.toml, but no CI
+  // runner has nix, and a test that skips when its tool is missing is the
+  // vacuous green this fixes; a Nix parser crate for one guard is not worth
+  // the dependency.
   let s = read_flake();
-  assert!(
-    !has_hardcoded_version_literal(&s),
-    "flake.nix must not hardcode a version literal — derive it with \
-     `version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;` \
-     so it cannot drift from Cargo.toml again (#393)"
-  );
-  assert!(
-    s.contains("fromTOML") && s.contains("./Cargo.toml"),
-    "flake.nix must read its version out of Cargo.toml"
-  );
+  if let Err(why) = version_derives_from_cargo_toml(&s) {
+    panic!(
+      "flake.nix must derive its version from Cargo.toml: {why}. Write \
+       `version = cargoToml.package.version;` with \
+       `cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);` so it \
+       cannot drift again (#393)"
+    );
+  }
   // Only the *version* is derived. Cargo.toml's `name` is `gwm-cli` (the bare
   // `gwm` crate name was taken on crates.io) while the binary — and so the
   // package — is `gwm`. `flake_exposes_gwm_package_via_build_rust_package`
   // pins `pname = "gwm"`, which is what stops a well-meaning "derive
   // everything from Cargo.toml" from renaming the package.
+}
+
+#[test]
+fn the_version_guard_can_actually_fire() {
+  let ok = |s: &str| version_derives_from_cargo_toml(s).is_ok();
+  let read = "cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);\n\
+              msrv = cargoToml.package.rust-version;\n";
+
+  assert!(
+    !ok(&format!(
+      "{read}pinnedVersion = \"0.3.0-rc.3\";\nversion = pinnedVersion;\n"
+    )),
+    "a pin one binding away, which the MSRV read hid from the previous guard (#648)"
+  );
+  assert!(!ok(&format!("{read}version = \"1.10.0\";\n")), "a literal");
+  assert!(
+    !ok(&format!("{read}version = cargoToml.package.rust-version;\n")),
+    "the wrong field of the right read"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\nversion = pinnedVersion;\n"
+    )),
+    "a second binding, the derivation's own, overriding the derived one"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\npname = \"gwm\"; version = \"0.3.0-rc.3\";\n"
+    )),
+    "a second binding sharing a line with another one"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\npin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a binding nested in an attribute set on the same line"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\npin = {{ package.version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a binding through an attribute path ending in `version`"
+  );
+  assert!(
+    !ok(&format!("{read}version = cargoToml.package.version\n  + \"-rc.3\";\n")),
+    "a right-hand side continued on the next line"
+  );
+  assert!(
+    !ok(
+      "cargoToml = lib.recursiveUpdate (builtins.fromTOML (builtins.readFile ./Cargo.toml)) \
+       (builtins.fromJSON \"{}\");\nversion = cargoToml.package.version;\n"
+    ),
+    "a read wrapped in something that can override what it returns"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\ncargoToml = builtins.fromJSON \"{{}}\";\n"
+    )),
+    "the read's name bound a second time, to something else"
+  );
+  assert!(
+    !ok(&format!("{read}# version = cargoToml.package.version;\n")),
+    "a commented-out binding is no binding"
+  );
+  assert!(
+    !ok(&format!("{read}/* version = cargoToml.package.version; */\n")),
+    "and neither is one in a block comment"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\nattrs = {{ \"version\" = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a quoted name"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\nattrs = {{ version # pinned\n  = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a comment between a name and its `=`"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\nattrs = {{ version /* pinned */ = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a block comment between a name and its `=`"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       url = \"https://example.org/#top\"; pin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a `#` inside a string does not start a comment"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       hook = ''echo #''; pin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "nor does one inside an indented string"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       say = \"a \\\"#\\\" b\"; pin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "an escaped quote does not end a string"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       hook = ''it'''s #''; pin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "nor does an escaped `''` end an indented one"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       say = \"${{f \"a#\"}}\"; pin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a string inside an interpolation does not end the one around it"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\ncargoToml.package = builtins.fromJSON \"{{}}\";\n"
+    )),
+    "the read's name extended through an attribute path"
+  );
+
+  assert!(
+    ok(&format!("{read}version = cargoToml.package.version;\n")),
+    "today's flake"
+  );
+  assert!(
+    ok("version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;\n"),
+    "the inline spelling #396 shipped"
+  );
+  assert!(
+    ok(
+      "cargoToml =\n  builtins.fromTOML\n    (builtins.readFile ./Cargo.toml);\n\
+       version = cargoToml.package.version;\n"
+    ),
+    "the read broken over several lines"
+  );
+  assert!(
+    ok(&format!(
+      "{read}version = cargoToml.package.version; # was: version = \"0.3.0-rc.3\"\n"
+    )),
+    "a comment after the binding, quoting the old one"
+  );
+  assert!(
+    ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       passthru.tests.version = pkgs.testers.testVersion {{ package = gwm; }};\n"
+    )),
+    "the nixpkgs version smoke test, which is not a version"
+  );
+  assert!(
+    ok(&format!("{read}version = \"${{cargoToml.package.version}}\";\n")),
+    "the version interpolated into a string"
+  );
 }
 
 #[test]
