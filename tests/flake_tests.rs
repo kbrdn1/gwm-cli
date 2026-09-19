@@ -114,15 +114,18 @@ fn strip_comments(s: &str) -> String {
 // `version = …` written in one is checked as a binding, which fails closed
 // too.
 //
-// Only the `path = rhs` form of a binding is read, and nothing traces which
-// binding the derivation actually receives. `inherit` is not read, a
-// dynamic name (`${"version"} = …`) is not a path, and a `pin.version = …`
-// merged into the derivation's arguments (`pin // { … }`) is a path the
-// version guard does not check (#672): this is a text guard, and the oracle
-// for Nix is `nix eval`.
-fn bindings(code: &str) -> impl Iterator<Item = (Vec<&str>, &str)> {
+// `inherit (src) a b;` is sugar for `a = src.a; b = src.b;` and is read as
+// those bindings. A plain `inherit a;` binds `a` to the `a` in scope, whose
+// own binding is read where it is written.
+//
+// Nothing traces which binding the derivation actually receives: a dynamic
+// name (`${"version"} = …`) is not a path, and a `pin.version = …` merged
+// into the derivation's arguments (`pin // { … }`) is a path the version
+// guard does not check. This is a text guard; the `flake` job in `ci.yml`
+// asks nix (#672).
+fn bindings(code: &str) -> impl Iterator<Item = (Vec<&str>, String)> {
   code.split(';').flat_map(|stmt| {
-    stmt.match_indices('=').filter_map(move |(i, _)| {
+    let assigned = stmt.match_indices('=').filter_map(move |(i, _)| {
       let (before, rhs) = (&stmt[..i], &stmt[i + 1..]);
       if before.ends_with(['=', '<', '>', '!']) || rhs.starts_with('=') {
         return None;
@@ -131,8 +134,35 @@ fn bindings(code: &str) -> impl Iterator<Item = (Vec<&str>, &str)> {
         .trim_end()
         .rsplit(|c: char| c.is_whitespace() || c == '{' || c == '(')
         .next()?;
-      Some((path.split('.').map(|seg| seg.trim_matches('"')).collect(), rhs.trim()))
-    })
+      Some((
+        path.split('.').map(|seg| seg.trim_matches('"')).collect(),
+        rhs.trim().to_string(),
+      ))
+    });
+    let inherited = stmt
+      .rsplit_once("inherit")
+      .filter(|(head, _)| head.is_empty() || head.ends_with(|c: char| c.is_whitespace() || c == '{'))
+      .and_then(|(_, tail)| tail.trim_start().strip_prefix('('))
+      .and_then(|tail| {
+        let mut depth = 1;
+        let end = tail.find(|c| {
+          depth += match c {
+            '(' => 1,
+            ')' => -1,
+            _ => 0,
+          };
+          depth == 0
+        })?;
+        Some((tail[..end].trim(), &tail[end + 1..]))
+      })
+      .into_iter()
+      .flat_map(|(src, names)| {
+        names.split_whitespace().map(move |name| {
+          let name = name.trim_matches('"');
+          (vec![name], format!("{src}.{name}"))
+        })
+      });
+    assigned.chain(inherited)
   })
 }
 
@@ -151,19 +181,20 @@ fn is_cargo_toml_read(expr: &str) -> bool {
 // string: inline,
 // `(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version`, or
 // through a name every `name… = …` binding of which is that read,
-// `cargoToml.package.version`. One hop only:
+// `cargoToml.package.version`, or `inherit (cargoToml.package) version;`,
+// which is the same binding. One hop only:
 // `a = cargoToml; version = a.package.version;` fails.
 fn version_derives_from_cargo_toml(s: &str) -> Result<(), String> {
   let code = strip_comments(s);
   let only_reads = |name: &str| {
     let mut rhs = bindings(&code).filter(|(path, _)| path[0] == name).peekable();
-    rhs.peek().is_some() && rhs.all(|(_, rhs)| is_cargo_toml_read(rhs))
+    rhs.peek().is_some() && rhs.all(|(_, rhs)| is_cargo_toml_read(&rhs))
   };
   let versions: Vec<_> = bindings(&code)
     .filter(|(path, _)| path == &["version"] || path.ends_with(&["package", "version"]))
     .collect();
   if versions.is_empty() {
-    return Err("no `version = …;` binding found".into());
+    return Err("no `version` binding found".into());
   }
   match versions.iter().find(|(_, rhs)| {
     let rhs = rhs
@@ -354,6 +385,21 @@ fn the_version_guard_can_actually_fire() {
     )),
     "the read's name extended through an attribute path"
   );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       pin = builtins.fromJSON \"{{\\\"version\\\": \\\"0.3.0-rc.3\\\"}}\";\n\
+       gwm = buildRustPackage {{ pname = \"gwm\"; inherit (pin) version; }};\n"
+    )),
+    "an `inherit (pin) version;` handing the derivation a version no `version =` spells out (#672)"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}pins = builtins.fromJSON (builtins.readFile ./pins.json);\n\
+       inherit (pins) cargoToml;\nversion = cargoToml.package.version;\n"
+    )),
+    "the read's name rebound by an `inherit`"
+  );
 
   assert!(
     ok(&format!("{read}version = cargoToml.package.version;\n")),
@@ -386,6 +432,12 @@ fn the_version_guard_can_actually_fire() {
   assert!(
     ok(&format!("{read}version = \"${{cargoToml.package.version}}\";\n")),
     "the version interpolated into a string"
+  );
+  assert!(
+    ok(&format!(
+      "{read}gwm = buildRustPackage {{ pname = \"gwm\"; inherit (cargoToml.package) version; }};\n"
+    )),
+    "`inherit (cargoToml.package) version;` with no `version =` binding at all (#672)"
   );
 }
 
