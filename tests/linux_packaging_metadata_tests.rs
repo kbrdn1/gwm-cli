@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod common;
+
 fn manifest() -> toml::Value {
   let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
   let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -75,11 +77,38 @@ fn release_workflow_builds_both_linux_packages() {
   );
 }
 
+/// Issue #647. This used to be `yml.contains(glob)` over the whole file, and
+/// it passed with no package published at all: `dist/*.deb` is a prefix of
+/// `dist/*.deb.sha256`, so the checksum line satisfied the package assertion
+/// on its own, and the globs also sit in the `upload-artifact` step of the
+/// build job, which publishes nothing. Deleting the `.deb` and `.rpm` lines
+/// from the release left 50 tests green across four binaries.
+///
+/// Now the globs are compared as whole tokens of the one `gh release upload`
+/// command in the `publish release` step. `release_workflow_tests` pins that
+/// command by value; this keeps the Linux packages named where their build is
+/// guarded, so losing them fails here too, with a message that says which.
 #[test]
 fn release_workflow_publishes_both_linux_packages() {
-  let yml = release_yml();
+  let step = common::workflow_step(".github/workflows/release.yml", "release", "publish release");
+  let script = step["run"]
+    .as_str()
+    .expect("the publish release step must carry a `run:` script");
+  let uploads: Vec<String> = common::logical_lines(script)
+    .into_iter()
+    .filter(|l| l.starts_with("gh release upload "))
+    .collect();
+  assert_eq!(
+    uploads.len(),
+    1,
+    "the publish release step must hold exactly one `gh release upload`, got {uploads:?}"
+  );
+  let tokens: Vec<&str> = uploads[0].split_whitespace().collect();
   for glob in ["dist/*.deb", "dist/*.deb.sha256", "dist/*.rpm", "dist/*.rpm.sha256"] {
-    assert!(yml.contains(glob), "the release upload step must publish {glob}");
+    assert!(
+      tokens.contains(&glob),
+      "the release upload must publish {glob} as its own argument, got {tokens:?}"
+    );
   }
 }
 
