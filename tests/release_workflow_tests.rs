@@ -117,9 +117,9 @@ fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, env: &serde_yaml_ng
   // The environment is part of what a script does, so it is pinned with it,
   // for every step pinned here rather than wherever someone remembers to:
   // `SHELLOPTS: noexec` has bash parse the script, run nothing and exit 0,
-  // leaving `path=` unwritten, and an `INPUT_*` variable switches an action's
-  // inputs. Review found the resolver steps unpinned while a comment said
-  // every step was, which is why this is a parameter and not a call site.
+  // leaving `path=` unwritten. Review found the resolver steps unpinned while
+  // a comment said every step was, which is why this is a parameter and not a
+  // call site.
   assert_eq!(
     step["env"], *env,
     "the {label} step's `env:` changed. It is pinned by value (issue #647): a variable there \
@@ -168,23 +168,29 @@ fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
-  // The environment reaches a step from three levels, and a step's inputs
-  // travel through it: an action reads `INPUT_<NAME>` from the process
-  // environment, so `INPUT_GENERATE_RELEASE_NOTES: true` on the job or the
-  // workflow switches softprops' generated notes on with its `with:` intact.
-  // The step level is pinned where each step is, through the `env`
-  // argument of `assert_run_step`; the two above are pinned here. What no reader of this file closes is a step writing to
-  // `$GITHUB_ENV`, the environment surface #656 names as the ceiling.
+  // The environment reaches a `run:` step from three levels, and
+  // `SHELLOPTS: noexec` at any of them has bash run nothing and exit 0. The
+  // step level is pinned through the `env` argument of `assert_run_step`, the
+  // job and the workflow levels here. An action's inputs are not reachable
+  // this way: the runner writes `INPUT_<NAME>` for every declared input, the
+  // empty string when it has no default, over whatever `env:` set (verified
+  // in actions/runner, `ActionManifestManager.cs` and `Handler.cs`).
+  //
+  // What no reader of this file closes: a step writing to `$GITHUB_ENV`, and
+  // any other step of the publish job, which stays free-form (one added after
+  // the publish can edit the notes away). That is the shape #656 names as the
+  // ceiling of a static reader.
   let workflow_env: serde_yaml_ng::Value = serde_yaml_ng::from_str("CARGO_TERM_COLOR: always").unwrap();
   assert_eq!(
     workflow["env"], workflow_env,
     "{path} must set nothing in its workflow-level `env:` but `CARGO_TERM_COLOR`: that environment \
-     reaches the publish step, and an action reads its inputs from `INPUT_*` variables in it"
+     reaches the steps that resolve and publish the notes, and `SHELLOPTS: noexec` there runs \
+     nothing and exits 0"
   );
   assert!(
     workflow["jobs"][job_name]["env"].is_null(),
-    "{path} job `{job_name}` must carry no `env:`: it reaches the publish step, and an action reads \
-     its inputs from `INPUT_*` variables in it. Got `env: {:?}`",
+    "{path} job `{job_name}` must carry no `env:`: it reaches the steps that resolve and publish the \
+     notes, and `SHELLOPTS: noexec` there runs nothing and exits 0. Got `env: {:?}`",
     workflow["jobs"][job_name]["env"]
   );
   assert_eq!(
@@ -594,18 +600,6 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
      `continue-on-error: {:?}`",
     step["if"],
     step["continue-on-error"]
-  );
-  // `with:` is not the only way in: the action reads its inputs back from
-  // `INPUT_*` variables, so `env: { INPUT_GENERATE_RELEASE_NOTES: "true" }`
-  // here generates notes with the mapping below untouched (softprops v3,
-  // `src/util.ts`). The job and the workflow levels are pinned in
-  // `assert_publish_job_blocks`.
-  assert!(
-    step["env"].is_null(),
-    "the publish pre-release step must carry no `env:`: the action reads its inputs from `INPUT_*` \
-     variables, which would switch on generated or appended notes past the pinned `with:`. Got \
-     `env: {:?}`",
-    step["env"]
   );
   let with: serde_yaml_ng::Value = serde_yaml_ng::from_str(
     "tag_name: ${{ steps.tag.outputs.name }}\n\
