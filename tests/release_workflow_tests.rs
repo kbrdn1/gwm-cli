@@ -1451,7 +1451,7 @@ fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
 }
 
 /// Issue #653. Every guard in this file and in `msrv_tests.rs` reasons about
-/// jobs, and the workflow's own `on:` block switches all eight off at once,
+/// jobs, and the workflow's own `on:` block switches all nine off at once,
 /// one level above every one of them. Narrowing `branches:` to `[main]` stops
 /// the whole of CI on a pull request targeting `dev`, which is where every
 /// feature branch lands, and leaves all 26 tests green.
@@ -1501,7 +1501,7 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
         branches.iter().any(|b| b == branch),
         "ci.yml must fire on `{event}` for `{branch}` (branches are {branches:?}). `dev` is \
          where every feature branch lands and `main` is what releases are cut from, so \
-         dropping either stops all eight jobs on that path while every job-level guard \
+         dropping either stops all nine jobs on that path while every job-level guard \
          stays green"
       );
     }
@@ -1592,13 +1592,13 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
   // stopped existing. An emptied `jobs:` leaves it iterating over nothing
   // while reporting success, and a count-based floor does not close that
   // either: deleting one job while adding another satisfies any count. So the
-  // eight are named.
+  // nine are named.
   //
   // This is an enumeration, and deliberately so, because it is a **bounded**
   // one. It covers the jobs `ci.yml` ships today; the sweep below covers the
   // ones it does not, which is the exact inverse of the caller list this test
   // replaces, a list that could only ever cover what someone remembered to add
-  // to it. Membership is a floor and never an equality: a ninth job has to be
+  // to it. Membership is a floor and never an equality: a tenth job has to be
   // a green test that the sweep then guards, not a red one.
   for expected in [
     "fmt",
@@ -1608,14 +1608,15 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
     "bench",
     "hook-smoke",
     "audit",
+    "flake",
     "doctor",
   ] {
     assert!(
       jobs.iter().any(|j| j == expected),
       "ci.yml must still define the `{expected}` job. Deleting or renaming it is invisible to \
        the sweep below, which guards whatever jobs it finds, and a job going quiet is not \
-       always a blocked merge either: only five of the eight are required contexts on `main`, \
-       so `msrv`, `bench` and `doctor` can vanish with nothing on GitHub's side objecting. \
+       always a blocked merge either: only five of the nine are required contexts on `main`, \
+       so `msrv`, `bench`, `flake` and `doctor` can vanish with nothing on GitHub's side objecting. \
        Got {jobs:?}"
     );
   }
@@ -1778,7 +1779,7 @@ const EXPECTED_CLIPPY: &str = "cargo clippy --all-targets --all-features -- -D w
 ///
 /// The workflow-level `RUSTFLAGS: -D warnings` is not a second line of
 /// defence to lean on here. It is set once at the top of `ci.yml` for every
-/// job, so it is one edit away from being gone for all eight of them, and the
+/// job, so it is one edit away from being gone for all nine of them, and the
 /// `msrv` job already overrides it to `""` at job level, which is precedent
 /// that it does get overridden. The command has to carry its own denial.
 ///

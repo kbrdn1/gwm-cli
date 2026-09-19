@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -205,10 +207,12 @@ fn flake_derives_its_version_from_cargo_toml() {
   // `./Cargo.toml` appeared anywhere in the file, and the MSRV read provides
   // both. `pinnedVersion = "0.3.0-rc.3"; version = pinnedVersion;` passed it.
   // So the guard reads the right-hand side of the `version` binding itself.
-  // The oracle would be `nix eval .#gwm.version` against Cargo.toml, but no CI
-  // runner has nix, and a test that skips when its tool is missing is the
-  // vacuous green this fixes; a Nix parser crate for one guard is not worth
-  // the dependency.
+  // It checks bindings, not what the derivation receives: the oracle for that
+  // is `nix eval` against Cargo.toml, which the `flake` job in ci.yml runs
+  // (#672, pinned by `ci_evaluates_the_flake_version_against_cargo_toml`).
+  // This guard stays because it runs wherever `cargo test` does; a test that
+  // skipped when nix is missing would be the vacuous green #648 fixed, and a
+  // Nix parser crate for one guard is not worth the dependency.
   let s = read_flake();
   if let Err(why) = version_derives_from_cargo_toml(&s) {
     panic!(
@@ -383,6 +387,46 @@ fn the_version_guard_can_actually_fire() {
     ok(&format!("{read}version = \"${{cargoToml.package.version}}\";\n")),
     "the version interpolated into a string"
   );
+}
+
+/// Issue #672. The text guard above reads bindings by name and cannot trace
+/// which one the derivation receives: four review passes of #648 each found a
+/// new Nix form pinning the version with it green. So `ci.yml` asks nix
+/// itself, in the `flake` job, and this pins that the job still does and
+/// cannot be switched off.
+#[test]
+fn ci_evaluates_the_flake_version_against_cargo_toml() {
+  let ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml");
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&fs::read_to_string(ci).expect("ci.yml must exist")).expect("ci.yml must be valid YAML");
+  common::assert_job_is_blocking(&workflow, "flake");
+
+  let steps = workflow["jobs"]["flake"]["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default();
+  assert!(
+    steps.iter().any(|s| s["uses"]
+      .as_str()
+      .is_some_and(|u| u.starts_with("cachix/install-nix-action@"))),
+    "the flake job must install nix: no runner ships it"
+  );
+  let script = steps
+    .iter()
+    .filter_map(|s| s["run"].as_str())
+    .collect::<Vec<_>>()
+    .join("\n");
+  for needle in [
+    "nix eval",
+    ".#packages.x86_64-linux.gwm",
+    "builtins.readFile ./Cargo.toml",
+  ] {
+    assert!(
+      script.contains(needle),
+      "the flake job must compare what `nix eval` returns for the package against the \
+       version Cargo.toml declares; its steps do not mention `{needle}`: {script:?}"
+    );
+  }
 }
 
 #[test]

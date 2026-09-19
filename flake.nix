@@ -23,7 +23,7 @@
       # carry, and that pin moves independently of this repo's floor. It drifted
       # exactly that way: the shell served rustc 1.89 against a declared 1.95,
       # so `nix develop` could not build the project it exists to serve, and
-      # nothing noticed because no CI job evaluates this file.
+      # nothing noticed because no CI job evaluates the dev shell.
       msrv = cargoToml.package.rust-version;
     in
     flake-utils.lib.eachDefaultSystem (system:
