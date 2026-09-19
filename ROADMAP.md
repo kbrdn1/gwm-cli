@@ -293,8 +293,12 @@ nothing. The publish steps are now pinned by value
 
 **What is queued next** is what that audit left open, all in the same family:
 the flake version guard is satisfied by the MSRV read, so #393 can come back
-([#648](https://github.com/kbrdn1/gwm-cli/issues/648)); and the non-vacuity
-floors have gone slack ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).
+([#648](https://github.com/kbrdn1/gwm-cli/issues/648)); the non-vacuity floors
+have gone slack ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)); a waiver
+path of the CI guard helper has had no caller since #659
+([#664](https://github.com/kbrdn1/gwm-cli/issues/664)); and the steps of the
+publish jobs stay free-form, so an added one can empty the notes
+([#665](https://github.com/kbrdn1/gwm-cli/issues/665)).
 Beyond them: forms compressing their spacing before they scroll
 ([#559](https://github.com/kbrdn1/gwm-cli/issues/559)), the remaining relays
 ([#525](https://github.com/kbrdn1/gwm-cli/issues/525)), the half of the ratatui
