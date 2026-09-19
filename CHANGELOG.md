@@ -125,11 +125,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pinnedVersion = "0.3.0-rc.3";` above it, the literal #393 let drift for
   eight releases, passed.
 
-  The guard now reads the right-hand side of every `version` binding, several
-  on one line, one nested in an attribute set, one spelled
+  The guard now reads the right-hand side of every `version = …` binding,
+  several on one line, one nested in an attribute set, one spelled
   `package.version =`, or one continued over several lines included, and
   requires the `package.version` of the `./Cargo.toml` read, inline or
-  through a name every binding of which is exactly
+  through a name every `name = …` binding of which is exactly
   `builtins.fromTOML (builtins.readFile ./Cargo.toml)`. A name whose binding
   merely contains the read does not count, since what wraps it can override
   the version. Nine mutations of `flake.nix`, each applied alone: the
@@ -137,12 +137,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same assertion, naming the binding. The inline spelling #396 shipped
   stays accepted.
 
-  What it does not read is how the derivation consumes the version: an
-  `inherit (pin) version;` whose `pin` gets its version from anything but a
-  `version =` binding, a `fromJSON` for one, still passes
-  ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). Comparing against
-  `nix eval .#gwm.version` would be the real oracle, but no CI runner has
-  nix.
+  It is a text guard, and it reads only the `name = …` form of a binding.
+  An `inherit` does not count, whether it hands the derivation its version
+  (`inherit (pin) version;`) or rebinds the read's name
+  (`inherit (pins) cargoToml;`), and neither does a quoted name or a comment
+  between a name and its `=`; each of these can pin the version with the
+  guard green ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). Three
+  review passes each found a new such form, which is the sign that text does
+  not bound Nix: `nix eval .#gwm.version` against `Cargo.toml` is the
+  oracle, and no CI runner has nix.
 
 - **One added step could empty the release notes with every publish guard
   green** ([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). #647

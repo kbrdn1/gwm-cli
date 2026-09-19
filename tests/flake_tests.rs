@@ -30,7 +30,14 @@ fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
 // `pname = "gwm"; version = …;`, `pin = { version = …; };` and
 // `{ package.version = …; }` all yield a `version`. `rhs` runs to the `;`,
 // over as many lines as it takes; a `;` inside a string cuts it short, which
-// fails the version guard rather than passing it.
+// fails the version guard rather than passing it. A string and a comment
+// after code are read as code, so a `version = …` in either is checked as a
+// binding, which fails closed too.
+//
+// Only the `name = rhs` form of a binding is read. `inherit`, a quoted name
+// (`"version" = …`) and a comment between a name and its `=` are not, and
+// neither is anything else Nix binds without spelling `name =` (#672): this
+// is a text guard, and the oracle for Nix is `nix eval`.
 fn bindings(code: &str) -> impl Iterator<Item = (&str, &str)> {
   code.split(';').flat_map(|stmt| {
     stmt.match_indices('=').filter_map(move |(i, _)| {
@@ -59,7 +66,7 @@ fn is_cargo_toml_read(expr: &str) -> bool {
 // Every `version` binding in `s`, each of which must be the `.package.version`
 // of the Cargo.toml read: inline,
 // `(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version`, or
-// through a name every binding of which is that read,
+// through a name every `name = …` binding of which is that read,
 // `cargoToml.package.version`. One hop only:
 // `a = cargoToml; version = a.package.version;` fails.
 fn version_derives_from_cargo_toml(s: &str) -> Result<(), String> {
