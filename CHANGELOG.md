@@ -117,6 +117,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The flake could pin its version again with the guard written for it
+  green** ([#648](https://github.com/kbrdn1/gwm-cli/issues/648)). The test
+  added for #393 asked whether `fromTOML` and `./Cargo.toml` appeared
+  anywhere in `flake.nix`, and the MSRV read, which binds the same parsed
+  `Cargo.toml`, provides both. `version = pinnedVersion;` with
+  `pinnedVersion = "0.3.0-rc.3";` above it, the literal #393 let drift for
+  eight releases, passed.
+
+  The guard now reads the right-hand side of every `version =` binding and
+  requires the `package.version` of an expression that reads `./Cargo.toml`,
+  inline or through a name bound to that read. Four mutations of `flake.nix`,
+  each applied alone: the previous guard catches only the bare literal, the
+  new one fails all four at the same assertion, naming the binding. The
+  inline spelling #396 shipped stays accepted. Comparing against
+  `nix eval .#gwm.version` would be the real oracle, but no CI runner has
+  nix.
+
 - **One added step could empty the release notes with every publish guard
   green** ([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). #647
   pinned the steps of the publish path by name and left the rest of each
