@@ -693,88 +693,84 @@ fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
     .unwrap()
 }
 
-/// `cargo nextest run` cannot run doctests: they have no test binary for it
-/// to schedule. #634 took `cargo test` out of this job, so unless something
-/// runs them explicitly the repo silently stops compiling every `///` example
-/// it has, which is the same shape of rot as the bench that panicked for 1086
-/// commits with nothing to report it.
+/// Issue #659. The crate has no doctests, and says so in its manifest rather
+/// than keeping a CI step with nothing to run.
 ///
-/// This pins the step rather than the property, on purpose, and the detour is
-/// worth recording. The first version of this guard scanned `src/` and decided
-/// for itself which fences rustdoc would compile, so that CI would not have to
-/// pay for a doctest run. Two review passes probed it against the toolchain
-/// and it was wrong ten ways: indented blocks carrying no fence at all, fences
-/// nested in a blockquote (`src/forge.rs` already writes that style), `~~~`,
-/// `/** */` blocks, `#[doc = "..."]` attributes, `{.rust}`, and the tag rules
-/// themselves, which turn out to be order-sensitive on 1.96.1
-/// (```` ```no_run,text ```` is a doctest, ```` ```text,no_run ```` is not).
+/// #634 moved the suite onto nextest, which cannot run doctests, and added a
+/// `cargo test --doc` step next to it, pinned by a guard that asserted the step
+/// was present and unconditioned. That guard never asserted the step ran
+/// anything, and it ran nothing: every fenced block in the doc comments is
+/// `text`, `toml` or `go`, and `cargo test --doc -- --list` answers `0 tests`.
+/// A step that cannot fail, held in place by a test that could not notice.
 ///
-/// Every one of those was found by asking rustdoc. Which is the point: the
-/// oracle was there the whole time, it costs about 35 seconds, and pinning it
-/// to ubuntu keeps it off a critical path that windows holds for four minutes
-/// more. An emulation that has to track rustdoc's release notes to stay
-/// correct is a worse guard than the thing it emulates, however cheap it runs.
+/// Writing doctests to give the step a subject was the other way out, and it
+/// does not fit this lib. `src/lib.rs` is `#![doc(hidden)]`, an internal test
+/// seam with no SemVer guarantee that tells readers not to build on it, so an
+/// example on it documents an API nobody is meant to call, and behaviour is
+/// tested under `tests/` already. A guard failing on a zero count is out of
+/// reach too: #652 makes every cargo step one bare invocation, so there is no
+/// shell to count with, and re-running cargo from inside the suite would cost
+/// roughly 35 seconds on each of the three runners to guard a subject that
+/// does not exist.
+///
+/// Both halves are pinned because neither one holds the decision alone.
+/// `doctest = false` only turns doctests off for a plain `cargo test`: an
+/// explicit `cargo test --doc` still compiles and runs them (measured on cargo
+/// 1.97.0, a scratch crate with the key set and a failing doctest exits 101).
+/// So restoring the step alone brings the empty step back, and dropping the
+/// key alone has `cargo test` run doctests locally that no CI job runs.
+/// Anyone who wants doctests flips the key, writes them and restores the step,
+/// and this test says so when they touch either half.
+///
+/// What this cannot see is a ```` ```rust ```` fence written under the
+/// declaration, which nothing compiles. Deciding from the source which fences
+/// rustdoc would run is the scanner #634 wrote and threw away after it was
+/// found wrong ten ways, so the manifest is what carries that rule, not a
+/// model of rustdoc.
 #[test]
-fn ci_runs_doctests_since_nextest_cannot() {
-  let job = ci_job("test");
-  let runs = run_steps(&job);
-  assert!(
-    runs.iter().any(|r| r.contains("cargo test --doc")),
-    "the test job must run `cargo test --doc`: nextest cannot, and nothing else in the repo \
-     does, so without it every doctest under src/ is compiled and run by nobody. Got {runs:?}"
+fn doctests_are_declared_off_rather_than_run_empty() {
+  let manifest: toml::Value = toml::from_str(&fs::read_to_string("Cargo.toml").unwrap()).expect("Cargo.toml must parse");
+  // By value: an absent key and `doctest = "false"` must both fail, and a
+  // lookup that stops at "is there a key" would take the first for granted.
+  let doctest = manifest.get("lib").and_then(|lib| lib.get("doctest"));
+  assert_eq!(
+    doctest,
+    Some(&toml::Value::Boolean(false)),
+    "Cargo.toml must declare `doctest = false` under `[lib]`: the lib carries no doctests \
+     (issue #659), and a plain `cargo test` would otherwise run an empty doctest phase. If \
+     doctests are wanted now, write them, drop this key and restore a `cargo test --doc` step \
+     in ci.yml together, then update this test"
   );
 
-  // Present is not the same as running. `run_steps` flattens the steps and
-  // reports their scripts whatever their `if:`, so `if: false` would leave
-  // the assertion above green over a step that never executes, and
-  // `continue-on-error` would leave it green over one that never fails. That
-  // is not hypothetical here: `continue-on-error` on the `audit` job is what
-  // hid RUSTSEC-2025-0068 for nine months, and the bench job carries the same
-  // pair of assertions for the same reason.
-  let step = job["steps"]
-    .as_sequence()
-    .cloned()
-    .unwrap_or_default()
-    .into_iter()
-    .find(|s| s["run"].as_str().is_some_and(|r| r.contains("cargo test --doc")))
-    .expect("the `cargo test --doc` step was found in the scripts, so it must be in the steps");
-  assert!(
-    step["continue-on-error"].is_null(),
-    "the doctest step must be able to fail the job: a doctest that runs and is not allowed to \
-     go red is a doctest nobody runs"
-  );
-  // One `if:` is legitimate, and only one: doctests behave identically on the
-  // three runners, so this pays for them once on the row with the slack.
-  // Anything else is the step being switched off by another name.
-  //
-  // Matched on the VALUE, not through `as_str()`. `if: false` is a YAML
-  // boolean, so `as_str()` hands back `None` for it exactly as it does for an
-  // absent key: the first version of this check used `match … .as_str()` and
-  // the canonical way to switch a step off took its "no `if:` at all" arm.
-  let cond = &step["if"];
-  assert!(
-    cond.is_null() || cond.as_str() == Some("matrix.os == 'ubuntu-latest'"),
-    "the doctest step may only be narrowed to the ubuntu matrix row, got `if: {cond:?}`"
-  );
+  // Every job, not just `test`: the step was there, and moving it to another
+  // job is the same empty step under a different name. Detected by token so
+  // `cargo test --all --doc` and `cargo  test --doc` are caught along with
+  // the spelling it used to have.
+  let workflow = ci_workflow();
+  for (job_name, job) in workflow["jobs"].as_mapping().expect("ci.yml must define `jobs:`") {
+    for run in run_steps(job) {
+      let tokens: Vec<&str> = run.split_whitespace().collect();
+      assert!(
+        !(tokens.contains(&"cargo") && tokens.contains(&"--doc")),
+        "ci.yml job {job_name:?} runs doctests ({run:?}) while Cargo.toml declares \
+         `doctest = false` and the lib carries none, so the step has nothing to run and cannot \
+         fail (issue #659). Restore it together with real doctests and the key, not alone"
+      );
+    }
+  }
 }
 
-/// Issue #646. The `test` job is the one carrying `cargo build`, `cargo
-/// nextest run` and `cargo test --doc`, so switching it off takes the whole
-/// suite with it. `if: false` on this job was mutated into `ci.yml` and all 19
-/// tests in this binary stayed green, because every guard here reads
-/// `step[...]` and GitHub Actions resolves `if:` at the job level too.
+/// Issue #646. The `test` job is the one carrying `cargo build` and `cargo
+/// nextest run`, so switching it off takes the whole suite with it. `if:
+/// false` on this job was mutated into `ci.yml` and all 19 tests in this
+/// binary stayed green, because every guard here reads `step[...]` and GitHub
+/// Actions resolves `if:` at the job level too.
 ///
-/// The doctest step keeps its one legitimate `if:`, because doctests behave
-/// identically on the three runners and are paid for once on the row with the
-/// slack. The helper pins that condition by value rather than waiving the
-/// check for the step.
+/// No step of it is allowed an `if:`. The doctest step narrowed to the ubuntu
+/// row was the one exception, until #659 removed the step.
 #[test]
 fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
-  assert_job_is_blocking(
-    &ci_workflow(),
-    "test",
-    &[("cargo test --doc", "matrix.os == 'ubuntu-latest'")],
-  );
+  assert_job_is_blocking(&ci_workflow(), "test", &[]);
 }
 
 /// Issue #646. `cargo audit` had no test naming it at all: `grep -rn '"audit"'
@@ -953,9 +949,9 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
 /// The four per-job callers stay: `bench`, `test` and `audit` elsewhere in
 /// this file, `msrv` in `msrv_tests`. Each carries a rationale the sweep
 /// cannot hold, and two carry a property it cannot express either, `audit`'s
-/// `--deny warnings` and `bench`'s `--benches -- --test`. The `test` job's
-/// doctest `if:` is not one of them: that waiver moved into
-/// `steps_allowed_an_if` and the sweep enforces it by value now. They overlap
+/// `--deny warnings` and `bench`'s `--benches -- --test`. The sweep allows no
+/// step an `if:` anywhere: the doctest step's ubuntu condition was the one
+/// waiver it carried, and #659 removed that step. They overlap
 /// with the sweep on purpose. Redundant coverage costs a millisecond; a gap
 /// costs nine months, which is what RUSTSEC-2025-0068 did.
 #[test]
@@ -1005,7 +1001,7 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
       assert_doctor_is_still_the_advisory_job(&workflow["jobs"]["doctor"]);
       continue;
     }
-    assert_job_is_blocking(&workflow, job_name, steps_allowed_an_if(job_name));
+    assert_job_is_blocking(&workflow, job_name, &[]);
   }
 }
 
@@ -1040,7 +1036,7 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
   // condition at all, `if: always()` included, while the message below claims
   // the restriction to `dev` is what it checks. That is the same overstatement
   // the `continue-on-error` assertion made before it was pinned to its step,
-  // and the same by-value standard `steps_allowed_an_if` already holds its
+  // and the same by-value standard `assert_job_is_blocking` holds its step
   // waivers to.
   //
   // Whitespace is normalised first because the condition is a YAML block
@@ -1086,20 +1082,6 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
      doctor` quietly becomes able to fail the job. Got `continue-on-error: {:?}`",
     reports[0]["continue-on-error"]
   );
-}
-
-/// The `if:` conditions the sweep above allows, by job. Everything not listed
-/// gets `&[]`, which is the helper refusing every step-level `if:`.
-///
-/// One entry today: doctests behave identically on the three runners and are
-/// paid for once, on the row with the slack against windows. The waiver
-/// carries the condition by value, so widening it to `false` is caught here
-/// and not left to whichever other test happens to pin that step.
-fn steps_allowed_an_if(job_name: &str) -> &'static [(&'static str, &'static str)] {
-  match job_name {
-    "test" => &[("cargo test --doc", "matrix.os == 'ubuntu-latest'")],
-    _ => &[],
-  }
 }
 
 /// Issue #655. Being blocking is not enough for `fmt`: `cargo fmt --all`
