@@ -189,10 +189,12 @@ steps:
 /// step is pinned, not the file it calls: `check-rc-changelog-dupes.sh` runs
 /// between the resolver and the publish, and its own tests pin what it
 /// detects, not what else it does, so a line added to it can still truncate
-/// the rc notes. And the rest of the workflow: `homebrew-tap-update` and
-/// `scoop-bucket-update` run after the publish with the workflow's `contents:
-/// write` token and a `GH_TOKEN` in one of their steps, so a line added there
-/// can still edit the notes. A reader of one job cannot close that, the
+/// the rc notes. And the rest of the workflow: the jobs after the publish
+/// hold a read-only token since #669
+/// (`release_workflow_grants_write_only_to_build_and_publish`), but the PATs
+/// they push with are scoped to the tap and the bucket only by what
+/// CONTRIBUTING.md says to create, and the other workflows of this repository
+/// are read by nothing here. A reader of one job cannot close that, the
 /// ceiling #656 names.
 fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
