@@ -213,5 +213,5 @@ fn ci_checks_the_msrv_locked_and_without_default_features() {
 /// behind.
 #[test]
 fn ci_msrv_job_cannot_be_switched_off_or_made_advisory() {
-  assert_job_is_blocking(&ci_workflow(), "msrv", &[]);
+  assert_job_is_blocking(&ci_workflow(), "msrv");
 }

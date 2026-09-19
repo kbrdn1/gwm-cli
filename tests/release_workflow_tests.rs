@@ -846,7 +846,7 @@ fn ci_runs_the_benches_and_can_fail_on_one() {
   // and it has to run at all: the `doctor` job in this same file is narrowed
   // with an `if:`, and doing that here would keep every assertion above green
   // while the benches quietly stopped running on pull requests.
-  assert_job_is_blocking(&ci_workflow(), "bench", &[]);
+  assert_job_is_blocking(&ci_workflow(), "bench");
 }
 
 #[test]
@@ -1112,7 +1112,7 @@ fn doctests_are_declared_off_rather_than_run_empty() {
 /// row was the one exception, until #659 removed the step.
 #[test]
 fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
-  assert_job_is_blocking(&ci_workflow(), "test", &[]);
+  assert_job_is_blocking(&ci_workflow(), "test");
 }
 
 /// Issue #646. `cargo audit` had no test naming it at all: `grep -rn '"audit"'
@@ -1138,7 +1138,7 @@ fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
 #[test]
 fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
   let job = ci_job("audit");
-  assert_job_is_blocking(&ci_workflow(), "audit", &[]);
+  assert_job_is_blocking(&ci_workflow(), "audit");
 
   let step = job["steps"]
     .as_sequence()
@@ -1343,7 +1343,7 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
       assert_doctor_is_still_the_advisory_job(&workflow["jobs"]["doctor"]);
       continue;
     }
-    assert_job_is_blocking(&workflow, job_name, &[]);
+    assert_job_is_blocking(&workflow, job_name);
   }
 }
 
@@ -1359,9 +1359,9 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
 /// `continue-on-error`" is satisfied by any of them, so moving the marker off
 /// `gwm doctor` and onto `cargo build` leaves an existential assertion green
 /// while `gwm doctor` itself becomes able to fail the job, which is the exact
-/// drift the exemption claims to catch. `assert_job_is_blocking` already
-/// closes that shape for its `if:` waivers by requiring exactly one step to
-/// answer to the label; it is closed the same way here.
+/// drift the exemption claims to catch. Exactly one step must answer to the
+/// label, so a second step renamed `gwm doctor` cannot inherit the marker
+/// written for its neighbour either.
 ///
 /// "The job cannot turn the workflow red" is deliberately *not* the property
 /// asserted, because it is not true and never was: `doctor`'s checkout, its
@@ -1377,9 +1377,7 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
   // By value, not by presence. `!job["if"].is_null()` is satisfied by any
   // condition at all, `if: always()` included, while the message below claims
   // the restriction to `dev` is what it checks. That is the same overstatement
-  // the `continue-on-error` assertion made before it was pinned to its step,
-  // and the same by-value standard `assert_job_is_blocking` holds its step
-  // waivers to.
+  // the `continue-on-error` assertion made before it was pinned to its step.
   //
   // Whitespace is normalised first because the condition is a YAML block
   // scalar: reflowing it across lines is a formatting change and must not be a
