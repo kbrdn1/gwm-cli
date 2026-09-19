@@ -646,9 +646,9 @@ Found by the same pass, all cheap, and the three TUI items shipped since:
 - [#551](https://github.com/kbrdn1/gwm-cli/issues/551) ✅ (v1.10.0): polish pass on the rich PR / Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)), queued behind the density line rather than reopening it.
 - [#544](https://github.com/kbrdn1/gwm-cli/issues/544) itself stays open for what is not TUI code: the site's contrast, in `kbrdn1/kbrdn-docs`.
 
-The doc captures that still showed the pre-fold sidebar were regenerated for
-v1.9.0 ([#575](https://github.com/kbrdn1/gwm-cli/issues/575)), at 2x since
-v1.10.0 ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)), and their
+The doc captures that still showed the pre-fold sidebar were regenerated at the
+v1.8.0 cut, narrower and fitted to their content (#544), are rendered at 2x
+since v1.10.0 ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)), and their
 regeneration is now a release step rather than a chore remembered before the cut
 ([#631](https://github.com/kbrdn1/gwm-cli/issues/631), on `dev`).
 
