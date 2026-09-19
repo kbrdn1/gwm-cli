@@ -365,11 +365,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   produced this in the first place: #646 guarded what it had looked at, #652
   and #653 widened the helper without widening its callers, and a ninth job
   would arrive unguarded the same way. A sweep guards what it finds and says
-  nothing about what stopped existing, so the eight jobs are also named: that
+  nothing about what stopped existing, so the jobs are also named: that
   enumeration is bounded, covering what `ci.yml` ships today while the sweep
   covers what it does not, which is the inverse of the caller list it replaces.
-  A missing job is not always a blocked merge either, since only five of the
-  eight are required contexts on `main`. `doctor` is the one exemption and it is
+  A missing job is not always a blocked merge either, since only five of them
+  are required contexts on `main`. `doctor` is the one exemption and it is
   pinned rather than waived. It is advisory by design, `continue-on-error:
   true` on its step and an `if:` restricting it to `dev`, and should it lose
   either property the exemption goes red instead of quietly covering a job it
@@ -475,7 +475,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test (windows-latest)` in the checks list, satisfying the required contexts
   on `main`, while nothing ever compiles the
   `[target."cfg(windows)".dependencies]` block. The workflow's own `on:` block
-  takes all eight jobs at once, so the events and branches it fires on are
+  takes every job at once, so the events and branches it fires on are
   pinned, and `paths:`, `paths-ignore:` and `types:` are asserted absent: a
   path filter skips CI on a change it does not match, and `types:` has
   defaults, so replacing them runs no CI on an ordinary pull request. Branch
