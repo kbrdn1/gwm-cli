@@ -149,7 +149,7 @@ pub fn git_only_bin() -> &'static Path {
 /// is a YAML boolean, so `as_str()` hands back `None` for it exactly as it
 /// does for an absent key, and the canonical way to switch something off would
 /// take the "no `if:` at all" arm (the defect fixed at `6bb82758`).
-#[allow(dead_code)] // used by the test binaries that parse ci.yml.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
   let job = &workflow["jobs"][job_name];
   assert!(
@@ -328,7 +328,7 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
 /// would say that is observational, a canary that breaks a test on a scratch
 /// branch and watches the checks turn red, and it costs a CI run every time it
 /// runs. #656 holds that trade-off.
-#[allow(dead_code)] // used by the test binaries that parse ci.yml.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 fn assert_run_cannot_swallow_its_failure(
   workflow: &serde_yaml_ng::Value,
   job: &serde_yaml_ng::Value,
@@ -520,7 +520,7 @@ pub fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
 /// How a step is named in an assertion message. `name:` first because that is
 /// what the workflow author reads, then `uses:` for the action-only steps that
 /// carry no name, then the script itself.
-#[allow(dead_code)] // used by the test binaries that parse ci.yml.
+#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
   step["name"]
     .as_str()

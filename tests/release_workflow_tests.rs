@@ -196,7 +196,10 @@ steps:
 /// CONTRIBUTING.md says to create, and the other workflows of this repository
 /// are read by nothing here. A reader of one job cannot close that, the
 /// ceiling #656 names.
-fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
+///
+/// `ci.yml`'s `flake` job is pinned the same way (#672); `why` carries what
+/// each job stands to lose.
+fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value, why: &str) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
@@ -209,10 +212,9 @@ fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value)
   assert_eq!(
     outside_steps(&workflow["jobs"][job]),
     outside_steps(expected),
-    "{path} job `{job}` changed outside its steps (issue #665). Every key of the publish job is \
-     pinned but `if:`, which `assert_publish_job_blocks` compares: a `container:` carries its \
-     `env:` into every `run:` step, `SHELLOPTS: noexec` included, and `defaults:` changes where \
-     and how they run. If the change is intended, update the expected job in the same diff"
+    "{path} job `{job}` changed outside its steps. Every key of the job is pinned but `if:`, \
+     which its blocking check compares: a `container:` carries its `env:` into every `run:` \
+     step, `SHELLOPTS: noexec` included, and `defaults:` changes where and how they run. {why}"
   );
   let actual: Vec<serde_yaml_ng::Value> = workflow["jobs"][job]["steps"]
     .as_sequence()
@@ -237,23 +239,25 @@ fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value)
   assert_eq!(
     labels(&actual),
     labels(expected),
-    "{path} job `{job}` must run exactly these steps, in this order (issue #665). A step added \
-     anywhere in it can empty the release notes with every other guard green: `gh release edit` \
-     with empty notes after the publish, the notes file truncated before it, or a line appended \
-     to `$GITHUB_ENV`. If the change is intended, update the expected steps in the same diff"
+    "{path} job `{job}` must run exactly these steps, in this order. {why}"
   );
   for (step, want) in actual.iter().zip(expected) {
     assert_eq!(
       step,
       want,
-      "{path} job `{job}`: the step {:?} changed. Every step of this job is pinned by value \
-       (issue #665), the action's `@ref` aside: each runs with the workflow's write token, ahead \
-       of the publish or after it, so a line added to any of them can edit or truncate the notes. \
-       If the change is intended, update the expected steps in the same diff",
+      "{path} job `{job}`: the step {:?} changed. Every step of this job is pinned by value, the \
+       action's `@ref` aside. {why}",
       step_label(want)
     );
   }
 }
+
+/// What a change anywhere in a publish job stands to lose (issue #665).
+const PUBLISH_JOB_WHY: &str = "Issue #665: every step of a publish job runs with the workflow's \
+  write token, ahead of the publish or after it, so a step added or changed anywhere in it can \
+  empty the release notes with every other guard green: `gh release edit` with empty notes after \
+  the publish, the notes file truncated before it, or a line appended to `$GITHUB_ENV`. If the \
+  change is intended, update the expected job in the same diff";
 
 /// A `run:` step pinned by value (issue #647): it runs, it can fail its job, it
 /// runs under bash, and its script is exactly `script`, as written. `if: false`
@@ -470,7 +474,7 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
   job["steps"][2]["run"] = RESOLVE_STABLE_CHANGELOG.into();
   job["steps"][3]["env"] = env;
   job["steps"][3]["run"] = PUBLISH_RELEASE_SCRIPT.into();
-  assert_job_as_written(".github/workflows/release.yml", "release", &job);
+  assert_job_as_written(".github/workflows/release.yml", "release", &job, PUBLISH_JOB_WHY);
 
   assert_publish_job_blocks(
     ".github/workflows/release.yml",
@@ -919,7 +923,7 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
   let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(PRE_RELEASE_JOB).unwrap();
   job["steps"][3]["run"] = RESOLVE_RC_CHANGELOG.into();
   job["steps"][5]["with"] = with;
-  assert_job_as_written(".github/workflows/pre-release.yml", "release", &job);
+  assert_job_as_written(".github/workflows/pre-release.yml", "release", &job, PUBLISH_JOB_WHY);
 
   assert_publish_job_blocks(".github/workflows/pre-release.yml", "release", None, &["build"]);
 }
@@ -1545,6 +1549,75 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
      pushing a commit"
   );
 }
+
+/// Issue #672. The `flake` job is the oracle for the flake's version: the text
+/// guard in `flake_tests.rs` reads bindings by name, and four review passes of
+/// #648 each found a Nix form it misses. `assert_job_is_blocking` reads what
+/// can skip a job, and the shape of a `run:` only when it invokes cargo, so
+/// review measured this job neutralised with it green: `exit 1` turned into
+/// `exit 0`, or `shell: 'true {0}'`, which never runs the script. So the job
+/// is pinned whole, its keys and each step by value, and so are the two
+/// workflow-level keys that reach its step: `env:`, where `SHELLOPTS: noexec`
+/// has bash parse the script and exit 0, and `defaults:`, which can set its
+/// shell.
+///
+/// What this leaves out is what nix and the install action do inside, the
+/// ceiling `assert_job_as_written` names for the publish jobs.
+#[test]
+fn ci_evaluates_the_flake_version_against_cargo_toml() {
+  let workflow = ci_workflow();
+  assert_job_is_blocking(&workflow, "flake");
+
+  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(FLAKE_JOB).unwrap();
+  job["steps"][2]["run"] = FLAKE_VERSION_CHECK.into();
+  assert_job_as_written(".github/workflows/ci.yml", "flake", &job, FLAKE_JOB_WHY);
+
+  let env: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str("CARGO_TERM_COLOR: always\nRUSTFLAGS: -D warnings\nGWM_NO_GLOBAL_CONFIG: \"1\"").unwrap();
+  assert_eq!(
+    workflow["env"], env,
+    "ci.yml's workflow-level `env:` changed. It reaches the flake job's step, and \
+     `SHELLOPTS: noexec` there has bash parse the comparison and exit 0 without running it. \
+     {FLAKE_JOB_WHY}"
+  );
+  assert!(
+    workflow["defaults"].is_null(),
+    "ci.yml must carry no workflow-level `defaults:`: a `run.shell` there sets the shell of \
+     the flake job's step, and `true {{0}}` never runs it. Got {:?}",
+    workflow["defaults"]
+  );
+}
+
+const FLAKE_JOB_WHY: &str = "Issue #672: this job is what fails when the flake's version drifts \
+  from Cargo.toml, and `exit 1` turned into `exit 0`, the comparison dropped, or a shell that \
+  never runs the script each leave it green over a drifted flake. If the change is intended, \
+  update `FLAKE_JOB` and `FLAKE_VERSION_CHECK` in the same diff";
+
+/// The `flake` job of `ci.yml`, its script aside (`FLAKE_VERSION_CHECK`).
+const FLAKE_JOB: &str = r#"
+name: flake version (nix eval)
+runs-on: ubuntu-latest
+steps:
+  - uses: actions/checkout
+    with:
+      persist-credentials: false
+  - uses: cachix/install-nix-action
+  - name: the flake's package is Cargo.toml's version
+"#;
+
+/// Both versions are read by nix: `Cargo.toml`'s through `builtins.fromTOML`,
+/// `--impure` because it is the checkout's file and not the store's, and the
+/// package's by evaluating it. `name` is compared too, since a `name =` next
+/// to `pname` changes what `nix profile list` shows without touching
+/// `version`.
+const FLAKE_VERSION_CHECK: &str = r#"want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
+got=$(nix eval --raw .#packages.x86_64-linux.gwm --apply 'p: "${p.name} ${p.version}"')
+echo "Cargo.toml: $want, flake: $got"
+if [ "$got" != "gwm-$want $want" ]; then
+  echo "::error file=flake.nix::the flake builds \"$got\" while Cargo.toml is at $want (#393, #672)"
+  exit 1
+fi
+"#;
 
 /// Issue #655. `assert_job_is_blocking` had four callers for eight jobs, and
 /// the four were the ones #646's own audit happened to name. `fmt` and
