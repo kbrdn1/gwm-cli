@@ -126,22 +126,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolver and the publish. A line appended to `$GITHUB_ENV` does the same,
   since it sets the environment of every later step, and the two `run:`
   steps nothing pinned, `resolve tag` and the rc duplicate check in
-  `pre-release.yml`, could carry any of the three unseen.
+  `pre-release.yml`, could carry any of the three unseen. The job's own keys
+  were a fourth way: a `container:` with an `env:` runs every `run:` step
+  inside it, `SHELLOPTS: noexec` included, so the resolver writes no path
+  and softprops publishes an rc with an empty body on a green run.
 
-  Both publish jobs are now pinned whole: the step labels as an ordered list
-  first, so an added, removed or reordered step reads as a list in the
-  failure, then every step by value. The one thing left free is an action's
-  `@ref`, because Dependabot bumps `github-actions` here and pinning the ref
-  would turn each of its pull requests red. What stays out of reach is what
-  the actions do inside, and the rest of the workflow: `homebrew-tap-update`
-  runs after the publish with the workflow's write token and a `GH_TOKEN` in
-  one of its steps.
+  Both publish jobs are now pinned whole: every key of the job but `if:`,
+  which #647 already compares, then the step labels as an ordered list, so an
+  added, removed or reordered step reads as a list in the failure, then every
+  step by value. The one thing left free is an action's `@ref`, because
+  Dependabot bumps `github-actions` here and pinning the ref would turn each
+  of its pull requests red. What stays out of reach is what the actions do
+  inside, and the rest of the workflow: `homebrew-tap-update` and
+  `scoop-bucket-update` run after the publish with the workflow's write token
+  and a `GH_TOKEN` in one of their steps.
 
-  Nine mutations, each applied alone, fail the new guard at the assertion
-  they aim at. Eight leave the previous guards green; the ninth, the
-  duplicate check removed, was already caught by the test that requires it.
-  Two controls, the checkout and softprops refs bumped a major version, stay
-  green.
+  Thirteen mutations, each applied alone, fail the new guard at the
+  assertion they aim at. Twelve leave the previous guards green; the
+  thirteenth, the duplicate check removed, was already caught by the test
+  that requires it. Three controls stay green: the checkout and softprops
+  refs bumped a major version, and the stable job's `if:` reflowed onto one
+  line.
 
   `assert_job_is_blocking` also loses its step-level waiver parameter
   ([#664](https://github.com/kbrdn1/gwm-cli/issues/664)). #659 removed the

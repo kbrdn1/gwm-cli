@@ -289,16 +289,17 @@ guards were the next surface: each was satisfied by something other than what
 it named, a checksum glob standing in for its package and one `--notes-file`
 standing in for two branches, and `pre-release.yml`'s notes were guarded by
 nothing. The publish steps are now pinned by value
-([#647](https://github.com/kbrdn1/gwm-cli/issues/647)).
+([#647](https://github.com/kbrdn1/gwm-cli/issues/647)), and then the rest of
+each publish job with them, its keys and every step, since one step added
+beside the publish could still empty the notes
+([#665](https://github.com/kbrdn1/gwm-cli/issues/665)). The CI guard helper
+lost a waiver path no caller drove any more
+([#664](https://github.com/kbrdn1/gwm-cli/issues/664)).
 
 **What is queued next** is what that audit left open, all in the same family:
 the flake version guard is satisfied by the MSRV read, so #393 can come back
-([#648](https://github.com/kbrdn1/gwm-cli/issues/648)); the non-vacuity floors
-have gone slack ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)); a waiver
-path of the CI guard helper has had no caller since #659
-([#664](https://github.com/kbrdn1/gwm-cli/issues/664)); and the steps of the
-publish jobs stay free-form, so an added one can empty the notes
-([#665](https://github.com/kbrdn1/gwm-cli/issues/665)).
+([#648](https://github.com/kbrdn1/gwm-cli/issues/648)), and the non-vacuity
+floors have gone slack ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).
 Beyond them: forms compressing their spacing before they scroll
 ([#559](https://github.com/kbrdn1/gwm-cli/issues/559)), the remaining relays
 ([#525](https://github.com/kbrdn1/gwm-cli/issues/525)), the half of the ratatui
