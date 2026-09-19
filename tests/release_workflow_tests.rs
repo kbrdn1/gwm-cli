@@ -3,7 +3,7 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os, job_needs, step_label, workflow_step};
+use common::{assert_job_is_blocking, effective_matrix_os, job_needs, step_label, string_keys, workflow_step};
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -542,6 +542,34 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
   );
 }
 
+/// Issue #673. The workflow guards collect mapping keys through
+/// `string_keys`, which refuses a key the parser does not read as a string.
+/// serde_yaml_ng reads `true:` and `false:` as booleans; GitHub reads them as
+/// the job, or the matrix dimension, named `true` or `false`. A guard that
+/// skipped them would pass over exactly that job.
+#[test]
+#[should_panic(expected = "every key must be a string")]
+fn string_keys_refuses_a_key_the_parser_reads_as_a_boolean() {
+  let jobs: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+    "build: {}
+true: {}
+",
+  )
+  .unwrap();
+  string_keys(jobs.as_mapping().unwrap(), "jobs");
+}
+
+#[test]
+fn string_keys_returns_every_key_in_order() {
+  let jobs: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+    "build: {}
+release: {}
+",
+  )
+  .unwrap();
+  assert_eq!(string_keys(jobs.as_mapping().unwrap(), "jobs"), ["build", "release"]);
+}
+
 /// The jobs of `release.yml` allowed to inherit the workflow's `contents:
 /// write`: `release` publishes, and `build` runs before it (see
 /// `release_workflow_grants_write_only_to_build_and_publish`).
@@ -591,20 +619,14 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
      job inherits it, and the jobs below are checked against it"
   );
 
-  // A key the parser does not read as a string is refused, not skipped:
-  // `true:` is a boolean to serde_yaml_ng and the job `true` to GitHub, so
-  // filtering it out would hand that job the write token with this test
-  // green.
-  let jobs: Vec<String> = workflow["jobs"]
-    .as_mapping()
-    .expect("release.yml must define a `jobs:` mapping")
-    .keys()
-    .map(|k| {
-      k.as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| panic!("{path}: every job key must be a string, got {k:?}"))
-    })
-    .collect();
+  // Through `string_keys`: a `true:` job, skipped, would keep the write
+  // token with this test green.
+  let jobs = string_keys(
+    workflow["jobs"]
+      .as_mapping()
+      .expect("release.yml must define a `jobs:` mapping"),
+    &format!("{path} `jobs:`"),
+  );
   // The loop below catches a rename, since it holds every job but `build`
   // and `release` to `contents: read` under whatever name. What a sweep does
   // not see is a job that stopped existing, down to a `jobs:` mapping it
@@ -1557,12 +1579,14 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
 #[test]
 fn ci_every_job_is_blocking_except_the_advisory_doctor() {
   let workflow = ci_workflow();
-  let jobs: Vec<String> = workflow["jobs"]
-    .as_mapping()
-    .expect("ci.yml must define a `jobs:` mapping")
-    .keys()
-    .filter_map(|k| k.as_str().map(str::to_owned))
-    .collect();
+  // Through `string_keys` (issue #673): a job keyed `true:` or `false:`,
+  // skipped, could be switched off with this sweep green.
+  let jobs = string_keys(
+    workflow["jobs"]
+      .as_mapping()
+      .expect("ci.yml must define a `jobs:` mapping"),
+    "ci.yml `jobs:`",
+  );
 
   // A sweep guards the jobs it finds and says nothing about the ones that
   // stopped existing. An emptied `jobs:` leaves it iterating over nothing
