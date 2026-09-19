@@ -24,16 +24,29 @@ fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
   s.lines().any(|line| line.starts_with(&prefix))
 }
 
-// `(name, rhs)` for every `name = rhs;` line outside a `#` comment, `rhs` cut
-// at its `;`. Line-based: a binding split over several lines is not seen,
-// which makes the version guard fail rather than pass.
+// `(name, rhs)` for every `name = rhs` outside a `#` comment line: each `;`
+// ends a statement and each `=` in it binds the word just before it, so
+// `pname = "gwm"; version = …;` and `pin = { version = …; };` both yield their
+// `version`. `rhs` stops at the `;` or the end of the line, so a right-hand
+// side running over several lines, or a `;` inside a string, cuts it short
+// and fails the version guard rather than passing it.
 fn bindings(s: &str) -> impl Iterator<Item = (&str, &str)> {
   s.lines()
     .map(str::trim)
     .filter(|l| !l.starts_with('#'))
-    .filter_map(|l| {
-      let (name, rhs) = l.split_once('=')?;
-      Some((name.trim(), rhs.split(';').next().unwrap_or(rhs).trim()))
+    .flat_map(|l| l.split(';'))
+    .flat_map(|stmt| {
+      stmt.match_indices('=').filter_map(move |(i, _)| {
+        let (before, rhs) = (&stmt[..i], &stmt[i + 1..]);
+        if before.ends_with(['=', '<', '>', '!']) || rhs.starts_with('=') {
+          return None;
+        }
+        let name = before
+          .trim_end()
+          .rsplit(|c: char| c.is_whitespace() || c == '{' || c == '(')
+          .next()?;
+        Some((name, rhs.trim()))
+      })
     })
 }
 
@@ -136,6 +149,18 @@ fn the_version_guard_can_actually_fire() {
       "{read}version = cargoToml.package.version;\nversion = pinnedVersion;\n"
     )),
     "a second binding, the derivation's own, overriding the derived one"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\npname = \"gwm\"; version = \"0.3.0-rc.3\";\n"
+    )),
+    "a second binding sharing a line with another one"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\npin = {{ version = \"0.3.0-rc.3\"; }};\n"
+    )),
+    "a binding nested in an attribute set on the same line"
   );
   assert!(
     !ok(&format!("{read}# version = cargoToml.package.version;\n")),
