@@ -137,9 +137,14 @@ fn bindings(code: &str) -> impl Iterator<Item = (Vec<&str>, String)> {
         rhs.trim().to_string(),
       ))
     });
+    // The keyword, not the substring: `inheritedPin` and `inherited` are names.
     let inherited = stmt
-      .rsplit_once("inherit")
-      .filter(|(head, _)| head.is_empty() || head.ends_with(|c: char| c.is_whitespace() || c == '{'))
+      .match_indices("inherit")
+      .map(|(i, kw)| (&stmt[..i], &stmt[i + kw.len()..]))
+      .find(|(head, tail)| {
+        (head.is_empty() || head.ends_with(|c: char| c.is_whitespace() || c == '{'))
+          && tail.starts_with(|c: char| c.is_whitespace() || c == '(')
+      })
       .and_then(|(_, tail)| tail.trim_start().strip_prefix('('))
       .and_then(|tail| {
         let mut depth = 1;
@@ -397,6 +402,22 @@ fn the_version_guard_can_actually_fire() {
        inherit (pins) cargoToml;\nversion = cargoToml.package.version;\n"
     )),
     "the read's name rebound by an `inherit`"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       inheritedPin = builtins.fromJSON \"{{\\\"version\\\": \\\"0.3.0-rc.3\\\"}}\";\n\
+       gwm = buildRustPackage {{ pname = \"gwm\"; inherit (inheritedPin) version; }};\n"
+    )),
+    "an `inherit` whose source contains the word `inherit`"
+  );
+  assert!(
+    !ok(&format!(
+      "{read}version = cargoToml.package.version;\n\
+       pin = builtins.fromJSON \"{{\\\"version\\\": \\\"0.3.0-rc.3\\\"}}\";\n\
+       gwm = buildRustPackage {{ pname = \"gwm\"; inherit (pin) version inherited; }};\n"
+    )),
+    "an `inherit` one of whose names contains the word `inherit`"
   );
 
   assert!(
