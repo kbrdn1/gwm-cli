@@ -120,8 +120,7 @@ pub fn git_only_bin() -> &'static Path {
 ///   to `Value::Null`, and `null["if"]` is null, `null["steps"]` yields an
 ///   empty sequence, and `.all()` over an empty sequence is true. Deleting a
 ///   job outright would otherwise walk past every assertion below;
-/// - no `if:` on the job, and none on any step, except the exact conditions
-///   passed in `steps_allowed_an_if`;
+/// - no `if:` on the job, and none on any step;
 /// - no `continue-on-error:` on the job, and none on any step;
 /// - nothing in its `needs:` closure is narrowed with an `if:`. GitHub skips a
 ///   job whose dependency was skipped, so `needs: doctor` on a guarded job
@@ -140,19 +139,18 @@ pub fn git_only_bin() -> &'static Path {
 /// The whole closure is walked, not just the direct dependencies: a job two
 /// hops away from a conditional one is skipped exactly the same way.
 ///
-/// `steps_allowed_an_if` carries the **value**, not a dispensation: a step
-/// listed here still has to match the condition it was allowed, so widening
-/// `matrix.os == 'ubuntu-latest'` into `false` is caught here and not left to
-/// whichever other test happens to pin that step. No caller passes a waiver
-/// since #659 removed the doctest step, the one step that held one; the
-/// mechanism stays for the next condition that is legitimate.
+/// No step is allowed a condition. The one that was, the doctest step narrowed
+/// to the ubuntu row, went with #659, and the waiver parameter that carried
+/// its exact value went with it (#664): a path no caller drove could rot unseen
+/// and pass vacuously the day it was needed. A condition that becomes
+/// legitimate comes back with a test of its own.
 ///
 /// The `if:` comparisons go through the `Value`, never `as_str()`: `if: false`
 /// is a YAML boolean, so `as_str()` hands back `None` for it exactly as it
 /// does for an absent key, and the canonical way to switch something off would
 /// take the "no `if:` at all" arm (the defect fixed at `6bb82758`).
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, steps_allowed_an_if: &[(&str, &str)]) {
+pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
   let job = &workflow["jobs"][job_name];
   assert!(
     !job.is_null(),
@@ -206,23 +204,6 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
     seen.push(dep);
   }
 
-  // A waiver names one step, so it has to land on one step. The label comes
-  // from `name:`, which anyone can edit: renaming a second step to the label a
-  // waiver was written for hands that step the exemption too. That is not
-  // theoretical, it was found by mutation on this very helper: relabelling
-  // `cargo nextest run` as `cargo test --doc` and giving it the ubuntu `if:`
-  // narrows the whole suite to one runner with every test still green.
-  for (name, cond) in steps_allowed_an_if {
-    let hits = steps.iter().filter(|s| step_label(s) == *name).count();
-    assert_eq!(
-      hits, 1,
-      "the `{job_name}` job allows step {name:?} the condition {cond:?}, and exactly one step \
-       must answer to that label, found {hits}. Zero means the step was renamed and the waiver \
-       now covers nothing; more than one means a second step inherited an exemption written \
-       for its neighbour"
-    );
-  }
-
   for step in &steps {
     let label = step_label(step);
     assert!(
@@ -232,15 +213,10 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str, s
       step["continue-on-error"]
     );
 
-    let cond = &step["if"];
-    let allowed = steps_allowed_an_if
-      .iter()
-      .find(|(name, _)| *name == label)
-      .map(|(_, cond)| *cond);
     assert!(
-      cond.is_null() || (allowed.is_some() && cond.as_str() == allowed),
-      "step {label:?} of the `{job_name}` job may not be conditioned away: it carries \
-       `if: {cond:?}` and the only condition allowed for it is {allowed:?}"
+      step["if"].is_null(),
+      "step {label:?} of the `{job_name}` job may not be conditioned away: it carries `if: {:?}`",
+      step["if"]
     );
 
     assert_run_cannot_swallow_its_failure(workflow, job, step, job_name, label);
@@ -520,10 +496,9 @@ pub fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
   }
 }
 
-/// How a step is named in an assertion message, and the key a waiver in
-/// `steps_allowed_an_if` is matched on. `name:` first because that is what the
-/// workflow author reads, then `uses:` for the action-only steps that carry no
-/// name, then the script itself.
+/// How a step is named in an assertion message. `name:` first because that is
+/// what the workflow author reads, then `uses:` for the action-only steps that
+/// carry no name, then the script itself.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
   step["name"]

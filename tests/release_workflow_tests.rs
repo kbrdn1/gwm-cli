@@ -97,6 +97,162 @@ const STABLE_TAGS_ONLY: &str = "!contains(github.event.inputs.tag || github.ref_
                                 !contains(github.event.inputs.tag || github.ref_name, '-alpha.') && \
                                 !contains(github.event.inputs.tag || github.ref_name, '-beta.')";
 
+/// The stable publish job, every key but `if:` and every step in order (issue
+/// #665). The `run:` of the two steps pinned above and the publish step's
+/// `env:` are filled in from what the test already pins, so each is written
+/// once. An action is named without its `@ref`, see `assert_job_as_written`.
+const STABLE_RELEASE_JOB: &str = r##"
+name: github release
+needs: [build]
+runs-on: ubuntu-latest
+steps:
+  - uses: actions/checkout
+    with:
+      persist-credentials: false
+  - name: download all artifacts
+    uses: actions/download-artifact
+    with:
+      path: dist
+      merge-multiple: true
+  - name: resolve changelog path
+    id: changelog
+    shell: bash
+  - name: publish release
+    shell: bash
+"##;
+
+/// The pre-release publish job, same convention: the resolver's `run:` and the
+/// publish step's `with:` come from the test, and `resolve tag` is written out
+/// here because nothing else pins it, although `tag_name` and `name` read its
+/// output.
+const PRE_RELEASE_JOB: &str = r##"
+name: github pre-release
+needs: [build]
+runs-on: ubuntu-latest
+steps:
+  - name: resolve tag
+    id: tag
+    shell: bash
+    run: |
+      if [ -n "${{ inputs.tag }}" ]; then
+        echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+      else
+        echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+      fi
+  - uses: actions/checkout
+    with:
+      ref: ${{ steps.tag.outputs.name }}
+      persist-credentials: false
+  - name: download all artifacts
+    uses: actions/download-artifact
+    with:
+      path: dist
+      merge-multiple: true
+  - name: resolve changelog path
+    id: changelog
+    shell: bash
+  - name: check unreleased changelog against previous rc
+    shell: bash
+    run: ./.github/scripts/check-rc-changelog-dupes.sh "${{ steps.tag.outputs.name }}"
+  - name: publish pre-release
+    uses: softprops/action-gh-release
+"##;
+
+/// Issue #665. The steps pinned by name leave the rest of the publish job
+/// free-form, and review measured two ways to empty the notes with every one
+/// of those pins green: `gh release edit "$TAG" --notes ""` added after the
+/// publish, and the notes file truncated by a step inserted between the
+/// resolver and the publish. A line appended to `$GITHUB_ENV` by any earlier
+/// step is the same shape, since it sets the environment of every step after
+/// it. So the whole job is pinned: its keys, then the list of steps in order,
+/// then each step by value.
+///
+/// The keys, because a step is not the only thing that reaches a `run:`. A
+/// `container:` with an `env:` runs every step through `docker exec` inside it,
+/// `SHELLOPTS: noexec` included, and `defaults:` changes where and how they
+/// run. Review measured the first with every step pinned and the suite green.
+/// The one key compared elsewhere is `if:`, which `assert_publish_job_blocks`
+/// reads with its whitespace collapsed, since the stable job writes it as a
+/// block scalar.
+///
+/// The labels are compared first so that an added, removed or reordered step
+/// reads as a list in the message, not as two unrelated steps compared at the
+/// same index. Ordered, because a step's output is unset for the steps above
+/// it, and a set would accept the resolver moved below its reader.
+///
+/// The `@ref` of an action is left free: Dependabot bumps `github-actions` on
+/// this repo, and pinning the ref would turn each of its pull requests red for
+/// a change it exists to make. The action's name is pinned, and so is
+/// everything passed to it.
+///
+/// What this leaves out is what the actions and the scripts do inside. The
+/// step is pinned, not the file it calls: `check-rc-changelog-dupes.sh` runs
+/// between the resolver and the publish, and its own tests pin what it
+/// detects, not what else it does, so a line added to it can still truncate
+/// the rc notes. And the rest of the workflow: `homebrew-tap-update` and
+/// `scoop-bucket-update` run after the publish with the workflow's `contents:
+/// write` token and a `GH_TOKEN` in one of their steps, so a line added there
+/// can still edit the notes. A reader of one job cannot close that, the
+/// ceiling #656 names.
+fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value) {
+  let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  let outside_steps = |job: &serde_yaml_ng::Value| {
+    let mut keys = job.as_mapping().cloned().unwrap_or_default();
+    keys.remove("steps");
+    keys.remove("if");
+    keys
+  };
+  assert_eq!(
+    outside_steps(&workflow["jobs"][job]),
+    outside_steps(expected),
+    "{path} job `{job}` changed outside its steps (issue #665). Every key of the publish job is \
+     pinned but `if:`, which `assert_publish_job_blocks` compares: a `container:` carries its \
+     `env:` into every `run:` step, `SHELLOPTS: noexec` included, and `defaults:` changes where \
+     and how they run. If the change is intended, update the expected job in the same diff"
+  );
+  let actual: Vec<serde_yaml_ng::Value> = workflow["jobs"][job]["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .map(|mut step| {
+      if let Some(action) = step["uses"]
+        .as_str()
+        .and_then(|u| u.split_once('@'))
+        .map(|(action, _)| action.to_owned())
+      {
+        step["uses"] = action.into();
+      }
+      step
+    })
+    .collect();
+  let expected = expected["steps"]
+    .as_sequence()
+    .expect("the expected job must list its steps");
+  let labels = |steps: &[serde_yaml_ng::Value]| steps.iter().map(|s| step_label(s).to_owned()).collect::<Vec<_>>();
+  assert_eq!(
+    labels(&actual),
+    labels(expected),
+    "{path} job `{job}` must run exactly these steps, in this order (issue #665). A step added \
+     anywhere in it can empty the release notes with every other guard green: `gh release edit` \
+     with empty notes after the publish, the notes file truncated before it, or a line appended \
+     to `$GITHUB_ENV`. If the change is intended, update the expected steps in the same diff"
+  );
+  for (step, want) in actual.iter().zip(expected) {
+    assert_eq!(
+      step,
+      want,
+      "{path} job `{job}`: the step {:?} changed. Every step of this job is pinned by value \
+       (issue #665), the action's `@ref` aside: each runs with the workflow's write token, ahead \
+       of the publish or after it, so a line added to any of them can edit or truncate the notes. \
+       If the change is intended, update the expected steps in the same diff",
+      step_label(want)
+    );
+  }
+}
+
 /// A `run:` step pinned by value (issue #647): it runs, it can fail its job, it
 /// runs under bash, and its script is exactly `script`, as written. `if: false`
 /// is a YAML boolean and `continue-on-error: false` is not an absent key, so
@@ -168,18 +324,18 @@ fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
-  // The environment reaches a `run:` step from three levels, and
+  // The environment reaches a `run:` step from three `env:` levels, and
   // `SHELLOPTS: noexec` at any of them has bash run nothing and exit 0. The
   // step level is pinned through the `env` argument of `assert_run_step`, the
-  // job and the workflow levels here. An action's inputs are not reachable
+  // job and the workflow levels here, and the `env:` of a job `container:`, a
+  // fourth, by `assert_job_as_written`. An action's inputs are not reachable
   // this way: the runner writes `INPUT_<NAME>` for every declared input, the
   // empty string when it has no default, over whatever `env:` set (verified
   // in actions/runner, `ActionManifestManager.cs` and `Handler.cs`).
   //
-  // What no reader of this file closes: a step writing to `$GITHUB_ENV`, and
-  // any other step of the publish job, which stays free-form (one added after
-  // the publish can edit the notes away). That is the shape #656 names as the
-  // ceiling of a static reader.
+  // The other steps of the publish job, a step writing to `$GITHUB_ENV`
+  // among them, and the job's own keys are pinned by `assert_job_as_written`
+  // (issue #665), which also says what stays out of reach.
   let workflow_env: serde_yaml_ng::Value = serde_yaml_ng::from_str("CARGO_TERM_COLOR: always").unwrap();
   assert_eq!(
     workflow["env"], workflow_env,
@@ -307,6 +463,12 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
      `changelogs/<version>.md` and the job must fail when that file is missing, never fall back \
      to the `CHANGELOG.md` index",
   );
+
+  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(STABLE_RELEASE_JOB).unwrap();
+  job["steps"][2]["run"] = RESOLVE_STABLE_CHANGELOG.into();
+  job["steps"][3]["env"] = env;
+  job["steps"][3]["run"] = PUBLISH_RELEASE_SCRIPT.into();
+  assert_job_as_written(".github/workflows/release.yml", "release", &job);
 
   assert_publish_job_blocks(
     ".github/workflows/release.yml",
@@ -641,6 +803,11 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
      missing, never fall back to the `CHANGELOG.md` index",
   );
 
+  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(PRE_RELEASE_JOB).unwrap();
+  job["steps"][3]["run"] = RESOLVE_RC_CHANGELOG.into();
+  job["steps"][5]["with"] = with;
+  assert_job_as_written(".github/workflows/pre-release.yml", "release", &job);
+
   assert_publish_job_blocks(".github/workflows/pre-release.yml", "release", None, &["build"]);
 }
 
@@ -846,7 +1013,7 @@ fn ci_runs_the_benches_and_can_fail_on_one() {
   // and it has to run at all: the `doctor` job in this same file is narrowed
   // with an `if:`, and doing that here would keep every assertion above green
   // while the benches quietly stopped running on pull requests.
-  assert_job_is_blocking(&ci_workflow(), "bench", &[]);
+  assert_job_is_blocking(&ci_workflow(), "bench");
 }
 
 #[test]
@@ -1112,7 +1279,7 @@ fn doctests_are_declared_off_rather_than_run_empty() {
 /// row was the one exception, until #659 removed the step.
 #[test]
 fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
-  assert_job_is_blocking(&ci_workflow(), "test", &[]);
+  assert_job_is_blocking(&ci_workflow(), "test");
 }
 
 /// Issue #646. `cargo audit` had no test naming it at all: `grep -rn '"audit"'
@@ -1138,7 +1305,7 @@ fn ci_test_job_cannot_be_switched_off_or_made_advisory() {
 #[test]
 fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
   let job = ci_job("audit");
-  assert_job_is_blocking(&ci_workflow(), "audit", &[]);
+  assert_job_is_blocking(&ci_workflow(), "audit");
 
   let step = job["steps"]
     .as_sequence()
@@ -1343,7 +1510,7 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
       assert_doctor_is_still_the_advisory_job(&workflow["jobs"]["doctor"]);
       continue;
     }
-    assert_job_is_blocking(&workflow, job_name, &[]);
+    assert_job_is_blocking(&workflow, job_name);
   }
 }
 
@@ -1359,9 +1526,9 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
 /// `continue-on-error`" is satisfied by any of them, so moving the marker off
 /// `gwm doctor` and onto `cargo build` leaves an existential assertion green
 /// while `gwm doctor` itself becomes able to fail the job, which is the exact
-/// drift the exemption claims to catch. `assert_job_is_blocking` already
-/// closes that shape for its `if:` waivers by requiring exactly one step to
-/// answer to the label; it is closed the same way here.
+/// drift the exemption claims to catch. Exactly one step must answer to the
+/// label, so a second step renamed `gwm doctor` cannot inherit the marker
+/// written for its neighbour either.
 ///
 /// "The job cannot turn the workflow red" is deliberately *not* the property
 /// asserted, because it is not true and never was: `doctor`'s checkout, its
@@ -1377,9 +1544,7 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
   // By value, not by presence. `!job["if"].is_null()` is satisfied by any
   // condition at all, `if: always()` included, while the message below claims
   // the restriction to `dev` is what it checks. That is the same overstatement
-  // the `continue-on-error` assertion made before it was pinned to its step,
-  // and the same by-value standard `assert_job_is_blocking` holds its step
-  // waivers to.
+  // the `continue-on-error` assertion made before it was pinned to its step.
   //
   // Whitespace is normalised first because the condition is a YAML block
   // scalar: reflowing it across lines is a formatting change and must not be a
