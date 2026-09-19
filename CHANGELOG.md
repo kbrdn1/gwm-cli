@@ -138,30 +138,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rc's notes on `changelogs/pre-releases/<version>.md`, had no test at all.
 
   The steps are now read from the parsed workflow and pinned by value: the
-  stable script line for line (continuations joined, whitespace collapsed),
-  with its `env` and `shell`, and the whole `with:` of the pre-release step.
-  By value rather than by flag, because a presence check loses to an
-  addition: `gh` keeps the last value of a repeated flag, so
+  stable script as written, with its `env` and `shell`, and the whole `with:`
+  of the pre-release step. By value rather than by flag, because a presence
+  check loses to an addition: `gh` keeps the last value of a repeated flag, so
   `--draft=false --draft=true` publishes a draft with the substring still
   there, and softprops takes `generate_release_notes` and `append_body`,
-  either of which changes the notes without touching `body_path`. The Linux
-  check compares whole tokens of the one `gh release upload` command, and
-  the continuation lines are joined the way bash reads them: an odd run of
-  trailing backslashes, tested before any trimming, since `dist/*.rpm \ `
-  with a trailing space ends the command there.
+  either of which changes the notes without touching `body_path`. As
+  written, with nothing normalised: review found two ways a test that joins
+  continuation lines itself disagrees with bash (`\ ` with a trailing space
+  ends a command, `"$TAG"\` glued to `--notes-file` makes one word of them),
+  each leaving the pin green over a broken release, so the test no longer
+  models bash at all and a reformat of the step reformats the pin. The Linux
+  check reads whole lines of that script rather than substrings of the file.
 
-  Review found the fix pinning a reference and not its target. `--notes-file`
-  and `body_path` both read `steps.changelog.outputs.path`, and
-  `CHANGELOG_PATH="CHANGELOG.md"` in the step that computes it left every
-  test green: the v0.6.0 incident again, with every pinned key intact. The
-  `resolve changelog path` step of both workflows is pinned the same way, and
-  so are the jobs, since GitHub applies `if:` and `continue-on-error:` at the
-  job level and the job wins (#646): `continue-on-error: true` on the
-  release job turned a failed publish into a green run. The publish job and
-  the build job it waits on must carry exactly the stable-tags condition, or
-  none on the pre-release side, and no `continue-on-error:`. Seventeen
-  mutations, each applied alone: all seventeen leave the previous guards
-  green and fail the one they aim at.
+  Review also found the fix pinning a reference and not its target.
+  `--notes-file` and `body_path` both read `steps.changelog.outputs.path`,
+  and `CHANGELOG_PATH="CHANGELOG.md"` in the step that computes it left every
+  test green, as did moving that step below the one reading its output: the
+  v0.6.0 incident again, with every pinned key intact. The `resolve changelog
+  path` step of both workflows is pinned the same way, and must come before
+  the publish step. So are the jobs, since GitHub applies `if:` and
+  `continue-on-error:` at the job level and the job wins (#646):
+  `continue-on-error: true` on the release job turned a failed publish into a
+  green run. The publish job must wait on `build`, and both must carry
+  exactly the stable-tags condition, or none on the pre-release side, and no
+  `continue-on-error:`. Twenty mutations, each applied alone: all twenty
+  leave the previous guards green and fail the one they aim at.
 
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
