@@ -3,7 +3,7 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os, step_label};
+use common::{assert_job_is_blocking, effective_matrix_os, job_needs, step_label, workflow_step};
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -21,34 +21,298 @@ fn stable_release_workflow_skips_prerelease_tags() {
   }
 }
 
+/// The stable publish step, as written. `edit` runs when the release already
+/// exists (a recovery rerun), `create` on a fresh tag, which is to say on the
+/// actual release; `upload` attaches every artifact the build produced.
+const PUBLISH_RELEASE_SCRIPT: &str = r##"set -euo pipefail
+
+if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+  gh release edit "$TAG" \
+    --repo "$GITHUB_REPOSITORY" \
+    --title "$TAG" \
+    --notes-file "${{ steps.changelog.outputs.path }}" \
+    --draft=false \
+    --prerelease=false
+else
+  gh release create "$TAG" \
+    --repo "$GITHUB_REPOSITORY" \
+    --title "$TAG" \
+    --notes-file "${{ steps.changelog.outputs.path }}" \
+    --verify-tag \
+    --draft=false \
+    --prerelease=false
+fi
+
+gh release upload "$TAG" \
+  --repo "$GITHUB_REPOSITORY" \
+  --clobber \
+  dist/*.tar.gz \
+  dist/*.tar.gz.sha256 \
+  dist/*.zip \
+  dist/*.zip.sha256 \
+  dist/*.deb \
+  dist/*.deb.sha256 \
+  dist/*.rpm \
+  dist/*.rpm.sha256
+"##;
+
+/// The `resolve changelog path` step of each release workflow, whose output
+/// the publish step reads. Pinning `--notes-file "${{ steps.changelog.outputs.path }}"`
+/// alone pins the reference and not what it resolves to: with
+/// `CHANGELOG_PATH="CHANGELOG.md"` here, the empty index goes out as the notes
+/// and every other guard stays green, which is the v0.6.0 incident itself.
+/// The dash in the error message is spelled `\u{2014}` so this file carries
+/// none while still matching the workflow byte for byte.
+const RESOLVE_STABLE_CHANGELOG: &str = concat!(
+  r##"TAG="${{ github.ref_name }}"
+VERSION="${TAG#v}"
+CHANGELOG_PATH="changelogs/${VERSION}.md"
+if [ ! -f "${CHANGELOG_PATH}" ]; then
+  echo "::error::Expected ${CHANGELOG_PATH} to exist for tag ${TAG} "##,
+  "\u{2014}",
+  r##" release notes would otherwise fall back to the empty CHANGELOG.md index."
+  exit 1
+fi
+echo "path=${CHANGELOG_PATH}" >> "$GITHUB_OUTPUT"
+"##
+);
+
+const RESOLVE_RC_CHANGELOG: &str = concat!(
+  r##"TAG="${{ steps.tag.outputs.name }}"
+VERSION="${TAG#v}"
+CHANGELOG_PATH="changelogs/pre-releases/${VERSION}.md"
+if [ ! -f "${CHANGELOG_PATH}" ]; then
+  echo "::error::Expected ${CHANGELOG_PATH} to exist for tag ${TAG} "##,
+  "\u{2014}",
+  r##" release notes would otherwise fall back to the empty CHANGELOG.md index."
+  exit 1
+fi
+echo "path=${CHANGELOG_PATH}" >> "$GITHUB_OUTPUT"
+"##
+);
+
+/// The `if:` both stable jobs carry, on one line. `release.yml` writes it as a
+/// block scalar across three.
+const STABLE_TAGS_ONLY: &str = "!contains(github.event.inputs.tag || github.ref_name, '-rc.') && \
+                                !contains(github.event.inputs.tag || github.ref_name, '-alpha.') && \
+                                !contains(github.event.inputs.tag || github.ref_name, '-beta.')";
+
+/// A `run:` step pinned by value (issue #647): it runs, it can fail its job, it
+/// runs under bash, and its script is exactly `script`, as written. `if: false`
+/// is a YAML boolean and `continue-on-error: false` is not an absent key, so
+/// both are compared to null rather than read through `as_str()`. `shell:`
+/// takes a whole command line, and `true {0}` never runs the script.
+///
+/// The script is compared as the YAML parser hands it over, indentation of the
+/// block already removed, with nothing normalised on top. The two versions of
+/// this guard before it joined continuation lines themselves, and review found
+/// two places where that join and bash disagree: `dist/*.rpm \ ` with a trailing
+/// space ends the command in bash and was joined here, and `"$TAG"\` followed
+/// by `--notes-file` glues the two into one word in bash and was split here:
+/// that word becomes the value of `--title`, and the notes path after it a
+/// positional argument, uploaded as an asset instead of read as the notes. Each is a model
+/// of bash written in place of bash, the mistake #634 already paid for. As
+/// written, the only cost is that reformatting the step reformats the pin.
+fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, env: &serde_yaml_ng::Value, script: &str, why: &str) {
+  // The environment is part of what a script does, so it is pinned with it,
+  // for every step pinned here rather than wherever someone remembers to:
+  // `SHELLOPTS: noexec` has bash parse the script, run nothing and exit 0,
+  // leaving `path=` unwritten. Review found the resolver steps unpinned while
+  // a comment said every step was, which is why this is a parameter and not a
+  // call site.
+  assert_eq!(
+    step["env"], *env,
+    "the {label} step's `env:` changed. It is pinned by value (issue #647): a variable there \
+     changes what the script does without touching it"
+  );
+  assert!(
+    step["if"].is_null() && step["continue-on-error"].is_null(),
+    "the {label} step must run and be able to fail its job, got `if: {:?}` and \
+     `continue-on-error: {:?}`",
+    step["if"],
+    step["continue-on-error"]
+  );
+  assert_eq!(
+    step["shell"].as_str(),
+    Some("bash"),
+    "the {label} step must run under bash, got `shell: {:?}`",
+    step["shell"]
+  );
+  assert_eq!(step["run"].as_str(), Some(script), "{why}");
+}
+
+/// Issue #647. A step that runs and fails its job says nothing about the job:
+/// GitHub applies `if:` and `continue-on-error:` at the job level too, and the
+/// job wins (#646). `continue-on-error: true` on the job turns a failed
+/// `gh release create` into a green run over a half-published release, and
+/// `if: false` on it publishes nothing at all.
+///
+/// So the job holding the publish step, and every job it waits on, since a
+/// skipped dependency skips everything below it, must carry exactly
+/// `condition` as its `if:` and no `continue-on-error:`. `assert_job_is_blocking`
+/// is not reused because it refuses any job-level `if:`, and the stable jobs
+/// carry one on purpose. The condition is compared by value, with whitespace
+/// collapsed because the workflow writes it as a block scalar.
+///
+/// The publish job's own `needs:` is pinned to `needs`, because the walk reads
+/// its route from that key: emptied, it walks the publish job alone and passes,
+/// while the publish runs beside the build instead of after it and uploads
+/// whatever `dist/` holds at that moment.
+///
+/// `continue-on-error:` is refused on the dependencies too, which is where
+/// this parts from `assert_job_is_blocking` on purpose. On a CI dependency it
+/// makes the dependency report success so the dependent runs; here the
+/// dependent is the publish, and `build` reporting success over a failed
+/// build is a release going out without its artifacts.
+fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>, needs: &[&str]) {
+  let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  // The environment reaches a `run:` step from three levels, and
+  // `SHELLOPTS: noexec` at any of them has bash run nothing and exit 0. The
+  // step level is pinned through the `env` argument of `assert_run_step`, the
+  // job and the workflow levels here. An action's inputs are not reachable
+  // this way: the runner writes `INPUT_<NAME>` for every declared input, the
+  // empty string when it has no default, over whatever `env:` set (verified
+  // in actions/runner, `ActionManifestManager.cs` and `Handler.cs`).
+  //
+  // What no reader of this file closes: a step writing to `$GITHUB_ENV`, and
+  // any other step of the publish job, which stays free-form (one added after
+  // the publish can edit the notes away). That is the shape #656 names as the
+  // ceiling of a static reader.
+  let workflow_env: serde_yaml_ng::Value = serde_yaml_ng::from_str("CARGO_TERM_COLOR: always").unwrap();
+  assert_eq!(
+    workflow["env"], workflow_env,
+    "{path} must set nothing in its workflow-level `env:` but `CARGO_TERM_COLOR`: that environment \
+     reaches the steps that resolve and publish the notes, and `SHELLOPTS: noexec` there runs \
+     nothing and exits 0"
+  );
+  assert!(
+    workflow["jobs"][job_name]["env"].is_null(),
+    "{path} job `{job_name}` must carry no `env:`: it reaches the steps that resolve and publish the \
+     notes, and `SHELLOPTS: noexec` there runs nothing and exits 0. Got `env: {:?}`",
+    workflow["jobs"][job_name]["env"]
+  );
+  assert_eq!(
+    job_needs(&workflow["jobs"][job_name]),
+    needs,
+    "{path} job `{job_name}` must wait on exactly {needs:?}: the publish has to run after the build \
+     it uploads, and the checks below walk the jobs this key names"
+  );
+  let condition = condition.map(|c| c.split_whitespace().collect::<Vec<_>>().join(" "));
+  let mut pending = vec![job_name.to_string()];
+  let mut seen: Vec<String> = Vec::new();
+  while let Some(name) = pending.pop() {
+    if seen.contains(&name) {
+      continue;
+    }
+    let job = &workflow["jobs"][name.as_str()];
+    assert!(
+      !job.is_null(),
+      "{path} must define a `{name}` job: the publish step runs in it or waits on it"
+    );
+    let actual = job["if"]
+      .as_str()
+      .map(|c| c.split_whitespace().collect::<Vec<_>>().join(" "));
+    let runs = match &condition {
+      None => job["if"].is_null(),
+      Some(c) => actual.as_deref() == Some(c.as_str()),
+    };
+    assert!(
+      runs,
+      "{path} job `{name}` must carry `if: {condition:?}` and nothing else, because the publish \
+       step runs in it or after it. Got `if: {:?}`",
+      job["if"]
+    );
+    assert!(
+      job["continue-on-error"].is_null(),
+      "{path} job `{name}` must carry no `continue-on-error:`: a failed publish would end in a green \
+       run over a half-published release. Got `continue-on-error: {:?}`",
+      job["continue-on-error"]
+    );
+    pending.extend(job_needs(job));
+    seen.push(name);
+  }
+}
+
+/// Issue #647. The stable publish step is pinned **by value**, script and
+/// environment, because every substring check it had was satisfied by
+/// something other than what it named.
+///
+/// `--notes-file` was asserted once over a script holding two exclusive
+/// branches, so dropping it from `create`, the branch a real release takes,
+/// left the test green and would have published an empty body in place of
+/// `changelogs/<version>.md` (gh 2.100.0 sends no body without `--notes`,
+/// `--notes-file` or `--generate-notes`, and has no prompt in CI): release
+/// notes missing, which is what this test exists to prevent since v0.6.0. `--verify-tag`, `--draft=false`, `--prerelease=false` and the
+/// `.tar.gz` / `.zip` uploads were asserted by nothing. And a flag check reads
+/// presence, which an addition defeats: `gh` keeps the last value of a
+/// repeated flag (measured on gh 2.100.0, `--limit 5 --limit 1` lists one
+/// release), so `--draft=false --draft=true` publishes a draft with the
+/// substring still there. #655 hit the same shape on `cargo clippy`.
+///
+/// Comparing the script as written closes all three without listing them.
+/// Changing what it says is a change to the release, and belongs in the same
+/// diff as this constant.
+///
+/// The step is only half of the path. `--notes-file` names the output of
+/// `resolve changelog path`, which is pinned the same way and must come
+/// before the publish step, since an output is unset for the steps above the
+/// one that writes it. The `release` job around both, with the `build` job it
+/// waits on, must run on stable tags and fail the run when it fails (see
+/// `assert_publish_job_blocks`).
 #[test]
 fn stable_release_publish_uses_github_cli_with_workflow_token() {
   let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
-  let publish_step = workflow
-    .split("      - name: publish release")
-    .nth(1)
-    .and_then(|tail| tail.split("\n  homebrew-tap-update:").next())
-    .expect("release.yml must contain a publish release step before homebrew-tap-update");
-
   assert!(
     !workflow.contains("uses: softprops/action-gh-release"),
     "release.yml must not use softprops/action-gh-release for the stable GitHub Release publish step"
   );
-  assert!(
-    publish_step.contains("GH_TOKEN: ${{ github.token }}"),
-    "release.yml must pass the workflow token to gh via GH_TOKEN in the publish release step"
+
+  let (publish_at, step) = workflow_step(".github/workflows/release.yml", "release", "publish release");
+  // `gh` authenticates with the workflow token and publishes the tag that
+  // triggered the run, and nothing else sits in its environment.
+  let env: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str("GH_TOKEN: ${{ github.token }}\nTAG: ${{ github.ref_name }}").unwrap();
+  assert_run_step(
+    &step,
+    "publish release",
+    &env,
+    PUBLISH_RELEASE_SCRIPT,
+    "release.yml's publish release script changed. It is pinned by value (issue #647): the notes \
+     must come from `changelogs/<version>.md` in BOTH the `create` and the `edit` branch, `create` \
+     must verify the tag and publish neither a draft nor a pre-release, and every artifact kind \
+     must be uploaded. If the change is intended, update `PUBLISH_RELEASE_SCRIPT` in the same diff",
   );
+
+  let (resolve_at, resolve) = workflow_step(".github/workflows/release.yml", "release", "resolve changelog path");
   assert!(
-    publish_step.contains("gh release create \"$TAG\""),
-    "release.yml must create the stable GitHub Release with gh release create"
+    resolve_at < publish_at,
+    "the resolve changelog path step must run before publish release: `--notes-file` reads its \
+     output, which is empty for every step above it, and `gh release create` then publishes with \
+     an empty body"
   );
-  assert!(
-    publish_step.contains("--notes-file \"${{ steps.changelog.outputs.path }}\""),
-    "stable release notes must still come from changelogs/<version>.md"
+  assert_eq!(
+    resolve["id"].as_str(),
+    Some("changelog"),
+    "the resolve changelog path step must keep `id: changelog`: `--notes-file` reads \
+     `steps.changelog.outputs.path`, which is empty under any other id"
   );
-  assert!(
-    publish_step.contains("gh release upload \"$TAG\"") && publish_step.contains("--clobber"),
-    "release.yml must upload artifacts with gh release upload --clobber so recovery reruns can replace assets"
+  assert_run_step(
+    &resolve,
+    "resolve changelog path",
+    &serde_yaml_ng::Value::Null,
+    RESOLVE_STABLE_CHANGELOG,
+    "release.yml's changelog path changed. It is pinned by value (issue #647): the notes must be \
+     `changelogs/<version>.md` and the job must fail when that file is missing, never fall back \
+     to the `CHANGELOG.md` index",
+  );
+
+  assert_publish_job_blocks(
+    ".github/workflows/release.yml",
+    "release",
+    Some(STABLE_TAGS_ONLY),
+    &["build"],
   );
 }
 
@@ -132,7 +396,7 @@ fn workflow_paths() -> Vec<String> {
 
 /// #433, the follow-up to #429/#432: the sibling workflows carry the same
 /// shape, and none of their checkouts pushes — `ci.yml` is entirely read-only,
-/// `pre-release.yml` publishes through `gh` with an env token, never
+/// `pre-release.yml` publishes through `softprops/action-gh-release`, never
 /// `git push`, and `docs-sync.yml` only calls an API. No checkout outside
 /// release.yml has any business passing `token:`, so the rule is stricter
 /// there: every checkout opts out, no exceptions.
@@ -302,6 +566,82 @@ fn prerelease_workflow_does_not_match_stable_tags() {
     !workflow.contains("\n      - \"v*.*.*\""),
     "pre-release.yml must not trigger on stable tags"
   );
+}
+
+/// Issue #647. `pre-release.yml` publishes through `softprops/action-gh-release`,
+/// and its `body_path`, the input that makes an rc's notes come from
+/// `changelogs/pre-releases/<version>.md`, was covered by no test at all: the
+/// guard against the v0.6.0-rc.1 incident (an rc published with the empty
+/// `CHANGELOG.md` index as its body) only ever looked at `release.yml`.
+///
+/// The whole `with:` mapping is pinned by value rather than `body_path` alone.
+/// The action takes inputs that change the body without touching that key,
+/// `generate_release_notes` and `append_body` among them, and an added key is
+/// exactly what a single-key check cannot see. The action is matched on its
+/// name and not its version, because dependabot bumps the version.
+///
+/// `body_path` names a step output, so the step computing it is pinned too,
+/// and so is the job, both the same way as on the stable side: a reference
+/// pinned to an output that resolves to the index, or a job switched off
+/// above a step that looks fine, is the incident again with every key intact.
+#[test]
+fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
+  let (publish_at, step) = workflow_step(".github/workflows/pre-release.yml", "release", "publish pre-release");
+  assert!(
+    step["uses"]
+      .as_str()
+      .is_some_and(|u| u.starts_with("softprops/action-gh-release@")),
+    "the publish pre-release step must use softprops/action-gh-release, got `uses: {:?}`",
+    step["uses"]
+  );
+  assert!(
+    step["if"].is_null() && step["continue-on-error"].is_null(),
+    "the publish pre-release step must run and be able to fail the job, got `if: {:?}` and \
+     `continue-on-error: {:?}`",
+    step["if"],
+    step["continue-on-error"]
+  );
+  let with: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+    "tag_name: ${{ steps.tag.outputs.name }}\n\
+     name: ${{ steps.tag.outputs.name }}\n\
+     body_path: ${{ steps.changelog.outputs.path }}\n\
+     files: |\n  dist/*.tar.gz\n  dist/*.tar.gz.sha256\n  dist/*.zip\n  dist/*.zip.sha256\n\
+     draft: false\n\
+     prerelease: true\n",
+  )
+  .unwrap();
+  assert_eq!(
+    step["with"], with,
+    "pre-release.yml's publish inputs changed. They are pinned by value (issue #647): the body must \
+     come from `changelogs/pre-releases/<version>.md` through `body_path`, with no input that \
+     generates or appends notes, and the release must be a published pre-release. If the change \
+     is intended, update this test in the same diff"
+  );
+
+  let (resolve_at, resolve) = workflow_step(".github/workflows/pre-release.yml", "release", "resolve changelog path");
+  assert!(
+    resolve_at < publish_at,
+    "the resolve changelog path step must run before publish pre-release: `body_path` reads its \
+     output, which is empty for every step above it, and softprops then falls back to the unset \
+     `body` input and publishes with no notes"
+  );
+  assert_eq!(
+    resolve["id"].as_str(),
+    Some("changelog"),
+    "the resolve changelog path step must keep `id: changelog`: `body_path` reads \
+     `steps.changelog.outputs.path`, which is empty under any other id"
+  );
+  assert_run_step(
+    &resolve,
+    "resolve changelog path",
+    &serde_yaml_ng::Value::Null,
+    RESOLVE_RC_CHANGELOG,
+    "pre-release.yml's changelog path changed. It is pinned by value (issue #647): an rc's notes \
+     must be `changelogs/pre-releases/<version>.md` and the job must fail when that file is \
+     missing, never fall back to the `CHANGELOG.md` index",
+  );
+
+  assert_publish_job_blocks(".github/workflows/pre-release.yml", "release", None, &["build"]);
 }
 
 const DOCS_SYNC: &str = ".github/workflows/docs-sync.yml";

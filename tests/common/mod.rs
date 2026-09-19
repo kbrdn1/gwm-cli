@@ -503,8 +503,8 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
 /// The `needs:` of a job, as a list. The Actions schema allows both a bare
 /// string and a sequence, and a job with no dependency parses to null, so the
 /// three shapes are read here rather than at each call site.
-#[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
+#[allow(dead_code)] // used by the test binaries that parse a workflow's jobs.
+pub fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
   match &job["needs"] {
     serde_yaml_ng::Value::String(one) => vec![one.clone()],
     serde_yaml_ng::Value::Sequence(many) => many
@@ -531,4 +531,37 @@ pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
     .or_else(|| step["uses"].as_str())
     .or_else(|| step["run"].as_str())
     .unwrap_or("<unnamed step>")
+}
+
+/// One step of a workflow, found by its `name:` in the named job, with its
+/// position among the job's steps (issue #647).
+///
+/// The publish guards used to slice the file text between two literal markers,
+/// or run `contains` over the whole file. The second matched the intermediate
+/// `upload-artifact` step as readily as the step that publishes, since both
+/// list `dist/*.deb`. Parsing the YAML reads the one step the guard is about,
+/// and exactly one step must answer to the name, or the guard would read
+/// whichever came first. The position is returned because a step's output is
+/// only set for the steps after it: a step read by name and pinned by value
+/// can still be moved below its reader.
+#[allow(dead_code)] // used by the suites that pin a release workflow step.
+pub fn workflow_step(path: &str, job: &str, name: &str) -> (usize, serde_yaml_ng::Value) {
+  let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  let mut hits: Vec<(usize, serde_yaml_ng::Value)> = workflow["jobs"][job]["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .enumerate()
+    .filter(|(_, s)| s["name"].as_str() == Some(name))
+    .collect();
+  assert_eq!(
+    hits.len(),
+    1,
+    "{path} job `{job}` must hold exactly one step named {name:?}, found {}",
+    hits.len()
+  );
+  hits.remove(0)
 }

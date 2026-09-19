@@ -117,6 +117,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The release publish guards were satisfied by something other than what
+  they named** ([#647](https://github.com/kbrdn1/gwm-cli/issues/647)). Two
+  guards on the path that publishes a release, and a third surface of it
+  with no guard at all.
+
+  The stable publish step holds two exclusive branches, `gh release edit`
+  for a recovery rerun and `gh release create` for a fresh tag, and
+  `--notes-file` was asserted once over both. Dropping it from `create`, the
+  branch a real release takes, stayed green, and that release would have
+  gone out with an empty body instead of `changelogs/<version>.md`: without
+  `--notes-file`, `gh` has no prompt to fall back on in CI and sends no body
+  at all. Notes missing from a release is what the guard was written
+  against, after v0.6.0.
+  `--verify-tag`, `--draft=false`, `--prerelease=false` and the `.tar.gz` /
+  `.zip` uploads were asserted by nothing. The Linux package check ran
+  `contains("dist/*.deb")` over the whole file, which `dist/*.deb.sha256`
+  satisfies on its own, as does the build job's `upload-artifact` step,
+  which publishes nothing. With the `.deb` and `.rpm` lines removed from
+  `release.yml`, `release_workflow_tests` and `linux_packaging_metadata_tests`
+  stayed green. And `pre-release.yml`'s `body_path`, which is what keeps an
+  rc's notes on `changelogs/pre-releases/<version>.md`, had no test at all.
+
+  The steps are now read from the parsed workflow and pinned by value: the
+  stable script as written, with its `env` and `shell`, and the whole `with:`
+  of the pre-release step. By value rather than by flag, because a presence
+  check loses to an addition: `gh` keeps the last value of a repeated flag, so
+  `--draft=false --draft=true` publishes a draft with the substring still
+  there, and softprops takes `generate_release_notes` and `append_body`,
+  either of which changes the notes without touching `body_path`. As
+  written, with nothing normalised: review found two ways a test that joins
+  continuation lines itself disagrees with bash (`\ ` with a trailing space
+  ends a command, `"$TAG"\` glued to `--notes-file` makes one word of them),
+  each leaving the pin green over a broken release, so the test no longer
+  models bash at all and a reformat of the step reformats the pin. The Linux
+  check reads whole lines of that script rather than substrings of the file.
+
+  Review also found the fix pinning a reference and not its target.
+  `--notes-file` and `body_path` both read `steps.changelog.outputs.path`,
+  and `CHANGELOG_PATH="CHANGELOG.md"` in the step that computes it left every
+  test green, as did moving that step below the one reading its output: the
+  v0.6.0 incident again, with every pinned key intact. The `resolve changelog
+  path` step of both workflows is pinned the same way, and must come before
+  the publish step. So are the jobs, since GitHub applies `if:` and
+  `continue-on-error:` at the job level and the job wins (#646):
+  `continue-on-error: true` on the release job turned a failed publish into a
+  green run. The publish job must wait on `build`, and both must carry
+  exactly the stable-tags condition, or none on the pre-release side, and no
+  `continue-on-error:`. And the environment is pinned where it reaches the
+  steps that resolve and publish the notes: `SHELLOPTS: noexec` has bash run
+  nothing and exit 0, the path never written. Every pinned `run:` step has
+  its `env:` pinned with its script, as a required argument of the check
+  rather than a line each caller has to remember, both publish jobs carry no
+  `env:`, and the workflow-level one is `CARGO_TERM_COLOR` alone. An action's
+  inputs cannot be reached that way, since the runner writes `INPUT_<NAME>`
+  for every declared input over whatever `env:` set. Two things stay out of
+  reach of any reader of the workflow file, the ceiling #656 names: a step
+  writing to `$GITHUB_ENV`, and the other steps of the publish job, which
+  are free-form.
+
+  Thirty mutations, each applied alone, all fail the guard they aim at.
+  Twenty-nine of them leave the previous guards green; the other, a second step
+  named `publish release`, failed them by accident, since the old text slice
+  read whichever of the two came first.
+
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
   nextest (#634) left `cargo test --doc` running beside it, because nextest

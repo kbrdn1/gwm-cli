@@ -284,13 +284,15 @@ than chased one vector at a time. Measuring that ceiling turned up one step with
 nothing to run at all: `cargo test --doc` ran zero doctests, so it could not
 fail. The step is gone and the lib declares `doctest = false`, since it is an
 internal test seam rather than an API to write examples for
-([#659](https://github.com/kbrdn1/gwm-cli/issues/659)).
+([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The release publish
+guards were the next surface: each was satisfied by something other than what
+it named, a checksum glob standing in for its package and one `--notes-file`
+standing in for two branches, and `pre-release.yml`'s notes were guarded by
+nothing. The publish steps are now pinned by value
+([#647](https://github.com/kbrdn1/gwm-cli/issues/647)).
 
 **What is queued next** is what that audit left open, all in the same family:
-two release publication
-guards pass by subsumption, a prefix and a branch
-([#647](https://github.com/kbrdn1/gwm-cli/issues/647)); the flake version guard
-is satisfied by the MSRV read, so #393 can come back
+the flake version guard is satisfied by the MSRV read, so #393 can come back
 ([#648](https://github.com/kbrdn1/gwm-cli/issues/648)); and the non-vacuity
 floors have gone slack ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).
 Beyond them: forms compressing their spacing before they scroll

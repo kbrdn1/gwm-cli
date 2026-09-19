@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+mod common;
+
 fn manifest() -> toml::Value {
   let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
   let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -75,11 +77,40 @@ fn release_workflow_builds_both_linux_packages() {
   );
 }
 
+/// Issue #647. This used to be `yml.contains(glob)` over the whole file, and
+/// it passed with no package published at all: `dist/*.deb` is a prefix of
+/// `dist/*.deb.sha256`, so the checksum line satisfied the package assertion
+/// on its own, and the globs also sit in the `upload-artifact` step of the
+/// build job, which publishes nothing. Deleting the `.deb` and `.rpm` lines
+/// from `release.yml` left this suite and `release_workflow_tests` green.
+///
+/// Now each glob must be a whole line of the `publish release` script, read
+/// from the parsed step, as a continued argument (`dist/*.deb \`) or the last
+/// one. Only the indentation is dropped, so `dist/*.deb.sha256` is not
+/// `dist/*.deb` and `dist/*.rpm \ ` with a trailing space, which ends the
+/// command in bash, is not `dist/*.rpm \`. `release_workflow_tests` pins the
+/// whole script as written, which is what closes it; this keeps the Linux
+/// packages named where their build is guarded, so losing them fails here
+/// too, with a message that says which.
 #[test]
 fn release_workflow_publishes_both_linux_packages() {
-  let yml = release_yml();
+  let (_, step) = common::workflow_step(".github/workflows/release.yml", "release", "publish release");
+  let script = step["run"]
+    .as_str()
+    .expect("the publish release step must carry a `run:` script");
+  let lines: Vec<&str> = script.lines().map(str::trim_start).collect();
+  // A bare glob ends the command in bash, so it only counts as uploaded on
+  // the script's last line; anywhere else it has to carry the continuation.
+  let last = lines.iter().rposition(|l| !l.is_empty());
   for glob in ["dist/*.deb", "dist/*.deb.sha256", "dist/*.rpm", "dist/*.rpm.sha256"] {
-    assert!(yml.contains(glob), "the release upload step must publish {glob}");
+    let continued = format!("{glob} \\");
+    assert!(
+      lines
+        .iter()
+        .enumerate()
+        .any(|(i, l)| *l == continued || (*l == glob && Some(i) == last)),
+      "the release upload must publish {glob} as a continued argument or the last one, got {lines:?}"
+    );
   }
 }
 
