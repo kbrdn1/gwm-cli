@@ -210,12 +210,13 @@ For reference (each linked to its closing PR):
 | [#408](https://github.com/kbrdn1/gwm-cli/issues/408) ([PR #435](https://github.com/kbrdn1/gwm-cli/pull/435)) + follow-ups [#439](https://github.com/kbrdn1/gwm-cli/issues/439) ([PR #444](https://github.com/kbrdn1/gwm-cli/pull/444)) / [#440](https://github.com/kbrdn1/gwm-cli/issues/440) ([PR #442](https://github.com/kbrdn1/gwm-cli/pull/442)) / [#441](https://github.com/kbrdn1/gwm-cli/issues/441) ([PR #443](https://github.com/kbrdn1/gwm-cli/pull/443)) / [#445](https://github.com/kbrdn1/gwm-cli/issues/445) ([PR #446](https://github.com/kbrdn1/gwm-cli/pull/446)) | v1.3.0 | **Agent session pane**: detect AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) per worktree from on-disk artefacts, surfaced as an AGENT column (table + TUI), an `a` detail overlay with pinning, `gwm agents` CLI, additive JSON `agents` field, statusline segment. Follow-ups: **Windows named pipe transport** for `gwm daemon` / `gwm statusline` (owner-only pipe, server identity verified by owner SID) (#439); `gwm clean` ENOTEMPTY race tolerance (#440); process-level liveness: a dead recorded PID demotes the session immediately on unix (#441); fixed-height attach prompt with a scrollbar (#445) |
 | [#437](https://github.com/kbrdn1/gwm-cli/issues/437) ([PR #452](https://github.com/kbrdn1/gwm-cli/pull/452)) / [#438](https://github.com/kbrdn1/gwm-cli/issues/438) ([PR #454](https://github.com/kbrdn1/gwm-cli/pull/454)) / [#436](https://github.com/kbrdn1/gwm-cli/issues/436) ([PR #455](https://github.com/kbrdn1/gwm-cli/pull/455)) / [#453](https://github.com/kbrdn1/gwm-cli/issues/453) ([PR #456](https://github.com/kbrdn1/gwm-cli/pull/456)) | v1.4.0 | **TUI polish + complete help overlay**: Working Tree scroll from the Status context (`J` / `K`, rebindable, viewport-clamped) (#437); responsive sidebar heights via a pure layout solver (guaranteed floors, proportional split, Agents pane never clipped, Working Tree scrollbar) (#438); CI checks overlay: one row per `statusCheckRollup` entry with workflow + duration, `Enter` opens details, `/` filter, `f` refresh (#436); `?` help overlay documents every modal context with a per-section completeness guard, which-key re-audit (`exec` / `agents`), and a reserved-typing contract across every input sub-mode (#453) |
 | [#419](https://github.com/kbrdn1/gwm-cli/issues/419) ([PR #458](https://github.com/kbrdn1/gwm-cli/pull/458)) + [#463](https://github.com/kbrdn1/gwm-cli/issues/463) ([PR #464](https://github.com/kbrdn1/gwm-cli/pull/464)) | v1.5.0 | **Multi-forge**: a `Forge` trait with two backends, the existing GitHub one (`gh`) and a new GitLab one (`glab`). Worktrees, bootstrap, branch naming and the `branch.<name>.gwm-*` link storage stay forge-neutral; only the network layer knows which forge is in play. Ships the `forge` key in `.gwm.toml`, a `[forge_hosts]` table read from the user's own global config, `gwm trust add`, `$GWM_GLAB`, and a refusal to assume an unrecognised host is GitHub (which would have sent an authenticated call, and a token, to whatever host a cloned repo named). GitLab specifics absorbed at the parse boundary: `iid`, nested subgroup paths, the `/-/` URL infix, date-only milestones, project-vs-group labels, and a pipeline-to-CI-state map where an unknown status never aggregates to green. Fix: the trust ledger keys on the repo again, not on its host (#463) |
-| [GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm) + [#415](https://github.com/kbrdn1/gwm-cli/issues/415) / [#416](https://github.com/kbrdn1/gwm-cli/issues/416) / [#417](https://github.com/kbrdn1/gwm-cli/issues/417) / [#418](https://github.com/kbrdn1/gwm-cli/issues/418) / [#479](https://github.com/kbrdn1/gwm-cli/issues/479) + [#491](https://github.com/kbrdn1/gwm-cli/issues/491) | v1.6.0 | **Security fix + naming flexibility.** A branch name could inject a command into a lifecycle hook: placeholders were expanded into `sh -c` unescaped, and git permits `;`, `|`, `&`, `$`, backticks and redirections in a ref name, so a branch someone else pushed ran arbitrary commands as anyone who had trusted their own repo's hooks, with no trust prompt in the path (the gate covers the repo's hooks, never the branch name entering them). Affects every version up to and including 1.5.0, no backport. Values are shell-escaped on expansion, `env` values stay raw because they never see a shell, and hooks additionally get `GWM_*` environment variables that need no quoting. Alongside it: `gwm create --name` drops the `<type> <issue> <desc>` requirement (#416), the TUI create and rename forms present the fields the repo's patterns actually ask for in pattern order, in both directions (#418), and the declared MSRV becomes an honest 1.95 held by a CI job that resolves and compiles the locked graph at the floor (#491). Verifying the sequence produced the Fixed section: terminal-escape neutralisation of echoed config (#473), single-pass placeholder expansion (#494), branch rollback on a failed `gwm create` (#487), Windows path rules on free-form names (#475), and worktree-aware branch reads (#477) |
+| [GHSA-fffq-vg6f-gxqm](https://github.com/kbrdn1/gwm-cli/security/advisories/GHSA-fffq-vg6f-gxqm) + [#415](https://github.com/kbrdn1/gwm-cli/issues/415) / [#416](https://github.com/kbrdn1/gwm-cli/issues/416) / [#417](https://github.com/kbrdn1/gwm-cli/issues/417) / [#418](https://github.com/kbrdn1/gwm-cli/issues/418) / [#479](https://github.com/kbrdn1/gwm-cli/issues/479) + [#491](https://github.com/kbrdn1/gwm-cli/issues/491) | v1.6.0 | **Security fix + naming flexibility.** A branch name could inject a command into a lifecycle hook: placeholders were expanded into `sh -c` unescaped, and git permits `;`, `\|`, `&`, `$`, backticks and redirections in a ref name, so a branch someone else pushed ran arbitrary commands as anyone who had trusted their own repo's hooks, with no trust prompt in the path (the gate covers the repo's hooks, never the branch name entering them). Affects every version up to and including 1.5.0, no backport. Values are shell-escaped on expansion, `env` values stay raw because they never see a shell, and hooks additionally get `GWM_*` environment variables that need no quoting. Alongside it: `gwm create --name` drops the `<type> <issue> <desc>` requirement (#416), the TUI create and rename forms present the fields the repo's patterns actually ask for in pattern order, in both directions (#418), and the declared MSRV becomes an honest 1.95 held by a CI job that resolves and compiles the locked graph at the floor (#491). Verifying the sequence produced the Fixed section: terminal-escape neutralisation of echoed config (#473), single-pass placeholder expansion (#494), branch rollback on a failed `gwm create` (#487), Windows path rules on free-form names (#475), and worktree-aware branch reads (#477) |
 | [#502](https://github.com/kbrdn1/gwm-cli/issues/502) / [#506](https://github.com/kbrdn1/gwm-cli/issues/506) / [#507](https://github.com/kbrdn1/gwm-cli/issues/507) + [#423](https://github.com/kbrdn1/gwm-cli/issues/423) / [#511](https://github.com/kbrdn1/gwm-cli/issues/511) | v1.6.1 | **Bidi follow-up to the security release, and the documentation pipeline.** The 1.6.0 neutralisation rests on `char::is_control`, which covers C0, DEL and C1: it does not cover the twelve characters carrying the `Bidi_Control` property, which are `Cf`, not `Cc`, and reorder how a terminal renders the text around them without ever being a control byte. The pre-trust bootstrap summary inherited the gap, the one output whose job is to let someone authorise a shell command out of an unvetted repo. The TUI worktrees table was never on the path the CLI sinks protect at all: measured on ratatui 0.30, every render path drops the zero-width bytes but `List` and `Table` keep the `Bidi_Control` ones, so a fetched ref could read in an order it is not stored in. Both closed, the neutralisation landing in the width-clipping funnel so a column added later inherits it, plus an alias expansion refused rather than neutralised because it becomes argv before clap is reached. Alongside: the published documentation now resyncs and redeploys itself when `main` moves ([#423](https://github.com/kbrdn1/gwm-cli/issues/423), <https://gwm.kbrdn.dev>), and `herdr-plugin-gwm` gets an integration page in English and French ([#511](https://github.com/kbrdn1/gwm-cli/issues/511)) |
 | [#515](https://github.com/kbrdn1/gwm-cli/issues/515) / [#420](https://github.com/kbrdn1/gwm-cli/issues/420) / [#528](https://github.com/kbrdn1/gwm-cli/issues/528) / [#421](https://github.com/kbrdn1/gwm-cli/issues/421) / [#484](https://github.com/kbrdn1/gwm-cli/issues/484) / [#392](https://github.com/kbrdn1/gwm-cli/issues/392) + [#521](https://github.com/kbrdn1/gwm-cli/issues/521) / [#531](https://github.com/kbrdn1/gwm-cli/issues/531) / [#422](https://github.com/kbrdn1/gwm-cli/issues/422) | v1.7.0 | **The feature line that closes the comparative read of the field.** Four capability gaps came out of reading `lazyworktree` and `gwq` against this codebase; the last of them close here, so the [comparison page](docs/8.comparison.md) (#422) reports parity where it would have reported a deficit. **Per-worktree notes** (#515): `N` opens the selected worktree's note in an editable modal rather than suspending the TUI for `$EDITOR`, stored as plain Markdown under `.git/gwm/notes/` in the main checkout, so it survives `gwm remove` and stays greppable with gwm shut down; keyed on the branch, with a refusal rather than a silent collision when a volume folds two branch names together. **Rich PR/Issue view** (#420): `I` renders the description, author, branch pair, diff size, CI rollup, reviews and conversation at no extra request, the fields riding the call gwm already made for the rollup; the comments anchored to a diff hunk followed as a second transport (#528), GraphQL-only, fired by the view rather than by every `gwm status`. **Container execution** (#421): a `[container]` block on an `exec` profile, where the mount is the substance rather than the wrapper, since a linked worktree's `.git` is a file holding an absolute host path and mounting the worktree alone yields a container in which git does not answer. **Multi-row selection** (#484): `Space` marks, `d` deletes the batch behind one confirm that snapshots its targets, with `gwm remove a b c` as the non-interactive half. **Symfony preset** (#392), built on Symfony's dotenv convention rather than copied from the Laravel one. Alongside: the TUI delete now runs the remove hooks and records the undo journal (#521), and the removal sequence records itself at its point of no return instead of before the destructive call, which had left `gwm undo` blocked for the whole repo on a refused removal (#531) |
 | [#524](https://github.com/kbrdn1/gwm-cli/issues/524) / [#523](https://github.com/kbrdn1/gwm-cli/issues/523) | v1.7.1 | **Documentation patch, binary unchanged.** The agent session pane is what the repository description leads on and it had no page of its own; `tui/agent-sessions` now covers the four backends, the freshness rules and the pinning, in English and French, and five text-only pages get the capture they described in prose. The demo GIF closes its last defect (#523): the agent pane, which needed a fake on-disk agent store rather than a tape edit, since the fixture simulated no session at all. Shipped with `docs_assets_tests`, because a capture referenced but absent is not a cosmetic dead link: Astro fails the whole build on it, so the docs site stops deploying. That exact failure happened during this cycle, from the other side: the sync computed capture links from `cli/reference.md` while writing pages into `cli/reference/`, one level deeper, so every link was short a `../`. Latent since the CLI reference split existed, and only triggered once an image finally lived there |
 | [#545](https://github.com/kbrdn1/gwm-cli/issues/545) + [#549](https://github.com/kbrdn1/gwm-cli/issues/549) / [#547](https://github.com/kbrdn1/gwm-cli/issues/547) / [#550](https://github.com/kbrdn1/gwm-cli/issues/550) / [#548](https://github.com/kbrdn1/gwm-cli/issues/548) / [#554](https://github.com/kbrdn1/gwm-cli/issues/554) + [#560](https://github.com/kbrdn1/gwm-cli/issues/560) + [#562](https://github.com/kbrdn1/gwm-cli/issues/562) + [#563](https://github.com/kbrdn1/gwm-cli/issues/563) / [#553](https://github.com/kbrdn1/gwm-cli/issues/553) / [#544](https://github.com/kbrdn1/gwm-cli/issues/544) | v1.8.0 | **The density line, and the width arithmetic underneath it.** **Compact by default** (#545): panes and sidebar sections drop their box rules for a filled one-line header, two rows and two columns back each, with `[tui] layout = "bordered"` as the opt-out and the same pass moving modal titles into the top rule (#549). The idea predates the feedback that triggered it; the work was never the removal but relocating **focus**, which the border used to carry and the header now does, plus a `section_bg` theme role that is an indexed colour rather than a translucent white so the mode survives a terminal without truecolor. **`[tui] status_one_line`** (#547) is the content half: the Status block folds onto one row, three more rows for the panes, on by default under either layout. **One modal width policy** (#550): four rules became one, two of which branched on `term_width <= 80` and so got *narrower* as the terminal widened, while four others had no ceiling at all. **A crash on returning from a fullscreen surface** (#548), and not a cosmetic one: `Terminal::clear` snapshots the cursor over DSR, and the return path from a PTY overlay is exactly when a terminal is least likely to answer in time. **Four truncators moved from characters to terminal cells** (#554 / #560 / #562 / #563), on ratatui's own `CellWidth` per grapheme rather than `unicode-width`, which disagrees with the renderer on more than CJK: `لالالا` is 3 columns to one and 6 painted. ASCII rendered identically throughout, which is what kept it standing. `unicode-width` is now a dev-dependency, kept as the contrast measure that proves a width fixture is one the two disagree on. Alongside: forms scroll to their focused field instead of clipping it away (#553), and the doc captures were regenerated narrower, fitted to their content and on a darker terminal (#544) |
 | [#573](https://github.com/kbrdn1/gwm-cli/issues/573) / [#577](https://github.com/kbrdn1/gwm-cli/issues/577) / [#567](https://github.com/kbrdn1/gwm-cli/issues/567) / [#569](https://github.com/kbrdn1/gwm-cli/issues/569) / [#568](https://github.com/kbrdn1/gwm-cli/issues/568) + [#575](https://github.com/kbrdn1/gwm-cli/issues/575) / [#579](https://github.com/kbrdn1/gwm-cli/issues/579) | v1.9.0 | **The licensing line, and the text the binary prints.** **Dual license MIT OR Apache-2.0** (#573): MIT stays in full under `LICENSE-MIT`, and `LICENSE-APACHE` joins it for §3, an express patent grant from every contributor that MIT has no clause for at all. Users pick either and never have to say which. The declaration had to be written six times in six syntaxes, none interchangeable (`MIT OR Apache-2.0` for crates.io and Arch, `any_of:` for Homebrew, a `\|` separator for Scoop, `[ licenses.asl20 licenses.mit ]` for nixpkgs), so a walk over `packaging/`, `Cargo.toml` and `flake.nix` now fails the suite if a channel declares one half without the other. **The vendored libraries ship their notices** (#577): `git2` builds with `vendored-libgit2` and `libz-sys` with `static`, so every binary distributed here statically contains libgit2 and zlib and no package dependency carries their terms. libgit2 is GPLv2 with a linking exception conditional on the notice travelling with the distribution; zlib's terms say its notice may not be removed. Both were unmet under MIT-only too, which is why this is separate from #573. They are taken from the crate source cargo actually built, and `third-party/README.md` records which version, checked against `Cargo.lock`. **The em dash sweep reaches `src/`** (#567): 165 across 161 string literals in every error message, status line and TUI hint, plus 49 in `gwm --help`, which `clap` builds out of doc comments, and the completion scripts that carry the same text; the connector was chosen per call site rather than substituted, and the one-line description was fixed in the eight published package fields no `src/` guard can see. Two tests hold the rule, one scanning literals with a Rust scanner rather than a grep, the other walking what the binary prints. **The Settings panel sizes to its active tab** (#569), between a floor of 11 rows and a ceiling leaving about 25 rows of body, where it used to take 60% of the frame whether the tab held 3 rows or 173. **One spelling for a worktree path** (#568): the header rendered `$HOME` as `~` and the table printed it raw, so one path appeared twice on one screen in two spellings, in the one column that can least afford it; compression runs before the terminal sanitiser, which is load-bearing, and the fix carried two silent failures with it, `/` versus `\` on Windows and a trailing separator on `$HOME`. Alongside: the doc captures show what the binary actually prints after #567 and #568 (#575), and the `docs/` frontmatter says what the published page should say, with two of its three defects pinned by a test (#579) |
+| [#625](https://github.com/kbrdn1/gwm-cli/issues/625) / [#617](https://github.com/kbrdn1/gwm-cli/issues/617) / [#551](https://github.com/kbrdn1/gwm-cli/issues/551) / [#588](https://github.com/kbrdn1/gwm-cli/issues/588) / [#589](https://github.com/kbrdn1/gwm-cli/issues/589) / [#611](https://github.com/kbrdn1/gwm-cli/issues/611) / [#608](https://github.com/kbrdn1/gwm-cli/issues/608) / [#591](https://github.com/kbrdn1/gwm-cli/issues/591) / [#590](https://github.com/kbrdn1/gwm-cli/issues/590) / [#592](https://github.com/kbrdn1/gwm-cli/issues/592) / [#593](https://github.com/kbrdn1/gwm-cli/issues/593) / [#629](https://github.com/kbrdn1/gwm-cli/issues/629) / [#557](https://github.com/kbrdn1/gwm-cli/issues/557) / [#594](https://github.com/kbrdn1/gwm-cli/issues/594) + [#581](https://github.com/kbrdn1/gwm-cli/issues/581) / [#601](https://github.com/kbrdn1/gwm-cli/issues/601) / [#619](https://github.com/kbrdn1/gwm-cli/issues/619) / [#595](https://github.com/kbrdn1/gwm-cli/issues/595) / [#596](https://github.com/kbrdn1/gwm-cli/issues/596) / [#597](https://github.com/kbrdn1/gwm-cli/issues/597) / [#605](https://github.com/kbrdn1/gwm-cli/issues/605) / [#613](https://github.com/kbrdn1/gwm-cli/issues/613) | v1.10.0 | **The line that keeps the whole cycle inside the TUI.** A worktree opens on an issue that already exists, from the CLI (`gwm create --issue <N>`, #617) or from the create form (`Ctrl+n`, #625), and the PR that comes out of it merges without leaving (`m`, #551), so the round trip that used to mean two context switches to the browser is one screen. **A multiplexer line**: herdr joins tmux and zellij as a third backend (#588), `o` on the agents overlay resumes the session in a pane (#591), two settings say what a spawn opens and where (#608, #589 / #611), and a split goes to the right by default, because the flag of a multiplexer names the axis rather than the direction. A link can open in a terminal browser instead of a GUI one (#590). **Full-size listings** for the panes the sidebar cannot hold: Working Tree (`W`, #592) and Commits (`c`, with load-more, #593), both saying which worktree they show, since an overlay that outlives the selection under it lies (#629). Notes gain a checklist and a vim normal mode, on by default with `[tui] note_vim = false` as the opt-out (#557); the rich PR/Issue view has its design pass (#551) and keeps its inline comments through a relist (#619); modals follow `[tui] layout` instead of always being bordered (#594). Alongside: every capture is rendered at 2x and the published crate drops the capture binaries to stay under the crates.io size limit (#581), `demo.gif` records the demo again (#601), the context and table defects the pass turned up are closed (#595 / #596 / #597 / #605 / #613), and the CLI no longer runs on the 1 MiB main-thread stack Windows gives a process, which three more clap arguments had overflowed (#617) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit: check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -241,67 +242,69 @@ follow-ups, and multi-forge support
 deliberately ahead of the rich PR/Issue view so that view is born multi-forge
 instead of being rewritten later. See the table above for both.
 
-**What is actually queued now**, after the v1.10.0 cut, is smaller than a feature
-line and mostly came out of one source: unsolicited design feedback from
-ratatui's maintainer on the awesome-ratatui listing
-([#544](https://github.com/kbrdn1/gwm-cli/issues/544)). Three of its four axes
-are closed; the fourth, the docs site reading flat, lives in `kbrdn1/kbrdn-docs`
-rather than here. The capture pass that closed #575 left one defect of its own
-behind: the stills are written at 1x and the published site scales them up, so
-they blur on a HiDPI screen ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)).
-Richer note editing
-([#557](https://github.com/kbrdn1/gwm-cli/issues/557)) has landed on `dev` and
-ships with the next minor: the note editor takes bullets and checkboxes for
-everyone, and its vim normal mode is on by default, with `[tui] note_vim = false`
-as the opt-out. Beyond it: forms compressing their
-spacing before they scroll ([#559](https://github.com/kbrdn1/gwm-cli/issues/559)),
-the remaining relays
-([#525](https://github.com/kbrdn1/gwm-cli/issues/525)) and the distribution
-channels still open under
-[#383](https://github.com/kbrdn1/gwm-cli/issues/383).
+**What is on `dev` now**, unreleased, is two lots since the v1.10.0 cut.
 
-**A second lot came out of living in the TUI for a day, and all of it is now on
-`dev`**, unreleased: a multiplexer line (herdr as a third backend
-[#588](https://github.com/kbrdn1/gwm-cli/issues/588), a pane-direction setting
-[#589](https://github.com/kbrdn1/gwm-cli/issues/589) with its two remaining
-directions [#611](https://github.com/kbrdn1/gwm-cli/issues/611), what a spawn
-opens [#608](https://github.com/kbrdn1/gwm-cli/issues/608), Issue/PR in a
-terminal browser [#590](https://github.com/kbrdn1/gwm-cli/issues/590), resuming
-an agent's session in a pane
-[#591](https://github.com/kbrdn1/gwm-cli/issues/591)), two full-size listings
-for the panes the sidebar cannot hold
-([#592](https://github.com/kbrdn1/gwm-cli/issues/592),
-[#593](https://github.com/kbrdn1/gwm-cli/issues/593)), modals following
-`[tui] layout` instead of staying bordered
-([#594](https://github.com/kbrdn1/gwm-cli/issues/594)), the rich PR/Issue view's
-design pass ([#551](https://github.com/kbrdn1/gwm-cli/issues/551)), and the
-table / context defects it turned up
-([#595](https://github.com/kbrdn1/gwm-cli/issues/595),
-[#596](https://github.com/kbrdn1/gwm-cli/issues/596),
-[#597](https://github.com/kbrdn1/gwm-cli/issues/597),
-[#605](https://github.com/kbrdn1/gwm-cli/issues/605),
-[#613](https://github.com/kbrdn1/gwm-cli/issues/613)).
+The first is the design line that came out of daily use, about density rather
+than capability: the Working Tree listing reads as columns, with a right-aligned
+status column and a collapsed leading path
+([#622](https://github.com/kbrdn1/gwm-cli/issues/622)), the Settings panel gains
+a value column, named sections and tab glyphs
+([#623](https://github.com/kbrdn1/gwm-cli/issues/623)), and the mouse. That last
+one was a defect wearing a feature's clothes: gwm enabled mouse capture in three
+places and read no mouse event anywhere, so the terminal's own text selection
+was sacrificed for nothing. #624 reads the events and puts the two digit-only
+panels (Command Logs, Settings) in the header where they can be seen and clicked
+([#624](https://github.com/kbrdn1/gwm-cli/issues/624)). Underneath it, `gwm list`
+stops degrading as a repository is used: its cost was linear in the size of
+`.git/config`, so `gwm doctor` now reports the config a deleted branch left
+behind, and the worktrees are scanned in parallel
+([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). Two TUI views move out
+of `app.rs` / `ui.rs` into a module each, as the pilot of a vertical split
+([#635](https://github.com/kbrdn1/gwm-cli/issues/635)), and the doc captures
+regenerate as one release step, in the order their traps require
+([#631](https://github.com/kbrdn1/gwm-cli/issues/631)).
 
-One item of that line is **blocked upstream** rather than pending here: running
-a `mux_pane` macro inside a herdr pane
+The second lot is an audit of the guards themselves. It started from the perf
+guards being off, a dead bench and no job to run it
+([#634](https://github.com/kbrdn1/gwm-cli/issues/634)), and turned into a
+question the suite had never asked: can CI go green without the code being
+right? It could, in ways no test noticed. Three jobs could be switched off at
+the job level while the guards read the step
+([#646](https://github.com/kbrdn1/gwm-cli/issues/646)); a `run:` line could be
+made unable to fail, and CI silenced above the job by `matrix.exclude` and by
+the `on:` block ([#652](https://github.com/kbrdn1/gwm-cli/issues/652),
+[#653](https://github.com/kbrdn1/gwm-cli/issues/653)); and `fmt` and `clippy`,
+two of the seven checks `main` requires, had no guard at all
+([#655](https://github.com/kbrdn1/gwm-cli/issues/655)).
+[#656](https://github.com/kbrdn1/gwm-cli/issues/656) then drew the line where
+static guards stop: a test that reads the workflow file cannot see every way the
+workflow can be neutralised, so that ceiling is accepted and documented rather
+than chased one vector at a time.
+
+**What is queued next** is what that audit left open, all in the same family:
+the `cargo test --doc` step runs zero doctests, so nothing can make it fail
+([#659](https://github.com/kbrdn1/gwm-cli/issues/659)); two release publication
+guards pass by subsumption, a prefix and a branch
+([#647](https://github.com/kbrdn1/gwm-cli/issues/647)); the flake version guard
+is satisfied by the MSRV read, so #393 can come back
+([#648](https://github.com/kbrdn1/gwm-cli/issues/648)); and the non-vacuity
+floors have gone slack ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).
+Beyond them: forms compressing their spacing before they scroll
+([#559](https://github.com/kbrdn1/gwm-cli/issues/559)), the remaining relays
+([#525](https://github.com/kbrdn1/gwm-cli/issues/525)), the half of the ratatui
+maintainer's feedback that is not TUI code
+([#544](https://github.com/kbrdn1/gwm-cli/issues/544), the docs site's contrast,
+which lives in `kbrdn1/kbrdn-docs`), and the distribution channels still open
+under [#383](https://github.com/kbrdn1/gwm-cli/issues/383).
+
+One item of the v1.10.0 multiplexer line is **blocked upstream** rather than
+pending here: running a `mux_pane` macro inside a herdr pane
 ([#599](https://github.com/kbrdn1/gwm-cli/issues/599)) needs a way to open a
 pane that runs a command, and herdr 0.8.2 has none. `pane split` takes only
 `--cwd` and `--env`, and `pane run` types into the pane's shell rather than
 executing, so it races the shell's startup (up to ~60s measured on a worktree
 with direnv and a nix flake). Filed with them as
 [herdrdev/herdr#3345](https://github.com/herdrdev/herdr/discussions/3345).
-
-**The design line queued next** came out of the same daily use, and is about
-density rather than capability: the Working Tree listing gaining a right-aligned
-status column and a collapsed leading path
-([#622](https://github.com/kbrdn1/gwm-cli/issues/622)), the Settings panel
-gaining a value column, named sections and tab glyphs
-([#623](https://github.com/kbrdn1/gwm-cli/issues/623)), and the mouse. That last
-one is a defect wearing a feature's clothes: gwm enables mouse capture in three
-places and reads no mouse event anywhere, so the terminal's own text selection
-is already sacrificed for nothing. #624 reads the events and puts the two
-digit-only panels (Command Logs, Settings) in the header where they can be seen
-and clicked ([#624](https://github.com/kbrdn1/gwm-cli/issues/624)).
 
 Translating the docs into
 German, Spanish and Japanese ([#522](https://github.com/kbrdn1/gwm-cli/issues/522))
@@ -623,28 +626,28 @@ naming before it is scheduled against a date.
 The traffic that took the repository from 30 to 122 stars came through the
 ratatui circle, and its maintainer sent back a design read: captures too wide,
 too much empty space, borders everywhere, weak contrast on the site. #544 tracks
-acting on it. The work below is **on `dev`, not in a published version**: it
-lands in the next minor.
+acting on it. The work below shipped in **v1.8.0**, except #551, which followed
+in v1.10.0.
 
-Shipped there so far:
+What shipped:
 
 - [#545](https://github.com/kbrdn1/gwm-cli/issues/545) ✅ + [#549](https://github.com/kbrdn1/gwm-cli/issues/549) ✅: **compact is the default layout**. A section is delimited by a filled one-line header instead of four rules, which buys back two rows and two columns per section; modal titles moved into the top rule, two more rows per overlay. `[tui] layout = "bordered"` restores the pre-1.8 boxes, deliberately untouched by the compact refinements so it stays a faithful restore. `[tui] dim_unfocused` arrived with it.
 - [#550](https://github.com/kbrdn1/gwm-cli/issues/550) ✅: **one width policy for every modal**. Four different rules, two of which made a modal *narrower* as the terminal widened past 80 columns, collapse into a single `modal_width(term_width, pct, min, max)`. The floor also makes 80 columns, the width the docs advertise, a size these surfaces were actually sized for: the confirm modal was 49 columns wide there, with its hint row cut mid-word.
 - [#547](https://github.com/kbrdn1/gwm-cli/issues/547) ✅: **the Status block folds onto one line**, under `[tui] status_one_line` (default on). Four labelled rows for four values of a handful of characters each was the largest waste left in the sidebar once #545 cut the chrome. A knob rather than a compact-mode behaviour, so `bordered` folds too.
 - [#548](https://github.com/kbrdn1/gwm-cli/issues/548) ✅: the cursor-position read that failed on return from a fullscreen overlay.
 
-Still open, all found by the same pass and all cheap:
+Found by the same pass, all cheap, and all shipped since:
 
-- [#553](https://github.com/kbrdn1/gwm-cli/issues/553): the two form modals drop a field below 18 rows. The horizontal policy landed with #550; the vertical one did not, so a short terminal silently hides an input rather than scrolling it.
-- [#554](https://github.com/kbrdn1/gwm-cli/issues/554): `ellipsize_middle` counts characters where the terminal counts cells, so a CJK or emoji title overflows the box it was measured into.
-- [#551](https://github.com/kbrdn1/gwm-cli/issues/551): polish pass on the rich PR / Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)), queued behind the density line rather than reopening it.
-- [#544](https://github.com/kbrdn1/gwm-cli/issues/544) itself stays open for what is not TUI code: capture width and the site's contrast.
+- [#553](https://github.com/kbrdn1/gwm-cli/issues/553) ✅: the two form modals drop a field below 18 rows. The horizontal policy landed with #550; the vertical one did not, so a short terminal silently hides an input rather than scrolling it.
+- [#554](https://github.com/kbrdn1/gwm-cli/issues/554) ✅: `ellipsize_middle` counts characters where the terminal counts cells, so a CJK or emoji title overflows the box it was measured into.
+- [#551](https://github.com/kbrdn1/gwm-cli/issues/551) ✅ (v1.10.0): polish pass on the rich PR / Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420)), queued behind the density line rather than reopening it.
+- [#544](https://github.com/kbrdn1/gwm-cli/issues/544) itself stays open for what is not TUI code: the site's contrast, in `kbrdn1/kbrdn-docs`.
 
-⚠️ The doc captures still show the pre-fold sidebar. Every screenshot under
-`docs/**/_assets/` is generated from a committed tape by
-`docs/_capture/generate.sh`, which drives the **installed** `gwm`, so the set
-regenerates in one pass on the maintainer's machine and has to be redone before
-the cut, not per-PR.
+The doc captures that still showed the pre-fold sidebar were regenerated for
+v1.9.0 ([#575](https://github.com/kbrdn1/gwm-cli/issues/575)), at 2x since
+v1.10.0 ([#581](https://github.com/kbrdn1/gwm-cli/issues/581)), and their
+regeneration is now a release step rather than a chore remembered before the cut
+([#631](https://github.com/kbrdn1/gwm-cli/issues/631), on `dev`).
 
 ### Deferred
 
