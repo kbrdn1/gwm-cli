@@ -82,7 +82,7 @@ fn release_workflow_builds_both_linux_packages() {
 /// `dist/*.deb.sha256`, so the checksum line satisfied the package assertion
 /// on its own, and the globs also sit in the `upload-artifact` step of the
 /// build job, which publishes nothing. Deleting the `.deb` and `.rpm` lines
-/// from the release left 50 tests green across four binaries.
+/// from `release.yml` left this suite and `release_workflow_tests` green.
 ///
 /// Now the globs are compared as whole tokens of the one `gh release upload`
 /// command in the `publish release` step. `release_workflow_tests` pins that
