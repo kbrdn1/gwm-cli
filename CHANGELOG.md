@@ -118,8 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The release publish guards were satisfied by something other than what
-  they named** ([#647](https://github.com/kbrdn1/gwm-cli/issues/647)). Three
-  of them, on the path that publishes a release.
+  they named** ([#647](https://github.com/kbrdn1/gwm-cli/issues/647)). Two
+  guards on the path that publishes a release, and a third surface of it
+  with no guard at all.
 
   The stable publish step holds two exclusive branches, `gh release edit`
   for a recovery rerun and `gh release create` for a fresh tag, and
@@ -132,9 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `contains("dist/*.deb")` over the whole file, which `dist/*.deb.sha256`
   satisfies on its own, as does the build job's `upload-artifact` step,
   which publishes nothing. With the `.deb` and `.rpm` lines removed from
-  `release.yml`, both suites that read it stayed green. And `pre-release.yml`'s
-  `body_path`, which is what keeps an rc's notes on
-  `changelogs/pre-releases/<version>.md`, had no test at all.
+  `release.yml`, `release_workflow_tests` and `linux_packaging_metadata_tests`
+  stayed green. And `pre-release.yml`'s `body_path`, which is what keeps an
+  rc's notes on `changelogs/pre-releases/<version>.md`, had no test at all.
 
   The steps are now read from the parsed workflow and pinned by value: the
   stable script line for line (continuations joined, whitespace collapsed),
@@ -145,8 +146,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there, and softprops takes `generate_release_notes`, `append_body` and
   `body`, any of which changes the notes without touching `body_path`. The
   Linux check compares whole tokens of the one `gh release upload` command.
-  Seven mutations, each applied alone, all fail the guard they aim at. Four
-  of them, replayed against the previous guards, left those green.
+
+  Review found the fix pinning a reference and not its target. `--notes-file`
+  and `body_path` both read `steps.changelog.outputs.path`, and
+  `CHANGELOG_PATH="CHANGELOG.md"` in the step that computes it left every
+  test green: the v0.6.0 incident again, with every pinned key intact. The
+  `resolve changelog path` step of both workflows is pinned the same way, and
+  so are the jobs, since GitHub applies `if:` and `continue-on-error:` at the
+  job level and the job wins (#646): `continue-on-error: true` on the
+  release job turned a failed publish into a green run. The publish job and
+  the build job it waits on must carry exactly the stable-tags condition, or
+  none on the pre-release side, and no `continue-on-error:`. Fifteen
+  mutations, each applied alone: all fifteen leave the previous guards green
+  and fail the one they aim at.
 
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
