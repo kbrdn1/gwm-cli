@@ -172,15 +172,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found refused along the way.
 
   It is a text guard: it checks those bindings, and nothing traces which one
-  the derivation actually receives. An `inherit` does not count, whether it
-  hands the derivation its version (`inherit (pin) version;`) or rebinds the
-  read's name (`inherit (pins) cargoToml;`), nor does a dynamic name
-  (`${"version"} = …`) or a `pin.version = …` merged into the derivation's
-  arguments (`pin // { … }`); each can pin the version with the guard green
-  ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). Four review passes
-  each found a new such form, which is the sign that text does not bound
-  Nix: `nix eval .#gwm.version` against `Cargo.toml` is the oracle, and no
-  CI runner has nix.
+  the derivation actually receives. A dynamic name (`${"version"} = …`) or a
+  `pin.version = …` merged into the derivation's arguments (`pin // { … }`)
+  can pin the version with the guard green. Four review passes each found a
+  new such form, which is the sign that text does not bound Nix, and the
+  reason CI now asks nix itself (#672, below).
+
+- **Nothing asked nix which version the flake builds**
+  ([#672](https://github.com/kbrdn1/gwm-cli/issues/672)). The guard above
+  reads bindings by name, and an `inherit`, a dynamic attribute name or a
+  set merged into the derivation's arguments could still hand the package a
+  pinned version with it green. A new `ci.yml` job, `flake version (nix
+  eval)`, installs nix and compares the `name` and `version` of
+  `packages.x86_64-linux.gwm` with the `package.version` of `Cargo.toml`,
+  both read by nix. Five mutations of `flake.nix`, each applied alone to a
+  copy and run through the job's own script: `inherit (pin) version;` with
+  `pin` from `builtins.fromJSON`, `inherit (pins) cargoToml;`,
+  `${"version"} = "0.3.0-rc.3";`, `buildRustPackage (pin // { … })`, and a
+  `name = "gwm-0.3.0-rc.3";` next to `pname`. Against `1.10.0` in
+  `Cargo.toml`, nix reports the package as `gwm-0.3.0-rc.3` for all five,
+  its `version` still `1.10.0` for the last one alone, and the job fails
+  all five; the text guard catches the first two.
+
+  The text guard now reads `inherit (src) a;` as the `a = src.a;` it is
+  sugar for, so both `inherit` forms fail it, and
+  `inherit (cargoToml.package) version;` with no `version =` binding, the
+  idiomatic spelling it used to refuse, passes. It stays because it runs
+  wherever `cargo test` does, nix or not. The job evaluates the package
+  only, not the dev shell, and for `x86_64-linux` only. It is not a
+  required check on `main` until the branch protection lists it.
 
 - **Two workflow guards skipped a key the YAML parser reads as a boolean**
   ([#673](https://github.com/kbrdn1/gwm-cli/issues/673)). serde_yaml_ng
