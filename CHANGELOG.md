@@ -143,9 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   By value rather than by flag, because a presence check loses to an
   addition: `gh` keeps the last value of a repeated flag, so
   `--draft=false --draft=true` publishes a draft with the substring still
-  there, and softprops takes `generate_release_notes`, `append_body` and
-  `body`, any of which changes the notes without touching `body_path`. The
-  Linux check compares whole tokens of the one `gh release upload` command.
+  there, and softprops takes `generate_release_notes` and `append_body`,
+  either of which changes the notes without touching `body_path`. The Linux
+  check compares whole tokens of the one `gh release upload` command, and
+  the continuation lines are joined the way bash reads them: an odd run of
+  trailing backslashes, tested before any trimming, since `dist/*.rpm \ `
+  with a trailing space ends the command there.
 
   Review found the fix pinning a reference and not its target. `--notes-file`
   and `body_path` both read `steps.changelog.outputs.path`, and
@@ -156,9 +159,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   job level and the job wins (#646): `continue-on-error: true` on the
   release job turned a failed publish into a green run. The publish job and
   the build job it waits on must carry exactly the stable-tags condition, or
-  none on the pre-release side, and no `continue-on-error:`. Fifteen
-  mutations, each applied alone: all fifteen leave the previous guards green
-  and fail the one they aim at.
+  none on the pre-release side, and no `continue-on-error:`. Seventeen
+  mutations, each applied alone: all seventeen leave the previous guards
+  green and fail the one they aim at.
 
 - **CI no longer keeps a doctest step that ran zero doctests**
   ([#659](https://github.com/kbrdn1/gwm-cli/issues/659)). The move to
