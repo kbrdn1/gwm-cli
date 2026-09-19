@@ -143,7 +143,9 @@ pub fn git_only_bin() -> &'static Path {
 /// `steps_allowed_an_if` carries the **value**, not a dispensation: a step
 /// listed here still has to match the condition it was allowed, so widening
 /// `matrix.os == 'ubuntu-latest'` into `false` is caught here and not left to
-/// whichever other test happens to pin that step today.
+/// whichever other test happens to pin that step. No caller passes a waiver
+/// since #659 removed the doctest step, the one step that held one; the
+/// mechanism stays for the next condition that is legitimate.
 ///
 /// The `if:` comparisons go through the `Value`, never `as_str()`: `if: false`
 /// is a YAML boolean, so `as_str()` hands back `None` for it exactly as it
