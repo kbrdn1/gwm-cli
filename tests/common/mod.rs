@@ -532,3 +532,64 @@ pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
     .or_else(|| step["run"].as_str())
     .unwrap_or("<unnamed step>")
 }
+
+/// One step of a workflow, found by its `name:` in the named job (issue #647).
+///
+/// The publish guards used to slice the file text between two literal markers,
+/// or run `contains` over the whole file. The second matched the intermediate
+/// `upload-artifact` step as readily as the step that publishes, since both
+/// list `dist/*.deb`. Parsing the YAML reads the one step the guard is about,
+/// and exactly one step must answer to the name, or the guard would read
+/// whichever came first.
+#[allow(dead_code)] // used by the suites that pin a release workflow step.
+pub fn workflow_step(path: &str, job: &str, name: &str) -> serde_yaml_ng::Value {
+  let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  let mut hits: Vec<serde_yaml_ng::Value> = workflow["jobs"][job]["steps"]
+    .as_sequence()
+    .cloned()
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|s| s["name"].as_str() == Some(name))
+    .collect();
+  assert_eq!(
+    hits.len(),
+    1,
+    "{path} job `{job}` must hold exactly one step named {name:?}, found {}",
+    hits.len()
+  );
+  hits.remove(0)
+}
+
+/// The logical lines of a `run:` script, for comparing it by value: a line
+/// ending in `\` is joined with the next, runs of whitespace collapse to one
+/// space, blank lines are dropped. That is all the normalisation there is, so
+/// reflowing a command across lines stays green and any change to what it
+/// says does not.
+#[allow(dead_code)] // used by the suites that pin a release workflow step.
+pub fn logical_lines(script: &str) -> Vec<String> {
+  let mut lines = Vec::new();
+  let mut pending = String::new();
+  for raw in script.lines() {
+    let raw = raw.trim_end();
+    let (body, continued) = match raw.strip_suffix('\\') {
+      Some(body) => (body, true),
+      None => (raw, false),
+    };
+    pending.push(' ');
+    pending.push_str(body);
+    if !continued {
+      let line = pending.split_whitespace().collect::<Vec<_>>().join(" ");
+      if !line.is_empty() {
+        lines.push(line);
+      }
+      pending.clear();
+    }
+  }
+  let tail = pending.split_whitespace().collect::<Vec<_>>().join(" ");
+  if !tail.is_empty() {
+    lines.push(tail);
+  }
+  lines
+}

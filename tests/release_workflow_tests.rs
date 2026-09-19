@@ -3,7 +3,7 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os, step_label};
+use common::{assert_job_is_blocking, effective_matrix_os, logical_lines, step_label, workflow_step};
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -21,34 +21,80 @@ fn stable_release_workflow_skips_prerelease_tags() {
   }
 }
 
+/// The stable publish step, line for line. `edit` runs when the release
+/// already exists (a recovery rerun), `create` on a fresh tag, which is to say
+/// on the actual release; `upload` attaches every artifact the build produced.
+const PUBLISH_RELEASE_SCRIPT: &[&str] = &[
+  "set -euo pipefail",
+  "if gh release view \"$TAG\" --repo \"$GITHUB_REPOSITORY\" >/dev/null 2>&1; then",
+  "gh release edit \"$TAG\" --repo \"$GITHUB_REPOSITORY\" --title \"$TAG\" --notes-file \"${{ steps.changelog.outputs.path }}\" --draft=false --prerelease=false",
+  "else",
+  "gh release create \"$TAG\" --repo \"$GITHUB_REPOSITORY\" --title \"$TAG\" --notes-file \"${{ steps.changelog.outputs.path }}\" --verify-tag --draft=false --prerelease=false",
+  "fi",
+  "gh release upload \"$TAG\" --repo \"$GITHUB_REPOSITORY\" --clobber dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.zip dist/*.zip.sha256 dist/*.deb dist/*.deb.sha256 dist/*.rpm dist/*.rpm.sha256",
+];
+
+/// Issue #647. The stable publish step is pinned **by value**, script and
+/// environment, because every substring check it had was satisfied by
+/// something other than what it named.
+///
+/// `--notes-file` was asserted once over a script holding two exclusive
+/// branches, so dropping it from `create`, the branch a real release takes,
+/// left the test green and would have published `gh`'s generated notes in
+/// place of `changelogs/<version>.md`: the v0.6.0 incident this test exists
+/// to prevent. `--verify-tag`, `--draft=false`, `--prerelease=false` and the
+/// `.tar.gz` / `.zip` uploads were asserted by nothing. And a flag check reads
+/// presence, which an addition defeats: `gh` keeps the last value of a
+/// repeated flag (measured on gh 2.100.0, `--limit 5 --limit 1` lists one
+/// release), so `--draft=false --draft=true` publishes a draft with the
+/// substring still there. #655 hit the same shape on `cargo clippy`.
+///
+/// Comparing the logical lines closes all three without listing them, and a
+/// failure prints the line that moved. Reflowing a command across lines stays
+/// green. Changing what it says is a change to the release, and belongs in
+/// the same diff as this constant.
 #[test]
 fn stable_release_publish_uses_github_cli_with_workflow_token() {
   let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
-  let publish_step = workflow
-    .split("      - name: publish release")
-    .nth(1)
-    .and_then(|tail| tail.split("\n  homebrew-tap-update:").next())
-    .expect("release.yml must contain a publish release step before homebrew-tap-update");
-
   assert!(
     !workflow.contains("uses: softprops/action-gh-release"),
     "release.yml must not use softprops/action-gh-release for the stable GitHub Release publish step"
   );
+
+  let step = workflow_step(".github/workflows/release.yml", "release", "publish release");
+  // By value: `if: false` is a YAML boolean, and a presence check reads an
+  // absent key and `continue-on-error: false` alike.
   assert!(
-    publish_step.contains("GH_TOKEN: ${{ github.token }}"),
-    "release.yml must pass the workflow token to gh via GH_TOKEN in the publish release step"
+    step["if"].is_null() && step["continue-on-error"].is_null(),
+    "the publish release step must run and be able to fail the job, got `if: {:?}` and \
+     `continue-on-error: {:?}`",
+    step["if"],
+    step["continue-on-error"]
   );
-  assert!(
-    publish_step.contains("gh release create \"$TAG\""),
-    "release.yml must create the stable GitHub Release with gh release create"
+  assert_eq!(
+    step["shell"].as_str(),
+    Some("bash"),
+    "the publish release step must run under bash: `shell:` also takes a whole command line, and \
+     `true {{0}}` never runs the script"
   );
-  assert!(
-    publish_step.contains("--notes-file \"${{ steps.changelog.outputs.path }}\""),
-    "stable release notes must still come from changelogs/<version>.md"
+  let env: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str("GH_TOKEN: ${{ github.token }}\nTAG: ${{ github.ref_name }}").unwrap();
+  assert_eq!(
+    step["env"], env,
+    "the publish release step must authenticate `gh` with the workflow token and publish the tag \
+     that triggered the run, and nothing else in its environment"
   );
-  assert!(
-    publish_step.contains("gh release upload \"$TAG\"") && publish_step.contains("--clobber"),
-    "release.yml must upload artifacts with gh release upload --clobber so recovery reruns can replace assets"
+
+  let script = step["run"]
+    .as_str()
+    .expect("the publish release step must carry a `run:` script");
+  assert_eq!(
+    logical_lines(script),
+    PUBLISH_RELEASE_SCRIPT,
+    "release.yml's publish release script changed. It is pinned by value (issue #647): the notes \
+     must come from `changelogs/<version>.md` in BOTH the `create` and the `edit` branch, `create` \
+     must verify the tag and publish neither a draft nor a pre-release, and every artifact kind \
+     must be uploaded. If the change is intended, update `PUBLISH_RELEASE_SCRIPT` in the same diff"
   );
 }
 
@@ -132,7 +178,7 @@ fn workflow_paths() -> Vec<String> {
 
 /// #433, the follow-up to #429/#432: the sibling workflows carry the same
 /// shape, and none of their checkouts pushes — `ci.yml` is entirely read-only,
-/// `pre-release.yml` publishes through `gh` with an env token, never
+/// `pre-release.yml` publishes through `softprops/action-gh-release`, never
 /// `git push`, and `docs-sync.yml` only calls an API. No checkout outside
 /// release.yml has any business passing `token:`, so the rule is stricter
 /// there: every checkout opts out, no exceptions.
@@ -301,6 +347,52 @@ fn prerelease_workflow_does_not_match_stable_tags() {
   assert!(
     !workflow.contains("\n      - \"v*.*.*\""),
     "pre-release.yml must not trigger on stable tags"
+  );
+}
+
+/// Issue #647. `pre-release.yml` publishes through `softprops/action-gh-release`,
+/// and its `body_path`, the input that makes an rc's notes come from
+/// `changelogs/pre-releases/<version>.md`, was covered by no test at all: the
+/// guard against the v0.6.0-rc.1 incident (an rc published with the empty
+/// `CHANGELOG.md` index as its body) only ever looked at `release.yml`.
+///
+/// The whole `with:` mapping is pinned by value rather than `body_path` alone.
+/// The action takes inputs that change the body without touching that key,
+/// `generate_release_notes` and `append_body` among them, and an added key is
+/// exactly what a single-key check cannot see. The action is matched on its
+/// name and not its version, because dependabot bumps the version.
+#[test]
+fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
+  let step = workflow_step(".github/workflows/pre-release.yml", "release", "publish pre-release");
+  assert!(
+    step["uses"]
+      .as_str()
+      .is_some_and(|u| u.starts_with("softprops/action-gh-release@")),
+    "the publish pre-release step must use softprops/action-gh-release, got `uses: {:?}`",
+    step["uses"]
+  );
+  assert!(
+    step["if"].is_null() && step["continue-on-error"].is_null(),
+    "the publish pre-release step must run and be able to fail the job, got `if: {:?}` and \
+     `continue-on-error: {:?}`",
+    step["if"],
+    step["continue-on-error"]
+  );
+  let with: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+    "tag_name: ${{ steps.tag.outputs.name }}\n\
+     name: ${{ steps.tag.outputs.name }}\n\
+     body_path: ${{ steps.changelog.outputs.path }}\n\
+     files: |\n  dist/*.tar.gz\n  dist/*.tar.gz.sha256\n  dist/*.zip\n  dist/*.zip.sha256\n\
+     draft: false\n\
+     prerelease: true\n",
+  )
+  .unwrap();
+  assert_eq!(
+    step["with"], with,
+    "pre-release.yml's publish inputs changed. They are pinned by value (issue #647): the body must \
+     come from `changelogs/pre-releases/<version>.md` through `body_path`, with no input that \
+     generates or appends notes, and the release must be a published pre-release. If the change \
+     is intended, update this test in the same diff"
   );
 }
 
