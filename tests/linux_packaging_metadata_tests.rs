@@ -84,30 +84,26 @@ fn release_workflow_builds_both_linux_packages() {
 /// build job, which publishes nothing. Deleting the `.deb` and `.rpm` lines
 /// from `release.yml` left this suite and `release_workflow_tests` green.
 ///
-/// Now the globs are compared as whole tokens of the one `gh release upload`
-/// command in the `publish release` step. `release_workflow_tests` pins that
-/// command by value; this keeps the Linux packages named where their build is
-/// guarded, so losing them fails here too, with a message that says which.
+/// Now each glob must be a whole line of the `publish release` script, read
+/// from the parsed step, as a continued argument (`dist/*.deb \`) or the last
+/// one. Only the indentation is dropped, so `dist/*.deb.sha256` is not
+/// `dist/*.deb` and `dist/*.rpm \ ` with a trailing space, which ends the
+/// command in bash, is not `dist/*.rpm \`. `release_workflow_tests` pins the
+/// whole script as written, which is what closes it; this keeps the Linux
+/// packages named where their build is guarded, so losing them fails here
+/// too, with a message that says which.
 #[test]
 fn release_workflow_publishes_both_linux_packages() {
-  let step = common::workflow_step(".github/workflows/release.yml", "release", "publish release");
+  let (_, step) = common::workflow_step(".github/workflows/release.yml", "release", "publish release");
   let script = step["run"]
     .as_str()
     .expect("the publish release step must carry a `run:` script");
-  let uploads: Vec<String> = common::logical_lines(script)
-    .into_iter()
-    .filter(|l| l.starts_with("gh release upload "))
-    .collect();
-  assert_eq!(
-    uploads.len(),
-    1,
-    "the publish release step must hold exactly one `gh release upload`, got {uploads:?}"
-  );
-  let tokens: Vec<&str> = uploads[0].split_whitespace().collect();
+  let lines: Vec<&str> = script.lines().map(str::trim_start).collect();
   for glob in ["dist/*.deb", "dist/*.deb.sha256", "dist/*.rpm", "dist/*.rpm.sha256"] {
+    let continued = format!("{glob} \\");
     assert!(
-      tokens.contains(&glob),
-      "the release upload must publish {glob} as its own argument, got {tokens:?}"
+      lines.iter().any(|l| *l == glob || *l == continued),
+      "the release upload must publish {glob} on a line of its own, got {lines:?}"
     );
   }
 }

@@ -533,25 +533,29 @@ pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
     .unwrap_or("<unnamed step>")
 }
 
-/// One step of a workflow, found by its `name:` in the named job (issue #647).
+/// One step of a workflow, found by its `name:` in the named job, with its
+/// position among the job's steps (issue #647).
 ///
 /// The publish guards used to slice the file text between two literal markers,
 /// or run `contains` over the whole file. The second matched the intermediate
 /// `upload-artifact` step as readily as the step that publishes, since both
 /// list `dist/*.deb`. Parsing the YAML reads the one step the guard is about,
 /// and exactly one step must answer to the name, or the guard would read
-/// whichever came first.
+/// whichever came first. The position is returned because a step's output is
+/// only set for the steps after it: a step read by name and pinned by value
+/// can still be moved below its reader.
 #[allow(dead_code)] // used by the suites that pin a release workflow step.
-pub fn workflow_step(path: &str, job: &str, name: &str) -> serde_yaml_ng::Value {
+pub fn workflow_step(path: &str, job: &str, name: &str) -> (usize, serde_yaml_ng::Value) {
   let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
   let workflow: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
-  let mut hits: Vec<serde_yaml_ng::Value> = workflow["jobs"][job]["steps"]
+  let mut hits: Vec<(usize, serde_yaml_ng::Value)> = workflow["jobs"][job]["steps"]
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .into_iter()
-    .filter(|s| s["name"].as_str() == Some(name))
+    .enumerate()
+    .filter(|(_, s)| s["name"].as_str() == Some(name))
     .collect();
   assert_eq!(
     hits.len(),
@@ -560,50 +564,4 @@ pub fn workflow_step(path: &str, job: &str, name: &str) -> serde_yaml_ng::Value 
     hits.len()
   );
   hits.remove(0)
-}
-
-/// The logical lines of a `run:` script, for comparing it by value: physical
-/// lines joined across a continuation, each piece trimmed, blank lines
-/// dropped. That is all the normalisation there is, so reflowing a command
-/// across lines or re-indenting it stays green, and any change to what it
-/// says does not. Whitespace inside a line is kept as written, since inside
-/// quotes it is part of the value.
-///
-/// A line continues only when it ends in an odd run of backslashes, tested
-/// before anything is trimmed, which is how bash reads it: `\\` is an escaped
-/// backslash, and `\ ` escapes the space and ends the command. Trimming first
-/// read `dist/*.rpm \ ` as a continuation, so a script that bash splits into
-/// two commands, one of them uploading nothing, compared equal to the pin.
-#[allow(dead_code)] // used by the suites that pin a release workflow step.
-pub fn logical_lines(script: &str) -> Vec<String> {
-  let mut lines = Vec::new();
-  let mut pending: Vec<&str> = Vec::new();
-  for raw in script.lines() {
-    let backslashes = raw.len() - raw.trim_end_matches('\\').len();
-    let continued = backslashes % 2 == 1;
-    let body = if continued { &raw[..raw.len() - 1] } else { raw };
-    pending.push(body.trim());
-    if !continued {
-      let line = pending
-        .iter()
-        .filter(|p| !p.is_empty())
-        .copied()
-        .collect::<Vec<_>>()
-        .join(" ");
-      if !line.is_empty() {
-        lines.push(line);
-      }
-      pending.clear();
-    }
-  }
-  let tail = pending
-    .iter()
-    .filter(|p| !p.is_empty())
-    .copied()
-    .collect::<Vec<_>>()
-    .join(" ");
-  if !tail.is_empty() {
-    lines.push(tail);
-  }
-  lines
 }
