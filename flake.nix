@@ -26,7 +26,15 @@
       # nothing noticed because no CI job evaluates the dev shell.
       msrv = cargoToml.package.rust-version;
     in
-    flake-utils.lib.eachDefaultSystem (system:
+    # The systems are named rather than taken from `eachDefaultSystem`, whose
+    # list includes x86_64-darwin: nixpkgs 26.11 dropped that platform and
+    # throws on import, so the flake advertised a `packages.x86_64-darwin.gwm`
+    # that could not even be evaluated, and an Intel Mac running `nix profile
+    # install github:kbrdn1/gwm-cli` got nixpkgs' refusal in place of gwm
+    # (#675). Intel macOS keeps the prebuilt archive, `cargo install` and
+    # `cargo binstall`; serving it from here again means pinning a nixpkgs that
+    # still supports it, which 26.05 is the last release to do.
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ] (system:
       let
         pkgs = import nixpkgs { inherit system; };
 

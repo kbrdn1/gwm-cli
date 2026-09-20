@@ -1607,14 +1607,28 @@ steps:
 
 /// Both versions are read by nix: `Cargo.toml`'s through `builtins.fromTOML`,
 /// `--impure` because it is the checkout's file and not the store's, and the
-/// package's by evaluating it. `name` is compared too, since a `name =` next
+/// packages' by evaluating them. `name` is compared too, since a `name =` next
 /// to `pname` changes what `nix profile list` shows without touching
 /// `version`.
+///
+/// Every system `packages` exposes is evaluated, not one (#675): evaluation is
+/// system-independent, so a runner can read them all, and a system the pinned
+/// nixpkgs no longer serves fails the `nix eval` outright rather than waiting
+/// for a user on that platform to find out.
+///
+/// The key set is compared by value, which is what `all` cannot say: `all`
+/// over the systems that remain is green on the systems that left, so a
+/// shortened `eachSystem` list passes it with every version correct
+/// (measured). `flake_tests.rs` pins the list too, but as text, so it stays
+/// green on a list shortened while the names live on in a binding or a
+/// comment; here the set comes out of the evaluation itself. An emptied
+/// `packages` does not reach jq at all, the eval failing on the missing
+/// attribute.
 const FLAKE_VERSION_CHECK: &str = r#"want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
-got=$(nix eval --raw .#packages.x86_64-linux.gwm --apply 'p: "${p.name} ${p.version}"')
+got=$(nix eval --json .#packages --apply 'builtins.mapAttrs (_: ps: "${ps.gwm.name} ${ps.gwm.version}")')
 echo "Cargo.toml: $want, flake: $got"
-if [ "$got" != "gwm-$want $want" ]; then
-  echo "::error file=flake.nix::the flake builds \"$got\" while Cargo.toml is at $want (#393, #672)"
+if ! printf '%s' "$got" | jq -e --arg v "$want" '(keys == ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]) and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
+  echo "::error file=flake.nix::the flake builds $got while Cargo.toml is at $want (#393, #672, #675)"
   exit 1
 fi
 "#;
