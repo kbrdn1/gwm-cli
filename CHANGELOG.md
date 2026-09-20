@@ -33,16 +33,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `persist-credentials: false` keeps out of the git config (#433).
 
   `ci.yml` now grants `contents: read` at workflow level, which is all any of
-  its jobs does anything with: no step of the file mentions `GITHUB_TOKEN`,
-  `GH_TOKEN`, `github.token` or `secrets.`. A test pins that grant by value
+  its jobs does anything with: no step of the file names a token of its own.
+  Some hold the default one regardless, `actions/checkout` through its `token:`
+  default and the nix action through its fallback, and scoping that default is
+  what the grant is for. A test pins that grant by value
   and refuses a job that restates a different one, since a job-level
   `permissions:` replaces the workflow's wholesale rather than narrowing it.
   A second, deliberately weaker sweep asks every workflow in the directory to
-  declare something, `{}` included, so a workflow added later cannot arrive
-  silent the way this one did. Eight mutations, each applied alone: the grant
-  removed, turned to `write`, given a second scope, restated wider on a job,
-  emptied on a job, `jobs: {}`, a new workflow with no `permissions:`, and one
-  workflow file short of the floor.
+  declare something, `{}` included, at the workflow level or on every one of
+  its jobs, so a workflow added later cannot arrive silent the way this one
+  did. Eight mutations, each applied alone: the grant removed, turned to
+  `write`, given a second scope, restated wider on a job, emptied on a job,
+  `jobs: {}`, a new workflow with no `permissions:`, and one workflow file
+  short of the floor.
+
+  The grant holds only while the file stays token-free, so that premise is
+  asserted rather than written down: the whole parsed workflow is refused the
+  words `token` and `secret`, in any casing. Review walked the first version of
+  that search, three keys inside `steps:`, and found `run:` the only one any
+  real input exercised, a `with:` dropped from the list staying green, and
+  every job-level surface unread, `container:`, `services:` and a reusable
+  call's `secrets: inherit` among them. Refusing the words rather than their
+  spellings closes `github['token']` and `toJSON(secrets)` too, which are the
+  next two forms and not the last. Nine synthetic shapes are asserted to be
+  seen, since `ci.yml` carries none of them, and six mutations of the real file
+  each name the word they added.
 
   The token on disk is not what `permissions:` removes, only what it scopes:
   the action writes it either way. Not giving the action a token at all is the

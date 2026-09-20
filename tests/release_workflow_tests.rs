@@ -668,11 +668,16 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
 /// line 93). The same reasoning closed #669 one workflow over.
 ///
 /// Read, so nothing in `ci.yml` needs more: every job does the same two
-/// things, check out and build, and no step of it reads a token. That second
-/// half is asserted rather than asserted *about*: a step reaching for
-/// `GITHUB_TOKEN` is the one edit that would make `contents: read` the wrong
-/// grant, and a premise left in prose falsifies before the guard does, which
-/// this repo has recorded once already (#648).
+/// things, check out and build, and the file names no token of its own. Not
+/// that no step holds one, which would be false: `actions/checkout` defaults
+/// `token:` to `${{ github.token }}` and the nix action falls back to
+/// `GITHUB_TOKEN`, and scoping exactly that default is what the grant is for.
+/// What the file naming one would mean is a step doing something with it, the
+/// one edit that makes `contents: read` the wrong grant, so that is asserted
+/// rather than asserted *about*: a premise left in prose falsifies before the
+/// guard does, which this repo has recorded once already (#648). The search
+/// reads the whole parsed workflow, and proves on synthetic shapes that it
+/// sees the surfaces `ci.yml` does not carry today.
 ///
 /// Job level is read as well as workflow level, because a job-level
 /// `permissions:` replaces the workflow's wholesale rather than narrowing it.
@@ -720,44 +725,95 @@ fn ci_workflow_grants_a_read_only_token() {
     jobs.len()
   );
 
-  // The premise of the grant, enforced: `contents: read` is enough only while
-  // nothing here reads a token. Every place a token can reach a step is
-  // searched, the workflow's own `env:` included, on the YAML the parser hands
-  // over rather than the file's text, so the comment above the grant can name
-  // the spellings it forbids without matching itself.
-  let mut searched = 0;
-  let mut haystacks = vec![("workflow `env:`".to_string(), workflow["env"].clone())];
-  for job in &jobs {
-    let j = &workflow["jobs"][job.as_str()];
-    haystacks.push((format!("job `{job}` `env:`"), j["env"].clone()));
-    for step in j["steps"].as_sequence().cloned().unwrap_or_default() {
-      let label = step_label(&step).to_owned();
-      for key in ["run", "env", "with"] {
-        haystacks.push((format!("job `{job}` step {label:?} `{key}:`"), step[key].clone()));
-      }
-    }
-  }
-  for (where_, value) in haystacks {
-    if value.is_null() {
-      continue;
-    }
-    let text = serde_yaml_ng::to_string(&value).expect("a workflow value must serialise");
-    searched += 1;
-    for token in ["GITHUB_TOKEN", "GH_TOKEN", "github.token", "secrets."] {
-      assert!(
-        !text.contains(token),
-        "{path} {where_} reads `{token}`, so this workflow is no longer the token-free one \
-         `contents: read` was granted for (issue #677). Decide what scope that step needs and \
-         say it here, rather than leaving the grant to mean something it no longer does"
-      );
-    }
-  }
+  // The premise of the grant, enforced. The **whole** parsed workflow is
+  // searched, not a list of the keys a token was thought to arrive through:
+  // review measured the first version of this, three keys inside `steps:`, and
+  // found `run:` alone carrying it, a `with:` dropped from the list staying
+  // green, and every job-level surface unread, `container:`, `services:` and a
+  // reusable call's `secrets:` among them. Enumerating where a secret can be
+  // written is the shape #652 and #655 already paid for.
+  //
+  // And the words, not their spellings. `GITHUB_TOKEN`, `github.token`,
+  // `github['token']`, `secrets.PAT`, `secrets: inherit` and
+  // `toJSON(secrets)` are six ways to write two things, and Actions keeps
+  // adding syntax for them: a list of the forms thought of is the four review
+  // passes #672 spent learning that text does not bound a language. So the
+  // haystack is refused the words `token` and `secret` in any casing, which is
+  // a superset of every form. The cost is a legitimate step whose name happens
+  // to carry either word going red, and that cost is the point: it is a line a
+  // reader should look at twice.
+  //
+  // Comments are gone by the time the parser is done, so the comment above the
+  // grant in `ci.yml` can name what it forbids without matching itself.
+  let flagged = |value: &serde_yaml_ng::Value| -> Vec<&'static str> {
+    let text = serde_yaml_ng::to_string(value)
+      .expect("a workflow must serialise")
+      .to_lowercase();
+    ["token", "secret"].into_iter().filter(|w| text.contains(w)).collect()
+  };
   assert!(
-    searched >= 20,
-    "expected at least 20 `run:`/`env:`/`with:` blocks across ci.yml, found {searched}. The \
-     steps are probably no longer being read, and the token search above would then look at \
-     nothing"
+    flagged(&workflow).is_empty(),
+    "{path} reads {:?}, so it is no longer the token-free workflow `contents: read` was granted \
+     for (issue #677). Decide what scope that step needs and say it in `permissions:`, rather \
+     than leaving the grant to mean something it no longer does",
+    flagged(&workflow)
   );
+
+  // What the sweep above is searching, stated rather than assumed: a
+  // serialisation that stopped carrying the steps would hold no token either.
+  let serialised = serde_yaml_ng::to_string(&workflow).expect("ci.yml must serialise");
+  for inside in ["cargo fmt --all -- --check", "cargo nextest run", "install-nix-action"] {
+    assert!(
+      serialised.contains(inside),
+      "the searched serialisation of {path} does not contain `{inside}`, so it is not carrying \
+       the steps and the token search above is looking at a shell of the workflow"
+    );
+  }
+
+  // And that it sees each shape it exists for. These are synthetic, because
+  // `ci.yml` carries none of them: the guard is about what a later edit could
+  // add, so the proof cannot come from today's file.
+  for (shape, yaml) in [
+    (
+      "a step's `env:`",
+      "jobs:\n  probe:\n    steps:\n      - env:\n          GH_TOKEN: x\n",
+    ),
+    (
+      "a step's `with:`",
+      "jobs:\n  probe:\n    steps:\n      - with:\n          token: ${{ github.token }}\n",
+    ),
+    (
+      "a step's `run:`",
+      "jobs:\n  probe:\n    steps:\n      - run: echo \"$GITHUB_TOKEN\"\n",
+    ),
+    (
+      "a job's `container.env`",
+      "jobs:\n  probe:\n    container:\n      image: x\n      env:\n        GITHUB_TOKEN: y\n",
+    ),
+    (
+      "a service's `credentials`",
+      "jobs:\n  probe:\n    services:\n      s:\n        credentials:\n          password: ${{ secrets.PAT }}\n",
+    ),
+    (
+      "a reusable call's `secrets: inherit`",
+      "jobs:\n  probe:\n    uses: ./.github/workflows/other.yml\n    secrets: inherit\n",
+    ),
+    ("the workflow's own `env:`", "env:\n  GH_TOKEN: x\njobs: {}\n"),
+    (
+      "an index expression",
+      "jobs:\n  probe:\n    steps:\n      - run: echo ${{ github['token'] }}\n",
+    ),
+    (
+      "a whole context serialised",
+      "jobs:\n  probe:\n    steps:\n      - run: echo ${{ toJSON(secrets) }}\n",
+    ),
+  ] {
+    let probe: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).expect("the probe must parse");
+    assert!(
+      !flagged(&probe).is_empty(),
+      "the token search no longer sees {shape}, so `ci.yml` could grow one with this test green"
+    );
+  }
 }
 
 /// Issue #677, the half a single file cannot state: a workflow added later
