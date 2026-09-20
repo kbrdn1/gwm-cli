@@ -267,6 +267,35 @@ jobs:
       - name: cargo audit
         run: cargo audit --deny warnings
 
+  flake:
+    name: flake version (nix eval)
+    runs-on: ubuntu-latest
+    # The flake's version drifted for eight releases (#393) and the text guard
+    # that followed, `flake_derives_its_version_from_cargo_toml`, reads
+    # bindings by name: an `inherit`, a dynamic attribute name or a set merged
+    # into the derivation's arguments can still hand it a pinned version, and
+    # four review passes of #648 each found a new such form (#672). So ask nix
+    # what the package is and compare it with what Cargo.toml says.
+    #
+    # Only the package is evaluated, not the dev shell: that one asserts the
+    # MSRV floor against nixpkgs' rustc, a different verdict. Evaluation only,
+    # nothing is built, so the cost is installing nix and fetching the pinned
+    # nixpkgs.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: the flake's package is Cargo.toml's version
+        run: |
+          want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
+          got=$(nix eval --raw .#packages.x86_64-linux.gwm --apply 'p: "${p.name} ${p.version}"')
+          echo "Cargo.toml: $want, flake: $got"
+          if [ "$got" != "gwm-$want $want" ]; then
+            echo "::error file=flake.nix::the flake builds \"$got\" while Cargo.toml is at $want (#393, #672)"
+            exit 1
+          fi
+
   doctor:
     name: gwm doctor (advisory)
     runs-on: ubuntu-latest
