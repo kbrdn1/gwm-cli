@@ -202,6 +202,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, not the dev shell, and for `x86_64-linux` only. It is not a
   required check on `main` until the branch protection lists it.
 
+- **The flake advertised a package for a platform its nixpkgs no longer has**
+  ([#675](https://github.com/kbrdn1/gwm-cli/issues/675)).
+  `flake-utils.lib.eachDefaultSystem` exposes `x86_64-darwin`, and the pinned
+  nixpkgs is 26.11, which dropped that platform and throws on import:
+  `nix eval .#packages.x86_64-darwin.gwm.name` answered `Nixpkgs 26.11 has
+  dropped support for x86_64-darwin`, so an Intel Mac running `nix profile
+  install github:kbrdn1/gwm-cli` got nixpkgs' refusal in place of gwm, while
+  the other three systems answered `gwm-1.10.0`. The flake now names the
+  systems it serves, `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
+  Intel macOS keeps the prebuilt archive, `cargo binstall` and `cargo
+  install`, which the install docs now say. Following `nixpkgs-26.05-darwin`
+  for that one system was the other option: it builds today, that branch
+  carrying rustc 1.95.0 against a declared MSRV of 1.95, and it expires with
+  the branch at the end of 2026, or at the first MSRV above 1.95.
+
+  The `flake` job now evaluates every system `packages` exposes rather than
+  `x86_64-linux` alone, which is what turns the next nixpkgs release dropping
+  a platform into a red pull request rather than a user's problem. Seven
+  variants of `flake.nix` measured through the job's own script: with
+  `eachDefaultSystem` restored it fails on nixpkgs' refusal, a version pinned
+  for one system alone fails naming that system, a system list without
+  `x86_64-linux` fails the floor with every version correct, an emptied
+  `packages` fails on the missing attribute, and the `name =` override of
+  #672 still fails. `flake_lists_the_systems_it_serves` pins the list,
+  because `eachDefaultSystem` is one word away and puts the platform back
+  without a word; each of its four assertions was measured against its own
+  mutation.
+
 - **Two workflow guards skipped a key the YAML parser reads as a boolean**
   ([#673](https://github.com/kbrdn1/gwm-cli/issues/673)). serde_yaml_ng
   reads `true:` and `false:` as booleans, where GitHub Actions reads the
