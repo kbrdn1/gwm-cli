@@ -662,14 +662,17 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
 /// `default_workflow_permissions` reads `read` today, which is a setting no
 /// pull request shows and one switch away from `write`. What that would hand a
 /// write token to is every build script and proc macro of the dependency
-/// graph, `cargo install cargo-audit`, four third-party actions, and
-/// `cachix/install-nix-action`, which copies the token into
+/// graph, `cargo install cargo-audit`, and five third-party actions, one of
+/// which, `cachix/install-nix-action`, copies the token into
 /// `/etc/nix/nix.conf` (`install-nix.sh` at `v31`, lines 50-52, installed at
 /// line 93). The same reasoning closed #669 one workflow over.
 ///
-/// Read, so nothing in `ci.yml` needs more: no step of it mentions
-/// `GITHUB_TOKEN`, `GH_TOKEN`, `github.token` or `secrets.`, and every job
-/// does the same two things, check out and build.
+/// Read, so nothing in `ci.yml` needs more: every job does the same two
+/// things, check out and build, and no step of it reads a token. That second
+/// half is asserted rather than asserted *about*: a step reaching for
+/// `GITHUB_TOKEN` is the one edit that would make `contents: read` the wrong
+/// grant, and a premise left in prose falsifies before the guard does, which
+/// this repo has recorded once already (#648).
 ///
 /// Job level is read as well as workflow level, because a job-level
 /// `permissions:` replaces the workflow's wholesale rather than narrowing it.
@@ -716,6 +719,45 @@ fn ci_workflow_grants_a_read_only_token() {
      being read, and the loop above would then pass over nothing",
     jobs.len()
   );
+
+  // The premise of the grant, enforced: `contents: read` is enough only while
+  // nothing here reads a token. Every place a token can reach a step is
+  // searched, the workflow's own `env:` included, on the YAML the parser hands
+  // over rather than the file's text, so the comment above the grant can name
+  // the spellings it forbids without matching itself.
+  let mut searched = 0;
+  let mut haystacks = vec![("workflow `env:`".to_string(), workflow["env"].clone())];
+  for job in &jobs {
+    let j = &workflow["jobs"][job.as_str()];
+    haystacks.push((format!("job `{job}` `env:`"), j["env"].clone()));
+    for step in j["steps"].as_sequence().cloned().unwrap_or_default() {
+      let label = step_label(&step).to_owned();
+      for key in ["run", "env", "with"] {
+        haystacks.push((format!("job `{job}` step {label:?} `{key}:`"), step[key].clone()));
+      }
+    }
+  }
+  for (where_, value) in haystacks {
+    if value.is_null() {
+      continue;
+    }
+    let text = serde_yaml_ng::to_string(&value).expect("a workflow value must serialise");
+    searched += 1;
+    for token in ["GITHUB_TOKEN", "GH_TOKEN", "github.token", "secrets."] {
+      assert!(
+        !text.contains(token),
+        "{path} {where_} reads `{token}`, so this workflow is no longer the token-free one \
+         `contents: read` was granted for (issue #677). Decide what scope that step needs and \
+         say it here, rather than leaving the grant to mean something it no longer does"
+      );
+    }
+  }
+  assert!(
+    searched >= 20,
+    "expected at least 20 `run:`/`env:`/`with:` blocks across ci.yml, found {searched}. The \
+     steps are probably no longer being read, and the token search above would then look at \
+     nothing"
+  );
 }
 
 /// Issue #677, the half a single file cannot state: a workflow added later
@@ -727,18 +769,31 @@ fn ci_workflow_grants_a_read_only_token() {
 ///
 /// This is deliberately weaker than those: it reads that the key exists, not
 /// what it says, because what a workflow needs is its own business. What it
-/// refuses is the silence.
+/// refuses is the silence. Declaring it on every job instead of at the top is
+/// explicit too, and passes: GitHub allows either, and neither leaves a job
+/// taking the repository default.
 #[test]
 fn every_workflow_declares_its_permissions() {
   let mut swept = 0;
   for path in workflow_paths() {
     let workflow: serde_yaml_ng::Value =
       serde_yaml_ng::from_str(&fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let jobs = string_keys(
+      workflow["jobs"]
+        .as_mapping()
+        .unwrap_or_else(|| panic!("`{path}` must define a `jobs:` mapping")),
+      &format!("`{path}` `jobs:`"),
+    );
+    let every_job_declares = !jobs.is_empty()
+      && jobs
+        .iter()
+        .all(|job| !workflow["jobs"][job.as_str()]["permissions"].is_null());
     assert!(
-      !workflow["permissions"].is_null(),
-      "`{path}` declares no workflow-level `permissions:` (issue #677), so its jobs take \
-       whatever `default_workflow_permissions` says, a repository setting no diff in this repo \
-       records. Declare what the workflow needs, `permissions: {{}}` if that is nothing"
+      !workflow["permissions"].is_null() || every_job_declares,
+      "`{path}` declares `permissions:` neither at the workflow level nor on every one of its \
+       jobs (issue #677), so a job of it takes whatever `default_workflow_permissions` says, a \
+       repository setting no diff in this repo records. Declare what the workflow needs, \
+       `permissions: {{}}` if that is nothing"
     );
     swept += 1;
   }

@@ -18,14 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default_workflow_permissions` reads `read` today, so the token was
   harmless, by a setting no pull request shows rather than by anything the
   workflow said. Every other workflow here states its own contract:
-  `docs-sync.yml` carries `permissions: {}`, the two release workflows carry
-  `contents: write` with `contents: read` on the jobs that run after the
-  publish (#669).
+  `docs-sync.yml` carries `permissions: {}`, `release.yml` and
+  `pre-release.yml` carry `contents: write`, and the two jobs that run after
+  `release.yml`'s publish carry `contents: read` (#669).
 
   What a flip of that setting to write would hand a pushing token to, on
   every pull request, is the build scripts and proc macros of the whole
   dependency graph, `cargo install cargo-audit --locked` building from
-  source, and four third-party actions, one of which copies the token to
+  source, and five third-party actions, one of which copies the token to
   disk: `cachix/install-nix-action@v31` falls back to `GITHUB_TOKEN` with no
   `github_access_token` input and writes `access-tokens = github.com=<token>`
   into `/etc/nix/nix.conf` (`install-nix.sh` at that tag, lines 50-52,
