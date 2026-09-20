@@ -1616,15 +1616,18 @@ steps:
 /// nixpkgs no longer serves fails the `nix eval` outright rather than waiting
 /// for a user on that platform to find out.
 ///
-/// `has("x86_64-linux")` is what `all` cannot say: `all` over the systems that
-/// remain is green on the systems that left, so dropping x86_64-linux from the
-/// flake's list passes it with every version correct (measured). An emptied
+/// The key set is compared by value, which is what `all` cannot say: `all`
+/// over the systems that remain is green on the systems that left, so a
+/// shortened `eachSystem` list passes it with every version correct
+/// (measured). `flake_tests.rs` pins the list too, but as text, so it stays
+/// green on a list shortened while the names live on in a binding or a
+/// comment; here the set comes out of the evaluation itself. An emptied
 /// `packages` does not reach jq at all, the eval failing on the missing
-/// attribute, and the list of systems itself is pinned in `flake_tests.rs`.
+/// attribute.
 const FLAKE_VERSION_CHECK: &str = r#"want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
 got=$(nix eval --json .#packages --apply 'builtins.mapAttrs (_: ps: "${ps.gwm.name} ${ps.gwm.version}")')
 echo "Cargo.toml: $want, flake: $got"
-if ! printf '%s' "$got" | jq -e --arg v "$want" 'has("x86_64-linux") and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
+if ! printf '%s' "$got" | jq -e --arg v "$want" '(keys == ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]) and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
   echo "::error file=flake.nix::the flake builds $got while Cargo.toml is at $want (#393, #672, #675)"
   exit 1
 fi

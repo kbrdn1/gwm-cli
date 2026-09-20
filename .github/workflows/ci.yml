@@ -285,7 +285,9 @@ jobs:
     # Every system `packages` exposes, not just this runner's: evaluation is
     # system-independent, and a system the pinned nixpkgs no longer serves
     # fails the eval outright instead of waiting for a user on that platform to
-    # find out, which is how x86_64-darwin went unnoticed (#675).
+    # find out, which is how x86_64-darwin went unnoticed (#675). The key set
+    # is compared by value, so a platform dropped from the flake's list is a
+    # red job rather than one fewer entry nobody counts.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -296,7 +298,7 @@ jobs:
           want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
           got=$(nix eval --json .#packages --apply 'builtins.mapAttrs (_: ps: "${ps.gwm.name} ${ps.gwm.version}")')
           echo "Cargo.toml: $want, flake: $got"
-          if ! printf '%s' "$got" | jq -e --arg v "$want" 'has("x86_64-linux") and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
+          if ! printf '%s' "$got" | jq -e --arg v "$want" '(keys == ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]) and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
             echo "::error file=flake.nix::the flake builds $got while Cargo.toml is at $want (#393, #672, #675)"
             exit 1
           fi
