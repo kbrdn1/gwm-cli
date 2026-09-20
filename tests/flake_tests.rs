@@ -460,6 +460,47 @@ fn the_version_guard_can_actually_fire() {
   );
 }
 
+/// Issue #675. `flake-utils.lib.eachDefaultSystem` exposed
+/// `packages.x86_64-darwin`, which stopped evaluating at all: the pinned
+/// nixpkgs is 26.11, which dropped x86_64-darwin and throws on import, so an
+/// Intel Mac running `nix profile install github:kbrdn1/gwm-cli` got nixpkgs'
+/// refusal in place of gwm. The systems are listed instead, and the list is
+/// pinned here because `eachDefaultSystem` is one word away and puts the
+/// broken system back without a word: what it defaults to is flake-utils'
+/// business, not this repo's.
+///
+/// That a listed system *evaluates* is not something text can tell. The
+/// `flake` job in ci.yml evaluates every system this file exposes, which is
+/// what turns a nixpkgs release dropping the next one into a red PR.
+#[test]
+fn flake_lists_the_systems_it_serves() {
+  let s = strip_comments(&read_flake());
+  assert!(
+    !s.contains("eachDefaultSystem"),
+    "flake.nix must not use `eachDefaultSystem`: flake-utils' defaults include \
+     x86_64-darwin, which nixpkgs 26.11 dropped (#675), so the flake would advertise \
+     a package that cannot be evaluated, let alone built"
+  );
+  assert!(
+    s.contains("eachSystem"),
+    "flake.nix must name the systems it serves with `flake-utils.lib.eachSystem [ … ]`"
+  );
+  for system in ["x86_64-linux", "aarch64-linux", "aarch64-darwin"] {
+    assert!(
+      s.contains(&format!("\"{system}\"")),
+      "flake.nix must still serve {system}: dropping a platform is a release note, not a \
+       side effect of editing this list"
+    );
+  }
+  assert!(
+    !s.contains("\"x86_64-darwin\""),
+    "flake.nix must not list x86_64-darwin while the pinned nixpkgs refuses it (#675). \
+     Intel macOS keeps the prebuilt archive, `cargo install` and `cargo binstall`; \
+     serving it from the flake again means pinning a nixpkgs that still supports it, \
+     and saying so in the same diff"
+  );
+}
+
 #[test]
 fn flake_declares_top_level_description_inputs_outputs() {
   let s = read_flake();
