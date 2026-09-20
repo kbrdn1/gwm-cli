@@ -277,10 +277,15 @@ jobs:
     # four review passes of #648 each found a new such form (#672). So ask nix
     # what the package is and compare it with what Cargo.toml says.
     #
-    # Only the package is evaluated, not the dev shell: that one asserts the
+    # Only the packages are evaluated, not the dev shell: that one asserts the
     # MSRV floor against nixpkgs' rustc, a different verdict. Evaluation only,
     # nothing is built, so the cost is installing nix and fetching the pinned
     # nixpkgs.
+    #
+    # Every system `packages` exposes, not just this runner's: evaluation is
+    # system-independent, and a system the pinned nixpkgs no longer serves
+    # fails the eval outright instead of waiting for a user on that platform to
+    # find out, which is how x86_64-darwin went unnoticed (#675).
     steps:
       - uses: actions/checkout@v7
         with:
@@ -289,10 +294,10 @@ jobs:
       - name: the flake's package is Cargo.toml's version
         run: |
           want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
-          got=$(nix eval --raw .#packages.x86_64-linux.gwm --apply 'p: "${p.name} ${p.version}"')
+          got=$(nix eval --json .#packages --apply 'builtins.mapAttrs (_: ps: "${ps.gwm.name} ${ps.gwm.version}")')
           echo "Cargo.toml: $want, flake: $got"
-          if [ "$got" != "gwm-$want $want" ]; then
-            echo "::error file=flake.nix::the flake builds \"$got\" while Cargo.toml is at $want (#393, #672)"
+          if ! printf '%s' "$got" | jq -e --arg v "$want" 'has("x86_64-linux") and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
+            echo "::error file=flake.nix::the flake builds $got while Cargo.toml is at $want (#393, #672, #675)"
             exit 1
           fi
 
