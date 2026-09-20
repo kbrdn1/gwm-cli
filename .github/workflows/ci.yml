@@ -7,6 +7,16 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# What every job here does is check out and build, and no step of this file
+# mentions a token. Declaring the grant is what keeps that true of the token
+# the jobs actually hold: with no `permissions:` they took whatever
+# `default_workflow_permissions` said, a repository setting no diff in this
+# repo records, and a flip to write would hand one that can push here to every
+# build script of the dependency graph, to `cargo install cargo-audit`, and to
+# the nix action that copies the token into `/etc/nix/nix.conf` (issue #677).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings

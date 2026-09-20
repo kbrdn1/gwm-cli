@@ -657,9 +657,101 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
   }
 }
 
+/// Issue #677. `ci.yml` declared no `permissions:` at all, so its jobs took
+/// whatever the repository setting handed them:
+/// `default_workflow_permissions` reads `read` today, which is a setting no
+/// pull request shows and one switch away from `write`. What that would hand a
+/// write token to is every build script and proc macro of the dependency
+/// graph, `cargo install cargo-audit`, four third-party actions, and
+/// `cachix/install-nix-action`, which copies the token into
+/// `/etc/nix/nix.conf` (`install-nix.sh` at `v31`, lines 50-52, installed at
+/// line 93). The same reasoning closed #669 one workflow over.
+///
+/// Read, so nothing in `ci.yml` needs more: no step of it mentions
+/// `GITHUB_TOKEN`, `GH_TOKEN`, `github.token` or `secrets.`, and every job
+/// does the same two things, check out and build.
+///
+/// Job level is read as well as workflow level, because a job-level
+/// `permissions:` replaces the workflow's wholesale rather than narrowing it.
+/// So a job either leaves it out or restates the same `contents: read`, and
+/// anything else is refused without ranking scopes: `contents: write` and a
+/// second scope are escalations, and a `{}` that cannot even check out is a
+/// job that fails at run time, neither of which belongs here unannounced.
+#[test]
+fn ci_workflow_grants_a_read_only_token() {
+  let path = ".github/workflows/ci.yml";
+  let workflow = ci_workflow();
+  let read: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: read").unwrap();
+  assert_eq!(
+    workflow["permissions"], read,
+    "{path} must grant exactly `contents: read` at the workflow level (issue #677). With no \
+     `permissions:` at all its jobs inherit the repository default, which is a setting no diff \
+     in this repo records: flip it to write and every build script, every `cargo install` and \
+     the nix action that writes the token to `/etc/nix/nix.conf` get a token that can push here"
+  );
+
+  // Through `string_keys` (issue #673): a job keyed `true:` is skipped by
+  // GitHub and would carry a widened `permissions:` past a `filter_map`.
+  let jobs = string_keys(
+    workflow["jobs"]
+      .as_mapping()
+      .expect("ci.yml must define a `jobs:` mapping"),
+    &format!("{path} `jobs:`"),
+  );
+  for job in &jobs {
+    let declared = &workflow["jobs"][job.as_str()]["permissions"];
+    assert!(
+      declared.is_null() || *declared == read,
+      "{path} job `{job}` must leave `permissions:` out or restate the workflow's \
+       `contents: read`, and nothing else (issue #677). A job-level block replaces the \
+       workflow's wholesale: `contents: write` or a second scope is the escalation the \
+       workflow-level grant exists to prevent, and a `{{}}` cannot check out at all. Either \
+       way it is a conscious change that belongs in its own diff, with this test updated. \
+       Got `permissions: {declared:?}`"
+    );
+  }
+  assert!(
+    jobs.len() >= 9,
+    "expected at least the 9 jobs `ci.yml` ships, found {}. The mapping is probably no longer \
+     being read, and the loop above would then pass over nothing",
+    jobs.len()
+  );
+}
+
+/// Issue #677, the half a single file cannot state: a workflow added later
+/// with no `permissions:` inherits the repository default the same way
+/// `ci.yml` did, and nothing here would say so. So every workflow declares
+/// one, whatever it is: `{}` for `docs-sync.yml`, `contents: read` for
+/// `ci.yml`, `contents: write` for the two that publish, each pinned by its
+/// own test above.
+///
+/// This is deliberately weaker than those: it reads that the key exists, not
+/// what it says, because what a workflow needs is its own business. What it
+/// refuses is the silence.
+#[test]
+fn every_workflow_declares_its_permissions() {
+  let mut swept = 0;
+  for path in workflow_paths() {
+    let workflow: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{path}: {e}"));
+    assert!(
+      !workflow["permissions"].is_null(),
+      "`{path}` declares no workflow-level `permissions:` (issue #677), so its jobs take \
+       whatever `default_workflow_permissions` says, a repository setting no diff in this repo \
+       records. Declare what the workflow needs, `permissions: {{}}` if that is nothing"
+    );
+    swept += 1;
+  }
+  assert!(
+    swept >= 4,
+    "expected at least the 4 workflows this repo ships, found {swept}. The directory listing is \
+     probably no longer seeing them, and the loop above would then pass over nothing"
+  );
+}
+
 /// Every workflow in the directory, so a file added later is audited by
 /// construction rather than by remembering to extend a hand-written list. The
-/// three sweeps below all enumerate from here: naming files individually is
+/// sweeps below all enumerate from here: naming files individually is
 /// how a new workflow silently escapes an invariant that was supposed to be
 /// repo-wide.
 fn workflow_paths() -> Vec<String> {
