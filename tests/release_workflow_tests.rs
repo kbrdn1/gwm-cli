@@ -698,8 +698,10 @@ fn ci_workflow_grants_a_read_only_token() {
      the nix action that writes the token to `/etc/nix/nix.conf` get a token that can push here"
   );
 
-  // Through `string_keys` (issue #673): a job keyed `true:` is skipped by
-  // GitHub and would carry a widened `permissions:` past a `filter_map`.
+  // Through `string_keys` (issue #673): GitHub reads `true:` as the job named
+  // `true` and runs it, while the YAML parser here reads a boolean, so a
+  // `filter_map` over string keys is what would skip it, carrying whatever
+  // `permissions:` it declares past this loop.
   let jobs = string_keys(
     workflow["jobs"]
       .as_mapping()
@@ -745,6 +747,13 @@ fn ci_workflow_grants_a_read_only_token() {
   //
   // Comments are gone by the time the parser is done, so the comment above the
   // grant in `ci.yml` can name what it forbids without matching itself.
+  //
+  // The ceiling, named because it is one: this reads `ci.yml`, so a token an
+  // action consumes inside its own definition is invisible here.
+  // `cachix/install-nix-action@v31` is exactly that shape, `GITHUB_TOKEN:
+  // ${{ github.token }}` in its own `action.yml`, and a local
+  // `uses: ./.github/actions/…` would be too. Scoping the token is what
+  // answers that, which is the grant above, not a wider search.
   let flagged = |value: &serde_yaml_ng::Value| -> Vec<&'static str> {
     let text = serde_yaml_ng::to_string(value)
       .expect("a workflow must serialise")
@@ -820,12 +829,19 @@ fn ci_workflow_grants_a_read_only_token() {
 /// with no `permissions:` inherits the repository default the same way
 /// `ci.yml` did, and nothing here would say so. So every workflow declares
 /// one, whatever it is: `{}` for `docs-sync.yml`, `contents: read` for
-/// `ci.yml`, `contents: write` for the two that publish, each pinned by its
-/// own test above.
+/// `ci.yml`, `contents: write` for the two that publish.
 ///
-/// This is deliberately weaker than those: it reads that the key exists, not
-/// what it says, because what a workflow needs is its own business. What it
-/// refuses is the silence. Declaring it on every job instead of at the top is
+/// Two of those four are also compared **by value**, `ci.yml` above and
+/// `release.yml` in `release_workflow_grants_write_only_to_build_and_publish`.
+/// The other two are not, and review measured what that leaves open:
+/// `docs-sync.yml` or `pre-release.yml` flipped to `permissions: write-all`
+/// keeps the suite green. That is a gap this issue did not open and does not
+/// close, and the sentence says so rather than implying coverage that is not
+/// there.
+///
+/// This test is deliberately weaker than the by-value ones: it reads that the
+/// key exists, not what it says, because what a workflow needs is its own
+/// business. What it refuses is the silence. Declaring it on every job instead of at the top is
 /// explicit too, and passes: GitHub allows either, and neither leaves a job
 /// taking the repository default.
 #[test]
