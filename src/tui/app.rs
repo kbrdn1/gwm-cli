@@ -7430,7 +7430,7 @@ impl App {
     let Some(repo) = self.selected_raw_index().and_then(|raw| self.row_repo_index(raw)) else {
       return;
     };
-    if !self.collapsed_repos.insert(repo) {
+    if !self.group_has_children(repo) || !self.collapsed_repos.insert(repo) {
       return;
     }
     // The filter memo is keyed on query + list length, so it cannot see the
@@ -7473,13 +7473,22 @@ impl App {
     if !self.worktrees.get(raw)?.is_main {
       return None;
     }
-    let ws = self.workspace.as_ref()?;
-    let repo = *ws.row_repo.get(raw)?;
-    let heads_something = ws.row_repo.iter().enumerate().any(|(i, &r)| r == repo && i != raw);
-    if !heads_something {
+    let repo = self.row_repo_index(raw)?;
+    if !self.group_has_children(repo) {
       return None;
     }
     Some(self.collapsed_repos.contains(&repo))
+  }
+
+  /// Does `repo`'s group hold a row besides its main worktree? A group that
+  /// heads nothing is not an accordion: it shows no chevron and cannot be
+  /// folded, so no fold can sit unseen on it and hide the first row created
+  /// there later.
+  fn group_has_children(&self, repo: usize) -> bool {
+    self
+      .workspace
+      .as_ref()
+      .is_some_and(|ws| ws.row_repo.iter().filter(|&&r| r == repo).count() > 1)
   }
 
   /// Move the cursor onto `repo`'s main worktree row. Falls back to the
