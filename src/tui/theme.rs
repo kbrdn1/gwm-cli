@@ -164,6 +164,42 @@ impl Default for Theme {
   }
 }
 
+/// A [`Theme`] whose every foreground role collapses onto `muted` (issue
+/// #680), used to paint a folded repo group header flat so the fold reads at
+/// a glance.
+///
+/// Derived rather than threaded: a folded header is an ordinary table row,
+/// and every cell builder already takes a `&Theme` and reads its roles from
+/// it. Handing them a muted one dims the whole row at one call site instead
+/// of a `dim` flag crossing six builders, and it dims the spans *inside* a
+/// cell too, which a row-level style cannot reach.
+///
+/// Backgrounds are deliberately untouched: the fold changes the text, not the
+/// bands behind it, and flattening `selection_bg` would erase the cursor.
+/// Spelled out field by field with no `..` spread, so a role added to
+/// [`Theme`] fails to compile here rather than silently staying lit.
+pub fn folded_group_theme(theme: &Theme) -> Theme {
+  let m = theme.muted;
+  Theme {
+    focus: m,
+    accent: m,
+    branch: m,
+    clean: m,
+    dirty: m,
+    main: m,
+    locked: m,
+    prunable: m,
+    muted: m,
+    selection_bg: theme.selection_bg,
+    name: m,
+    path: m,
+    staged: m,
+    modified: m,
+    untracked: m,
+    section_bg: theme.section_bg,
+  }
+}
+
 impl Theme {
   /// Resolve a built-in preset by name. Returns `None` for unknown
   /// names — the config loader translates `None` into a
