@@ -141,12 +141,18 @@ fn referenced_basenames(page: &Path) -> BTreeSet<String> {
 #[test]
 fn every_referenced_capture_exists() {
   let mut missing = Vec::new();
+  let mut resolved = 0usize;
   for page in markdown_pages() {
     let dir = page.parent().expect("a page has a parent directory");
     for target in image_targets(&page) {
       if !is_local_asset(&target) {
         continue;
       }
+      // Counted here and not at the page: what this guard inspects is a
+      // reference, and `image_targets` going blind inside a fence (#649) or
+      // `images_in_line` losing a shape both empty the loop while the pages
+      // are still walked.
+      resolved += 1;
       // Strip a `#fragment` / `?query`, which markdown allows on an image.
       let clean = target.split(['#', '?']).next().unwrap_or(&target);
       if !dir.join(clean).exists() {
@@ -154,6 +160,13 @@ fn every_referenced_capture_exists() {
       }
     }
   }
+  // Exact, the policy this repo uses for a set of units it owns (#649): the
+  // count moves only when somebody adds or removes one, so a red here is an
+  // edit to acknowledge, not noise.
+  assert!(
+    resolved >= 54,
+    "expected the walk to read the 54 local image references under docs/, found {resolved}"
+  );
   assert!(
     missing.is_empty(),
     "these image references resolve to nothing (regenerate with docs/_capture/generate.sh, \
@@ -172,6 +185,7 @@ fn french_mirrors_reference_the_same_captures() {
   let root = docs_root();
   let fr_root = root.join("fr");
   let mut divergent = Vec::new();
+  let mut compared = 0usize;
   for page in markdown_pages() {
     if page.starts_with(&fr_root) {
       continue;
@@ -183,6 +197,7 @@ fn french_mirrors_reference_the_same_captures() {
     if !mirror.exists() {
       continue; // untranslated pages are a separate concern
     }
+    compared += 1;
     let en = referenced_basenames(&page);
     let fr = referenced_basenames(&mirror);
     if en != fr {
@@ -194,6 +209,13 @@ fn french_mirrors_reference_the_same_captures() {
       ));
     }
   }
+  // Exact, the policy this repo uses for a set of units it owns (#649): the
+  // count moves only when somebody adds or removes one, so a red here is an
+  // edit to acknowledge, not noise.
+  assert!(
+    compared >= 40,
+    "expected the walk to find the 40 English pages with a French mirror, compared {compared}"
+  );
   assert!(
     divergent.is_empty(),
     "these pages show different captures in English and in French; the sync builds both \
@@ -208,6 +230,14 @@ fn french_mirrors_reference_the_same_captures() {
 fn capture_basenames_are_unique_across_sections() {
   let mut by_name: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
   collect_assets(&docs_root(), &mut by_name);
+  let collected: usize = by_name.values().map(Vec::len).sum();
+  // Exact, the policy this repo uses for a set of units it owns (#649): the
+  // count moves only when somebody adds or removes one, so a red here is an
+  // edit to acknowledge, not noise.
+  assert!(
+    collected >= 30,
+    "expected the walk to collect the 30 assets under docs/, found {collected}"
+  );
   let clashes: Vec<String> = by_name
     .iter()
     .filter(|(_, paths)| paths.len() > 1)
@@ -311,14 +341,26 @@ const CAPTURED_VERSION_STAMP: &str = "captured-version.txt";
 #[test]
 fn every_capture_ships_at_retina_density() {
   let mut thin = Vec::new();
+  let mut measured = 0usize;
   for asset in capture_files() {
     let Some((width, _)) = image_size(&asset) else {
       panic!("{} is neither a PNG nor a GIF", asset.display());
     };
+    // After the header was read, not after the file was listed: a
+    // `git ls-files` that stopped matching and an `image_size` that stopped
+    // parsing are two different failures and this counts the second.
+    measured += 1;
     if width < MIN_CAPTURE_WIDTH {
       thin.push(format!("{} is {width}px wide", asset.display()));
     }
   }
+  // Exact, the policy this repo uses for a set of units it owns (#649): the
+  // count moves only when somebody adds or removes one, so a red here is an
+  // edit to acknowledge, not noise.
+  assert!(
+    measured >= 29,
+    "expected the walk to measure the 29 tracked captures under docs/, found {measured}"
+  );
   assert!(
     thin.is_empty(),
     "these captures are below {MIN_CAPTURE_WIDTH}px and the site will upscale them; regenerate \
@@ -335,7 +377,9 @@ fn every_capture_ships_at_retina_density() {
 #[test]
 fn every_tape_renders_at_retina_density() {
   let mut stale = Vec::new();
+  let mut read = 0usize;
   for tape in tape_files() {
+    read += 1;
     let text = fs::read_to_string(&tape)
       .unwrap_or_else(|err| panic!("{} must be readable: {err}", tape.display()))
       .replace("\r\n", "\n");
@@ -348,6 +392,13 @@ fn every_tape_renders_at_retina_density() {
       stale.push(format!("{}: {declared:?}", tape.display()));
     }
   }
+  // Exact, the policy this repo uses for a set of units it owns (#649): the
+  // count moves only when somebody adds or removes one, so a red here is an
+  // edit to acknowledge, not noise.
+  assert!(
+    read >= 25,
+    "expected the walk to read the 25 tapes under docs/_capture, found {read}"
+  );
   assert!(
     stale.is_empty(),
     "every tape must declare `{RETINA_FONT_SIZE}` exactly once, with `Set Width`, `Set Height` \
