@@ -1023,3 +1023,29 @@ fn clearing_a_query_drops_the_marks_a_fold_hides() {
   assert_eq!(app.filtered_indices(), vec![0, 3], "the fold is back");
   assert_eq!(app.marked_count(), 0, "the mark went with the hidden row");
 }
+
+#[test]
+fn a_group_that_heads_nothing_cannot_be_folded() {
+  // `Left` on a repo with a single worktree shows nothing (no chevron, no
+  // row to hide), so a fold recorded there would surface later, unseen: the
+  // first worktree created in that repo would be hidden the moment it lands.
+  let (root, wts, mut app) = workspace_with_a_foldable_group();
+  app.list_state.select(Some(3));
+  app.collapse_group();
+
+  let beta = Repository::open(root.path().join("beta")).unwrap();
+  beta.worktree("beta-one", &wts.path().join("beta-one"), None).unwrap();
+  app.refresh().unwrap();
+
+  assert_eq!(app.worktrees.len(), 5, "precondition: beta's new worktree is listed");
+  assert_eq!(
+    app.filtered_indices(),
+    vec![0, 1, 2, 3, 4],
+    "the new row shows: no fold was recorded on a group that headed nothing"
+  );
+  assert_eq!(
+    app.group_fold(3),
+    Some(false),
+    "beta's header now heads a row, and reads open"
+  );
+}
