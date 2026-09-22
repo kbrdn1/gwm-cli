@@ -1382,6 +1382,8 @@ impl App {
     // Pruning (not clearing) is deliberate — this tail also runs for the
     // background auto-refresh, which must not eat a selection mid-build.
     self.prune_marks();
+    // #680: same reasoning for a fold whose group no longer heads anything.
+    self.prune_folds();
     self.clamp_selection_to_filter();
     let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
@@ -7478,6 +7480,26 @@ impl App {
       return None;
     }
     Some(self.collapsed_repos.contains(&repo))
+  }
+
+  /// Drop the folds whose group no longer heads anything (issue #680): the
+  /// entry guard in [`Self::collapse_group`] keeps a childless group out of
+  /// `collapsed_repos`, and this keeps one from staying in once its linked
+  /// rows are gone, so the next worktree created there cannot land hidden
+  /// under a fold nothing shows.
+  fn prune_folds(&mut self) {
+    if self.collapsed_repos.is_empty() {
+      return;
+    }
+    let stale: Vec<usize> = self
+      .collapsed_repos
+      .iter()
+      .copied()
+      .filter(|&repo| !self.group_has_children(repo))
+      .collect();
+    for repo in stale {
+      self.collapsed_repos.remove(&repo);
+    }
   }
 
   /// Does `repo`'s group hold a row besides its main worktree? A group that
