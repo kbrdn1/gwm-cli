@@ -1057,15 +1057,19 @@ fn sibling_workflow_checkouts_do_not_persist_credentials() {
 
   // A glob that matches nothing passes vacuously, and so does one that stops
   // seeing the steps inside the files it matched. Both floors are the counts
-  // at the time of writing, minus release.yml.
+  // at the time of writing, minus release.yml: three sibling workflows and the
+  // eleven checkouts they hold. Exact, since a workflow file and a checkout
+  // step are both units this repo owns, so the floors move only when somebody
+  // edits one. The checkout floor read 8 against 11 until #649: three could
+  // have dropped out of the parse with this test green.
   assert!(
     swept >= 3,
     "expected at least 3 workflows besides release.yml, found {swept} — the directory listing is \
      probably no longer seeing them"
   );
   assert!(
-    audited >= 8,
-    "expected at least 8 credential-free checkouts outside release.yml, found {audited} — the \
+    audited >= 11,
+    "expected at least 11 credential-free checkouts outside release.yml, found {audited} — the \
      parser is probably no longer seeing the steps"
   );
 }
