@@ -732,3 +732,236 @@ fn a_relist_does_not_cancel_the_fetch_it_is_waiting_on() {
     "the relist cancelled the worker it was waiting on"
   );
 }
+
+// ---- repo-group folding (issue #680) --------------------------------------
+// In workspace mode each repo is an accordion whose header is its main
+// worktree row. The fold lives in the one index space selection, marks and
+// the counter resolve against, so these drive the `App` directly and draw
+// nothing first: a frame warms the filter cache, and a fold applied on only
+// one of the two index readers would pass behind a warm cache.
+
+/// A workspace whose `alpha` repo carries two linked worktrees, so its group
+/// has something to fold. Rows: alpha main, alpha's two, beta main. The
+/// linked worktrees live outside the root so discovery does not count them.
+fn workspace_with_a_foldable_group() -> (TempDir, TempDir, App) {
+  let root = workspace_root();
+  let wts = TempDir::new().unwrap();
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  for name in ["feat-one", "feat-two"] {
+    alpha.worktree(name, &wts.path().join(name), None).unwrap();
+  }
+  let app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  assert_eq!(
+    app.worktrees.len(),
+    4,
+    "precondition: alpha main + 2 linked + beta main"
+  );
+  assert!(app.worktrees[0].is_main && app.row_repo_name(0) == Some("alpha"));
+  assert!(!app.worktrees[1].is_main && app.row_repo_name(2) == Some("alpha"));
+  assert!(app.worktrees[3].is_main && app.row_repo_name(3) == Some("beta"));
+  (root, wts, app)
+}
+
+#[test]
+fn collapsing_a_group_keeps_its_main_row_and_moves_the_cursor_onto_it() {
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  app.list_state.select(Some(1));
+  app.collapse_group();
+
+  assert_eq!(app.filtered_indices(), vec![0, 3], "alpha's linked rows are hidden");
+  assert_eq!(
+    app.list_state.selected(),
+    Some(0),
+    "the cursor lands on the group header"
+  );
+  assert_eq!(
+    app.selected().map(|w| w.path.clone()),
+    Some(app.worktrees[0].path.clone())
+  );
+}
+
+#[test]
+fn the_cursor_and_the_selection_share_the_folded_index_space() {
+  // The load-bearing contract: `selected()` resolves the cursor through the
+  // same folded view the cursor moved in. Diverge, and `d` acts on a row the
+  // cursor is not on.
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  app.collapse_group();
+  app.next();
+
+  assert_eq!(app.list_state.selected(), Some(1));
+  assert_eq!(
+    app.selected().map(|w| w.path.clone()),
+    Some(app.worktrees[3].path.clone()),
+    "one step down from a folded alpha is beta's main row"
+  );
+}
+
+#[test]
+fn expanding_a_group_restores_its_rows_and_keeps_the_cursor() {
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  app.collapse_group();
+  app.expand_group();
+
+  assert_eq!(app.filtered_indices(), vec![0, 1, 2, 3]);
+  assert_eq!(app.list_state.selected(), Some(0));
+}
+
+#[test]
+fn a_group_header_reports_its_fold_state_and_other_rows_report_none() {
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  assert_eq!(app.group_fold(0), Some(false), "alpha's header starts expanded");
+  assert_eq!(app.group_fold(1), None, "a linked row is not a header");
+  assert_eq!(app.group_fold(3), None, "beta has nothing to fold, so no header");
+
+  app.collapse_group();
+  assert_eq!(app.group_fold(0), Some(true));
+}
+
+#[test]
+fn an_active_filter_overrides_the_fold() {
+  // The query scores worktree names only, so it can match a linked row while
+  // filtering its header out: folding under a query would hide rows under a
+  // header that is not on screen. The query wins, and the chevron goes with
+  // the fold rather than claim a state the rows do not show.
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  app.collapse_group();
+  app.filter.set_query("feat".into());
+
+  let visible = app.filtered_indices();
+  assert!(
+    visible.contains(&1) && visible.contains(&2),
+    "both folded rows match the query and show: {visible:?}"
+  );
+  assert_eq!(app.group_fold(0), None, "no chevron while a query is active");
+}
+
+#[test]
+fn folding_a_group_drops_the_marks_it_hides() {
+  // A mark on a hidden row would be deleted by `d` without being on screen.
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  app.list_state.select(Some(1));
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1, "precondition: one linked row marked");
+
+  app.collapse_group();
+  assert_eq!(app.marked_count(), 0);
+}
+
+#[test]
+fn folding_beats_a_warm_filter_cache() {
+  // `FilterState` memoises on query + list length. A fold changes neither, so
+  // the cache cannot see it: without an explicit invalidation the fold reads
+  // back the pre-fold indices and does nothing at all, silently, on exactly
+  // the path that matters (a rendered frame warms the cache every tick).
+  // Probed by removing the `invalidate` call: every other test in this file
+  // still passed, because none of them warms the cache first.
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  assert_eq!(app.filtered_indices(), vec![0, 1, 2, 3], "a read warms the cache");
+
+  app.collapse_group();
+  assert_eq!(app.filtered_indices(), vec![0, 3], "the fold beat the warm cache");
+
+  // The unfold carries the same hazard in reverse.
+  app.expand_group();
+  assert_eq!(
+    app.filtered_indices(),
+    vec![0, 1, 2, 3],
+    "the unfold beat the warm cache"
+  );
+}
+
+#[test]
+fn group_folding_is_a_noop_in_single_repo_mode() {
+  let root = TempDir::new().unwrap();
+  let wts = TempDir::new().unwrap();
+  init_repo_at(root.path());
+  let repo = Repository::open(root.path()).unwrap();
+  repo.worktree("feat-one", &wts.path().join("feat-one"), None).unwrap();
+  let mut app = App::new_at_layered(Some(root.path()), None).unwrap();
+  let before = app.filtered_indices();
+  assert_eq!(before.len(), 2, "precondition: main + one linked worktree");
+
+  app.collapse_group();
+  assert_eq!(app.filtered_indices(), before);
+  assert_eq!(app.group_fold(0), None);
+}
+
+/// Buffer row `y` as a string of cell symbols.
+fn row_at(terminal: &Terminal<TestBackend>, y: u16) -> String {
+  let buf = terminal.backend().buffer();
+  (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+}
+
+/// The first buffer row carrying `needle`, with the column it starts at.
+fn find_in_buffer(terminal: &Terminal<TestBackend>, needle: &str) -> Option<(u16, u16)> {
+  let buf = terminal.backend().buffer();
+  (0..buf.area.height).find_map(|y| {
+    let cells: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+    (0..cells.len())
+      .find(|&x| cells[x..].concat().starts_with(needle))
+      .map(|x| (x as u16, y))
+  })
+}
+
+/// Foreground of every letter or digit right of `x` on row `y`. Letters and
+/// digits only, so the pane rule and the padding do not count.
+fn text_fgs_right_of(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Vec<ratatui::style::Color> {
+  let buf = terminal.backend().buffer();
+  (x + 1..buf.area.width)
+    .map(|x| &buf[(x, y)])
+    .filter(|c| c.symbol().chars().any(char::is_alphanumeric))
+    .map(|c| c.fg)
+    .collect()
+}
+
+#[test]
+fn a_folded_group_header_renders_dimmed_with_a_closed_chevron() {
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  let muted = app.theme.muted;
+  // Under 120 columns the sidebar stays closed, so the header row holds the
+  // table alone and every letter on it belongs to the row under test.
+  let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let (x, y) = find_in_buffer(&terminal, "▾").expect("an expanded header carries ▾");
+  assert!(
+    text_fgs_right_of(&terminal, x, y).iter().any(|&c| c != muted),
+    "precondition: an expanded header keeps its colours, or the dim check below is vacuous: {}",
+    row_at(&terminal, y)
+  );
+
+  app.collapse_group();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  assert!(find_in_buffer(&terminal, "▾").is_none(), "no expanded header left");
+  let (x, y) = find_in_buffer(&terminal, "▸").expect("a folded header carries ▸");
+  let fgs = text_fgs_right_of(&terminal, x, y);
+  assert!(!fgs.is_empty(), "the header row has text: {}", row_at(&terminal, y));
+  assert!(
+    fgs.iter().all(|&c| c == muted),
+    "every cell of a folded header paints with the muted role: {:?} on {}",
+    fgs,
+    row_at(&terminal, y)
+  );
+}
+
+#[test]
+fn the_repo_column_fits_a_thirty_cell_repo_name() {
+  // The 24-cell ceiling had zero margin on a real workspace root: one more
+  // character and the name truncated. Read off a linked row, whose NAME and
+  // PATH do not carry the repo name, so only the REPO cell can match.
+  let long = "gwm-remotion-video-maker-extra";
+  assert_eq!(long.len(), 30, "precondition: past the old 24-cell ceiling");
+  let root = TempDir::new().unwrap();
+  let wts = TempDir::new().unwrap();
+  init_repo_at(&root.path().join(long));
+  let repo = Repository::open(root.path().join(long)).unwrap();
+  repo.worktree("wt-short", &wts.path().join("wt-short"), None).unwrap();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+
+  let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let (_, y) = find_in_buffer(&terminal, "wt-short").expect("the linked row renders");
+  let row = row_at(&terminal, y);
+  assert!(row.contains(long), "the REPO cell shows the whole name: {row}");
+}
