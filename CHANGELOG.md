@@ -93,6 +93,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Repo groups fold in the workspace worktrees pane**
+  ([#680](https://github.com/kbrdn1/gwm-cli/issues/680)). In `--workspace`
+  mode the pane merges every repo's listing into one table, grouped by repo
+  with each main worktree first, and nothing marked the groups beyond a
+  repeated `REPO` cell. Each repo is now an accordion headed by its main
+  worktree row: `Left` folds the cursor's group down to that header, `Right`
+  unfolds it (`collapse_group` / `expand_group` under `[tui.keys]`, both keys
+  unbound in the list view before). The header carries a chevron in its age
+  cell, `▾` open and `▸` folded, a slot a trunk branch leaves empty, and a
+  folded header paints in the `muted` role so a folded repo reads as folded
+  at a glance.
+
+  The fold lives in the one index space that selection, marks and the
+  counter resolve against, not in the renderer: hiding rows at draw time
+  would let `d` delete a row other than the one under the cursor. Folding
+  moves the cursor onto the header and drops the marks it hides. An active
+  filter overrides the fold, since the query matches worktree names and can
+  keep a linked row while filtering its header out. The filter cache is keyed
+  on query and list length, which a fold changes neither of, so a toggle
+  invalidates it explicitly; without that, a warm cache served the pre-fold
+  rows and the fold did nothing, silently, on exactly the rendered path.
+
+  The `REPO` column ceiling goes from 24 to 32 cells: the longest repo
+  basename on a real workspace root was exactly 24, so one more character
+  truncated the name the column exists to show. Session-only state, nothing
+  persists it; single-repo mode is untouched.
+
 - **`gwm doctor` reports the config a deleted branch left behind, and
   `--fix` drops it**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). `gwm create`
