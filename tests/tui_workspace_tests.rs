@@ -1049,3 +1049,44 @@ fn a_group_that_heads_nothing_cannot_be_folded() {
     "beta's header now heads a row, and reads open"
   );
 }
+
+#[test]
+fn a_fold_does_not_outlive_its_group_shrinking_to_one_row() {
+  // Fold alpha, then remove every linked worktree it had: the group heads
+  // nothing any more, so the fold must go with the rows, or the next
+  // worktree created in alpha lands hidden under a fold nobody can see.
+  let (root, wts, mut app) = workspace_with_a_foldable_group();
+  app.list_state.select(Some(0));
+  app.collapse_group();
+  assert_eq!(app.filtered_indices(), vec![0, 3], "precondition: alpha is folded");
+
+  let alpha_dir = root.path().join("alpha");
+  for name in ["feat-one", "feat-two"] {
+    let out = std::process::Command::new("git")
+      .args(["-C", alpha_dir.to_str().unwrap(), "worktree", "remove", "--force"])
+      .arg(wts.path().join(name))
+      .output()
+      .unwrap();
+    assert!(
+      out.status.success(),
+      "git worktree remove {name}: {}",
+      String::from_utf8_lossy(&out.stderr)
+    );
+  }
+  app.refresh().unwrap();
+  assert_eq!(app.worktrees.len(), 2, "precondition: alpha main + beta main");
+
+  let alpha = Repository::open(&alpha_dir).unwrap();
+  alpha
+    .worktree("feat-three", &wts.path().join("feat-three"), None)
+    .unwrap();
+  app.refresh().unwrap();
+
+  assert_eq!(app.worktrees.len(), 3, "precondition: the new worktree is listed");
+  assert_eq!(
+    app.filtered_indices(),
+    vec![0, 1, 2],
+    "the new row shows: the fold went with the rows it used to hide"
+  );
+  assert_eq!(app.group_fold(0), Some(false), "alpha's header reads open");
+}
