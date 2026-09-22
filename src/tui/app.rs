@@ -16,7 +16,7 @@ use super::state::confirm::{
 };
 use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::detail_overlay::DetailKind;
-use super::state::filter::{fuzzy_match_indices, FilterState};
+use super::state::filter::{visible_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::help::HelpOverlay;
 use super::state::link_prompt::LinkPrompt;
@@ -357,6 +357,17 @@ pub struct WorkspaceState {
   pub active: usize,
 }
 
+/// Is raw worktree row `raw` owned by a folded repo group (issue #680)?
+///
+/// Free rather than a method so both index readers can call it while
+/// `self.filter` is borrowed mutably: it takes the two fields it needs, which
+/// are disjoint from the filter. Single-repo mode (`ws` is `None`) always
+/// answers `false`, so the fold is inert there by construction.
+fn row_repo_folded(ws: Option<&WorkspaceState>, folded: &BTreeSet<usize>, raw: usize) -> bool {
+  ws.and_then(|ws| ws.row_repo.get(raw))
+    .is_some_and(|repo| folded.contains(repo))
+}
+
 /// Columns one `h` / `l` moves the rich view (issue #551).
 ///
 /// Eight rather than one: the rows this scrolls are code and diff lines,
@@ -412,6 +423,12 @@ pub struct App {
   /// Private — the mutation surface is [`App::toggle_select`] /
   /// [`App::clear_marks`], both of which keep the status line in sync.
   marked: BTreeSet<PathBuf>,
+  /// Indices into `workspace.repos` whose group is folded in the worktrees
+  /// pane (issue #680). Session-only: nothing persists it, and `repos` is
+  /// session-stable, so an index cannot drift onto another repo across a
+  /// refresh the way a row index would. Empty (every group open) outside
+  /// workspace mode, where nothing can add to it.
+  collapsed_repos: BTreeSet<usize>,
   /// The batch the open confirm overlay is about (issue #484). Snapshotted by
   /// [`App::enter_confirm_delete`] and read by [`App::confirm_delete`], so an
   /// auto-refresh landing during the safety countdown cannot retarget the
@@ -750,6 +767,7 @@ impl App {
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
       marked: BTreeSet::new(),
+      collapsed_repos: BTreeSet::new(),
       pending_delete: Vec::new(),
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
@@ -901,7 +919,7 @@ impl App {
   /// filter map (the selection indexes the filtered view, not the raw vec).
   fn selected_raw_index(&self) -> Option<usize> {
     let i = self.list_state.selected()?;
-    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let filtered = self.visible_now();
     filtered.get(i).copied()
   }
 
@@ -5374,7 +5392,7 @@ impl App {
     // the table renderer calls `filtered_indices` first) and falls
     // back to a fresh compute when it isn't.
     let i = self.list_state.selected()?;
-    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let filtered = self.visible_now();
     let original = *filtered.get(i)?;
     self.worktrees.get(original)
   }
@@ -7359,8 +7377,120 @@ impl App {
   /// invalidates it. `App::refresh` calls `invalidate` after replacing
   /// `worktrees` so a same-length-different-contents refresh is also
   /// caught.
-  pub fn filtered_indices(&mut self) -> &[usize] {
-    self.filter.filtered_indices(&self.worktrees, fuzzy_match_indices)
+  pub fn filtered_indices(&mut self) -> Vec<usize> {
+    let ws = self.workspace.as_ref();
+    let folded = &self.collapsed_repos;
+    self
+      .filter
+      .filtered_indices(&self.worktrees, |q, w| {
+        visible_indices(q, w, |i| row_repo_folded(ws, folded, i))
+      })
+      .to_vec()
+  }
+
+  /// `&self` twin of [`Self::filtered_indices`], for the callers that hold a
+  /// shared borrow (`selected`, `selected_raw_index`). Reads the memo when it
+  /// is warm, which the per-frame render guarantees.
+  ///
+  /// Both go through [`visible_indices`] (issue #680): the cursor and the
+  /// selection must resolve against the same folded view, or `d` acts on a
+  /// row the cursor is not on.
+  fn visible_now(&self) -> Vec<usize> {
+    let ws = self.workspace.as_ref();
+    let folded = &self.collapsed_repos;
+    self.filter.snapshot_indices(&self.worktrees, |q, w| {
+      visible_indices(q, w, |i| row_repo_folded(ws, folded, i))
+    })
+  }
+
+  /// Index into `workspace.repos` of the repo owning raw row `raw`. `None` in
+  /// single-repo mode, which is what makes every fold path below a no-op
+  /// there without a second guard.
+  fn row_repo_index(&self, raw: usize) -> Option<usize> {
+    self.workspace.as_ref()?.row_repo.get(raw).copied()
+  }
+
+  /// Fold the cursor's repo group down to its main worktree row (issue #680).
+  ///
+  /// The cursor moves onto the group header, because the row it sits on is
+  /// usually one of the rows this hides. Marks on hidden rows are dropped:
+  /// a mark out of sight is a row `d` would delete without showing it.
+  pub fn collapse_group(&mut self) {
+    let Some(repo) = self.selected_raw_index().and_then(|raw| self.row_repo_index(raw)) else {
+      return;
+    };
+    if !self.collapsed_repos.insert(repo) {
+      return;
+    }
+    // The filter memo is keyed on query + list length, so it cannot see the
+    // fold. Without this, a warm cache serves the pre-fold indices and the
+    // fold silently does nothing.
+    self.filter.invalidate();
+    self.drop_marks_hidden_by_a_fold();
+    self.select_group_header(repo);
+  }
+
+  /// Unfold the cursor's repo group (issue #680). A no-op on an open group,
+  /// and outside workspace mode.
+  pub fn expand_group(&mut self) {
+    let Some(repo) = self.selected_raw_index().and_then(|raw| self.row_repo_index(raw)) else {
+      return;
+    };
+    if !self.collapsed_repos.remove(&repo) {
+      return;
+    }
+    self.filter.invalidate();
+    self.clamp_selection_to_filter();
+  }
+
+  /// Fold state of raw row `raw` when that row is a repo group's header
+  /// (issue #680): `Some(true)` folded, `Some(false)` open, `None` when the
+  /// row heads nothing. Drives the chevron the renderer puts in the age cell.
+  ///
+  /// Two rows report `None` although they are main worktrees: one whose repo
+  /// contributes no other row (an accordion with nothing inside is not an
+  /// accordion), and any row while a query is active, since the query
+  /// overrides the fold and a chevron would claim a state the list does not
+  /// show.
+  pub fn group_fold(&self, raw: usize) -> Option<bool> {
+    if !self.filter.query().is_empty() {
+      return None;
+    }
+    if !self.worktrees.get(raw)?.is_main {
+      return None;
+    }
+    let ws = self.workspace.as_ref()?;
+    let repo = *ws.row_repo.get(raw)?;
+    let heads_something = ws.row_repo.iter().enumerate().any(|(i, &r)| r == repo && i != raw);
+    if !heads_something {
+      return None;
+    }
+    Some(self.collapsed_repos.contains(&repo))
+  }
+
+  /// Move the cursor onto `repo`'s main worktree row. Falls back to the
+  /// generic clamp when that row is not visible, which a query can arrange.
+  fn select_group_header(&mut self, repo: usize) {
+    let header = (0..self.worktrees.len()).find(|&i| self.worktrees[i].is_main && self.row_repo_index(i) == Some(repo));
+    let pos = header.and_then(|raw| self.visible_now().iter().position(|&i| i == raw));
+    match pos {
+      Some(pos) => self.select_row(pos),
+      None => self.clamp_selection_to_filter(),
+    }
+  }
+
+  /// Drop the marks a fold just took off screen (issue #680). Called after
+  /// the memo is invalidated, so `visible_now` already reflects the fold.
+  fn drop_marks_hidden_by_a_fold(&mut self) {
+    if self.marked.is_empty() {
+      return;
+    }
+    let visible: BTreeSet<PathBuf> = self
+      .visible_now()
+      .into_iter()
+      .filter_map(|i| self.worktrees.get(i).map(|w| w.path.clone()))
+      .collect();
+    self.marked.retain(|p| visible.contains(p));
   }
 
   /// Reposition the selection so it stays inside the current filtered subset.
@@ -7651,7 +7781,7 @@ impl App {
     let Some(i) = self.list_state.selected() else {
       return;
     };
-    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let filtered = self.visible_now();
     let Some(&original) = filtered.get(i) else {
       return;
     };

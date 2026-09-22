@@ -62,6 +62,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "mark / unmark the highlighted worktree for a bulk delete",
     },
     PaletteEntry {
+      action: Action::CollapseGroup,
+      name: "fold-repo",
+      description: "fold the highlighted repo group down to its main worktree (workspace mode)",
+    },
+    PaletteEntry {
+      action: Action::ExpandGroup,
+      name: "unfold-repo",
+      description: "unfold the highlighted repo group (workspace mode)",
+    },
+    PaletteEntry {
       action: Action::Bootstrap,
       name: "bootstrap",
       description: "re-run bootstrap on the selected worktree",

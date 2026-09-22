@@ -57,6 +57,38 @@ pub fn fuzzy_match_indices(query: &str, worktrees: &[WorktreeInfo]) -> Vec<usize
   scored.into_iter().map(|(_, i)| i).collect()
 }
 
+/// The rows the worktrees pane shows: the fuzzy match of [`fuzzy_match_indices`],
+/// minus the rows a folded repo group hides (issue #680).
+///
+/// `repo_collapsed(raw)` answers "is this row's repo group folded" for a raw
+/// index into `worktrees`; single-repo mode always answers `false`. Two rules
+/// live here rather than at the call sites, because both are load-bearing:
+///
+/// - **A main worktree row survives its own group folding.** It IS the group
+///   header, so hiding it would hide the row the user unfolds from.
+/// - **An active query overrides the fold.** The matcher scores `w.name`
+///   alone, so a query can match a linked worktree while its repo's main row
+///   scores nothing; folding under a query would then hide rows under a
+///   header that is not on screen.
+///
+/// Every index consumer goes through this one function. A fold applied on
+/// only one of the two index readers (`App::filtered_indices` for the cursor,
+/// `snapshot_indices` for `App::selected`) would let the two resolve against
+/// different rows, and `d` would delete a row the cursor is not on.
+pub fn visible_indices<F>(query: &str, worktrees: &[WorktreeInfo], repo_collapsed: F) -> Vec<usize>
+where
+  F: Fn(usize) -> bool,
+{
+  let matched = fuzzy_match_indices(query, worktrees);
+  if !query.is_empty() {
+    return matched;
+  }
+  matched
+    .into_iter()
+    .filter(|&i| worktrees.get(i).is_some_and(|w| w.is_main) || !repo_collapsed(i))
+    .collect()
+}
+
 /// Inline fuzzy-filter state machine + memoised matched-indices cache.
 /// `Default` opens the filter in the closed / empty / cold-cache state.
 #[derive(Debug, Default)]
