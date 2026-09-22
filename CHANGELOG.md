@@ -110,7 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would let `d` delete a row other than the one under the cursor. Folding
   moves the cursor onto the header and drops the marks it hides. An active
   filter overrides the fold, since the query matches worktree names and can
-  keep a linked row while filtering its header out. The filter cache is keyed
+  keep a linked row while filtering its header out; under a query the two
+  keys are inert rather than deferred, and clearing the query drops the
+  marks the returning fold hides. The filter cache is keyed
   on query and list length, which a fold changes neither of, so a toggle
   invalidates it explicitly; without that, a warm cache served the pre-fold
   rows and the fold did nothing, silently, on exactly the rendered path.
