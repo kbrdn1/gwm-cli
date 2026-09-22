@@ -3229,9 +3229,6 @@ fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
   }
 }
 
-/// The three width-constrained column budgets a row truncates against.
-/// Grouped rather than passed one by one so the mark column (#484) could join
-/// `build_row`'s signature without pushing it past the argument limit.
 /// What workspace mode adds to a table row: the `REPO` cell (issue #36) and,
 /// when the row heads its repo's accordion, that group's fold state (issue
 /// #680). One value rather than two parameters because they carry the same
@@ -3272,6 +3269,9 @@ pub fn repo_group_chevron(folded: bool) -> &'static str {
 /// ceiling only costs width on a root that actually has a name that long.
 pub const REPO_COL_MAX: u16 = 32;
 
+/// The three width-constrained column budgets a row truncates against.
+/// Grouped rather than passed one by one so the mark column (#484) could join
+/// `build_row`'s signature without pushing it past the argument limit.
 #[derive(Debug, Clone, Copy)]
 struct RowWidths {
   name: u16,
