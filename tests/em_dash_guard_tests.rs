@@ -308,11 +308,18 @@ fn no_string_literal_under_src_carries_an_em_dash() {
 
   // A scanner that desynchronises reports no offenders for the same reason a
   // clean tree does, and the two are indistinguishable from the outside. The
-  // tree holds 4867 literals today, so a floor well under it still catches
+  // tree holds 5610 literals today, so a floor well under it still catches
   // the failure that matters: one mis-parsed construct swallowing the rest of
   // a file, or of every file.
+  //
+  // Deliberately under, and by a stated ratio rather than a round number: a
+  // literal is not an owned unit the way a file or a subcommand is, and any
+  // refactor deletes a few. This is ~82% of the count, the same margin the
+  // floor was written with when the tree held 4867 (#649 measured it still
+  // reading 4000, which is 71%). Re-measure and re-apply the ratio when it
+  // drifts, rather than pinning the exact number and reddening every cleanup.
   assert!(
-    scanned >= 4000,
+    scanned >= 4600,
     "expected the scan to find the literals in src/, found {scanned}"
   );
   assert!(
@@ -363,9 +370,15 @@ fn no_help_page_carries_an_em_dash() {
 
   // The walk parses clap's own layout, so a formatter change upstream could
   // silently stop finding subcommands and leave this reading one page. There
-  // are 39 top-level subcommands today, plus their children.
+  // are 40 top-level subcommands today, plus their children: 75 pages.
+  //
+  // Exact, like the env_guard floor and unlike the literal count above: a help
+  // page is an owned unit, one per variant of `Command` and its children, so
+  // the count only moves when the CLI surface does, and that is a change worth
+  // seeing. Stable across platforms because no variant of `Command` is
+  // `#[cfg]`-gated, verified for #649. It read 30 against 75 until then.
   assert!(
-    visited >= 30,
+    visited >= 75,
     "expected the help walk to reach the subcommands, visited {visited} page(s)"
   );
   assert!(

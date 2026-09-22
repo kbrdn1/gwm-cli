@@ -134,16 +134,28 @@ fn overlap(left: &BTreeSet<String>, right: &BTreeSet<String>) -> f64 {
 fn descriptions_survive_search_result_truncation() {
   let root = docs_root();
   let mut long = Vec::new();
+  let mut parsed = 0usize;
   for page in markdown_pages() {
     let Some(description) = description(&page) else {
       continue;
     };
+    // Counted after the parse, not at the page: `description()` returning
+    // `None` for every page, which a frontmatter delimiter change would do,
+    // empties this loop while the walk still finds all 83 (#649).
+    parsed += 1;
     let len = description.chars().count();
     if len > MAX_DESCRIPTION_CHARS {
       let rel = page.strip_prefix(&root).unwrap_or(&page);
       long.push(format!("{} ({len} chars)", rel.display()));
     }
   }
+  // Exact, the policy this repo uses for a set of units it owns (#649): the
+  // count moves only when somebody adds or removes one, so a red here is an
+  // edit to acknowledge, not noise.
+  assert!(
+    parsed >= 81,
+    "expected the walk to parse the 81 descriptions under docs/, found {parsed}"
+  );
   assert!(
     long.is_empty(),
     "these descriptions run past {MAX_DESCRIPTION_CHARS} characters, so what a search engine \
@@ -163,11 +175,13 @@ fn descriptions_are_distinct_within_a_locale() {
     .filter_map(|page| description(&page).map(|d| (page, words(&d))))
     .collect();
   let mut clashes = Vec::new();
+  let mut compared = 0usize;
   for (i, (left, left_words)) in pages.iter().enumerate() {
     for (right, right_words) in pages.iter().skip(i + 1) {
       if locale(left) != locale(right) {
         continue;
       }
+      compared += 1;
       let score = overlap(left_words, right_words);
       if score >= MAX_DESCRIPTION_OVERLAP {
         clashes.push(format!(
@@ -178,6 +192,15 @@ fn descriptions_are_distinct_within_a_locale() {
       }
     }
   }
+  // Under, not exact: the count is the locale split of the 81 descriptions
+  // squared (41 EN and 40 FR make 1600 pairs today), so moving one page
+  // between locales moves it without anything being lost. It is the only
+  // floor that catches `locale()` collapsing to a distinct value per page,
+  // which would skip every pair while the descriptions are all still parsed.
+  assert!(
+    compared >= 1500,
+    "expected the walk to compare the same-locale description pairs, compared {compared}"
+  );
   assert!(
     clashes.is_empty(),
     "these pages are crawled as separate URLs and say the same sentence, so an engine drops \

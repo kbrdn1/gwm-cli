@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Two of the four workflow `permissions:` grants were compared by nothing**
+  ([#681](https://github.com/kbrdn1/gwm-cli/issues/681)).
+  `ci.yml` (#677) and `release.yml` (#669) each had a test reading their grant
+  by value. `docs-sync.yml` and `pre-release.yml` were covered only by the
+  repo-wide sweep that asks for the key to exist, which reads that something is
+  declared and never what: `permissions: write-all` on either file, alone, left
+  all 32 tests of the suite green. Measured while reviewing #677, and older than
+  it, so it was filed rather than folded in.
+
+  Both are now pinned by value. `docs-sync.yml` must grant `{}`, the strongest
+  statement in this repo and the one an edit widens most easily, since it is
+  triggered by a push to `main` and authenticates its one API call with a PAT
+  that is not the workflow token. `pre-release.yml` must grant
+  `contents: write` for its publish, and is held to the same split
+  `release.yml` has: only `build` and `release` may inherit that grant, any
+  other job must carry `contents: read`. There is no such job today, which is
+  why the rule is written before one appears rather than after.
+
+  Compared as parsed values and never through `as_str()`, which reads `None`
+  for `{}` and for `write-all` alike and so cannot tell a grant from its
+  absence (#669). Four mutations, each applied alone: both grants flipped to
+  `write-all`, a scope written on `docs-sync.yml`'s only job, and a third job
+  added to `pre-release.yml` after the publish with no grant of its own.
+
 - **`ci.yml` declared no `permissions:`, so its nine jobs took whatever the
   repository setting said**
   ([#677](https://github.com/kbrdn1/gwm-cli/issues/677)).
@@ -197,6 +221,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inset origin and the child's own DECSET state.
 
 ### Fixed
+
+- **The non-vacuity floors had stopped tracking what they count, and one file's
+  own upkeep rule was not followed**
+  ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).
+  A floor is the `assert!(count >= N)` that proves a sweep inspected something
+  rather than passing over an empty corpus, which is the defect class this repo
+  has hit five times. Four had drifted, read by inflating each to `9999999` and
+  taking the counter out of the panic: `env_guard_invariant_tests` `audited`
+  said 9 against 11, `em_dash_guard_tests` `scanned` said 4000 against 5610 and
+  `visited` 30 against 75, and `release_workflow_tests` `audited` said 8
+  against 11.
+
+  The `env_guard` one is the case that matters, because the comment beside it
+  states the rule: "the floor moves up when a binary is added, never down
+  without saying why". Two env-rewriting binaries were added and it stayed at
+  9, so two could have dropped out of the `set_var` / `remove_var` audit
+  entirely with the count still above the floor. The three other
+  `release_workflow_tests` floors were re-measured and are exactly tight, so
+  they are untouched.
+
+  Eleven sweeps over `docs/` had no floor at all, or `!pages.is_empty()`, which
+  proves a page was found and not that a line of it was inspected. Each now
+  counts what it inspects, at the point of inspection rather than of discovery:
+  `parsed` after `description()` returns `Some`, `measured` after `image_size`
+  reads a header, `resolved` per image reference rather than per page. Today
+  that reads 54 image references, 40 mirrored pages, 30 assets, 29 tracked
+  captures, 25 tapes, 81 descriptions, 1600 same-locale pairs and 11065
+  unfenced lines.
+
+  Each floor now names which of two policies it follows, since they are not
+  interchangeable: exact for a set of units the repo owns, where a red is an
+  edit to acknowledge, and deliberately under by a stated ratio for markdown
+  lines and string literals, where every rewrite moves the count. `scanned` is
+  back to the ~82% margin it was written with, having drifted to 71%.
+
+  Reds by shrinking the corpus and never by editing a floor: one binary dropped
+  from the env audit, one workflow file removed, one docs section and the tapes
+  moved out of the tree.
+
+- **An unclosed code fence in the French docs blinded the two guards that
+  follow fences** ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).
+  `docs_callout_tests::container_lines` and
+  `docs_assets_tests::image_targets` both skip fenced blocks, because a page is
+  allowed to show syntax it does not use, and both toggle on a line starting
+  with three backticks. An unclosed fence leaves that toggle on for the rest of
+  the file, so a `:::` directive or a broken image reference below it is
+  invisible to the guard that exists to catch it, with the guard green.
+
+  `docs/fr/6.development/1.testing.md` carried an orphan fence at line 200,
+  which is its last line, so nothing was blinded yet. That is how such a line
+  survives: at end of file it costs nothing until someone appends to the page,
+  and the published French page also showed an unterminated code block. The
+  English counterpart ends with the same list and no fence. A new guard asserts
+  every page closes what it opens, using the same fence rule as the two
+  followers on purpose, since one that recognised fences differently could pass
+  while they are blind.
 
 - **The flake could pin its version again with the guard written for it
   green** ([#648](https://github.com/kbrdn1/gwm-cli/issues/648)). The test
