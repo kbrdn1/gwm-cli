@@ -7336,6 +7336,8 @@ impl App {
     let had_query = !self.filter.query().is_empty();
     self.filter.close_cancel();
     self.clamp_selection_to_filter();
+    // #680: the fold the query had overridden is back, with its hidden rows.
+    self.drop_marks_hidden_by_a_fold();
     self.invalidate_sidebar_cache();
     self.status = if had_query {
       "filter cleared".into()
@@ -7356,6 +7358,8 @@ impl App {
     if self.filter.query().len() != before {
       self.clamp_selection_to_filter();
       self.invalidate_sidebar_cache();
+      // #680: a no-op until the last character goes and the fold is back.
+      self.drop_marks_hidden_by_a_fold();
     }
   }
 
@@ -7416,6 +7420,13 @@ impl App {
   /// usually one of the rows this hides. Marks on hidden rows are dropped:
   /// a mark out of sight is a row `d` would delete without showing it.
   pub fn collapse_group(&mut self) {
+    // An active query overrides the fold (`visible_indices`), so a fold
+    // recorded now would surface later, unseen, when the query clears, and
+    // the mark pruning below would run against the query's rows instead of
+    // the fold's. Inert until the query is gone.
+    if !self.filter.query().is_empty() {
+      return;
+    }
     let Some(repo) = self.selected_raw_index().and_then(|raw| self.row_repo_index(raw)) else {
       return;
     };
@@ -7433,6 +7444,9 @@ impl App {
   /// Unfold the cursor's repo group (issue #680). A no-op on an open group,
   /// and outside workspace mode.
   pub fn expand_group(&mut self) {
+    if !self.filter.query().is_empty() {
+      return;
+    }
     let Some(repo) = self.selected_raw_index().and_then(|raw| self.row_repo_index(raw)) else {
       return;
     };
@@ -7479,10 +7493,16 @@ impl App {
     }
   }
 
-  /// Drop the marks a fold just took off screen (issue #680). Called after
-  /// the memo is invalidated, so `visible_now` already reflects the fold.
+  /// Drop the marks a fold takes off screen (issue #680): after a fold, and
+  /// when a query clears, since the query had overridden the fold and let a
+  /// hidden row be marked. The batch overlay reports a count, not the
+  /// members, so a hidden mark is a row `d` deletes without showing it.
+  ///
+  /// A no-op while a query is active: `visible_now` is then the query's
+  /// rows, and pruning against it would drop marks the query hides, which
+  /// the filter has always kept.
   fn drop_marks_hidden_by_a_fold(&mut self) {
-    if self.marked.is_empty() {
+    if self.marked.is_empty() || self.collapsed_repos.is_empty() || !self.filter.query().is_empty() {
       return;
     }
     let visible: BTreeSet<PathBuf> = self
