@@ -1103,10 +1103,16 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
     Vec::new()
   };
   let repo_w = if is_workspace {
-    column_width(repo_names.iter().map(|s| s.as_str()), 6, 24)
+    column_width(repo_names.iter().map(|s| s.as_str()), 6, REPO_COL_MAX)
   } else {
     0
   };
+
+  // #680: fold state per visible row, `Some(folded)` only on a repo group
+  // header. Resolved up front for the same borrow reason as `repo_names`:
+  // `group_fold` reads `app` immutably, `list_state` is borrowed mutably at
+  // render time.
+  let group_folds: Vec<Option<bool>> = filtered.iter().map(|&raw| app.group_fold(raw)).collect();
 
   // Dynamic column widths derived from the visible subset so columns fit the
   // rows actually on screen. The path column is always last and absorbs the
@@ -1184,7 +1190,11 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
     .iter()
     .enumerate()
     .map(|(vi, w)| {
-      let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
+      let repo = is_workspace.then(|| RepoCell {
+        name: repo_names[vi].as_str(),
+        width: repo_w,
+        fold: group_folds[vi],
+      });
       let agent = show_agent.then_some(agent_cells[vi]);
       let mark = marks.get(vi).copied();
       build_row(w, mark, repo, row_widths, agent, show_note, &theme)
@@ -3219,6 +3229,46 @@ fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
   }
 }
 
+/// What workspace mode adds to a table row: the `REPO` cell (issue #36) and,
+/// when the row heads its repo's accordion, that group's fold state (issue
+/// #680). One value rather than two parameters because they carry the same
+/// precondition: outside workspace mode there is no repo cell AND no group to
+/// fold, so `None` states both at once.
+#[derive(Debug, Clone, Copy)]
+struct RepoCell<'a> {
+  name: &'a str,
+  width: u16,
+  /// `Some(folded)` when this row is its group's header, `None` otherwise.
+  fold: Option<bool>,
+}
+
+/// Disclosure markers for a repo group header in workspace mode (issue #680):
+/// `REPO_GROUP_OPEN` when the group shows its worktrees, `REPO_GROUP_FOLDED`
+/// when it is folded down to its main row. Plain Unicode rather than a
+/// nerd-font codepoint, like [`super::wt_tree::WT_DIR_CARET`], so a header
+/// still reads on a terminal without a patched font.
+pub const REPO_GROUP_OPEN: &str = "\u{25be}";
+/// Folded counterpart of [`REPO_GROUP_OPEN`].
+pub const REPO_GROUP_FOLDED: &str = "\u{25b8}";
+
+/// The chevron a repo group header carries for its fold state (issue #680).
+pub fn repo_group_chevron(folded: bool) -> &'static str {
+  if folded {
+    REPO_GROUP_FOLDED
+  } else {
+    REPO_GROUP_OPEN
+  }
+}
+
+/// Ceiling on the workspace `REPO` column (issue #680).
+///
+/// It was 24, which had exactly zero margin: the longest repo basename on the
+/// workspace root this was measured against is 24 cells, so one more
+/// character truncated the name of a repo the column exists to name. The
+/// floor stays at 6, and the column is still a hard `Length`, so the extra
+/// ceiling only costs width on a root that actually has a name that long.
+pub const REPO_COL_MAX: u16 = 32;
+
 /// The three width-constrained column budgets a row truncates against.
 /// Grouped rather than passed one by one so the mark column (#484) could join
 /// `build_row`'s signature without pushing it past the argument limit.
@@ -3238,7 +3288,7 @@ fn build_row(
   // #484: `Some(is_marked)` while the mark column is shown (i.e. at least one
   // row is marked anywhere in the list), `None` when it is absent entirely.
   mark: Option<bool>,
-  repo: Option<(&str, u16)>,
+  repo: Option<RepoCell<'_>>,
   widths: RowWidths,
   // Outer `Option` = is the AGENT column shown at all (round D:
   // conditional on any detected session); inner = this row's top agent.
@@ -3248,6 +3298,20 @@ fn build_row(
   show_note: bool,
   theme: &Theme,
 ) -> Row<'static> {
+  // #680: `Some(folded)` on a repo group header, `None` on every other row.
+  // Drives the chevron and the flat muted repaint below.
+  let group = repo.and_then(|r| r.fold);
+  // #680: a folded header paints flat `muted`, and it does so by swapping the
+  // theme rather than by threading a `dim` flag: every cell below reads its
+  // roles off `theme`, including the sub-builders, so one swap dims the spans
+  // inside a cell too, which a row-level style cannot reach.
+  let folded_palette;
+  let theme = if group == Some(true) {
+    folded_palette = super::theme::folded_group_theme(theme);
+    &folded_palette
+  } else {
+    theme
+  };
   let RowWidths {
     name: name_w,
     branch: branch_w,
@@ -3276,8 +3340,19 @@ fn build_row(
   // freshness palette (green/yellow/darkgray) reads as noise next to the
   // more important BRANCH-status colour, so we keep it muted in the table
   // and let the sidebar's `Created:` row carry the colour-coded signal.
-  let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
-  let age_cell = Cell::from(age_label).style(Style::default().fg(theme.muted));
+  //
+  // #680: on a repo group header the slot carries the fold chevron instead.
+  // It is free real estate: `branch_age` returns `None` for a trunk branch,
+  // so a main worktree row renders `-` there. `accent` while the group is
+  // open makes the chevron read as the affordance it is; folded, the swapped
+  // palette above takes it back down to `muted` with the rest of the row.
+  let age_cell = match group {
+    Some(folded) => Cell::from(repo_group_chevron(folded)).style(Style::default().fg(theme.accent)),
+    None => {
+      let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+      Cell::from(age_label).style(Style::default().fg(theme.muted))
+    }
+  };
 
   // The path column paints with the `path` role (issue #210; default
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
@@ -3293,10 +3368,9 @@ fn build_row(
     cells.push(mark_cell(marked, theme));
   }
   cells.push(age_cell);
-  if let Some((repo_name, repo_w)) = repo {
+  if let Some(RepoCell { name, width, .. }) = repo {
     cells.push(
-      Cell::from(trunc(repo_name, repo_w as usize))
-        .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+      Cell::from(trunc(name, width as usize)).style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
     );
   }
   cells.push(Cell::from(marker));
@@ -4563,6 +4637,8 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     entry(Action::WtScrollUp, "scroll the Working Tree pane up"),
     entry(Action::Top, "jump to first worktree"),
     entry(Action::Bottom, "jump to last worktree"),
+    entry(Action::CollapseGroup, "fold the repo group (workspace mode)"),
+    entry(Action::ExpandGroup, "unfold the repo group (workspace mode)"),
   ];
   if picker_mode {
     rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
