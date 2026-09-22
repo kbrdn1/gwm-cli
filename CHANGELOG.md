@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Two of the four workflow `permissions:` grants were compared by nothing**
+  ([#681](https://github.com/kbrdn1/gwm-cli/issues/681)).
+  `ci.yml` (#677) and `release.yml` (#669) each had a test reading their grant
+  by value. `docs-sync.yml` and `pre-release.yml` were covered only by the
+  repo-wide sweep that asks for the key to exist, which reads that something is
+  declared and never what: `permissions: write-all` on either file, alone, left
+  all 32 tests of the suite green. Measured while reviewing #677, and older than
+  it, so it was filed rather than folded in.
+
+  Both are now pinned by value. `docs-sync.yml` must grant `{}`, the strongest
+  statement in this repo and the one an edit widens most easily, since it is
+  triggered by a push to `main` and authenticates its one API call with a PAT
+  that is not the workflow token. `pre-release.yml` must grant
+  `contents: write` for its publish, and is held to the same split
+  `release.yml` has: only `build` and `release` may inherit that grant, any
+  other job must carry `contents: read`. There is no such job today, which is
+  why the rule is written before one appears rather than after.
+
+  Compared as parsed values and never through `as_str()`, which reads `None`
+  for `{}` and for `write-all` alike and so cannot tell a grant from its
+  absence (#669). Four mutations, each applied alone: both grants flipped to
+  `write-all`, a scope written on `docs-sync.yml`'s only job, and a third job
+  added to `pre-release.yml` after the publish with no grant of its own.
+
 - **`ci.yml` declared no `permissions:`, so its nine jobs took whatever the
   repository setting said**
   ([#677](https://github.com/kbrdn1/gwm-cli/issues/677)).
