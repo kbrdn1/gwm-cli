@@ -12,6 +12,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`ci.yml` declared no `permissions:`, so its nine jobs took whatever the
+  repository setting said**
+  ([#677](https://github.com/kbrdn1/gwm-cli/issues/677)).
+  `default_workflow_permissions` reads `read` today, so the token was
+  harmless, by a setting no pull request shows rather than by anything the
+  workflow said. Every other workflow here states its own contract:
+  `docs-sync.yml` carries `permissions: {}`, `release.yml` and
+  `pre-release.yml` carry `contents: write`, and the two jobs that run after
+  `release.yml`'s publish carry `contents: read` (#669).
+
+  What a flip of that setting to write would hand a pushing token to, on
+  every pull request, is the build scripts and proc macros of the whole
+  dependency graph, `cargo install cargo-audit --locked` building from
+  source, and five third-party actions, one of which copies the token to
+  disk: `cachix/install-nix-action@v31` falls back to `GITHUB_TOKEN` with no
+  `github_access_token` input and writes `access-tokens = github.com=<token>`
+  into `/etc/nix/nix.conf` (`install-nix.sh` at that tag, lines 50-52,
+  installed at line 93), which puts back for the rest of the job what
+  `persist-credentials: false` keeps out of the git config (#433).
+
+  `ci.yml` now grants `contents: read` at workflow level, which is all any of
+  its jobs does anything with: no step of the file names a token of its own.
+  Some hold the default one regardless, `actions/checkout` through its `token:`
+  default and the nix action through its fallback, and scoping that default is
+  what the grant is for. A test pins that grant by value
+  and refuses a job that restates a different one, since a job-level
+  `permissions:` replaces the workflow's wholesale rather than narrowing it.
+  A second, deliberately weaker sweep asks every workflow in the directory to
+  declare something, `{}` included, at the workflow level or on every one of
+  its jobs, so a workflow added later cannot arrive silent the way this one
+  did. Eight mutations, each applied alone: the grant removed, turned to
+  `write`, given a second scope, restated wider on a job, emptied on a job,
+  `jobs: {}`, a new workflow with no `permissions:`, and one workflow file
+  short of the floor.
+
+  The grant holds only while the file stays token-free, so that premise is
+  asserted rather than written down: the whole parsed workflow is refused the
+  words `token` and `secret`, in any casing. Review walked the first version of
+  that search, three keys inside `steps:`, and found `run:` the only one any
+  real input exercised, a `with:` dropped from the list staying green, and
+  every job-level surface unread, `container:`, `services:` and a reusable
+  call's `secrets: inherit` among them. Refusing the words rather than their
+  spellings closes `github['token']` and `toJSON(secrets)` too, which are the
+  next two forms and not the last. Nine synthetic shapes are asserted to be
+  seen, since `ci.yml` carries none of them, and six mutations of the real file
+  each name the word they added.
+
+  The token on disk is not what `permissions:` removes, only what it scopes:
+  the action writes it either way. Not giving the action a token at all is the
+  only thing that removes it, at the cost of an unauthenticated `nixpkgs`
+  fetch, rate-limited per runner IP.
+
 - **The jobs that run after the release publish no longer hold a write
   token** ([#669](https://github.com/kbrdn1/gwm-cli/issues/669)).
   `release.yml` grants `contents: write` at the workflow level for the

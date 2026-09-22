@@ -657,9 +657,228 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
   }
 }
 
+/// Issue #677. `ci.yml` declared no `permissions:` at all, so its jobs took
+/// whatever the repository setting handed them:
+/// `default_workflow_permissions` reads `read` today, which is a setting no
+/// pull request shows and one switch away from `write`. What that would hand a
+/// write token to is every build script and proc macro of the dependency
+/// graph, `cargo install cargo-audit`, and five third-party actions, one of
+/// which, `cachix/install-nix-action`, copies the token into
+/// `/etc/nix/nix.conf` (`install-nix.sh` at `v31`, lines 50-52, installed at
+/// line 93). The same reasoning closed #669 one workflow over.
+///
+/// Read, so nothing in `ci.yml` needs more: every job does the same two
+/// things, check out and build, and the file names no token of its own. Not
+/// that no step holds one, which would be false: `actions/checkout` defaults
+/// `token:` to `${{ github.token }}` and the nix action falls back to
+/// `GITHUB_TOKEN`, and scoping exactly that default is what the grant is for.
+/// What the file naming one would mean is a step doing something with it, the
+/// one edit that makes `contents: read` the wrong grant, so that is asserted
+/// rather than asserted *about*: a premise left in prose falsifies before the
+/// guard does, which this repo has recorded once already (#648). The search
+/// reads the whole parsed workflow, and proves on synthetic shapes that it
+/// sees the surfaces `ci.yml` does not carry today.
+///
+/// Job level is read as well as workflow level, because a job-level
+/// `permissions:` replaces the workflow's wholesale rather than narrowing it.
+/// So a job either leaves it out or restates the same `contents: read`, and
+/// anything else is refused without ranking scopes: `contents: write` and a
+/// second scope are escalations, and a `{}` that cannot even check out is a
+/// job that fails at run time, neither of which belongs here unannounced.
+#[test]
+fn ci_workflow_grants_a_read_only_token() {
+  let path = ".github/workflows/ci.yml";
+  let workflow = ci_workflow();
+  let read: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: read").unwrap();
+  assert_eq!(
+    workflow["permissions"], read,
+    "{path} must grant exactly `contents: read` at the workflow level (issue #677). With no \
+     `permissions:` at all its jobs inherit the repository default, which is a setting no diff \
+     in this repo records: flip it to write and every build script, every `cargo install` and \
+     the nix action that writes the token to `/etc/nix/nix.conf` get a token that can push here"
+  );
+
+  // Through `string_keys` (issue #673): GitHub reads `true:` as the job named
+  // `true` and runs it, while the YAML parser here reads a boolean, so a
+  // `filter_map` over string keys is what would skip it, carrying whatever
+  // `permissions:` it declares past this loop.
+  let jobs = string_keys(
+    workflow["jobs"]
+      .as_mapping()
+      .expect("ci.yml must define a `jobs:` mapping"),
+    &format!("{path} `jobs:`"),
+  );
+  for job in &jobs {
+    let declared = &workflow["jobs"][job.as_str()]["permissions"];
+    assert!(
+      declared.is_null() || *declared == read,
+      "{path} job `{job}` must leave `permissions:` out or restate the workflow's \
+       `contents: read`, and nothing else (issue #677). A job-level block replaces the \
+       workflow's wholesale: `contents: write` or a second scope is the escalation the \
+       workflow-level grant exists to prevent, and a `{{}}` cannot check out at all. Either \
+       way it is a conscious change that belongs in its own diff, with this test updated. \
+       Got `permissions: {declared:?}`"
+    );
+  }
+  assert!(
+    jobs.len() >= 9,
+    "expected at least the 9 jobs `ci.yml` ships, found {}. The mapping is probably no longer \
+     being read, and the loop above would then pass over nothing",
+    jobs.len()
+  );
+
+  // The premise of the grant, enforced. The **whole** parsed workflow is
+  // searched, not a list of the keys a token was thought to arrive through:
+  // review measured the first version of this, three keys inside `steps:`, and
+  // found `run:` alone carrying it, a `with:` dropped from the list staying
+  // green, and every job-level surface unread, `container:`, `services:` and a
+  // reusable call's `secrets:` among them. Enumerating where a secret can be
+  // written is the shape #652 and #655 already paid for.
+  //
+  // And the words, not their spellings. `GITHUB_TOKEN`, `github.token`,
+  // `github['token']`, `secrets.PAT`, `secrets: inherit` and
+  // `toJSON(secrets)` are six ways to write two things, and Actions keeps
+  // adding syntax for them: a list of the forms thought of is the four review
+  // passes #672 spent learning that text does not bound a language. So the
+  // haystack is refused the words `token` and `secret` in any casing, which is
+  // a superset of every form. The cost is a legitimate step whose name happens
+  // to carry either word going red, and that cost is the point: it is a line a
+  // reader should look at twice.
+  //
+  // Comments are gone by the time the parser is done, so the comment above the
+  // grant in `ci.yml` can name what it forbids without matching itself.
+  //
+  // The ceiling, named because it is one: this reads `ci.yml`, so a token an
+  // action consumes inside its own definition is invisible here.
+  // `cachix/install-nix-action@v31` is exactly that shape, `GITHUB_TOKEN:
+  // ${{ github.token }}` in its own `action.yml`, and a local
+  // `uses: ./.github/actions/…` would be too. Scoping the token is what
+  // answers that, which is the grant above, not a wider search.
+  let flagged = |value: &serde_yaml_ng::Value| -> Vec<&'static str> {
+    let text = serde_yaml_ng::to_string(value)
+      .expect("a workflow must serialise")
+      .to_lowercase();
+    ["token", "secret"].into_iter().filter(|w| text.contains(w)).collect()
+  };
+  assert!(
+    flagged(&workflow).is_empty(),
+    "{path} reads {:?}, so it is no longer the token-free workflow `contents: read` was granted \
+     for (issue #677). Decide what scope that step needs and say it in `permissions:`, rather \
+     than leaving the grant to mean something it no longer does",
+    flagged(&workflow)
+  );
+
+  // What the sweep above is searching, stated rather than assumed: a
+  // serialisation that stopped carrying the steps would hold no token either.
+  let serialised = serde_yaml_ng::to_string(&workflow).expect("ci.yml must serialise");
+  for inside in ["cargo fmt --all -- --check", "cargo nextest run", "install-nix-action"] {
+    assert!(
+      serialised.contains(inside),
+      "the searched serialisation of {path} does not contain `{inside}`, so it is not carrying \
+       the steps and the token search above is looking at a shell of the workflow"
+    );
+  }
+
+  // And that it sees each shape it exists for. These are synthetic, because
+  // `ci.yml` carries none of them: the guard is about what a later edit could
+  // add, so the proof cannot come from today's file.
+  for (shape, yaml) in [
+    (
+      "a step's `env:`",
+      "jobs:\n  probe:\n    steps:\n      - env:\n          GH_TOKEN: x\n",
+    ),
+    (
+      "a step's `with:`",
+      "jobs:\n  probe:\n    steps:\n      - with:\n          token: ${{ github.token }}\n",
+    ),
+    (
+      "a step's `run:`",
+      "jobs:\n  probe:\n    steps:\n      - run: echo \"$GITHUB_TOKEN\"\n",
+    ),
+    (
+      "a job's `container.env`",
+      "jobs:\n  probe:\n    container:\n      image: x\n      env:\n        GITHUB_TOKEN: y\n",
+    ),
+    (
+      "a service's `credentials`",
+      "jobs:\n  probe:\n    services:\n      s:\n        credentials:\n          password: ${{ secrets.PAT }}\n",
+    ),
+    (
+      "a reusable call's `secrets: inherit`",
+      "jobs:\n  probe:\n    uses: ./.github/workflows/other.yml\n    secrets: inherit\n",
+    ),
+    ("the workflow's own `env:`", "env:\n  GH_TOKEN: x\njobs: {}\n"),
+    (
+      "an index expression",
+      "jobs:\n  probe:\n    steps:\n      - run: echo ${{ github['token'] }}\n",
+    ),
+    (
+      "a whole context serialised",
+      "jobs:\n  probe:\n    steps:\n      - run: echo ${{ toJSON(secrets) }}\n",
+    ),
+  ] {
+    let probe: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).expect("the probe must parse");
+    assert!(
+      !flagged(&probe).is_empty(),
+      "the token search no longer sees {shape}, so `ci.yml` could grow one with this test green"
+    );
+  }
+}
+
+/// Issue #677, the half a single file cannot state: a workflow added later
+/// with no `permissions:` inherits the repository default the same way
+/// `ci.yml` did, and nothing here would say so. So every workflow declares
+/// one, whatever it is: `{}` for `docs-sync.yml`, `contents: read` for
+/// `ci.yml`, `contents: write` for the two that publish.
+///
+/// Two of those four are also compared **by value**, `ci.yml` above and
+/// `release.yml` in `release_workflow_grants_write_only_to_build_and_publish`.
+/// The other two are not, and review measured what that leaves open:
+/// `docs-sync.yml` or `pre-release.yml` flipped to `permissions: write-all`
+/// keeps the suite green. That is a gap this issue did not open and does not
+/// close, and the sentence says so rather than implying coverage that is not
+/// there.
+///
+/// This test is deliberately weaker than the by-value ones: it reads that the
+/// key exists, not what it says, because what a workflow needs is its own
+/// business. What it refuses is the silence. Declaring it on every job instead of at the top is
+/// explicit too, and passes: GitHub allows either, and neither leaves a job
+/// taking the repository default.
+#[test]
+fn every_workflow_declares_its_permissions() {
+  let mut swept = 0;
+  for path in workflow_paths() {
+    let workflow: serde_yaml_ng::Value =
+      serde_yaml_ng::from_str(&fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let jobs = string_keys(
+      workflow["jobs"]
+        .as_mapping()
+        .unwrap_or_else(|| panic!("`{path}` must define a `jobs:` mapping")),
+      &format!("`{path}` `jobs:`"),
+    );
+    let every_job_declares = !jobs.is_empty()
+      && jobs
+        .iter()
+        .all(|job| !workflow["jobs"][job.as_str()]["permissions"].is_null());
+    assert!(
+      !workflow["permissions"].is_null() || every_job_declares,
+      "`{path}` declares `permissions:` neither at the workflow level nor on every one of its \
+       jobs (issue #677), so a job of it takes whatever `default_workflow_permissions` says, a \
+       repository setting no diff in this repo records. Declare what the workflow needs, \
+       `permissions: {{}}` if that is nothing"
+    );
+    swept += 1;
+  }
+  assert!(
+    swept >= 4,
+    "expected at least the 4 workflows this repo ships, found {swept}. The directory listing is \
+     probably no longer seeing them, and the loop above would then pass over nothing"
+  );
+}
+
 /// Every workflow in the directory, so a file added later is audited by
 /// construction rather than by remembering to extend a hand-written list. The
-/// three sweeps below all enumerate from here: naming files individually is
+/// sweeps below all enumerate from here: naming files individually is
 /// how a new workflow silently escapes an invariant that was supposed to be
 /// repo-wide.
 fn workflow_paths() -> Vec<String> {
