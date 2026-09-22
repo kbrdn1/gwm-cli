@@ -965,3 +965,61 @@ fn the_repo_column_fits_a_thirty_cell_repo_name() {
   let row = row_at(&terminal, y);
   assert!(row.contains(long), "the REPO cell shows the whole name: {row}");
 }
+
+#[test]
+fn folding_is_ignored_while_a_query_is_active() {
+  // The stated assumption: while `filter.query()` is non-empty, collapse is
+  // ignored. Not "applied later": a fold recorded under a query would take
+  // effect, unseen, the moment the query clears, and `drop_marks` would
+  // prune against the query's rows, dropping marks in any repo.
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  // By name: libgit2 lists linked worktrees in directory order, not sorted.
+  let feat_one = app.worktrees.iter().position(|w| w.name == "feat-one").unwrap();
+  let feat_two = app.worktrees.iter().position(|w| w.name == "feat-two").unwrap();
+  app.list_state.select(Some(feat_two));
+  app.toggle_select();
+  assert_eq!(app.marked_count(), 1, "precondition: feat-two is marked");
+  // `one` matches feat-one alone, so the marked feat-two is off screen.
+  app.filter.set_query("one".into());
+  assert_eq!(
+    app.filtered_indices(),
+    vec![feat_one],
+    "precondition: the query hides the marked row"
+  );
+  app.list_state.select(Some(0));
+
+  app.collapse_group();
+
+  assert_eq!(app.marked_count(), 1, "a fold under a query touches no mark");
+  assert_eq!(app.list_state.selected(), Some(0), "and moves no cursor");
+  app.exit_filter_cancel();
+  assert_eq!(
+    app.filtered_indices(),
+    vec![0, 1, 2, 3],
+    "no fold surfaces once the query clears"
+  );
+}
+
+#[test]
+fn clearing_a_query_drops_the_marks_a_fold_hides() {
+  // Fold alpha, then type a query: the query overrides the fold and shows
+  // alpha's linked rows again, so one can be marked. Clearing the query puts
+  // the fold back, and the mark must go with the row it sits on: the batch
+  // overlay reports a count, not the members, so a hidden mark is a row `d`
+  // deletes without showing it.
+  let (_root, _wts, mut app) = workspace_with_a_foldable_group();
+  app.collapse_group();
+  app.filter.set_query("feat".into());
+  app.list_state.select(Some(0));
+  app.toggle_select();
+  assert_eq!(
+    app.marked_count(),
+    1,
+    "precondition: a fold-hidden row is marked under the query"
+  );
+
+  app.exit_filter_cancel();
+
+  assert_eq!(app.filtered_indices(), vec![0, 3], "the fold is back");
+  assert_eq!(app.marked_count(), 0, "the mark went with the hidden row");
+}
