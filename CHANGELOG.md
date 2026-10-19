@@ -226,6 +226,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The details sidebar no longer rebuilds once per row while the selection
+  is moving.** Each rebuild shells out three times (`git diff --stat`, `git
+  log`, `git status`), and on Windows a git subprocess costs 115 to 185 ms
+  (measured on a Ryzen 5 3600, Windows 11, Git for Windows: `git status
+  --short` 132 ms on a small repo, 183 ms on a Node monorepo; `git log -n 10`
+  117 ms; `git diff --stat` 114 ms), so a held `j` through an eleven-row
+  workspace queued a 350 to 450 ms rebuild per row and the list read as
+  lagging. Coalescing onto the in-flight worker (#343) kept the thread count
+  at one but still spawned the next rebuild the moment the previous one
+  landed. `maybe_refresh_sidebar` now waits for the selection to settle
+  (`SIDEBAR_SETTLE`, 150 ms since the last navigation) before it spawns: a
+  burst of rows costs one rebuild, and the first stable row is fetched
+  within one event-loop poll. `SidebarState::moved_at` records the last
+  navigation; `maybe_refresh_sidebar_at(now)` takes the clock so the window
+  is tested without sleeping. Hiding the sidebar (`V`) still costs nothing,
+  as before. Measured and proposed by @Ismaouste.
+
 - **The non-vacuity floors had stopped tracking what they count, and one file's
   own upkeep rule was not followed**
   ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).

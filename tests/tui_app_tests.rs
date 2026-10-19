@@ -1663,6 +1663,30 @@ fn next_prev_invalidate_sidebar_cache() {
 }
 
 #[test]
+fn the_sidebar_waits_for_the_selection_to_settle_before_rebuilding() {
+  // A rebuild is three git subprocesses (115–185 ms each on Windows), so one
+  // per row during a held `j` reads as lag. The settle window holds the
+  // spawn while the selection is still moving and releases it once the
+  // selection has stayed put; the clock is explicit so no test sleeps.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  assert!(app.selected().is_some(), "a worktree is selected");
+  let before = Instant::now();
+  app.next();
+  app.maybe_refresh_sidebar_at(before);
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sidebar),
+    "no rebuild while the selection is still moving"
+  );
+  app.maybe_refresh_sidebar_at(before + Duration::from_millis(400));
+  assert!(
+    app.tasks.is_loading(TaskKind::Sidebar),
+    "the settled selection is fetched"
+  );
+}
+
+#[test]
 fn refresh_invalidates_sidebar_cache() {
   let (_dir, mut app) = make_app();
   app.sidebar.cache = Some((

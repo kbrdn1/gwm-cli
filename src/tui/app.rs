@@ -365,6 +365,14 @@ pub struct WorkspaceState {
 /// exercise. Small enough to still land on a specific column in a few taps.
 const RICH_H_STEP: usize = 8;
 
+/// How long the selection must stay put before the details sidebar shells
+/// out for it. A rebuild is three git subprocesses, 115 to 185 ms each on
+/// Windows, so spawning one per row during a held `j` reads as lag; below a
+/// key-repeat interval the window would never engage, and much above it the
+/// first stable row would feel slow. The event loop polls every 200 ms at
+/// most, which bounds the added latency after the last keypress.
+const SIDEBAR_SETTLE: Duration = Duration::from_millis(150);
+
 pub struct App {
   pub repo: Repository,
   /// The name `{repo}` expands to, in `branch_pattern`, `path_pattern` and
@@ -1517,10 +1525,21 @@ impl App {
   /// `Sidebar` slot, so a held `j` coalesces onto the single in-flight worker
   /// instead of spawning a thread per row: the render shows the placeholder
   /// while scrolling and the settled selection is fetched once the burst ends.
-  /// That coalescing IS the debounce — no timer needed. A worker whose
-  /// selection has since moved stores a payload the render key-check ignores;
-  /// the next tick requests the settled one.
+  /// That coalescing is one half of the debounce. The other half is a short
+  /// settle window: no worker is spawned while the selection moved less than
+  /// [`SIDEBAR_SETTLE`] ago. Coalescing alone still spawns one rebuild per
+  /// row the moment the previous one lands, and each rebuild is three git
+  /// subprocesses — 115 to 185 ms each on Windows, measured on a Ryzen 5
+  /// 3600 — so a held `j` through a workspace read as a lagging list. A
+  /// worker whose selection has since moved stores a payload the render
+  /// key-check ignores; the next tick requests the settled one.
   pub fn maybe_refresh_sidebar(&mut self) {
+    self.maybe_refresh_sidebar_at(Instant::now());
+  }
+
+  /// [`Self::maybe_refresh_sidebar`] against an explicit clock, so the settle
+  /// window is unit-testable without sleeping.
+  pub fn maybe_refresh_sidebar_at(&mut self, now: Instant) {
     // A hidden sidebar is not drawn (`draw_body` skips `draw_sidebar`), so
     // rebuilding its preview would run git work for an invisible panel —
     // restoring the pre-#343 behaviour where hiding the sidebar (`v`) did no
@@ -1534,6 +1553,16 @@ impl App {
     let mode = self.sidebar.mode;
     // Already authoritative for this selection + mode → nothing to rebuild.
     if matches!(&self.sidebar.cache, Some(((p, m), _)) if *p == w.path && *m == mode) {
+      return;
+    }
+    // Still moving: let the selection settle. The event loop calls back
+    // within one poll (200 ms at most), so the first stable row is fetched
+    // promptly, and a burst of rows costs one rebuild instead of one each.
+    if self
+      .sidebar
+      .moved_at
+      .is_some_and(|at| now.saturating_duration_since(at) < SIDEBAR_SETTLE)
+    {
       return;
     }
     let Some(generation) = self.tasks.request(TaskKind::Sidebar) else {

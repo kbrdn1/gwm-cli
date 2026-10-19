@@ -33,6 +33,7 @@
 
 use crate::tui::ui::SidebarSections;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Re-exported from [`crate::config`], where both sidebar knobs live now
 /// that the orientation is persisted to `.gwm.toml` alongside the
@@ -290,6 +291,10 @@ pub struct SidebarState {
   /// pre-#34 sidebar behaviour is unchanged until the user presses
   /// `s`. Toggled by [`Self::cycle_mode`].
   pub mode: SidebarMode,
+  /// When the selection last moved ([`Self::on_navigation`]). The rebuild
+  /// waits for the selection to settle before it shells out, so a held `j`
+  /// spawns no worker per row. `None` until the first navigation.
+  pub moved_at: Option<Instant>,
 }
 
 impl Default for SidebarState {
@@ -311,6 +316,7 @@ impl SidebarState {
       wt_max_scroll: 0,
       cache: None,
       mode: SidebarMode::Commits,
+      moved_at: None,
     }
   }
 
@@ -394,6 +400,7 @@ impl SidebarState {
     self.scroll = 0;
     self.wt_scroll = 0;
     self.cache = None;
+    self.moved_at = Some(Instant::now());
   }
 
   /// Standalone cache flush. Used outside the navigation path —
