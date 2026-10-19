@@ -86,8 +86,10 @@ pub fn set(node: &mut YamlOwned, key: &str, value: YamlOwned) {
   // In place when the key is already there, because `MappingOwned` is a
   // `LinkedHashMap` that keeps insertion order *and* compares order-sensitively:
   // re-inserting an existing key moves it to the end, and the expected trees
-  // these builders feed are compared by value. Three publish guards read as
-  // changed on exactly that, with identical keys in a different order.
+  // these builders feed are compared by value. Three guards read as
+  // changed on exactly that, with identical keys in a different order: the two
+  // publish jobs and the `flake` job of `ci.yml`, which is not a publish guard
+  // and was miscounted as one here.
   match mapping.get_mut(&key) {
     Some(slot) => *slot = value,
     None => {
