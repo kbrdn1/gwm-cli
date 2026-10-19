@@ -194,6 +194,42 @@ fn matching_guard_reference_is_ok() {
   assert_eq!(c.status, CheckStatus::Ok);
 }
 
+#[test]
+fn unreferenced_guard_is_a_warning() {
+  // A guard no copy references never runs. The config still parses and the
+  // forward check is green, so without this warning a renamed copy quietly
+  // drops the one rule that keeps a production `.env` out of the worktree.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.guard.push(gwm::config::Guard {
+    name: "no-production-database".into(),
+    deny_patterns: vec!["amazonaws".into()],
+    on_match: "abort".into(),
+    example_file: None,
+  });
+  config.bootstrap.copy.push(gwm::config::CopyStep {
+    from: ".env".into(),
+    to: ".env".into(),
+    required: false,
+    guards: vec![],
+    fallback: None,
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("guard")).unwrap();
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.contains("no-production-database"),
+    "the warning must name the dead guard: {}",
+    c.detail
+  );
+  assert_ne!(
+    report.severity(),
+    Severity::Failed,
+    "a dead guard warns, it does not fail"
+  );
+}
+
 // --------------------------------------------------------------------------
 // Check #3 — `when` predicates use a supported keyword
 // --------------------------------------------------------------------------

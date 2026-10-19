@@ -121,6 +121,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gwm doctor` warns about a `[[bootstrap.guard]]` that no
+  `[[bootstrap.copy]]` references.** Check #2 verified one direction only:
+  every name in a copy's `guards = [...]` had to exist. The reverse was
+  silent, and the guards page said so ("does not flag this (yet)"). A guard
+  is the one thing in `.gwm.toml` that keeps a production `.env` out of a
+  worktree, and it goes dead quietly when a copy is renamed and its
+  `guards` list is not carried along: the file still parses, every other
+  check stays green, and the worktree inherits the file the guard was
+  written to refuse. The check now ends in a warning (`!`) that names each
+  unreferenced guard, with the hint to attach it to a copy or drop the
+  block; a dangling reference still fails as before. Docs: the doctor page
+  and the guards page (EN, FR). Proposed by @Ismaouste after writing a
+  first guard and wondering what would tell him if it stopped applying.
+
 - **`gwm doctor` reports the config a deleted branch left behind, and
   `--fix` drops it**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). `gwm create`

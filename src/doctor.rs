@@ -278,6 +278,13 @@ fn check_config_parses(ctx: &DoctorCtx<'_>) -> Check {
 /// `[[bootstrap.guard]].name` that actually exists. Dangling references are
 /// silent footguns — the copy step would proceed unchecked and the guard
 /// would never trip.
+///
+/// The reverse direction is a warning: a `[[bootstrap.guard]]` that no copy
+/// references never runs. A guard is the one thing in `.gwm.toml` that
+/// stands between a worktree and production credentials, and it goes dead
+/// silently when a copy is renamed and its `guards` list is not carried
+/// along — the file still parses, every other check stays green, and the
+/// worktree inherits the `.env` the guard was written to refuse.
 fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
   let name = "guard references resolve";
   let bs = &ctx.config.bootstrap;
@@ -294,13 +301,32 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
     }
   }
 
-  if dangling.is_empty() {
-    let count: usize = bs.copy.iter().map(|c| c.guards.len()).sum();
+  if !dangling.is_empty() {
+    return Check::failed(name, format!("dangling guard reference(s): {}", dangling.join("; ")))
+      .with_hint("declare the missing `[[bootstrap.guard]]` block(s) or drop the reference");
+  }
+
+  let count: usize = bs.copy.iter().map(|c| c.guards.len()).sum();
+  let unreferenced: Vec<&str> = bs
+    .guard
+    .iter()
+    .map(|g| g.name.as_str())
+    .filter(|g| !bs.copy.iter().any(|c| c.guards.iter().any(|r| r == g)))
+    .collect();
+
+  if unreferenced.is_empty() {
     return Check::ok(name, format!("{} guard reference(s) resolve", count));
   }
 
-  Check::failed(name, format!("dangling guard reference(s): {}", dangling.join("; ")))
-    .with_hint("declare the missing `[[bootstrap.guard]]` block(s) or drop the reference")
+  Check::warning(
+    name,
+    format!(
+      "{} guard reference(s) resolve; guard(s) referenced by no [[bootstrap.copy]], so never run: {}",
+      count,
+      unreferenced.join(", ")
+    ),
+  )
+  .with_hint("add the guard to a copy's `guards = [...]`, or drop the `[[bootstrap.guard]]` block")
 }
 
 /// Recognised `when:` predicate keywords. Update this list when a new
