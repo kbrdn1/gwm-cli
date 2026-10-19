@@ -6,12 +6,22 @@
 //! the same way, so this file pins the answers rather than trusting that it
 //! does.
 //!
-//! While both crates were declared the two readers were compared head to head:
-//! **93 comparisons over 17 documents and 6 keys, including five-level paths,
-//! with zero divergence** on absence, `as_str`, sequence length and `as_bool`.
-//! That throwaway comparison died with the old crate; what stays below is the
-//! answer it produced, written as a literal. A reader swapped again has to
-//! reproduce these, or say in a diff why it does not.
+//! With the old crate briefly re-declared, the two readers were compared head
+//! to head through `At::at`, the accessor these sweeps actually use:
+//! **187 comparisons over 17 documents and 8 keys, including five-level paths,
+//! with zero divergence** on `is_null()`, `as_str()`, `as_bool()`, sequence
+//! length and mapping size.
+//!
+//! Through `At::at` and not through an adapter, because the first run of this
+//! measurement covered four helpers that were replaced before any of it
+//! shipped: evidence for a path that was not delivered is not evidence. That
+//! harness is gone with the dependency; what stays below is the answer it
+//! produced, written as literals. A reader swapped again has to reproduce
+//! these, or say in a diff why it does not.
+//!
+//! One behaviour did change and is not in the count above: mapping equality is
+//! now order-sensitive, where the old reader compared order-insensitively.
+//! `set` states it where it matters and the CHANGELOG records it.
 
 mod common;
 

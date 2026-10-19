@@ -28,12 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alternative would have been and which this repo's own rules forbid: a guard
   silenced to make a check pass.
 
-  The two other candidates were ruled out by their own advisories rather than
-  by preference. `noyalib`, the advisory's second suggestion, carries
-  `RUSTSEC-2026-0333`; `serde_yml` carries `RUSTSEC-2025-0068`, unsound, with a
-  segfault reachable through its serializer. `serde_norway` depends on
+  The other candidates, and why each was not taken. `serde_norway` depends on
   `unsafe-libyaml-norway`, the same translated C under a new name, which
   silences the advisory by renaming the crate rather than by fixing the cause.
+  `serde_yml` carries `RUSTSEC-2025-0068`, unsound, with a segfault reachable
+  through its serializer, `patched = []` and the project archived, so that one
+  is a disqualification.
+
+  `noyalib`, the advisory's second suggestion, is **not** disqualified, and the
+  first draft of this entry said it was: it carries `RUSTSEC-2026-0333`, but
+  that advisory is `patched = [">= 0.0.53"]` and the current release is 0.0.58,
+  so a current `noyalib` is clean. What it is instead is a judgement: it was at
+  its 58th patch release before a 0.1, it took a denial-of-service advisory two
+  weeks before this was written, and `serde_yml`, from the same author, is the
+  archived unsound crate above. `serde-saphyr` is the advisory's first
+  suggestion and the one taken.
 
   A fourth route was measured and dropped, and is worth recording because it
   looked free: deserialising into `serde_json::Value` through `serde-saphyr`
@@ -49,9 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key whose value is YAML null read alike, because the old reader could not
   tell them apart and every `must carry no X:` assertion was written against
   that. While both crates were declared the two readers were compared head to
-  head: 93 comparisons with zero divergence **on absence, `as_str()`, sequence
-  length and `as_bool`**, which is the scope of that number and not a claim
-  about every behaviour.
+  head, against the accessor that actually ships: **187 comparisons over 17
+  documents, zero divergence** on `is_null()`, `as_str()`, `as_bool()`,
+  sequence length and mapping size, including five-level paths where the old
+  reader cascaded to null. That is the scope of the number and not a claim
+  about every behaviour. An earlier measurement covered an adapter that was
+  replaced before this shipped, which is why it was redone rather than quoted.
 
   One behaviour did change, and it is the only one found: mapping equality is
   now sensitive to key order. `MappingOwned` is a `LinkedHashMap` comparing

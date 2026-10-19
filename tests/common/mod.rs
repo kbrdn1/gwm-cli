@@ -96,12 +96,6 @@ pub fn set(node: &mut YamlOwned, key: &str, value: YamlOwned) {
   }
 }
 
-/// A YAML fragment written in the test itself, parsed.
-#[allow(dead_code)] // used by the test binaries that build an expected tree.
-pub fn yaml_doc_inline(text: &str) -> YamlOwned {
-  yaml_doc("<inline>", text)
-}
-
 /// Every scalar of a node, keys and values, flattened to one searchable
 /// string.
 ///

@@ -5,7 +5,7 @@ use std::{path::Path, process::Command};
 mod common;
 use common::{
   assert_job_is_blocking, effective_matrix_os, flatten, job_needs, scalar, set, step_label, string_keys, workflow_step,
-  yaml_doc, yaml_doc_inline, yaml_null, At,
+  yaml_doc, yaml_null, At,
 };
 use saphyr::YamlOwned;
 
@@ -563,7 +563,8 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
 #[test]
 #[should_panic(expected = "every key must be a string")]
 fn string_keys_refuses_a_key_the_parser_reads_as_a_boolean() {
-  let jobs = yaml_doc_inline(
+  let jobs = yaml_doc(
+    "<inline>",
     "build: {}
 true: {}
 ",
@@ -573,7 +574,8 @@ true: {}
 
 #[test]
 fn string_keys_returns_every_key_in_order() {
-  let jobs = yaml_doc_inline(
+  let jobs = yaml_doc(
+    "<inline>",
     "build: {}
 release: {}
 ",
@@ -1259,7 +1261,8 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
     step.at("if"),
     step.at("continue-on-error")
   );
-  let with = yaml_doc_inline(
+  let with = yaml_doc(
+    "<inline>",
     "tag_name: ${{ steps.tag.outputs.name }}\n\
      name: ${{ steps.tag.outputs.name }}\n\
      body_path: ${{ steps.changelog.outputs.path }}\n\
@@ -1966,7 +1969,10 @@ fn ci_evaluates_the_flake_version_against_cargo_toml() {
   set(&mut job["steps"][2], "run", scalar(FLAKE_VERSION_CHECK));
   assert_job_as_written(".github/workflows/ci.yml", "flake", &job, FLAKE_JOB_WHY);
 
-  let env = yaml_doc_inline("CARGO_TERM_COLOR: always\nRUSTFLAGS: -D warnings\nGWM_NO_GLOBAL_CONFIG: \"1\"");
+  let env = yaml_doc(
+    "<inline>",
+    "CARGO_TERM_COLOR: always\nRUSTFLAGS: -D warnings\nGWM_NO_GLOBAL_CONFIG: \"1\"",
+  );
   assert_eq!(
     workflow.at("env"),
     &env,
@@ -2251,7 +2257,7 @@ const EXPECTED_CLIPPY: &str = "cargo clippy --all-targets --all-features -- -D w
 /// Issue #655. The same hole one job over. `cargo clippy --all-targets` with
 /// `-D warnings` dropped exits 0 on every lint it finds, and `cargo clippy -D
 /// warnings` without `--all-targets` never lints `tests/`, `benches/` or
-/// `examples/` at all, which in this repo is 110 test binaries and three
+/// `examples/` at all, which in this repo is 111 test binaries and three
 /// benches, the larger half of the code. Both are one bare cargo invocation
 /// and both pass `assert_job_is_blocking` unchanged.
 ///
@@ -2302,7 +2308,7 @@ fn ci_clippy_job_denies_warnings_across_all_targets() {
   assert!(
     clippy.contains("--all-targets"),
     "the clippy job must lint every target (`--all-targets`): the default leaves `tests/`, \
-     `benches/` and `examples/` unlinted, which here is 110 test binaries and three benches \
+     `benches/` and `examples/` unlinted, which here is 111 test binaries and three benches \
      the job would report clean without having read. Got {clippy:?}"
   );
 
