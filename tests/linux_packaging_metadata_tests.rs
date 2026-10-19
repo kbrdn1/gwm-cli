@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 mod common;
+use common::At;
 
 fn manifest() -> toml::Value {
   let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -95,7 +96,8 @@ fn release_workflow_builds_both_linux_packages() {
 #[test]
 fn release_workflow_publishes_both_linux_packages() {
   let (_, step) = common::workflow_step(".github/workflows/release.yml", "release", "publish release");
-  let script = step["run"]
+  let script = step
+    .at("run")
     .as_str()
     .expect("the publish release step must carry a `run:` script");
   let lines: Vec<&str> = script.lines().map(str::trim_start).collect();

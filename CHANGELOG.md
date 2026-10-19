@@ -49,7 +49,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key whose value is YAML null read alike, because the old reader could not
   tell them apart and every `must carry no X:` assertion was written against
   that. While both crates were declared the two readers were compared head to
-  head, 93 comparisons with zero divergence.
+  head: 93 comparisons with zero divergence **on absence, `as_str()`, sequence
+  length and `as_bool`**, which is the scope of that number and not a claim
+  about every behaviour.
+
+  One behaviour did change, and it is the only one found: mapping equality is
+  now sensitive to key order. `MappingOwned` is a `LinkedHashMap` comparing
+  element by element, where the old `Mapping` wrapped an `IndexMap` and
+  compared order-insensitively, so swapping two lines of a pinned `env:` now
+  reddens the guard that pins it. Stricter is the right direction for a step
+  pinned as written, and it is what the by-value guards of #647 and #665 were
+  reaching for, but it is a change rather than a no-op: a reordering that alters
+  nothing at run time now has to be acknowledged in the expected tree.
 
 - **Two of the four workflow `permissions:` grants were compared by nothing**
   ([#681](https://github.com/kbrdn1/gwm-cli/issues/681)).

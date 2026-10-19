@@ -109,10 +109,14 @@ pub fn yaml_doc_inline(text: &str) -> YamlOwned {
 /// the text of the workflow *as parsed*, to catch a token written anywhere in
 /// it; `saphyr`'s `YamlEmitter` dumps the borrowing `Yaml` rather than the
 /// owned node these sweeps hold, and round-tripping one into the other to get
-/// a string back would be more machinery than the question needs. The debug
-/// rendering carries every scalar verbatim, which is all a substring search
-/// reads, and the caller asserts that it still contains known step text so a
-/// flattening that stopped carrying the steps cannot pass as a clean search.
+/// a string back would be more machinery than the question needs.
+///
+/// The ceiling, measured: `{:?}` **escapes**, so a `run:` holding
+/// `echo "a<tab>b\c"` renders with `\t` and `\\`. The two words the caller
+/// searches, `token` and `secret`, and the three canaries it checks are all
+/// escape-free, so the sweep is exact for them; one carrying a quote, a
+/// backslash or a tab would be missed. The caller's canary assertion catches a
+/// flattening that stopped carrying the steps, not one that escaped a needle.
 #[allow(dead_code)] // used by the test binaries that search a whole workflow.
 pub fn flatten(node: &YamlOwned) -> String {
   format!("{node:?}")
@@ -602,7 +606,7 @@ pub fn effective_matrix_os(job: &YamlOwned, job_name: &str) -> Vec<String> {
 /// The keys of a YAML mapping, as strings, in document order (issue #673).
 ///
 /// A key the parser does not read as a string panics instead of being
-/// skipped. serde_yaml_ng reads `true:` and `false:` as booleans, where GitHub
+/// skipped. YAML reads `true:` and `false:` as booleans, where GitHub
 /// Actions reads the job, or the matrix dimension, named `true` or `false`. A
 /// sweep collecting keys through `filter_map(as_str)` drops that job and
 /// passes over it green: review measured it on the permissions sweep of

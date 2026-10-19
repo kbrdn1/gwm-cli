@@ -223,7 +223,6 @@ tui-term = "0.3"
 sha2 = "0.11"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde-saphyr = "2.0.0"
-saphyr = "0.2.2"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /
@@ -240,6 +239,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_Pipes", "Win32_Fou
 interprocess = "2.4.2"
 
 [dev-dependencies]
+# Only `tests/` read a dynamic YAML tree; `src/` uses `serde-saphyr` alone (#688).
+saphyr = "0.2.2"
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"

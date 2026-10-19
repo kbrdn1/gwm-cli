@@ -175,9 +175,16 @@ fn equal_documents_compare_equal() {
 /// checks the tree out with CRLF and a value would come back with a trailing
 /// `\r`, never equal to the same value parsed from a string literal. Measured
 /// here rather than assumed, and the normalisation is deliberately *not* added
-/// back: `saphyr` implements YAML 1.2, where CRLF is a line break, and the
-/// three workflow suites pass with all four files converted. The rule still
-/// holds for every other parser this repo reads a file with.
+/// back: `saphyr` implements YAML 1.2, where CRLF is a line break.
+///
+/// What the measurement actually covers, since "the suites pass" overstates
+/// it: `msrv_tests::read` and `the_workflows_are_single_document` normalise
+/// line endings themselves before parsing, so they cannot see a CRLF
+/// workflow whatever the reader does. The suites that do are
+/// `release_workflow_tests`, block-scalar `run:` compared against Rust
+/// literals included, and `linux_packaging_metadata_tests`. Both pass with
+/// all four workflow files converted, and `test (windows-latest)` is green.
+/// The rule still holds for every other parser this repo reads a file with.
 #[test]
 fn crlf_parses_the_same_as_lf() {
   let lf = doc("permissions:\n  contents: read\njobs:\n  build:\n    id: 1\n");
