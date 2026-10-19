@@ -326,6 +326,12 @@ fn placeholder_value<'a>(token: &str, ctx: &'a HookContext) -> Option<Cow<'a, st
     "{user}" => Cow::Borrowed(ctx.user.as_str()),
     "{owner}" => Cow::Borrowed(ctx.owner.as_str()),
     "{repo}" => Cow::Borrowed(ctx.repo.as_str()),
+    // The main checkout the worktree was cut from. A hook that must point
+    // the new worktree at something living next to the main checkout (an
+    // app in a subdirectory, unversioned assets such as model files) had
+    // no way to find it short of `git rev-parse --git-common-dir`; the
+    // context already carries the path, so expose it.
+    "{main_repo}" => Cow::Owned(ctx.main_repo.display().to_string()),
     _ => return None,
   })
 }
@@ -389,7 +395,7 @@ fn expand_shell(template: &str, ctx: &HookContext) -> String {
 /// so no substitution can start a second command. Quote it — the value is
 /// still subject to word splitting and pathname expansion when bare, and a
 /// branch may contain a tab, a newline or a `*`.
-fn gwm_env(ctx: &HookContext) -> [(&'static str, String); 8] {
+fn gwm_env(ctx: &HookContext) -> [(&'static str, String); 9] {
   [
     ("GWM_BRANCH", ctx.branch.clone()),
     ("GWM_PATH", ctx.path.display().to_string()),
@@ -399,6 +405,7 @@ fn gwm_env(ctx: &HookContext) -> [(&'static str, String); 8] {
     ("GWM_USER", ctx.user.clone()),
     ("GWM_OWNER", ctx.owner.clone()),
     ("GWM_REPO", ctx.repo.clone()),
+    ("GWM_MAIN_REPO", ctx.main_repo.display().to_string()),
   ]
 }
 

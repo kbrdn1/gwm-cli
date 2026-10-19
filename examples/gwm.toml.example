@@ -118,7 +118,7 @@ path = "node_modules"
 # --- lifecycle hooks --------------------------------------------------------
 # Phases: pre_create, post_create, pre_bootstrap, post_bootstrap, pre_remove,
 # post_remove. Placeholders: {branch} {path} {type} {issue} {desc} {user}
-# {owner} {repo}. Failure handling: on_fail = "abort" (default), "warn",
+# {owner} {repo} {main_repo}. Failure handling: on_fail = "abort" (default), "warn",
 # or "ignore". Emergency bypass: --skip-hooks <phase,phase>; `gwm remove
 # --force` implies --skip-hooks pre_remove,post_remove.
 

@@ -171,6 +171,33 @@ fn the_context_is_also_exported_as_environment_variables() {
 }
 
 #[test]
+fn the_main_checkout_is_a_placeholder_and_an_env_var() {
+  // A hook that must point the new worktree at something living next to
+  // the main checkout (an app in a subdirectory whose `.env` holds relative
+  // paths, unversioned model files) had no way to find that checkout short
+  // of `git rev-parse --git-common-dir`. The context already carries it:
+  // `{main_repo}` and `GWM_MAIN_REPO` hand it to the hook.
+  let dir = tempfile::TempDir::new().unwrap();
+  let main = tempfile::TempDir::new().unwrap();
+  let mut ctx = ctx_at(dir.path());
+  ctx.main_repo = main.path().to_path_buf();
+
+  let out = run_one_hook(
+    dir.path(),
+    &ctx,
+    "echo {main_repo}; printenv GWM_MAIN_REPO",
+    HashMap::new(),
+  );
+
+  let expected = main.path().display().to_string();
+  assert_eq!(
+    out.matches(expected.as_str()).count(),
+    2,
+    "both the placeholder and the variable must carry the main checkout: {out}"
+  );
+}
+
+#[test]
 fn a_legacy_bootstrap_command_gets_the_same_escaping() {
   // `[[bootstrap.command]]` steps are folded into the post_create phase via
   // `HookStep::from`, so they run through the same `run_step`. That surface

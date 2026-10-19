@@ -121,6 +121,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hooks can reach the main checkout: `{main_repo}` and `GWM_MAIN_REPO`.**
+  `HookContext` has carried the main checkout's path since the bootstrap
+  copies needed it, but hooks only saw `{branch} {path} {type} {issue}
+  {desc} {user} {owner} {repo}`. A hook that must point the new worktree at
+  something that lives next to the main checkout and is not versioned — an
+  engine binary, model files, a build cache — or at an application in a
+  subdirectory whose `.env` holds relative paths, had to shell out to
+  `git rev-parse --git-common-dir` (and, on Windows under MSYS `sh`, pass the
+  result through `cygpath -m` before a non-MSYS program could read it). The
+  placeholder and the variable expose the path the context already holds,
+  in the same form as `{path}`. Documented in the `.gwm.toml` page (EN and
+  FR) and the example config. First met while writing a `.gwm.toml` for a
+  Laravel app kept in `plateforme/` next to a llama.cpp engine; proposed by
+  @Ismaouste.
+
 - **`gwm doctor` reports the config a deleted branch left behind, and
   `--fix` drops it**
   ([#633](https://github.com/kbrdn1/gwm-cli/issues/633)). `gwm create`
