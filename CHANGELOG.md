@@ -226,6 +226,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Windows, `gwm create` and `gwm doctor` printed the new worktree's path
+  with both separators, unlike `gwm list`.** `[worktree].base` expands
+  `{home}` to `C:\Users\me`, the template supplies `/cc-worktree/{repo}` and
+  `Path::join` adds `\feat-1`, so `create` reported
+  `C:\Users\me/cc-worktree/repo\feat-1` while `list`, fed by libgit2, showed
+  `C:/Users/me/cc-worktree/repo/feat-1` for the same directory. A display
+  helper (`worktree::display_with_slashes`) now gives the `create`, `review`
+  and `doctor` lines the `list` spelling; nothing on disk changes and Unix
+  paths are returned as is. The bootstrap page (EN, FR) gains a "Windows:
+  paths inside hooks" section: a path a hook computes under MSYS `sh` comes
+  out as `/c/Users/…`, which PHP, Node or Python for Windows do not read, and
+  `cygpath -m` is the one-line fix. Reported by @Ismaouste after half an hour
+  lost on exactly that.
+
 - **The non-vacuity floors had stopped tracking what they count, and one file's
   own upkeep rule was not followed**
   ([#649](https://github.com/kbrdn1/gwm-cli/issues/649)).

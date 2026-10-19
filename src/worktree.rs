@@ -189,6 +189,25 @@ pub fn discover_repo(start: Option<&Path>) -> Result<Repository> {
   Ok(repo)
 }
 
+/// A path as `gwm list` prints it: forward slashes on every platform.
+///
+/// On Windows, a path gwm builds from `[worktree].base` mixes the two
+/// separators — `{home}` expands to `C:\Users\me` and the template supplies
+/// `/cc-worktree/{repo}`, then `Path::join` adds `\feat-1` — while libgit2
+/// reports worktree paths with forward slashes. So `gwm create` printed
+/// `C:\Users\me/cc-worktree/repo\feat-1` and, one command later, `gwm list`
+/// showed `C:/Users/me/cc-worktree/repo/feat-1` for the same directory.
+/// Display only: the path on disk is untouched, and on Unix the string is
+/// returned as is.
+pub fn display_with_slashes(path: &Path) -> String {
+  let shown = path.display().to_string();
+  if cfg!(windows) {
+    shown.replace('\\', "/")
+  } else {
+    shown
+  }
+}
+
 /// Name of the repo derived from the working dir path.
 pub fn repo_name(repo: &Repository) -> String {
   repo

@@ -3038,10 +3038,10 @@ fn cmd_create(
   println!("creating worktree:");
   println!("  branch : {}", branch);
   println!("  dir    : {}", dirname);
-  println!("  path   : {}", target.display());
+  println!("  path   : {}", worktree::display_with_slashes(&target));
 
   let created = worktree::add(&repo, &dirname, &target, &branch, reuse_branch)?;
-  println!("✓ worktree created at {}", created.display());
+  println!("✓ worktree created at {}", worktree::display_with_slashes(&created));
 
   let post_ctx = pre_ctx.with_cwd(&created);
 
@@ -3142,7 +3142,7 @@ fn cmd_review(
   );
   println!("  branch : {branch}");
   println!("  dir    : {dirname}");
-  println!("  path   : {}", target.display());
+  println!("  path   : {}", worktree::display_with_slashes(&target));
 
   // Record `origin/<base>` (a remote-tracking ref) as the diff base, not the
   // bare local `<base>` — a review-only checkout may have a stale or absent
@@ -3171,7 +3171,7 @@ fn cmd_review(
     base_ref: base_ref.as_deref(),
   };
   let created = review::materialize(&repo, &workdir, &rspec)?;
-  println!("✓ review worktree created at {}", created.display());
+  println!("✓ review worktree created at {}", worktree::display_with_slashes(&created));
   println!("✓ linked to {} #{number}", forge.pr_noun());
 
   let post_ctx = pre_ctx.with_cwd(&created);

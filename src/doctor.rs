@@ -927,12 +927,15 @@ fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
     Err(e) => return Check::failed(name, format!("could not expand base placeholders: {}", e)),
   };
   let base = Path::new(&base_expanded);
+  // Same display as `gwm list`: on Windows the expanded base mixes `\` and
+  // `/` (`{home}` versus the template), which read as two different paths.
+  let shown = worktree::display_with_slashes(base);
 
   if base.exists() {
     return if is_writable_dir(base) {
-      Check::ok(name, format!("{} is writable", base.display()))
+      Check::ok(name, format!("{} is writable", shown))
     } else {
-      Check::failed(name, format!("{} exists but is not writable", base.display()))
+      Check::failed(name, format!("{} exists but is not writable", shown))
         .with_hint("fix the permissions, or set `[worktree].base` to a writable path")
     };
   }
@@ -943,31 +946,25 @@ fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
     _ => {
       return Check::ok(
         name,
-        format!("{} will be created on first `gwm create`", base.display()),
+        format!("{} will be created on first `gwm create`", shown),
       )
     }
   };
+  let shown_parent = worktree::display_with_slashes(parent);
   if !parent.exists() {
     return Check::warning(
       name,
-      format!(
-        "neither {} nor its parent {} exists yet",
-        base.display(),
-        parent.display()
-      ),
+      format!("neither {} nor its parent {} exists yet", shown, shown_parent),
     )
     .with_hint("create the parent directory, or pick a different `[worktree].base`");
   }
   if is_writable_dir(parent) {
     Check::ok(
       name,
-      format!(
-        "{} will be created on first `gwm create` (parent writable)",
-        base.display()
-      ),
+      format!("{} will be created on first `gwm create` (parent writable)", shown),
     )
   } else {
-    Check::failed(name, format!("parent {} is not writable", parent.display()))
+    Check::failed(name, format!("parent {} is not writable", shown_parent))
       .with_hint("fix the permissions, or set `[worktree].base` to a writable path")
   }
 }
