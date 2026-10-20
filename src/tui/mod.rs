@@ -1255,6 +1255,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // #484: `Space` marks the cursor row. Picker-gated — `gwm switch` picks
     // exactly one path, so a mark set has nothing to act on there.
     Action::ToggleSelect if !app.picker_mode => app.toggle_select(),
+    // #680: navigation only, and a no-op outside workspace mode, so no
+    // picker gate.
+    Action::CollapseGroup => app.collapse_group(),
+    Action::ExpandGroup => app.expand_group(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
     // Issue #258: `gwm sync` of the selected worktree, off-thread.
     Action::Sync if !app.picker_mode => app.request_sync(),
