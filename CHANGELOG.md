@@ -12,6 +12,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`cargo audit` failed on `dev` itself: the YAML parser under the crate is
+  unmaintained** ([#688](https://github.com/kbrdn1/gwm-cli/issues/688)).
+  `RUSTSEC-2024-0449` marks `unsafe-libyaml` unmaintained: the repository was
+  archived on 2024-03-25, and the crate is a machine translation of libyaml's C
+  into unsafe Rust, so bugs found in it are not fixed upstream. It reached this
+  crate through `serde_yaml_ng 0.10.0`, a direct dependency, and the advisory
+  entered the database after this repo's last green `cargo audit`, which is why
+  a check that had been green went red without a line of code changing.
+
+  Replaced by the pair the advisory itself names, both written in safe Rust:
+  `serde-saphyr` for the one typed parse in `src/`, and `saphyr` for the
+  dynamic tree the workflow guards read. `unsafe-libyaml` is gone from the
+  graph entirely rather than satisfied by an `ignore`, which is what the
+  alternative would have been and which this repo's own rules forbid: a guard
+  silenced to make a check pass.
+
+  The other candidates, and why each was not taken. `serde_norway` depends on
+  `unsafe-libyaml-norway`, the same translated C under a new name, which
+  silences the advisory by renaming the crate rather than by fixing the cause.
+  `serde_yml` carries `RUSTSEC-2025-0068`, unsound, with a segfault reachable
+  through its serializer, `patched = []` and the project archived, so that one
+  is a disqualification.
+
+  `noyalib`, the advisory's second suggestion, is **not** disqualified, and the
+  first draft of this entry said it was: it carries `RUSTSEC-2026-0333`, but
+  that advisory is `patched = [">= 0.0.53"]` and the current release is 0.0.58,
+  so a current `noyalib` is clean. What it is instead is a judgement: it was at
+  its 58th patch release before a 0.1, it took a denial-of-service advisory two
+  weeks before this was written, and `serde_yml`, from the same author, is the
+  archived unsound crate above. `serde-saphyr` is the advisory's first
+  suggestion and the one taken.
+
+  A fourth route was measured and dropped, and is worth recording because it
+  looked free: deserialising into `serde_json::Value` through `serde-saphyr`
+  would have been a near-mechanical rename of every read the swap touches,
+  the bulk of them in `release_workflow_tests.rs`. No count is given because
+  three attempts at one were each wrong and none of them credited a guard with
+  anything: a figure derived in prose drifts exactly like the floor it
+  describes, with nothing to catch it. It sorts mapping
+  keys, so `string_keys`, which promises document order, would have lost that
+  guarantee while its own test kept passing on a sample that happens to be
+  alphabetical. It also reads the YAML key `true:` as the string `"true"`,
+  which leaves `string_keys` unable to fire at all and turns the guard from
+  #673 vacuous. Both measured before the route was abandoned.
+
+  `tests/workflow_reader_tests.rs` pins what the new reader answers, including
+  the one semantic that was inherited rather than chosen: an absent key and a
+  key whose value is YAML null read alike, because the old reader could not
+  tell them apart and every `must carry no X:` assertion was written against
+  that. While both crates were declared the two readers were compared head to
+  head, against the accessor that actually ships: **187 comparisons over 17
+  documents, zero divergence** on `is_null()`, `as_str()`, `as_bool()`,
+  sequence length and mapping size, including five-level paths where the old
+  reader cascaded to null. That is the scope of the number and not a claim
+  about every behaviour. An earlier measurement covered an adapter that was
+  replaced before this shipped, which is why it was redone rather than quoted.
+
+  Two behaviours changed, and only one of them is visible in what `gwm`
+  prints.
+
+  **A YAML merge key now contributes its fields.** `serde_yaml_ng` dropped
+  `<<:` silently, so an issue form factoring a shared field out through an
+  anchor lost it with no error; `serde-saphyr` resolves it, which is the
+  correct YAML 1.2 reading. This is the only change that reaches a user:
+  `gwm create --from-issue` renders the merged fields where it used to skip
+  them. None of the forms this repo ships uses an anchor, so nothing moves
+  here today, and it is pinned as a contract rather than left to be discovered
+  the first time somebody factors two forms. Resolution is bounded by the
+  reader's default alias budget, so a hostile form cannot expand without
+  limit.
+
+  **Mapping equality is now sensitive to key order**, which is test-side only.
+  `MappingOwned` is a `LinkedHashMap` comparing element by element, where the
+  old `Mapping` wrapped an `IndexMap` and compared order-insensitively, so
+  swapping two lines of a pinned `env:` now reddens the guard that pins it.
+  Stricter is the right direction for a step pinned as written, and it is what
+  the by-value guards of #647 and #665 were reaching for, but it is a change
+  rather than a no-op: a reordering that alters nothing at run time now has to
+  be acknowledged in the expected tree.
+
 - **Two of the four workflow `permissions:` grants were compared by nothing**
   ([#681](https://github.com/kbrdn1/gwm-cli/issues/681)).
   `ci.yml` (#677) and `release.yml` (#669) each had a test reading their grant

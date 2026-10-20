@@ -3,7 +3,11 @@ use std::fs;
 use std::{path::Path, process::Command};
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os, job_needs, step_label, string_keys, workflow_step};
+use common::{
+  assert_job_is_blocking, effective_matrix_os, flatten, job_needs, scalar, set, step_label, string_keys, workflow_step,
+  yaml_doc, yaml_null, At,
+};
+use saphyr::YamlOwned;
 
 #[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
@@ -199,43 +203,47 @@ steps:
 ///
 /// `ci.yml`'s `flake` job is pinned the same way (#672); `why` carries what
 /// each job stands to lose.
-fn assert_job_as_written(path: &str, job: &str, expected: &serde_yaml_ng::Value, why: &str) {
+fn assert_job_as_written(path: &str, job: &str, expected: &YamlOwned, why: &str) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
-  let outside_steps = |job: &serde_yaml_ng::Value| {
+  let workflow = yaml_doc(path, &text);
+  let outside_steps = |job: &YamlOwned| {
     let mut keys = job.as_mapping().cloned().unwrap_or_default();
-    keys.remove("steps");
-    keys.remove("if");
+    keys.remove(&scalar("steps"));
+    keys.remove(&scalar("if"));
     keys
   };
   assert_eq!(
-    outside_steps(&workflow["jobs"][job]),
+    outside_steps(workflow.at("jobs").at(job)),
     outside_steps(expected),
     "{path} job `{job}` changed outside its steps. Every key of the job is pinned but `if:`, \
      which its blocking check compares: a `container:` carries its `env:` into every `run:` \
      step, `SHELLOPTS: noexec` included, and `defaults:` changes where and how they run. {why}"
   );
-  let actual: Vec<serde_yaml_ng::Value> = workflow["jobs"][job]["steps"]
+  let actual: Vec<YamlOwned> = workflow
+    .at("jobs")
+    .at(job)
+    .at("steps")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .into_iter()
     .map(|mut step| {
-      if let Some(action) = step["uses"]
+      if let Some(action) = step
+        .at("uses")
         .as_str()
         .and_then(|u| u.split_once('@'))
         .map(|(action, _)| action.to_owned())
       {
-        step["uses"] = action.into();
+        set(&mut step, "uses", scalar(&action));
       }
       step
     })
     .collect();
-  let expected = expected["steps"]
+  let expected = expected
+    .at("steps")
     .as_sequence()
     .expect("the expected job must list its steps");
-  let labels = |steps: &[serde_yaml_ng::Value]| steps.iter().map(|s| step_label(s).to_owned()).collect::<Vec<_>>();
+  let labels = |steps: &[YamlOwned]| steps.iter().map(|s| step_label(s).to_owned()).collect::<Vec<_>>();
   assert_eq!(
     labels(&actual),
     labels(expected),
@@ -275,7 +283,7 @@ const PUBLISH_JOB_WHY: &str = "Issue #665: every step of a publish job runs with
 /// positional argument, uploaded as an asset instead of read as the notes. Each is a model
 /// of bash written in place of bash, the mistake #634 already paid for. As
 /// written, the only cost is that reformatting the step reformats the pin.
-fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, env: &serde_yaml_ng::Value, script: &str, why: &str) {
+fn assert_run_step(step: &YamlOwned, label: &str, env: &YamlOwned, script: &str, why: &str) {
   // The environment is part of what a script does, so it is pinned with it,
   // for every step pinned here rather than wherever someone remembers to:
   // `SHELLOPTS: noexec` has bash parse the script, run nothing and exit 0,
@@ -283,24 +291,25 @@ fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, env: &serde_yaml_ng
   // a comment said every step was, which is why this is a parameter and not a
   // call site.
   assert_eq!(
-    step["env"], *env,
+    step.at("env"),
+    env,
     "the {label} step's `env:` changed. It is pinned by value (issue #647): a variable there \
      changes what the script does without touching it"
   );
   assert!(
-    step["if"].is_null() && step["continue-on-error"].is_null(),
+    step.at("if").is_null() && step.at("continue-on-error").is_null(),
     "the {label} step must run and be able to fail its job, got `if: {:?}` and \
      `continue-on-error: {:?}`",
-    step["if"],
-    step["continue-on-error"]
+    step.at("if"),
+    step.at("continue-on-error")
   );
   assert_eq!(
-    step["shell"].as_str(),
+    step.at("shell").as_str(),
     Some("bash"),
     "the {label} step must run under bash, got `shell: {:?}`",
-    step["shell"]
+    step.at("shell")
   );
-  assert_eq!(step["run"].as_str(), Some(script), "{why}");
+  assert_eq!(step.at("run").as_str(), Some(script), "{why}");
 }
 
 /// Issue #647. A step that runs and fails its job says nothing about the job:
@@ -328,8 +337,7 @@ fn assert_run_step(step: &serde_yaml_ng::Value, label: &str, env: &serde_yaml_ng
 /// build is a release going out without its artifacts.
 fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>, needs: &[&str]) {
   let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  let workflow = yaml_doc(path, &text);
   // The environment reaches a `run:` step from three `env:` levels, and
   // `SHELLOPTS: noexec` at any of them has bash run nothing and exit 0. The
   // step level is pinned through the `env` argument of `assert_run_step`, the
@@ -342,21 +350,22 @@ fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>
   // The other steps of the publish job, a step writing to `$GITHUB_ENV`
   // among them, and the job's own keys are pinned by `assert_job_as_written`
   // (issue #665), which also says what stays out of reach.
-  let workflow_env: serde_yaml_ng::Value = serde_yaml_ng::from_str("CARGO_TERM_COLOR: always").unwrap();
+  let workflow_env: YamlOwned = yaml_doc("<inline>", "CARGO_TERM_COLOR: always");
   assert_eq!(
-    workflow["env"], workflow_env,
+    workflow.at("env"),
+    &workflow_env,
     "{path} must set nothing in its workflow-level `env:` but `CARGO_TERM_COLOR`: that environment \
      reaches the steps that resolve and publish the notes, and `SHELLOPTS: noexec` there runs \
      nothing and exits 0"
   );
   assert!(
-    workflow["jobs"][job_name]["env"].is_null(),
+    workflow.at("jobs").at(job_name).at("env").is_null(),
     "{path} job `{job_name}` must carry no `env:`: it reaches the steps that resolve and publish the \
      notes, and `SHELLOPTS: noexec` there runs nothing and exits 0. Got `env: {:?}`",
-    workflow["jobs"][job_name]["env"]
+    workflow.at("jobs").at(job_name).at("env")
   );
   assert_eq!(
-    job_needs(&workflow["jobs"][job_name]),
+    job_needs(workflow.at("jobs").at(job_name)),
     needs,
     "{path} job `{job_name}` must wait on exactly {needs:?}: the publish has to run after the build \
      it uploads, and the checks below walk the jobs this key names"
@@ -368,29 +377,30 @@ fn assert_publish_job_blocks(path: &str, job_name: &str, condition: Option<&str>
     if seen.contains(&name) {
       continue;
     }
-    let job = &workflow["jobs"][name.as_str()];
+    let job = &workflow.at("jobs").at(name.as_str());
     assert!(
       !job.is_null(),
       "{path} must define a `{name}` job: the publish step runs in it or waits on it"
     );
-    let actual = job["if"]
+    let actual = job
+      .at("if")
       .as_str()
       .map(|c| c.split_whitespace().collect::<Vec<_>>().join(" "));
     let runs = match &condition {
-      None => job["if"].is_null(),
+      None => job.at("if").is_null(),
       Some(c) => actual.as_deref() == Some(c.as_str()),
     };
     assert!(
       runs,
       "{path} job `{name}` must carry `if: {condition:?}` and nothing else, because the publish \
        step runs in it or after it. Got `if: {:?}`",
-      job["if"]
+      job.at("if")
     );
     assert!(
-      job["continue-on-error"].is_null(),
+      job.at("continue-on-error").is_null(),
       "{path} job `{name}` must carry no `continue-on-error:`: a failed publish would end in a green \
        run over a half-published release. Got `continue-on-error: {:?}`",
-      job["continue-on-error"]
+      job.at("continue-on-error")
     );
     pending.extend(job_needs(job));
     seen.push(name);
@@ -434,8 +444,7 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
   let (publish_at, step) = workflow_step(".github/workflows/release.yml", "release", "publish release");
   // `gh` authenticates with the workflow token and publishes the tag that
   // triggered the run, and nothing else sits in its environment.
-  let env: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str("GH_TOKEN: ${{ github.token }}\nTAG: ${{ github.ref_name }}").unwrap();
+  let env: YamlOwned = yaml_doc("<inline>", "GH_TOKEN: ${{ github.token }}\nTAG: ${{ github.ref_name }}");
   assert_run_step(
     &step,
     "publish release",
@@ -455,7 +464,7 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
      an empty body"
   );
   assert_eq!(
-    resolve["id"].as_str(),
+    resolve.at("id").as_str(),
     Some("changelog"),
     "the resolve changelog path step must keep `id: changelog`: `--notes-file` reads \
      `steps.changelog.outputs.path`, which is empty under any other id"
@@ -463,17 +472,17 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
   assert_run_step(
     &resolve,
     "resolve changelog path",
-    &serde_yaml_ng::Value::Null,
+    &yaml_null(),
     RESOLVE_STABLE_CHANGELOG,
     "release.yml's changelog path changed. It is pinned by value (issue #647): the notes must be \
      `changelogs/<version>.md` and the job must fail when that file is missing, never fall back \
      to the `CHANGELOG.md` index",
   );
 
-  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(STABLE_RELEASE_JOB).unwrap();
-  job["steps"][2]["run"] = RESOLVE_STABLE_CHANGELOG.into();
-  job["steps"][3]["env"] = env;
-  job["steps"][3]["run"] = PUBLISH_RELEASE_SCRIPT.into();
+  let mut job = yaml_doc("<STABLE_RELEASE_JOB>", STABLE_RELEASE_JOB);
+  set(&mut job["steps"][2], "run", scalar(RESOLVE_STABLE_CHANGELOG));
+  set(&mut job["steps"][3], "env", env);
+  set(&mut job["steps"][3], "run", scalar(PUBLISH_RELEASE_SCRIPT));
   assert_job_as_written(".github/workflows/release.yml", "release", &job, PUBLISH_JOB_WHY);
 
   assert_publish_job_blocks(
@@ -485,7 +494,7 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
 }
 
 /// Every `actions/checkout` in `release.yml`, paired with its `with:` block.
-fn release_workflow_checkout_steps() -> Vec<(String, serde_yaml_ng::Value)> {
+fn release_workflow_checkout_steps() -> Vec<(String, YamlOwned)> {
   workflow_checkout_steps(".github/workflows/release.yml")
 }
 
@@ -495,19 +504,19 @@ fn release_workflow_checkout_steps() -> Vec<(String, serde_yaml_ng::Value)> {
 /// Parsing the YAML rather than grepping the text keeps the invariants below
 /// honest: a step that spells its inputs differently, or a job that grows a
 /// second checkout, is still seen.
-fn workflow_checkout_steps(path: &str) -> Vec<(String, serde_yaml_ng::Value)> {
-  let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+fn workflow_checkout_steps(path: &str) -> Vec<(String, YamlOwned)> {
+  let workflow = yaml_doc(path, &fs::read_to_string(path).unwrap());
 
   let mut steps = Vec::new();
-  for (job_name, job) in workflow["jobs"].as_mapping().expect("workflow must define jobs") {
+  for (job_name, job) in workflow.at("jobs").as_mapping().expect("workflow must define jobs") {
     let job_name = job_name.as_str().unwrap_or_default().to_string();
-    let Some(job_steps) = job["steps"].as_sequence() else {
+    let Some(job_steps) = job.at("steps").as_sequence() else {
       continue;
     };
     for step in job_steps {
-      let uses = step["uses"].as_str().unwrap_or_default();
+      let uses = step.at("uses").as_str().unwrap_or_default();
       if uses.starts_with("actions/checkout@") {
-        steps.push((job_name.clone(), step["with"].clone()));
+        steps.push((job_name.clone(), step.at("with").clone()));
       }
     }
   }
@@ -528,12 +537,12 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
   let mut audited = 0;
 
   for (job, with) in release_workflow_checkout_steps() {
-    if !with["token"].is_null() {
+    if !with.at("token").is_null() {
       continue;
     }
     audited += 1;
     assert_eq!(
-      with["persist-credentials"].as_bool(),
+      with.at("persist-credentials").as_bool(),
       Some(false),
       "the checkout in job `{job}` does not push, so it must set `persist-credentials: false`"
     );
@@ -548,29 +557,29 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
 
 /// Issue #673. The workflow guards collect mapping keys through
 /// `string_keys`, which refuses a key the parser does not read as a string.
-/// serde_yaml_ng reads `true:` and `false:` as booleans; GitHub reads them as
+/// YAML reads `true:` and `false:` as booleans; GitHub reads them as
 /// the job, or the matrix dimension, named `true` or `false`. A guard that
 /// skipped them would pass over exactly that job.
 #[test]
 #[should_panic(expected = "every key must be a string")]
 fn string_keys_refuses_a_key_the_parser_reads_as_a_boolean() {
-  let jobs: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+  let jobs = yaml_doc(
+    "<inline>",
     "build: {}
 true: {}
 ",
-  )
-  .unwrap();
+  );
   string_keys(jobs.as_mapping().unwrap(), "jobs");
 }
 
 #[test]
 fn string_keys_returns_every_key_in_order() {
-  let jobs: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+  let jobs = yaml_doc(
+    "<inline>",
     "build: {}
 release: {}
 ",
-  )
-  .unwrap();
+  );
   assert_eq!(string_keys(jobs.as_mapping().unwrap(), "jobs"), ["build", "release"]);
 }
 
@@ -622,11 +631,11 @@ const INHERITS_THE_WRITE_TOKEN: [&str; 2] = ["build", "release"];
 #[test]
 fn release_workflow_grants_write_only_to_build_and_publish() {
   let path = ".github/workflows/release.yml";
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&fs::read_to_string(path).unwrap()).unwrap_or_else(|e| panic!("{path}: {e}"));
-  let write: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: write").unwrap();
+  let workflow: YamlOwned = yaml_doc(path, &fs::read_to_string(path).unwrap());
+  let write: YamlOwned = yaml_doc("<inline>", "contents: write");
   assert_eq!(
-    workflow["permissions"], write,
+    workflow.at("permissions"),
+    &write,
     "{path} must grant `contents: write` at the workflow level and nothing else: the publish \
      job inherits it, and the jobs below are checked against it"
   );
@@ -634,7 +643,8 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
   // Through `string_keys`: a `true:` job, skipped, would keep the write
   // token with this test green.
   let jobs = string_keys(
-    workflow["jobs"]
+    workflow
+      .at("jobs")
       .as_mapping()
       .expect("release.yml must define a `jobs:` mapping"),
     &format!("{path} `jobs:`"),
@@ -651,16 +661,16 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
     );
   }
 
-  let read: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: read").unwrap();
+  let read: YamlOwned = yaml_doc("<inline>", "contents: read");
   for job in jobs.iter().filter(|j| !INHERITS_THE_WRITE_TOKEN.contains(&j.as_str())) {
     assert_eq!(
-      workflow["jobs"][job.as_str()]["permissions"],
-      read,
+      workflow.at("jobs").at(job.as_str()).at("permissions"),
+      &read,
       "{path} job `{job}` must carry `permissions: contents: read` (issue #669). Without it the \
        job inherits the workflow's `contents: write`, and one step added to it can edit the \
        release notes after the publish. Only {INHERITS_THE_WRITE_TOKEN:?} may inherit it. \
        Got `permissions: {:?}`",
-      workflow["jobs"][job.as_str()]["permissions"]
+      workflow.at("jobs").at(job.as_str()).at("permissions")
     );
   }
 }
@@ -697,9 +707,10 @@ fn release_workflow_grants_write_only_to_build_and_publish() {
 fn ci_workflow_grants_a_read_only_token() {
   let path = ".github/workflows/ci.yml";
   let workflow = ci_workflow();
-  let read: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: read").unwrap();
+  let read: YamlOwned = yaml_doc("<inline>", "contents: read");
   assert_eq!(
-    workflow["permissions"], read,
+    workflow.at("permissions"),
+    &read,
     "{path} must grant exactly `contents: read` at the workflow level (issue #677). With no \
      `permissions:` at all its jobs inherit the repository default, which is a setting no diff \
      in this repo records: flip it to write and every build script, every `cargo install` and \
@@ -711,13 +722,14 @@ fn ci_workflow_grants_a_read_only_token() {
   // `filter_map` over string keys is what would skip it, carrying whatever
   // `permissions:` it declares past this loop.
   let jobs = string_keys(
-    workflow["jobs"]
+    workflow
+      .at("jobs")
       .as_mapping()
       .expect("ci.yml must define a `jobs:` mapping"),
     &format!("{path} `jobs:`"),
   );
   for job in &jobs {
-    let declared = &workflow["jobs"][job.as_str()]["permissions"];
+    let declared = workflow.at("jobs").at(job.as_str()).at("permissions");
     assert!(
       declared.is_null() || *declared == read,
       "{path} job `{job}` must leave `permissions:` out or restate the workflow's \
@@ -762,10 +774,8 @@ fn ci_workflow_grants_a_read_only_token() {
   // ${{ github.token }}` in its own `action.yml`, and a local
   // `uses: ./.github/actions/…` would be too. Scoping the token is what
   // answers that, which is the grant above, not a wider search.
-  let flagged = |value: &serde_yaml_ng::Value| -> Vec<&'static str> {
-    let text = serde_yaml_ng::to_string(value)
-      .expect("a workflow must serialise")
-      .to_lowercase();
+  let flagged = |value: &YamlOwned| -> Vec<&'static str> {
+    let text = flatten(value).to_lowercase();
     ["token", "secret"].into_iter().filter(|w| text.contains(w)).collect()
   };
   assert!(
@@ -778,7 +788,7 @@ fn ci_workflow_grants_a_read_only_token() {
 
   // What the sweep above is searching, stated rather than assumed: a
   // serialisation that stopped carrying the steps would hold no token either.
-  let serialised = serde_yaml_ng::to_string(&workflow).expect("ci.yml must serialise");
+  let serialised = flatten(&workflow);
   for inside in ["cargo fmt --all -- --check", "cargo nextest run", "install-nix-action"] {
     assert!(
       serialised.contains(inside),
@@ -825,7 +835,7 @@ fn ci_workflow_grants_a_read_only_token() {
       "jobs:\n  probe:\n    steps:\n      - run: echo ${{ toJSON(secrets) }}\n",
     ),
   ] {
-    let probe: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).expect("the probe must parse");
+    let probe = yaml_doc("<probe>", yaml);
     assert!(
       !flagged(&probe).is_empty(),
       "the token search no longer sees {shape}, so `ci.yml` could grow one with this test green"
@@ -858,10 +868,10 @@ fn ci_workflow_grants_a_read_only_token() {
 fn every_workflow_declares_its_permissions() {
   let mut swept = 0;
   for path in workflow_paths() {
-    let workflow: serde_yaml_ng::Value =
-      serde_yaml_ng::from_str(&fs::read_to_string(&path).unwrap()).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let workflow: YamlOwned = yaml_doc(&path, &fs::read_to_string(&path).unwrap());
     let jobs = string_keys(
-      workflow["jobs"]
+      workflow
+        .at("jobs")
         .as_mapping()
         .unwrap_or_else(|| panic!("`{path}` must define a `jobs:` mapping")),
       &format!("`{path}` `jobs:`"),
@@ -869,9 +879,9 @@ fn every_workflow_declares_its_permissions() {
     let every_job_declares = !jobs.is_empty()
       && jobs
         .iter()
-        .all(|job| !workflow["jobs"][job.as_str()]["permissions"].is_null());
+        .all(|job| !workflow.at("jobs").at(job.as_str()).at("permissions").is_null());
     assert!(
-      !workflow["permissions"].is_null() || every_job_declares,
+      !workflow.at("permissions").is_null() || every_job_declares,
       "`{path}` declares `permissions:` neither at the workflow level nor on every one of its \
        jobs (issue #677), so a job of it takes whatever `default_workflow_permissions` says, a \
        repository setting no diff in this repo records. Declare what the workflow needs, \
@@ -889,9 +899,11 @@ fn every_workflow_declares_its_permissions() {
 /// Any workflow by path, parsed. `ci_workflow()` is the `ci.yml`-shaped
 /// sibling of this one, kept because most of this file only ever reads that
 /// file.
-fn workflow_at(path: &str) -> serde_yaml_ng::Value {
-  serde_yaml_ng::from_str(&fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}")))
-    .unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"))
+fn workflow_at(path: &str) -> YamlOwned {
+  yaml_doc(
+    path,
+    &fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}")),
+  )
 }
 
 /// Issue #681. `docs-sync.yml` grants `permissions: {}`, the strongest
@@ -904,8 +916,10 @@ fn workflow_at(path: &str) -> serde_yaml_ng::Value {
 /// in the one direction that matters here: `{}` is an empty mapping, so
 /// `as_str()` reads `None` for it exactly as it does for a key that is not
 /// there, and the strongest grant in the repo becomes indistinguishable from
-/// no grant at all. Measured on serde_yaml_ng 0.10: `{}` and an absent key
-/// both read `None`, and only `is_null()` separates them.
+/// no grant at all. Measured on the reader this file uses: `{}` and an absent
+/// key both read `None` through `as_str()`, and only `is_null()` separates
+/// them, `{}` being a mapping and an absent key nothing
+/// (`workflow_reader_tests.rs` pins both).
 ///
 /// `write-all` is a different trap and not this one, since it is a string and
 /// reads `Some("write-all")`. It defeats a *presence* check instead, which is
@@ -917,9 +931,10 @@ fn workflow_at(path: &str) -> serde_yaml_ng::Value {
 fn docs_sync_workflow_grants_nothing() {
   let path = DOCS_SYNC;
   let workflow = workflow_at(path);
-  let nothing: serde_yaml_ng::Value = serde_yaml_ng::from_str("{}").unwrap();
+  let nothing: YamlOwned = yaml_doc("<inline>", "{}");
   assert_eq!(
-    workflow["permissions"], nothing,
+    workflow.at("permissions"),
+    &nothing,
     "{path} must grant `permissions: {{}}` at the workflow level and nothing else (issue #681). \
      It checks nothing out and authenticates its one API call with `secrets.DOCS_SITE_TOKEN`, so \
      the workflow token needs no scope at all. Until this test the grant was read as present and \
@@ -930,13 +945,14 @@ fn docs_sync_workflow_grants_nothing() {
   // parser here reads a boolean, and a `filter_map` over string keys is what
   // would skip it, carrying whatever it declares past this loop.
   let jobs = string_keys(
-    workflow["jobs"]
+    workflow
+      .at("jobs")
       .as_mapping()
       .unwrap_or_else(|| panic!("{path} must define a `jobs:` mapping")),
     &format!("{path} `jobs:`"),
   );
   for job in &jobs {
-    let declared = &workflow["jobs"][job.as_str()]["permissions"];
+    let declared = workflow.at("jobs").at(job.as_str()).at("permissions");
     assert!(
       declared.is_null() || *declared == nothing,
       "{path} job `{job}` must leave `permissions:` out or restate the workflow's `{{}}`, and \
@@ -976,16 +992,18 @@ fn docs_sync_workflow_grants_nothing() {
 fn pre_release_workflow_grants_write_only_to_build_and_publish() {
   let path = ".github/workflows/pre-release.yml";
   let workflow = workflow_at(path);
-  let write: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: write").unwrap();
+  let write: YamlOwned = yaml_doc("<inline>", "contents: write");
   assert_eq!(
-    workflow["permissions"], write,
+    workflow.at("permissions"),
+    &write,
     "{path} must grant `contents: write` at the workflow level and nothing else (issue #681): \
      the publish job inherits it to create the pre-release, and nothing here needs a second \
      scope. `write-all` passed this file until this test existed"
   );
 
   let jobs = string_keys(
-    workflow["jobs"]
+    workflow
+      .at("jobs")
       .as_mapping()
       .unwrap_or_else(|| panic!("{path} must define a `jobs:` mapping")),
     &format!("{path} `jobs:`"),
@@ -1001,16 +1019,16 @@ fn pre_release_workflow_grants_write_only_to_build_and_publish() {
     );
   }
 
-  let read: serde_yaml_ng::Value = serde_yaml_ng::from_str("contents: read").unwrap();
+  let read: YamlOwned = yaml_doc("<inline>", "contents: read");
   for job in jobs.iter().filter(|j| !INHERITS_THE_WRITE_TOKEN.contains(&j.as_str())) {
     assert_eq!(
-      workflow["jobs"][job.as_str()]["permissions"],
-      read,
+      workflow.at("jobs").at(job.as_str()).at("permissions"),
+      &read,
       "{path} job `{job}` must carry `permissions: contents: read` (issue #681). Without it the \
        job inherits the workflow's `contents: write`, and one step added to it can edit the \
        pre-release notes #647 pins after the publish. Only {INHERITS_THE_WRITE_TOKEN:?} may \
        inherit it. Got `permissions: {:?}`",
-      workflow["jobs"][job.as_str()]["permissions"]
+      workflow.at("jobs").at(job.as_str()).at("permissions")
     );
   }
 }
@@ -1067,13 +1085,13 @@ fn sibling_workflow_checkouts_do_not_persist_credentials() {
 
     for (job, with) in workflow_checkout_steps(&path) {
       assert!(
-        with["token"].is_null(),
+        with.at("token").is_null(),
         "the checkout in `{path}` job `{job}` passes an explicit token, but nothing in this \
          workflow pushes — drop it or move the job behind release.yml's audited split"
       );
       audited += 1;
       assert_eq!(
-        with["persist-credentials"].as_bool(),
+        with.at("persist-credentials").as_bool(),
         Some(false),
         "the checkout in `{path}` job `{job}` does not push, so it must set \
          `persist-credentials: false`"
@@ -1108,7 +1126,7 @@ fn sibling_workflow_checkouts_do_not_persist_credentials() {
 fn release_workflow_publishing_checkouts_keep_their_token() {
   let pushing: Vec<_> = release_workflow_checkout_steps()
     .into_iter()
-    .filter(|(_, with)| !with["token"].is_null())
+    .filter(|(_, with)| !with.at("token").is_null())
     .collect();
 
   assert_eq!(
@@ -1120,7 +1138,7 @@ fn release_workflow_publishing_checkouts_keep_their_token() {
 
   for (job, with) in pushing {
     assert_ne!(
-      with["persist-credentials"].as_bool(),
+      with.at("persist-credentials").as_bool(),
       Some(false),
       "job `{job}` pushes with its token, so it must not disable credential persistence"
     );
@@ -1229,30 +1247,32 @@ fn prerelease_workflow_does_not_match_stable_tags() {
 fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
   let (publish_at, step) = workflow_step(".github/workflows/pre-release.yml", "release", "publish pre-release");
   assert!(
-    step["uses"]
+    step
+      .at("uses")
       .as_str()
       .is_some_and(|u| u.starts_with("softprops/action-gh-release@")),
     "the publish pre-release step must use softprops/action-gh-release, got `uses: {:?}`",
-    step["uses"]
+    step.at("uses")
   );
   assert!(
-    step["if"].is_null() && step["continue-on-error"].is_null(),
+    step.at("if").is_null() && step.at("continue-on-error").is_null(),
     "the publish pre-release step must run and be able to fail the job, got `if: {:?}` and \
      `continue-on-error: {:?}`",
-    step["if"],
-    step["continue-on-error"]
+    step.at("if"),
+    step.at("continue-on-error")
   );
-  let with: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+  let with = yaml_doc(
+    "<inline>",
     "tag_name: ${{ steps.tag.outputs.name }}\n\
      name: ${{ steps.tag.outputs.name }}\n\
      body_path: ${{ steps.changelog.outputs.path }}\n\
      files: |\n  dist/*.tar.gz\n  dist/*.tar.gz.sha256\n  dist/*.zip\n  dist/*.zip.sha256\n\
      draft: false\n\
      prerelease: true\n",
-  )
-  .unwrap();
+  );
   assert_eq!(
-    step["with"], with,
+    step.at("with"),
+    &with,
     "pre-release.yml's publish inputs changed. They are pinned by value (issue #647): the body must \
      come from `changelogs/pre-releases/<version>.md` through `body_path`, with no input that \
      generates or appends notes, and the release must be a published pre-release. If the change \
@@ -1267,7 +1287,7 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
      `body` input and publishes with no notes"
   );
   assert_eq!(
-    resolve["id"].as_str(),
+    resolve.at("id").as_str(),
     Some("changelog"),
     "the resolve changelog path step must keep `id: changelog`: `body_path` reads \
      `steps.changelog.outputs.path`, which is empty under any other id"
@@ -1275,16 +1295,16 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
   assert_run_step(
     &resolve,
     "resolve changelog path",
-    &serde_yaml_ng::Value::Null,
+    &yaml_null(),
     RESOLVE_RC_CHANGELOG,
     "pre-release.yml's changelog path changed. It is pinned by value (issue #647): an rc's notes \
      must be `changelogs/pre-releases/<version>.md` and the job must fail when that file is \
      missing, never fall back to the `CHANGELOG.md` index",
   );
 
-  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(PRE_RELEASE_JOB).unwrap();
-  job["steps"][3]["run"] = RESOLVE_RC_CHANGELOG.into();
-  job["steps"][5]["with"] = with;
+  let mut job = yaml_doc("<PRE_RELEASE_JOB>", PRE_RELEASE_JOB);
+  set(&mut job["steps"][3], "run", scalar(RESOLVE_RC_CHANGELOG));
+  set(&mut job["steps"][5], "with", with);
   assert_job_as_written(".github/workflows/pre-release.yml", "release", &job, PUBLISH_JOB_WHY);
 
   assert_publish_job_blocks(".github/workflows/pre-release.yml", "release", None, &["build"]);
@@ -1292,9 +1312,9 @@ fn pre_release_publish_takes_its_notes_from_the_per_rc_changelog() {
 
 const DOCS_SYNC: &str = ".github/workflows/docs-sync.yml";
 
-fn docs_sync_triggers() -> serde_yaml_ng::Value {
-  let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&fs::read_to_string(DOCS_SYNC).unwrap()).unwrap();
-  workflow["on"].clone()
+fn docs_sync_triggers() -> YamlOwned {
+  let workflow = yaml_doc(DOCS_SYNC, &fs::read_to_string(DOCS_SYNC).unwrap());
+  workflow.at("on").clone()
 }
 
 /// The published docs must only ever show what was *delivered*. `main` is the
@@ -1308,9 +1328,10 @@ fn docs_sync_triggers() -> serde_yaml_ng::Value {
 #[test]
 fn docs_sync_fires_on_pushes_to_main_only() {
   let on = docs_sync_triggers();
-  let push = &on["push"];
+  let push = &on.at("push");
 
-  let branches: Vec<&str> = push["branches"]
+  let branches: Vec<&str> = push
+    .at("branches")
     .as_sequence()
     .expect("docs-sync.yml must restrict its push trigger to a branch list")
     .iter()
@@ -1323,11 +1344,11 @@ fn docs_sync_fires_on_pushes_to_main_only() {
   );
 
   assert!(
-    push["tags"].is_null(),
+    push.at("tags").is_null(),
     "docs-sync.yml must not trigger on tags: the `v*.*.*` glob matches pre-release tags too"
   );
   assert!(
-    on["pull_request"].is_null(),
+    on.at("pull_request").is_null(),
     "docs-sync.yml must not trigger on pull requests: it publishes, it does not check"
   );
 }
@@ -1349,7 +1370,9 @@ fn docs_sync_fires_on_pushes_to_main_only() {
 #[test]
 fn docs_sync_watches_every_root_the_site_reads() {
   let on = docs_sync_triggers();
-  let paths: Vec<&str> = on["push"]["paths"]
+  let paths: Vec<&str> = on
+    .at("push")
+    .at("paths")
     .as_sequence()
     .expect("docs-sync.yml must filter its push trigger by path")
     .iter()
@@ -1370,25 +1393,29 @@ fn docs_sync_watches_every_root_the_site_reads() {
 /// `\n  hook-smoke:` markers, so inserting any job between the two silently
 /// emptied what the assertions ran against, the same failure mode the `msrv`
 /// tests already parse the YAML to avoid.
-fn ci_workflow() -> serde_yaml_ng::Value {
-  serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).expect("ci.yml must be valid YAML")
+fn ci_workflow() -> YamlOwned {
+  yaml_doc(
+    ".github/workflows/ci.yml",
+    &fs::read_to_string(".github/workflows/ci.yml").unwrap(),
+  )
 }
 
-fn ci_job(name: &str) -> serde_yaml_ng::Value {
+fn ci_job(name: &str) -> YamlOwned {
   let workflow = ci_workflow();
-  let job = workflow["jobs"][name].clone();
+  let job = workflow.at("jobs").at(name).clone();
   assert!(!job.is_null(), "ci.yml must define a `{name}` job");
   job
 }
 
 /// The `run:` scripts of a job's steps, in order.
-fn run_steps(job: &serde_yaml_ng::Value) -> Vec<String> {
-  job["steps"]
+fn run_steps(job: &YamlOwned) -> Vec<String> {
+  job
+    .at("steps")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .iter()
-    .filter_map(|s| s["run"].as_str().map(str::to_owned))
+    .filter_map(|s| s.at("run").as_str().map(str::to_owned))
     .collect()
 }
 
@@ -1428,12 +1455,13 @@ fn ci_test_matrix_runs_on_windows_latest() {
 #[test]
 fn ci_installs_nextest_from_a_prebuilt_binary() {
   let job = ci_job("test");
-  let uses: Vec<String> = job["steps"]
+  let uses: Vec<String> = job
+    .at("steps")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .iter()
-    .filter_map(|s| s["uses"].as_str().map(str::to_owned))
+    .filter_map(|s| s.at("uses").as_str().map(str::to_owned))
     .collect();
   assert!(
     uses.iter().any(|u| u.starts_with("taiki-e/install-action")),
@@ -1735,7 +1763,7 @@ fn doctests_are_declared_off_rather_than_run_empty() {
   // `cargo test --all --doc` and `cargo  test --doc` are caught along with
   // the spelling it used to have.
   let workflow = ci_workflow();
-  for (job_name, job) in workflow["jobs"].as_mapping().expect("ci.yml must define `jobs:`") {
+  for (job_name, job) in workflow.at("jobs").as_mapping().expect("ci.yml must define `jobs:`") {
     for run in run_steps(job) {
       let tokens: Vec<&str> = run.split_whitespace().collect();
       assert!(
@@ -1786,14 +1814,16 @@ fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
   let job = ci_job("audit");
   assert_job_is_blocking(&ci_workflow(), "audit");
 
-  let step = job["steps"]
+  let step = job
+    .at("steps")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .into_iter()
-    .find(|s| s["name"].as_str() == Some("cargo audit"))
+    .find(|s| s.at("name").as_str() == Some("cargo audit"))
     .expect("the audit job needs a step named `cargo audit` that runs the audit");
-  let run = step["run"]
+  let run = step
+    .at("run")
     .as_str()
     .expect("the `cargo audit` step must carry a `run:` script")
     .to_string();
@@ -1829,12 +1859,14 @@ fn ci_audits_dependencies_and_can_fail_on_an_advisory() {
 ///
 /// The key is read as the string `"on"`. YAML 1.1 would resolve a bare `on`
 /// to the boolean `true`, which is the classic trap for anything parsing
-/// Actions workflows, but serde_yaml_ng implements YAML 1.2, where it stays a
-/// string. Checked against this file rather than assumed, and stated here so
-/// nobody "fixes" it into `workflow[true]`.
+/// Actions workflows, but this file's reader implements YAML 1.2, where it
+/// stays a string. The assertion below is the check, not this sentence: a
+/// reader resolving `on` to `true` would read the key as absent and redden it.
+/// Stated here so nobody "fixes" it into `workflow[true]`.
 #[test]
 fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
-  let on = &ci_workflow()["on"];
+  let workflow = ci_workflow();
+  let on = workflow.at("on");
   assert!(
     !on.is_null(),
     "ci.yml must declare an `on:` block: without one the workflow never runs and every \
@@ -1842,7 +1874,9 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
   );
 
   for event in ["push", "pull_request"] {
-    let branches: Vec<String> = on[event]["branches"]
+    let branches: Vec<String> = on
+      .at(event)
+      .at("branches")
       .as_sequence()
       .cloned()
       .unwrap_or_default()
@@ -1898,15 +1932,16 @@ fn ci_fires_on_main_and_dev_with_nothing_filtered_out() {
       ),
     ] {
       assert!(
-        on[event][filter].is_null(),
+        on.at(event).at(filter).is_null(),
         "ci.yml must not filter `{event}` by `{filter}`: {why}. Got `{filter}: {:?}`",
-        on[event][filter]
+        on.at(event).at(filter)
       );
     }
   }
 
   assert!(
-    on.as_mapping().is_some_and(|m| m.contains_key("workflow_dispatch")),
+    on.as_mapping()
+      .is_some_and(|m| m.contains_key(&scalar("workflow_dispatch"))),
     "ci.yml must keep `workflow_dispatch:`: it is the only way to re-run the suite without \
      pushing a commit"
   );
@@ -1930,23 +1965,26 @@ fn ci_evaluates_the_flake_version_against_cargo_toml() {
   let workflow = ci_workflow();
   assert_job_is_blocking(&workflow, "flake");
 
-  let mut job: serde_yaml_ng::Value = serde_yaml_ng::from_str(FLAKE_JOB).unwrap();
-  job["steps"][2]["run"] = FLAKE_VERSION_CHECK.into();
+  let mut job = yaml_doc("<FLAKE_JOB>", FLAKE_JOB);
+  set(&mut job["steps"][2], "run", scalar(FLAKE_VERSION_CHECK));
   assert_job_as_written(".github/workflows/ci.yml", "flake", &job, FLAKE_JOB_WHY);
 
-  let env: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str("CARGO_TERM_COLOR: always\nRUSTFLAGS: -D warnings\nGWM_NO_GLOBAL_CONFIG: \"1\"").unwrap();
+  let env = yaml_doc(
+    "<inline>",
+    "CARGO_TERM_COLOR: always\nRUSTFLAGS: -D warnings\nGWM_NO_GLOBAL_CONFIG: \"1\"",
+  );
   assert_eq!(
-    workflow["env"], env,
+    workflow.at("env"),
+    &env,
     "ci.yml's workflow-level `env:` changed. It reaches the flake job's step, and \
      `SHELLOPTS: noexec` there has bash parse the comparison and exit 0 without running it \
      (#672). If the change is intended, update the `env` this test expects in the same diff"
   );
   assert!(
-    workflow["defaults"].is_null(),
+    workflow.at("defaults").is_null(),
     "ci.yml must carry no workflow-level `defaults:`: a `run.shell` there sets the shell of \
      the flake job's step, and `true {{0}}` never runs it. Got {:?}",
-    workflow["defaults"]
+    workflow.at("defaults")
   );
 }
 
@@ -2031,7 +2069,8 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
   // Through `string_keys` (issue #673): a job keyed `true:` or `false:`,
   // skipped, could be switched off with this sweep green.
   let jobs = string_keys(
-    workflow["jobs"]
+    workflow
+      .at("jobs")
       .as_mapping()
       .expect("ci.yml must define a `jobs:` mapping"),
     "ci.yml `jobs:`",
@@ -2072,7 +2111,7 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
 
   for job_name in &jobs {
     if job_name == "doctor" {
-      assert_doctor_is_still_the_advisory_job(&workflow["jobs"]["doctor"]);
+      assert_doctor_is_still_the_advisory_job(workflow.at("jobs").at("doctor"));
       continue;
     }
     assert_job_is_blocking(&workflow, job_name);
@@ -2105,8 +2144,8 @@ fn ci_every_job_is_blocking_except_the_advisory_doctor() {
 const DOCTOR_CONDITION: &str = "(github.event_name == 'push' && github.ref == 'refs/heads/dev') || \
                                 (github.event_name == 'pull_request' && github.base_ref == 'dev')";
 
-fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
-  // By value, not by presence. `!job["if"].is_null()` is satisfied by any
+fn assert_doctor_is_still_the_advisory_job(job: &YamlOwned) {
+  // By value, not by presence. `!job.at("if").is_null()` is satisfied by any
   // condition at all, `if: always()` included, while the message below claims
   // the restriction to `dev` is what it checks. That is the same overstatement
   // the `continue-on-error` assertion made before it was pinned to its step.
@@ -2114,7 +2153,8 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
   // Whitespace is normalised first because the condition is a YAML block
   // scalar: reflowing it across lines is a formatting change and must not be a
   // red test, whereas changing what it admits must be.
-  let condition = job["if"]
+  let condition = job
+    .at("if")
     .as_str()
     .unwrap_or_default()
     .split_whitespace()
@@ -2130,10 +2170,10 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
      the rest, or restore the condition"
   );
 
-  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
-  let reports: Vec<&serde_yaml_ng::Value> = steps
+  let steps = job.at("steps").as_sequence().cloned().unwrap_or_default();
+  let reports: Vec<&YamlOwned> = steps
     .iter()
-    .filter(|s| s["name"].as_str() == Some("gwm doctor"))
+    .filter(|s| s.at("name").as_str() == Some("gwm doctor"))
     .collect();
   assert_eq!(
     reports.len(),
@@ -2145,14 +2185,14 @@ fn assert_doctor_is_still_the_advisory_job(job: &serde_yaml_ng::Value) {
     reports.len()
   );
   assert_eq!(
-    reports[0]["continue-on-error"].as_bool(),
+    reports[0].at("continue-on-error").as_bool(),
     Some(true),
     "the `gwm doctor` step must carry `continue-on-error: true`: that one step being \
      advisory is the whole reason this job sits outside the blocking guard. Asserting it of \
      the step rather than of the job as a whole is deliberate, since `some step is \
      continue-on-error` stays green when the marker moves onto `cargo build` and `gwm \
      doctor` quietly becomes able to fail the job. Got `continue-on-error: {:?}`",
-    reports[0]["continue-on-error"]
+    reports[0].at("continue-on-error")
   );
 }
 
@@ -2217,7 +2257,7 @@ const EXPECTED_CLIPPY: &str = "cargo clippy --all-targets --all-features -- -D w
 /// Issue #655. The same hole one job over. `cargo clippy --all-targets` with
 /// `-D warnings` dropped exits 0 on every lint it finds, and `cargo clippy -D
 /// warnings` without `--all-targets` never lints `tests/`, `benches/` or
-/// `examples/` at all, which in this repo is 110 test binaries and three
+/// `examples/` at all, which in this repo is 111 test binaries and three
 /// benches, the larger half of the code. Both are one bare cargo invocation
 /// and both pass `assert_job_is_blocking` unchanged.
 ///
@@ -2268,7 +2308,7 @@ fn ci_clippy_job_denies_warnings_across_all_targets() {
   assert!(
     clippy.contains("--all-targets"),
     "the clippy job must lint every target (`--all-targets`): the default leaves `tests/`, \
-     `benches/` and `examples/` unlinted, which here is 110 test binaries and three benches \
+     `benches/` and `examples/` unlinted, which here is 111 test binaries and three benches \
      the job would report clean without having read. Got {clippy:?}"
   );
 
@@ -2287,45 +2327,48 @@ fn ci_clippy_job_denies_warnings_across_all_targets() {
   );
 
   assert_eq!(
-    workflow["env"]["RUSTFLAGS"].as_str(),
+    workflow.at("env").at("RUSTFLAGS").as_str(),
     Some("-D warnings"),
     "the workflow-wide `RUSTFLAGS` must stay exactly `-D warnings`, because it is half of \
      the lint level `cargo clippy` runs at and the half that wins: `--cap-lints=allow` here \
      exits the job 0 on every lint in the tree while the `-D warnings` on the command sits \
      there untouched. Changing what clippy is allowed to ignore is a conscious decision in \
      a reviewed diff, not a one-word edit to a shared `env:` block. Got {:?}",
-    workflow["env"]["RUSTFLAGS"]
+    workflow.at("env").at("RUSTFLAGS")
   );
 
   // Below the workflow, `env:` exists at exactly two levels, and either one
   // shadows the value pinned above for this job alone. `msrv` overriding
   // `RUSTFLAGS` to `""` two jobs away is the precedent that this does happen.
-  let mut envs: Vec<(&serde_yaml_ng::Value, String)> = vec![(&job["env"], "the `clippy` job".to_string())];
-  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  let mut envs: Vec<(&YamlOwned, String)> = vec![(job.at("env"), "the `clippy` job".to_string())];
+  let steps = job.at("steps").as_sequence().cloned().unwrap_or_default();
   for step in &steps {
-    envs.push((&step["env"], format!("step {:?} of the `clippy` job", step_label(step))));
+    envs.push((
+      step.at("env"),
+      format!("step {:?} of the `clippy` job", step_label(step)),
+    ));
   }
   for (env, where_) in &envs {
     assert!(
-      env["RUSTFLAGS"].is_null(),
+      env.at("RUSTFLAGS").is_null(),
       "`RUSTFLAGS` must not be set on {where_}: it shadows the workflow-wide `-D warnings` \
        for this job alone, and it decides the lint level over the command's own denial. Got \
        `RUSTFLAGS: {:?}`",
-      env["RUSTFLAGS"]
+      env.at("RUSTFLAGS")
     );
     assert!(
-      env["CARGO_ENCODED_RUSTFLAGS"].is_null(),
+      env.at("CARGO_ENCODED_RUSTFLAGS").is_null(),
       "`CARGO_ENCODED_RUSTFLAGS` must not be set on {where_}: cargo reads it *instead of* \
        `RUSTFLAGS`, so it silently replaces the value pinned above rather than adding to it. \
        Got `CARGO_ENCODED_RUSTFLAGS: {:?}`",
-      env["CARGO_ENCODED_RUSTFLAGS"]
+      env.at("CARGO_ENCODED_RUSTFLAGS")
     );
   }
   assert!(
-    workflow["env"]["CARGO_ENCODED_RUSTFLAGS"].is_null(),
+    workflow.at("env").at("CARGO_ENCODED_RUSTFLAGS").is_null(),
     "`CARGO_ENCODED_RUSTFLAGS` must not be set workflow-wide either, for the same reason: \
      cargo reads it instead of `RUSTFLAGS`, so the pin above would describe a variable \
      nothing reads. Got {:?}",
-    workflow["env"]["CARGO_ENCODED_RUSTFLAGS"]
+    workflow.at("env").at("CARGO_ENCODED_RUSTFLAGS")
   );
 }
