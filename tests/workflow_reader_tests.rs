@@ -1,10 +1,10 @@
 //! Issue #688. The reader the workflow sweeps parse YAML with.
 //!
 //! `serde_yaml_ng` was replaced because `RUSTSEC-2024-0449` marks the
-//! `unsafe-libyaml` under it unmaintained. Swapping the parser under a hundred
-//! and thirty reads is only safe if the new reading answers the old questions
-//! the same way, so this file pins the answers rather than trusting that it
-//! does.
+//! `unsafe-libyaml` under it unmaintained. Swapping the parser under every
+//! read in these sweeps, 160 lines over four files, is only safe if the new
+//! reading answers the old questions the same way, so this file pins the
+//! answers rather than trusting that it does.
 //!
 //! With the old crate briefly re-declared, the two readers were compared head
 //! to head through `At::at`, the accessor these sweeps actually use:
@@ -181,11 +181,18 @@ fn equal_documents_compare_equal() {
 /// CRLF is a line break, so a workflow checked out on Windows parses the same.
 ///
 /// This repo has a standing rule that a test parsing a repo file normalises
-/// line endings first, because the old reader needed it: the Windows runner
-/// checks the tree out with CRLF and a value would come back with a trailing
-/// `\r`, never equal to the same value parsed from a string literal. Measured
-/// here rather than assumed, and the normalisation is deliberately *not* added
-/// back: `saphyr` implements YAML 1.2, where CRLF is a line break.
+/// line endings first, and the reason is not the YAML reader: it came from
+/// `msrv_tests` searching the raw text for `"\n  msrv:\n"`, which matched
+/// nothing on the Windows runner (#498). A substring search over bytes, with
+/// no parser involved.
+///
+/// Stated because the first draft of this docstring invented a different
+/// reason, that the old reader left a trailing `\r` on parsed values.
+/// Measured on `dev`: `release_workflow_tests` parsed the workflows with no
+/// normalisation at all, compared block-scalar `run:` against Rust literals,
+/// and `test (windows-latest)` was green. So neither reader leaves a `\r`,
+/// and the normalisation is deliberately not added back here: `saphyr`
+/// implements YAML 1.2, where CRLF is a line break.
 ///
 /// What the measurement actually covers, since "the suites pass" overstates
 /// it: `msrv_tests::read` and `the_workflows_are_single_document` normalise
