@@ -2,9 +2,9 @@
 //!
 //! `serde_yaml_ng` was replaced because `RUSTSEC-2024-0449` marks the
 //! `unsafe-libyaml` under it unmaintained. Swapping the parser under every
-//! read in these sweeps, 160 lines over four files, is only safe if the new
-//! reading answers the old questions the same way, so this file pins the
-//! answers rather than trusting that it does.
+//! read in these sweeps is only safe if the new reading answers the old
+//! questions the same way, so this file pins the answers rather than trusting
+//! that it does.
 //!
 //! With the old crate briefly re-declared, the two readers were compared head
 //! to head through `At::at`, the accessor these sweeps actually use:

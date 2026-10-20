@@ -240,7 +240,11 @@ interprocess = "2.4.2"
 
 [dev-dependencies]
 # Only `tests/` read a dynamic YAML tree; `src/` uses `serde-saphyr` alone (#688).
-saphyr = "0.2.2"
+# `default-features = false` drops the `encoding` feature, which the helpers never
+# touch and which pulls `encoding_rs < 0.8.40` into the graph: `encoding_rs_io`
+# already holds the 0.8 slot, so cargo backtracks to the 0.7 series and compiles
+# `encoding_rs 0.7.2` plus `cfg-if 0.1.10` for nothing.
+saphyr = { version = "0.2.2", default-features = false }
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"

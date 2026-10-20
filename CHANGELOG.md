@@ -47,8 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A fourth route was measured and dropped, and is worth recording because it
   looked free: deserialising into `serde_json::Value` through `serde-saphyr`
   would have been a near-mechanical rename of every read the swap touches,
-  160 lines over four files by the count that strips comments, 117 of them in
-  `release_workflow_tests.rs` alone. It sorts mapping
+  the bulk of them in `release_workflow_tests.rs`. No count is given because
+  three attempts at one were each wrong and none of them credited a guard with
+  anything: a figure derived in prose drifts exactly like the floor it
+  describes, with nothing to catch it. It sorts mapping
   keys, so `string_keys`, which promises document order, would have lost that
   guarantee while its own test kept passing on a sample that happens to be
   alphabetical. It also reads the YAML key `true:` as the string `"true"`,
