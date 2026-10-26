@@ -217,7 +217,7 @@ fn the_prefix_is_resolved_from_the_issue_form_when_the_config_declares_none() {
 ///
 /// `serde-saphyr` refuses a duplicate key even under one the form struct
 /// ignores, which `serde_yaml_ng` let through, and `title_prefix_for` reads an
-/// unparseable form as having no prefix. So `gwm create --from-issue` keeps the
+/// unparseable form as having no prefix. So `gwm create --issue` keeps the
 /// whole title in the slug for such a form, where it used to strip the prefix.
 #[test]
 fn a_form_repeating_a_key_contributes_no_prefix() {
@@ -246,7 +246,7 @@ fn a_form_repeating_a_key_contributes_no_prefix() {
 ///
 /// The reverse of the case above: `serde_yaml_ng` did not resolve `<<:`, so
 /// this form failed with a missing `type` and contributed no prefix.
-/// `serde-saphyr` resolves it, the form parses, and `gwm create --from-issue`
+/// `serde-saphyr` resolves it, the form parses, and `gwm create --issue`
 /// now strips the prefix it used to keep.
 #[test]
 fn a_form_completed_by_a_merge_key_contributes_its_prefix() {

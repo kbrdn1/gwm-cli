@@ -84,7 +84,7 @@ pub fn render_form_markdown(raw: &str, ctx: &TemplateContext, defaults: &FormDef
 ///
 /// - `gwm new` (`render_issue_draft`): title prefix, labels and body; a parse
 ///   error fails the command.
-/// - `gwm create --from-issue` and the TUI's prefill from an issue
+/// - `gwm create --issue` and the TUI's prefill from an issue
 ///   (`title_prefix_for`): the title prefix only; a parse error reads as no
 ///   prefix, and unless the type's config sets `title_prefix` the whole issue
 ///   title lands in the slug.

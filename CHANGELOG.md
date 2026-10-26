@@ -73,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one `gwm` reads none of (a second `name:`), no longer parses, where
   `serde_yaml_ng` let it through. Two paths parse a form and they fail it
   differently. `gwm new` refuses it, in `serde-saphyr`'s wording, as it does
-  any form it cannot parse. `gwm create --from-issue` and the TUI's prefill
+  any form it cannot parse. `gwm create --issue` and the TUI's prefill
   from an issue parse the whole form to take its `title:`, and treat a form
   they cannot parse as having no prefix: unless the type's config sets
   `title_prefix`, the whole issue title lands in the slug
@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the optional ones with no error, or was rejected when the merge carried a
   required one such as `type`; `serde-saphyr` resolves merge keys, a YAML 1.1
   type. `gwm new` renders the merged fields into the issue it opens.
-  `gwm create --from-issue` and the TUI's prefill move the other way: a form
+  `gwm create --issue` and the TUI's prefill move the other way: a form
   rejected for a `type` its merge carried used to contribute no prefix, and
   now contributes its `title:`, so unless the type's config sets
   `title_prefix` the slug drops the prefix it used to carry. None of the forms
