@@ -644,7 +644,7 @@ The tag's `v` prefix is stripped to match the winget `PackageVersion`, and the m
 
 If the channel is unblocked and the manual flow proves routine, the job can come back — deleting the pin test is the first step of that change, and the removed job (pinned, digest-anchored komac; see the git history of `release.yml` at #448) is the starting point.
 
-### Documentation site (<https://gwm-docs.kbrdn.dev>)
+### Documentation site (<https://gwm.kbrdn.dev>)
 
 The published documentation follows `main`, not `dev`. Every push to `main` that touches `docs/` or `changelogs/` fires [`docs-sync.yml`](.github/workflows/docs-sync.yml), which sends a `repository_dispatch` to [`kbrdn1/kbrdn-docs`](https://github.com/kbrdn1/kbrdn-docs); that repo replays the conversion into its Starlight site, commits the drift and deploys.
 
