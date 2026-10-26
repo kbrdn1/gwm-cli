@@ -73,6 +73,9 @@ struct Fixture {
   /// is vhs 0.12.0: the tape's shell commands run, so the stamp lands, and the
   /// encoder never starts, so nothing vhs itself writes does (vhs#787).
   writes_output: bool,
+  /// Leave a `version-stamp.gif` from an earlier run in `.tmp/`, as a
+  /// `GWM_CAPTURE_PREFLIGHT_ONLY=1` run does: it exits before the cleanup.
+  stale_gif: bool,
 }
 
 impl Default for Fixture {
@@ -84,6 +87,7 @@ impl Default for Fixture {
       dirty: false,
       open_pr: Some("42"),
       writes_output: true,
+      stale_gif: false,
     }
   }
 }
@@ -177,6 +181,10 @@ exit 0"#,
   git(repo, &["commit", "-qm", "fixture"]);
   if fx.dirty {
     fs::write(repo.join("uncommitted.txt"), "in the shot\n").unwrap();
+  }
+  if fx.stale_gif {
+    fs::create_dir_all(repo.join("docs/_capture/.tmp")).unwrap();
+    fs::write(repo.join("docs/_capture/.tmp/version-stamp.gif"), "GIF89a").unwrap();
   }
 
   // The stubs first, then a git that has been checked to work, then the system
@@ -287,6 +295,26 @@ fn a_vhs_that_writes_none_of_its_own_output_stops_the_run() {
   assert!(
     !log.contains("github-linking.tape"),
     "no capture should run behind a vhs that writes nothing: {log}"
+  );
+}
+
+/// A gif left by an earlier run is not this run's answer.
+///
+/// The check reads the gif's presence, so it holds only because the run
+/// deletes the previous one first, and a previous one is the usual case: a
+/// preflight-only run exits before the cleanup that removes it.
+#[test]
+fn a_gif_left_by_an_earlier_run_does_not_pass_for_this_one() {
+  let (_dir, out) = run_preflight(Fixture {
+    writes_output: false,
+    stale_gif: true,
+    ..Default::default()
+  });
+  let text = stdout(&out);
+  assert!(!out.status.success(), "a stale gif must not pass the check: {text}");
+  assert!(
+    text.contains("wrote none of its own output"),
+    "the run should say vhs wrote nothing: {text}"
   );
 }
 
