@@ -90,6 +90,34 @@ fn reading_through_an_absent_level_answers_null() {
   );
 }
 
+/// A tag on a node does not hide what it holds.
+///
+/// `serde_yaml_ng` untagged on every read. `saphyr` keeps a node carrying a
+/// non-core tag (`!x`) as a `Tagged` wrapper that `get`, `as_str` and
+/// `as_mapping` all answer `None` through, so a guard reading
+/// `env: !x {RUSTFLAGS: --cap-lints=allow}` would see no `RUSTFLAGS` and pass.
+/// The receiver and the result are both covered: the tag can sit on the
+/// mapping being read or on the value read out of it.
+#[test]
+fn a_tagged_node_reads_as_what_it_holds() {
+  let d = doc("env: !x\n  RUSTFLAGS: --cap-lints=allow\nrun: !y cargo clippy\nwith: !z\n  a: 1\n");
+  assert_eq!(
+    d.at("env").at("RUSTFLAGS").as_str(),
+    Some("--cap-lints=allow"),
+    "a key under a tagged mapping must be read"
+  );
+  assert_eq!(
+    d.at("run").as_str(),
+    Some("cargo clippy"),
+    "a tagged scalar must read as its text"
+  );
+  assert_eq!(
+    d.at("with").as_mapping().map(|m| m.len()),
+    Some(1),
+    "a tagged mapping must read as a mapping"
+  );
+}
+
 /// A sequence read off an absent path is empty, not a panic.
 #[test]
 fn a_sequence_at_an_absent_path_is_empty() {

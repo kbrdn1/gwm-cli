@@ -53,8 +53,15 @@ pub trait At {
 
 impl At for YamlOwned {
   fn at(&self, key: &str) -> &YamlOwned {
-    self.get(key).unwrap_or_else(|| absent())
+    untagged(self).get(key).map(untagged).unwrap_or_else(|| absent())
   }
+}
+
+/// The node under a tag, the way `serde_yaml_ng` read it. `saphyr` wraps a
+/// node carrying a non-core tag (`!x`) in `Tagged`, which `get`, `as_str` and
+/// `as_mapping` answer `None` through: a guard would read an empty `env:`.
+fn untagged(node: &YamlOwned) -> &YamlOwned {
+  node.get_tagged_node().unwrap_or(node)
 }
 
 /// A YAML string scalar. Replaces the `.into()` the old reader provided
