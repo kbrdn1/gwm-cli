@@ -1,6 +1,6 @@
 ---
 name: gwm
-description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Also covers multi-forge (#419): GitHub via `gh` **or** GitLab via `glab`, the `forge` / `[forge_hosts]` keys, and `gwm trust add`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `forge`, `forge_hosts`, `glab`, `gwm trust add`, GitLab MR, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm note`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
+description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij/herdr, or wire `gcd` via `gwm shell-init`. Also covers multi-forge (#419): GitHub via `gh` **or** GitLab via `glab`, the `forge` / `[forge_hosts]` keys, and `gwm trust add`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `forge`, `forge_hosts`, `glab`, `gwm trust add`, GitLab MR, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm note`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm herdr`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
@@ -126,6 +126,7 @@ gwm create feat 123 "user-authentication"
 gwm create feat 123 foo --no-bootstrap    # skip the .gwm.toml stages
 gwm create feat 123 foo --reuse-branch    # attach to an existing local branch instead of erroring
 gwm create feat 123 foo --repo <name>     # workspace mode: which child repo gets the worktree
+gwm create --issue 594 [--type fix] [--force]   # derive the triple from an existing issue (#617); --force accepts a closed one
 
 gwm list [--format table|names|json] [--detect-pr]   # `json` = stable schema (#38); names = completion
 gwm path <pattern> [--format text|json]   # print path (fuzzy match) → use $(gwm path auth)
@@ -142,7 +143,8 @@ gwm remove <PATTERN>... [--delete-branch] [--dry-run] [--force]   # remove (fuzz
 #   collapse; the destructive loop does not stop at the first error and exits non-zero
 gwm prune [--dry-run]                     # clean stale .git/worktrees entries
 
-gwm doctor [--format text|json]           # diagnose setup. Exit: 0=green, 1=warn, 2=fail
+gwm doctor [--format text|json] [--fix]   # diagnose setup. Exit: 0=green, 1=warn, 2=fail
+#   --fix drops the branch.<name>.gwm-* keys of branches that no longer exist (#633)
 gwm completions <bash|elvish|fish|powershell|zsh>   # emit a shell-completion script on stdout
 gwm shell-init  <bash|fish|powershell|zsh>          # emit a `gcd <pattern>` wrapper to eval/source
 
@@ -150,6 +152,8 @@ gwm switch                                # interactive picker → prints chosen
 
 gwm tmux   <pattern> [-p|--split]         # open matched worktree in new tmux window (or split)
 gwm zellij <pattern> [-p|--split]         # open matched worktree in new zellij tab (or pane)
+gwm herdr  <pattern> [-p|--split]         # open matched worktree in new herdr tab (or pane, #588)
+#   --direction right|down|left|up on all three implies --split (herdr refuses left / up)
 
 # --- fan-out & disk hygiene (#313) ---
 gwm exec [<slug>...] [--jobs N] [--profile P] -- <cmd>   # run <cmd> in each worktree; ✓/✗ rollup, non-zero on any fail
@@ -275,10 +279,11 @@ Local, per-branch, survives worktree moves. Issue numbers are auto-detected from
 
 The backend a link was written under is recorded per branch; flipping `forge` drops the other backend's numbers rather than resolving issue #42 as merge request !42 on the other forge: a real page, the wrong one.
 
-### Multiplexer hand-off (`tmux` / `zellij`)
+### Multiplexer hand-off (`tmux` / `zellij` / `herdr`)
 
 - `gwm tmux <pat>` requires `$TMUX` to be set (i.e. you are already inside a tmux session): otherwise it exits non-zero with a clear error rather than spawning a stray server. `--split` opens a horizontal split of the current pane instead of a new window.
 - `gwm zellij <pat>` requires `$ZELLIJ`. `--cwd` on `zellij action new-tab` needs zellij ≥ 0.40. `--split` opens a new pane in the current tab instead of a new tab.
+- `gwm herdr <pat>` requires `$HERDR_ENV`, i.e. gwm runs in a pane herdr manages (#588). `--split` opens a pane in the current tab; herdr has no implicit direction, so the split takes `--direction` or `[tui] mux_pane_direction`.
 
 ## Status column
 
@@ -335,7 +340,7 @@ context.
 | `h` / `H`       | run `[tui.macro1]` / `[tui.macro2]` (#290)                                  |
 | `y` / `w` / `Y` | yank branch name / worktree name / absolute path to the clipboard           |
 | `i` / `B`       | link prompt (issue/PR) / browse-links menu (open linked issue·PR in browser)|
-| `a`             | agent sessions overlay (#408) ; `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
+| `a`             | agent sessions overlay (#408) ; `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `o` resume the session in a mux pane (#591), `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
 | `I`             | rich PR / issue view (#420) ; description, author, branch pair, diff size, CI rollup, submitted reviews, conversation, and the comments anchored to a diff hunk (#528, a second GraphQL request fired when the view opens). `Enter` opens the selected row's URL, `f` re-fetches. On GitLab: summary, description, author and branch pair only |
 | `x`             | exec profile picker (#325) ; pick a `[exec.profiles.<name>]` and run it in a PTY. A profile carrying a `[container]` block runs inside `docker run` / `podman run` with `-i -t` (#421) |
 | `F`             | refresh GitHub issue/PR status via `gh` (off-thread; statusbar spinner)     |
@@ -973,6 +978,7 @@ gwm completions <shell>      # emit shell completion script (bash/elvish/fish/po
 gwm shell-init  <shell>      # emit gcd wrapper to eval (bash/fish/powershell/zsh)
 gwm tmux   <pat> [-p]        # tmux window / split hand-off
 gwm zellij <pat> [-p]        # zellij tab / pane hand-off
+gwm herdr  <pat> [-p]        # herdr tab / pane hand-off
 gwm link   issue|pr <N>      # bind to GitHub issue / PR
 gwm unlink issue|pr          # drop the link
 gwm open   [issue|pr]        # open URL in $BROWSER

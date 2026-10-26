@@ -34,11 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `skills/SKILL.md` presents 1.11.0 as the current line and gains the 1.10.0
   line it never had; its key table follows the 1.10.0 moves (`e` / `E` for
-  rename and exit, `c` / `C` for commits and CI checks) and lists the keys
-  1.10.0 and 1.11.0 added. CONTRIBUTING.md links the docs site at
-  `gwm.kbrdn.dev`, the address it is served at, rather than
-  `gwm-docs.kbrdn.dev`, which does not resolve
-  ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)).
+  rename and exit, `c` / `C` for commits and CI checks) and lists the
+  list-view keys 1.10.0 and 1.11.0 added, plus `o` on the agents overlay; its
+  CLI references gain `gwm herdr`, `gwm create --issue` and
+  `gwm doctor --fix`. CONTRIBUTING.md links the docs site at `gwm.kbrdn.dev`,
+  the address it is served at, instead of a `gwm-docs` subdomain that does
+  not resolve ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)).
 
 
 ## Past releases
