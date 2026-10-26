@@ -69,10 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about every behaviour. An earlier measurement covered an adapter that was
   replaced before this shipped, which is why it was redone rather than quoted.
 
-  Two behaviours changed, below. Separately, `gwm new` reports a form it
-  cannot parse in `serde-saphyr`'s wording, and refuses a form that repeats a
-  key even where it reads none of it (a second `name:`), which
-  `serde_yaml_ng` let through.
+  Two behaviours changed, below. Separately, a form that repeats a key, even
+  one `gwm` reads none of (a second `name:`), no longer parses, where
+  `serde_yaml_ng` let it through. Two paths read a form and they fail it
+  differently. `gwm new` refuses it, in `serde-saphyr`'s wording, as it does
+  any form it cannot parse. `gwm create --from-issue` and the TUI's prefill
+  from an issue read only its `title:` and treat a form they cannot parse as
+  having no prefix, so the whole issue title lands in the slug
+  (`feature-add-config-types` rather than `add-config-types`).
 
   **A YAML merge key now contributes its fields.** `serde_yaml_ng` did not
   resolve `<<:`, so an issue form factoring fields out through an anchor lost

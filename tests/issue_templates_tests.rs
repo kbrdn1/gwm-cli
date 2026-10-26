@@ -213,6 +213,34 @@ fn the_prefix_is_resolved_from_the_issue_form_when_the_config_declares_none() {
   );
 }
 
+/// Issue #688. A form repeating a key contributes no prefix.
+///
+/// `serde-saphyr` refuses a duplicate key even under one the form struct
+/// ignores, which `serde_yaml_ng` let through, and `title_prefix_for` reads an
+/// unparseable form as having no prefix. So `gwm create --from-issue` keeps the
+/// whole title in the slug for such a form, where it used to strip the prefix.
+#[test]
+fn a_form_repeating_a_key_contributes_no_prefix() {
+  let (dir, repo) = init_repo();
+  let tpl = dir.path().join(".github").join("ISSUE_TEMPLATE");
+  std::fs::create_dir_all(&tpl).unwrap();
+  std::fs::write(
+    tpl.join("feature_request.yml"),
+    "name: Feature\nname: Again\ndescription: d\ntitle: \"[Feature]: \"\nbody: []\n",
+  )
+  .unwrap();
+
+  let config =
+    Config::load_layered_from_bytes(Some(b"[issue_template]\ndefault = \"feature_request.yml\"\n"), None).unwrap();
+
+  let prefix = title_prefix_for(&repo, &config, "feat");
+  assert_eq!(prefix, "", "a form with a repeated `name:` no longer parses");
+  assert_eq!(
+    desc_from_title("[Feature]: add config types", &prefix).unwrap(),
+    "feature-add-config-types"
+  );
+}
+
 #[test]
 fn the_configured_prefix_wins_over_the_form_title() {
   let (dir, repo) = init_repo();
