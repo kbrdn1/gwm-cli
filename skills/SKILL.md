@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli, latest stable **`1.9.0`** (machine contracts frozen since 1.0.0, MSRV 1.95).
+Source: https://github.com/kbrdn1/gwm-cli, latest stable **`1.11.0`** (machine contracts frozen since 1.0.0, MSRV 1.95).
 
 **1.9.0 is the licensing line, and it changes nothing you call.** gwm is dual-licensed **MIT OR Apache-2.0**: MIT stays in full under `LICENSE-MIT`, `LICENSE-APACHE` joins it for its §3 patent grant, and a user picks either without having to say which. Both texts travel in every artefact (release archives, `.deb`, `.rpm`, AUR, the published crate). The libraries statically compiled in ship their notices under `third-party/`: libgit2 (GPLv2 with a linking exception, which is conditional on the notice travelling) and zlib. Behaviour-wise the line is what gwm prints: 165 em dashes rewritten across the binary's string literals and 49 more in `gwm --help`, so an error message or a completion script no longer carries a character the docs dropped; the Settings panel sizes to its active tab instead of a flat 60% of the frame; and a worktree path is spelled one way everywhere it is printed in full, `~` for `$HOME`, in the TUI header, the table and the sidebar alike (`gwm path --format=json` stays absolute).
 
