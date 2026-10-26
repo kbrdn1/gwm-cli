@@ -4,9 +4,10 @@
 #   ./docs/_capture/generate.sh            # rebuild demo + all captures
 #   GWM_KEEP_DEMO=1 ./docs/_capture/generate.sh   # reuse the existing demo
 #
-# Run from anywhere inside the checkout being captured. Requires: vhs, cargo,
-# a Nerd Font, and (for the one capture taken off the demo repo) `gh` plus a
-# branch with an open PR.
+# Run from anywhere inside the checkout being captured. Requires: vhs 0.12.1 or
+# later (0.12.0 writes nothing, see the stamp below), cargo, a Nerd Font, and
+# (for the one capture taken off the demo repo) `gh` plus a branch with an
+# open PR.
 # PNG stills come from `Screenshot` inside each tape; the tape's gif Output is
 # a throwaway written under .tmp/. Animated captures Output their gif directly.
 #
@@ -86,7 +87,8 @@ export GWM_CAPTURE_REPO="$TRUNK"
 # after its `Screenshot`, a bare tape landed the file roughly one run in three.
 # Both leave the previous asset in place, so the set stays plausible and goes
 # stale one capture at a time. Anything a tape declares must therefore be newer
-# than this run's start.
+# than this run's start. A third failure, a vhs that writes nothing at all, is
+# stopped once by the stamp below rather than met here two dozen times.
 STARTED="$CAP/.tmp/.started"
 : > "$STARTED"
 
@@ -108,7 +110,8 @@ run() {
   return $missed
 }
 
-# One retry: the race above is the common cause and it does not repeat.
+# One retry: the race above is the common cause and it does not repeat. A vhs
+# that writes nothing repeats every time, which is why it never gets this far.
 #
 # A retry is only safe on a tape that can run twice against the same fixture,
 # and four of them mutate it. Three were already written that way: `demo` and
@@ -127,11 +130,27 @@ FAILED=()
 # resolution answers the question the captures answer.
 STAMP="$CAP/.tmp/version.txt"
 WHICH="$CAP/.tmp/which.txt"
-rm -f "$STAMP" "$WHICH"
+# The tape's own `Output`: the one file of the three that vhs writes itself.
+STAMP_GIF="$CAP/.tmp/version-stamp.gif"
+rm -f "$STAMP" "$WHICH" "$STAMP_GIF"
 echo "▸ version-stamp.tape"
 vhs "$CAP/version-stamp.tape" >/dev/null 2>&1 || true
 if [[ ! -s "$STAMP" ]]; then
   echo "  ✗ version-stamp.tape produced nothing: is vhs installed, and is 'gwm' runnable?"
+  exit 1
+fi
+# The stamp proves vhs ran the tape's shell and nothing about vhs itself: both
+# files above are written by a redirection inside the tape. vhs 0.12.0 runs
+# every command, prints `Creating ….gif`, exits 0 and never starts the encoder
+# (charmbracelet/vhs#787). It passed this preflight from 2026-09-10 to the
+# v1.11.0 cut, where each tape the run reached then failed twice, each failure
+# read as the write race above, until the theme gallery's own check stopped
+# it. The gif is the cheap question that tells the two apart, asked once
+# before any tape.
+if [[ ! -s "$STAMP_GIF" ]]; then
+  echo "  ✗ vhs ran version-stamp.tape but wrote none of its own output ($STAMP_GIF)."
+  echo "    Every tape would exit 0 and leave its capture untouched. vhs 0.12.0 does"
+  echo "    exactly this (charmbracelet/vhs#787): check 'vhs --version', 0.12.1 or later."
   exit 1
 fi
 CAPTURED=$(tr -d '\r' < "$STAMP" | head -n 1)

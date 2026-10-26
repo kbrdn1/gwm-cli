@@ -69,6 +69,13 @@ struct Fixture {
   dirty: bool,
   /// What the stubbed `gh` answers: a PR number, or nothing (no open PR).
   open_pr: Option<&'static str>,
+  /// Whether the stubbed `vhs` writes the stamp tape's own `Output`. `false`
+  /// is vhs 0.12.0: the tape's shell commands run, so the stamp lands, and the
+  /// encoder never starts, so nothing vhs itself writes does (vhs#787).
+  writes_output: bool,
+  /// Leave a `version-stamp.gif` from an earlier run in `.tmp/`, as a
+  /// `GWM_CAPTURE_PREFLIGHT_ONLY=1` run does: it exits before the cleanup.
+  stale_gif: bool,
 }
 
 impl Default for Fixture {
@@ -79,6 +86,8 @@ impl Default for Fixture {
       resolved_relative: None,
       dirty: false,
       open_pr: Some("42"),
+      writes_output: true,
+      stale_gif: false,
     }
   }
 }
@@ -126,9 +135,14 @@ exit 0"#,
   // `vhs` stands in for the version stamp: the one thing the preflight reads
   // out of it is the file the tape leaves behind.
   let resolved = fx.resolved_relative.unwrap_or("target/release/gwm");
+  let gif = if fx.writes_output {
+    "case \"$1\" in *version-stamp.tape) printf 'GIF89a' > \"$PWD/docs/_capture/.tmp/version-stamp.gif\" ;; esac\n"
+  } else {
+    ""
+  };
   let vhs = match fx.stamped_version {
     Some(v) => format!(
-      "echo \"$@\" >> \"$PWD/docs/_capture/.tmp/vhs.log\"\nprintf 'gwm {v}\\n' > \"$PWD/docs/_capture/.tmp/version.txt\"\nprintf '%s\\n' \"$PWD/{resolved}\" > \"$PWD/docs/_capture/.tmp/which.txt\"\nexit 0"
+      "echo \"$@\" >> \"$PWD/docs/_capture/.tmp/vhs.log\"\nprintf 'gwm {v}\\n' > \"$PWD/docs/_capture/.tmp/version.txt\"\nprintf '%s\\n' \"$PWD/{resolved}\" > \"$PWD/docs/_capture/.tmp/which.txt\"\n{gif}exit 0"
     ),
     // vhs exits 0 whether or not it wrote what the tape asked for, which is
     // the failure the `-s` check exists for.
@@ -167,6 +181,10 @@ exit 0"#,
   git(repo, &["commit", "-qm", "fixture"]);
   if fx.dirty {
     fs::write(repo.join("uncommitted.txt"), "in the shot\n").unwrap();
+  }
+  if fx.stale_gif {
+    fs::create_dir_all(repo.join("docs/_capture/.tmp")).unwrap();
+    fs::write(repo.join("docs/_capture/.tmp/version-stamp.gif"), "GIF89a").unwrap();
   }
 
   // The stubs first, then a git that has been checked to work, then the system
@@ -247,6 +265,56 @@ fn a_stamp_that_was_never_written_stops_the_run() {
   assert!(
     text.contains("version-stamp.tape produced nothing"),
     "the run should say the tape produced nothing: {text}"
+  );
+}
+
+/// A vhs that runs the tape's shell but writes none of its own output stops
+/// the run before a single capture.
+///
+/// This is vhs 0.12.0 (vhs#787), and the stamp cannot see it on its own: the
+/// stamp is written by the shell inside the tape, so it lands either way. It
+/// went unseen from 2026-09-10 to the v1.11.0 cut, where each tape the run
+/// reached failed twice, read as the write race, until the theme gallery's
+/// own check stopped it.
+#[test]
+fn a_vhs_that_writes_none_of_its_own_output_stops_the_run() {
+  let (dir, out) = run_preflight(Fixture {
+    writes_output: false,
+    ..Default::default()
+  });
+  let text = stdout(&out);
+  assert!(
+    !out.status.success(),
+    "a vhs that writes nothing must fail the run: {text}"
+  );
+  assert!(
+    text.contains("version-stamp.gif") && text.contains("0.12.1"),
+    "the run should name the missing file and the vhs floor: {text}"
+  );
+  let log = fs::read_to_string(dir.path().join("docs/_capture/.tmp/vhs.log")).unwrap();
+  assert!(
+    !log.contains("github-linking.tape"),
+    "no capture should run behind a vhs that writes nothing: {log}"
+  );
+}
+
+/// A gif left by an earlier run is not this run's answer.
+///
+/// The check reads the gif's presence, so it holds only because the run
+/// deletes the previous one first, and a previous one is the usual case: a
+/// preflight-only run exits before the cleanup that removes it.
+#[test]
+fn a_gif_left_by_an_earlier_run_does_not_pass_for_this_one() {
+  let (_dir, out) = run_preflight(Fixture {
+    writes_output: false,
+    stale_gif: true,
+    ..Default::default()
+  });
+  let text = stdout(&out);
+  assert!(!out.status.success(), "a stale gif must not pass the check: {text}");
+  assert!(
+    text.contains("wrote none of its own output"),
+    "the run should say vhs wrote nothing: {text}"
   );
 }
 

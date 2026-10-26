@@ -11,6 +11,10 @@
 # built. It writes under `.tmp/`, which is gitignored: the
 # committed copy is made at the end, because `github-linking.tape`
 # photographs this repo's working tree and must find it clean.
+#
+# The gif is not a throwaway: it is the one file here that vhs writes rather
+# than the shell, so `generate.sh` reads its absence as a vhs that cannot write
+# at all (0.12.0, vhs#787) and stops before any tape.
 Output docs/_capture/.tmp/version-stamp.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
