@@ -954,6 +954,7 @@ fullscreen = true
 gwm                          # TUI  (gwm --workspace <dir> = multi-repo)
 gwm init [--preset <stack>]  # scaffold .gwm.toml (optionally from a preset)
 gwm create <t> <#> <desc>    # create + bootstrap
+gwm create --issue <N>       # same, the triple derived from an existing issue (#617)
 gwm list [--format json]     # list worktrees (json = stable schema)
 gwm path|cd <pat>            # print path
 gwm switch | gwm s | gcd     # interactive picker (cd via shell wrapper)
@@ -971,7 +972,7 @@ gwm statusline [--watch]     # one-line prompt summary off the daemon
 gwm agents [attach|detach]   # AI-agent sessions per worktree + manual pins (#408)
 gwm note show [slug]         # print a worktree's note (exit 1 = none) (#515)
 gwm types                    # show branch types
-gwm doctor [--format json]   # diagnose setup (exit 0/1/2)
+gwm doctor [--format json]   # diagnose setup (exit 0/1/2); --fix drops dead branches' gwm config
 gwm config get|set|list      # edit .gwm.toml (comment-preserving)
 gwm history | gwm undo       # destructive-op journal / undo
 gwm completions <shell>      # emit shell completion script (bash/elvish/fish/powershell/zsh)
