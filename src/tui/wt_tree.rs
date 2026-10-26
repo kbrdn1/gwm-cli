@@ -12,7 +12,9 @@
 //! Layout rules baked into [`build_tree`]:
 //!
 //! - **Nesting** by path segment (`src/tui/ui.rs` → `src` → `tui` → `ui.rs`).
-//! - **Directories before files**, alphabetical within each level.
+//! - **Directories before files**, alphabetical within each level, each
+//!   directory row led by the [`WT_DIR_CARET`] disclosure marker rather
+//!   than a folder glyph.
 //! - **Single-child directory chains collapse** for compactness
 //!   (`src` → `tui` → `ui.rs` renders as `src/tui/` then `ui.rs`), matching
 //!   the way file explorers fold empty intermediate folders.
@@ -20,13 +22,18 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Nerd-font glyph for a closed directory (`nf-fa-folder`). Kept public so
-/// a future expand/collapse affordance (issue #300, deferred) can pick the
-/// closed variant; the MVP renders the full tree with [`WT_DIR_OPEN_ICON`].
+/// Nerd-font glyph for a closed directory (`nf-fa-folder`), used by the
+/// generic file-tree renderer outside this module.
 pub const WT_DIR_ICON: &str = "\u{f07b}";
-/// Nerd-font glyph for an open directory (`nf-fa-folder_open`). The MVP
-/// always shows children, so every directory row uses this.
-pub const WT_DIR_OPEN_ICON: &str = "\u{f07c}";
+/// Disclosure marker leading every directory row (issue #622).
+///
+/// Replaces the `nf-fa-folder_open` glyph the rows carried since #300. A
+/// folder glyph and a file glyph are two icons of the same weight, so the
+/// two levels of the listing were told apart by indentation alone; a caret
+/// is a different SHAPE, which is what makes the nesting readable at a
+/// glance. Plain Unicode rather than a nerd-font codepoint, so a directory
+/// row still reads on a terminal without a patched font.
+pub const WT_DIR_CARET: &str = "▾";
 /// Generic file glyph (`nf-fa-file`) — the fallback when no extension in
 /// [`file_icon`]'s table matches.
 pub const WT_FILE_ICON: &str = "\u{f15b}";

@@ -227,6 +227,13 @@ jobs:
     name: update homebrew tap
     needs: [release]
     runs-on: ubuntu-latest
+    # Read-only on this repo (#669): the workflow grants `contents: write` for
+    # the publish, and inheriting it here would let one added step edit the
+    # release notes after they are published. This job only reads: the
+    # checkout, and `gh release download` of a sidecar. The push to the tap
+    # goes through HOMEBREW_TAP_TOKEN, which `permissions:` does not govern.
+    permissions:
+      contents: read
     # Stable releases only — rc/alpha/beta must never reach `brew install gwm`,
     # otherwise users tracking the tap would silently move to a pre-release.
     # Intentionally does NOT gate on `event_name == 'push'`: the documented
@@ -321,6 +328,10 @@ jobs:
     name: update scoop bucket
     needs: [release]
     runs-on: ubuntu-latest
+    # Read-only on this repo, same reasoning as homebrew-tap-update (#669):
+    # the push to the bucket goes through SCOOP_BUCKET_TOKEN.
+    permissions:
+      contents: read
     # Stable releases only — rc/alpha/beta must never reach `scoop install gwm`,
     # otherwise users tracking the bucket would silently move to a pre-release.
     # Same reasoning as homebrew-tap-update above (the whole workflow is

@@ -108,6 +108,17 @@ impl LinkPrompt {
     };
   }
 
+  /// Point the highlight straight at `target` (issue #624 — a click lands on
+  /// a row, not one step away). Same stage guard as
+  /// [`Self::toggle_selection`]: a click landing on the picker's old rows
+  /// after it advanced to `InputNumber` must not flip a committed choice.
+  pub fn select_target(&mut self, target: LinkTarget) {
+    if self.stage != LinkPromptStage::ChooseTarget {
+      return;
+    }
+    self.selected = target;
+  }
+
   /// Commit a target and advance to `InputNumber`. Clears the buffer so
   /// the user starts fresh on the digit input. Called from the
   /// orchestrator's `link_prompt_choose` wrapper, which also updates

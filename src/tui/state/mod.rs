@@ -14,19 +14,22 @@
 //! - `github_fetch` — TTL cache + inflight dedupe for `gh` shell-outs (#128, this PR)
 //! - `async_task` — generic off-thread spine (coalescing + late-drop) for slow ops (#231)
 //! - `config_panel` — scroll + resolved-row snapshot for the Configuration overlay (#232)
-//! - `commits` — scroll + paged snapshot for the full-size commit listing (#593)
+//!
+//! `commits` and `exec_picker` left this list in #635: their state now sits
+//! in `tui::views::<view>`, next to that view's rendering and its key
+//! handling, rather than one slice here and two more in `app.rs` / `ui.rs`.
 
+pub mod agents;
 pub mod async_task;
 pub mod clean_overlay;
 pub mod command_logs;
-pub mod commits;
 pub mod config_panel;
 pub mod confirm;
 pub mod create_form;
 pub mod detail_overlay;
-pub mod exec_picker;
 pub mod filter;
 pub mod github_fetch;
+pub mod help;
 pub mod link_prompt;
 pub mod markdown;
 pub mod note_editor;

@@ -8,6 +8,8 @@
 //! values, then dispatches `worktree::add` + `bootstrap::run` on the async
 //! task spine).
 
+use std::path::PathBuf;
+
 /// Max digits accepted in the issue-number field. Seven digits covers any
 /// realistic GitHub issue/PR number (up to 9,999,999) while keeping the
 /// resolved branch name well within git's 255-byte ref limit (#217).
@@ -120,6 +122,30 @@ pub struct CreateForm {
   /// form's answer, and prefilling from it would fill the form from an issue
   /// the user never named.
   pub awaiting_issue: Option<u64>,
+
+  // ── The Create / Edit banner and the Edit origin (issue #635) ────────────
+  //
+  // These four moved off `App`, where they sat as flat satellites of this
+  // very struct. [`Self::reset`] deliberately does NOT clear them, and that
+  // is load-bearing rather than an oversight: `App` clears each failure
+  // banner at its own explicit sites, and one caller
+  // (`App::open_create_form_from_issue`) resets the form WITHOUT clearing
+  // the banner. Fold them into `reset` and that path starts wiping an error
+  // the user has not read yet.
+  /// Last asynchronous create failure shown inside the Create modal.
+  pub create_failure: Option<String>,
+  /// Last rename failure, surfaced inside the Edit modal (mirrors
+  /// [`CreateForm::create_failure`]) so the user can correct and retry without
+  /// losing the form. Cleared when the modal reopens.
+  pub edit_failure: Option<String>,
+  /// The selected worktree's branch name captured when the rename modal
+  /// (`View::Edit`, #290) opens — the `<old>` in `git branch -m <old> <new>`.
+  /// `None` while the modal is closed.
+  pub edit_original_branch: Option<String>,
+  /// The selected worktree's on-disk path captured when the rename modal
+  /// opens — the source for `git worktree move <old_path> <new_path>`.
+  pub edit_original_path: Option<PathBuf>,
+
   /// The structured fields the repo's patterns ask for, in pattern order
   /// (issue #418). Private, because the form's invariant is that [`Self::field`]
   /// is always one of these (or `Name` in free-form mode) — a focused field the
@@ -137,6 +163,10 @@ impl Default for CreateForm {
       desc: String::new(),
       name: String::new(),
       awaiting_issue: None,
+      create_failure: None,
+      edit_failure: None,
+      edit_original_branch: None,
+      edit_original_path: None,
       fields: DEFAULT_FIELDS.to_vec(),
     }
   }

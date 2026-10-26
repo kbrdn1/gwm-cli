@@ -683,6 +683,19 @@ impl ModalKeymap {
     &self.entries
   }
 
+  /// The first key bound to `action`, as a stroke rather than as its display
+  /// string (issue #624). A clicked button fires the verb by handing the
+  /// event loop the key the user would have pressed, so a rebound `activate`
+  /// reaches the mouse too.
+  pub fn primary_stroke(&self, action: ModalAction) -> Option<KeyStroke> {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .and_then(|b| b.keys.first())
+      .cloned()
+  }
+
   /// The first key bound to `action`, rendered for an inline hint (the
   /// statusbar chip / help-overlay footer). `None` when the verb is
   /// unbound — the caller drops it rather than advertise a phantom key.

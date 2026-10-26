@@ -4,19 +4,19 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.10.0"
+version = "1.11.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the newest
 # one introduced here. Our own std usage sits far lower: `std::sync::LazyLock`
 # (src/naming.rs) wants 1.80, `std::iter::repeat_n` (src/tui/ui.rs's countdown
 # bar) wants 1.82. The floor comes from the dependency graph, and reading it
-# takes a build rather than `cargo metadata`: the highest *declared*
-# `rust-version` in the locked graph is 1.88 (the ratatui 0.30 stack, `time
-# 0.3.47`), but `libsqlite3-sys 0.38.1`, a normal dependency pulled in by
-# `rusqlite` with `bundled`, declares no `rust-version` at all and its build
-# script uses `cfg_select!`, stable only since 1.95.0. Measured against the
-# committed lockfile: `cargo +1.94 check --all-targets --locked` fails with
-# `error[E0658]`, `cargo +1.95 check --all-targets --locked` passes.
+# takes a build rather than `cargo metadata`: every *declared* `rust-version`
+# among the dependencies sits below it, but `libsqlite3-sys 0.38.1`, a normal
+# dependency pulled in by `rusqlite` with `bundled`, declares no `rust-version`
+# at all and its build script uses `cfg_select!`, stable only since 1.95.0.
+# Measured against the committed lockfile: `cargo +1.94 check --all-targets
+# --locked` fails with `error[E0658]`, `cargo +1.95 check --all-targets
+# --locked` passes.
 #
 # Two CI jobs hold this line. The clippy job catches an accidental *std-API*
 # use above it (`clippy::incompatible_msrv` is warn-by-default, escalated to a
@@ -149,6 +149,12 @@ assets = [
 [lib]
 name = "gwm"
 path = "src/lib.rs"
+# No doctests (issue #659). The lib is the internal test seam behind
+# `#![doc(hidden)]`, its doc comments carry `text`, `toml` and `go` blocks and
+# no Rust example, and behaviour is tested under `tests/`. Declared so plain
+# `cargo test` skips an empty phase and CI keeps no step with nothing to run;
+# `doctests_are_declared_off_rather_than_run_empty` holds the two together.
+doctest = false
 
 [[bin]]
 name = "gwm"
@@ -195,7 +201,7 @@ toml = "1.1"
 toml_edit = "0.25"
 anyhow = "1"
 thiserror = "2"
-dirs = "6"
+dirs = "7"
 regex = "1"
 shellexpand = "3"
 chrono = { version = "0.4", features = ["serde"] }
@@ -215,8 +221,8 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
-serde_yaml_ng = "0.10.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde-saphyr = "2.0.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /
@@ -233,6 +239,12 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_Pipes", "Win32_Fou
 interprocess = "2.4.2"
 
 [dev-dependencies]
+# Only `tests/` read a dynamic YAML tree; `src/` uses `serde-saphyr` alone (#688).
+# `default-features = false` drops the `encoding` feature, which the helpers never
+# touch and which pulls `encoding_rs < 0.8.40` into the graph: `encoding_rs_io`
+# already holds the 0.8 slot, so cargo backtracks to the 0.7 series and compiles
+# `encoding_rs 0.7.2` plus `cfg-if 0.1.10` for nothing.
+saphyr = { version = "0.2.2", default-features = false }
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"

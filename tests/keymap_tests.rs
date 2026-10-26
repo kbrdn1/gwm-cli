@@ -256,6 +256,26 @@ fn default_keymap_binds_working_tree_scroll() {
 }
 
 #[test]
+fn default_keymap_folds_repo_groups_on_left_and_right() {
+  // Issue #680: `Left` folds the cursor's repo group in workspace mode,
+  // `Right` unfolds it, the tree-view convention. Rebindable as
+  // `collapse_group` / `expand_group` under `[tui.keys]`.
+  let km = Keymap::defaults();
+
+  let left = KeyStroke::parse_chord("Left").unwrap();
+  assert!(matches!(
+    km.lookup(&left),
+    ChordResolution::Matched(Action::CollapseGroup)
+  ));
+
+  let right = KeyStroke::parse_chord("Right").unwrap();
+  assert!(matches!(
+    km.lookup(&right),
+    ChordResolution::Matched(Action::ExpandGroup)
+  ));
+}
+
+#[test]
 fn default_keymap_binds_open_docs_to_dot() {
   // Issue #233: `.` opens the gwm documentation in the browser, reusing the
   // OpenMenu browser-spawn path. Rebindable as `open_docs` under `[tui.keys]`.

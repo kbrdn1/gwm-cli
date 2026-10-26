@@ -8,17 +8,25 @@ mod app;
 pub mod commit_graph;
 pub mod keymap;
 pub mod modal_keymap;
+pub mod mouse;
 pub mod palette;
 pub mod state;
 pub mod theme;
 mod ui;
+mod views;
 pub mod wt_tree;
 
 use crate::error::Result;
 use crate::tui::keymap::Action;
 use crate::tui::modal_keymap::{KeyContext, ModalAction};
+use crate::tui::mouse::MouseKind;
+#[cfg(windows)]
+use crossterm::event::EnableMouseCapture;
 use crossterm::{
-  event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+  event::{
+    self, DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+  },
   execute,
   terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -29,22 +37,22 @@ use std::time::{Duration, Instant};
 
 pub use app::{
   agent_pane_status, detached_browser_status, mux_pane_status, plan_agent_pane, plan_terminal_browser,
-  read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, ConfirmKind, CreateKey, ExecPickerKey,
-  LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, NoteKey, OpenTarget, PendingMerge, RepoMeta, ToggleStroke,
-  View, WorkspaceState,
+  read_pins_from_sources, AgentPanePlan, App, BrowserPlan, CommandLogsKey, CreateKey, ExecPickerKey, LauncherPlan,
+  LinkPromptKey, LinkPromptStage, LinkTarget, MouseOutcome, NoteKey, OpenTarget, RepoMeta, ToggleStroke, View,
+  WorkspaceState,
 };
 pub use state::async_task::{
   CreateWorktreeResult, DeleteBatchOutcome, DeleteFailure, DeleteTarget, TaskKind, TaskMsg, TaskRunner,
 };
 pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
-pub use state::commits::{CommitsModal, CommitsSnapshot, MetaColumn, COMMITS_MAX, COMMITS_PAGE};
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
 };
-pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+pub use state::confirm::{
+  ConfirmButton, ConfirmContext, ConfirmKeyAction, ConfirmKind, ConfirmModal, CountdownTickOutcome, PendingMerge,
+};
 pub use state::create_form::{CreateForm, Field};
-pub use state::exec_picker::ExecPicker;
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
@@ -52,6 +60,11 @@ pub use state::note_editor::NoteEditor;
 pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
 pub use state::working_tree::{WorkingTreeModal, WorkingTreeSnapshot};
+pub use views::commits::{
+  commit_meta_columns, commits_meta_pick, recent_commits_lines, recent_commits_listing, CommitsModal, CommitsSnapshot,
+  COMMITS_MAX, COMMITS_PAGE, COMMITS_SUBJECT_FLOOR, COMMIT_HASH_DISPLAY_LEN,
+};
+pub use views::exec_picker::ExecPicker;
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -75,24 +88,24 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 pub use ui::{
   agent_cell_label, agent_pane_lines, agents_pane_title, author_initials, badge_group_width, band_fill,
   bootstrap_report_lines, branch_name_color, branch_status_color, build_sidebar_payload, build_sidebar_sections, cells,
-  centered_abs, chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, commit_meta_columns,
-  commits_meta_pick, compact_header_fill, compact_header_line, compact_header_style, config_capture_footer_hints,
-  config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
-  confirm_detail_line, create_buttons_line, delete_batch_title, delete_worktree_title, detail_overlay_width,
-  detail_visible_rows, display_path_with_home, ellipsize_middle, field_input_line, filled_cells_for_progress,
-  folded_status_line, footer_line, form_field_scroll, format_status, freshness_color, github_status_lines, header_line,
-  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
-  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
-  link_prompt_modal_width, link_target_keys, link_target_line, list_pane_counter, markdown_style, meta_pick,
-  modal_height, modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_width,
+  centered_abs, chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints, compact_header_fill,
+  compact_header_line, compact_header_style, config_capture_footer_hints, config_edit_footer_hints,
+  config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line,
+  delete_batch_title, delete_worktree_title, detail_overlay_width, detail_visible_rows, display_path_with_home,
+  ellipsize_middle, field_input_line, filled_cells_for_progress, folded_status_line, footer_line, form_field_scroll,
+  format_status, freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line,
+  help_label_style, help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, hint_line_cells,
+  issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width,
+  link_target_keys, link_target_line, list_pane_counter, markdown_style, meta_pick, modal_height,
+  modal_hint_for_context, modal_hint_for_context_with_fields, modal_hint_line, modal_section_rule, modal_width,
   overlay_modal_width, pad_cells, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
-  pr_summary_line, recent_commits_lines, recent_commits_listing, recent_items_pane_title, reclaim_size_color,
-  rename_buttons_line, rich_view_modal_width, skip_cells, status_line, status_pane_title, table_marker,
-  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_listing,
-  working_tree_meta_column, working_tree_pane_title, working_tree_stat_spans, working_tree_status_counts,
-  working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext,
-  SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, COMMITS_SUBJECT_FLOOR,
-  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  pr_summary_line, recent_items_pane_title, reclaim_size_color, rename_buttons_line, rich_view_modal_width,
+  settings_value_cell, skip_cells, status_line, status_pane_title, table_marker, tilde_compress_with_home,
+  type_selector_line, working_tree_counts_footer, working_tree_listing, working_tree_meta_column,
+  working_tree_pane_title, working_tree_stat_spans, working_tree_status_counts, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, Header, HelpRow, HintContext, MetaColumn,
+  SidebarSections, WorkingTreeCounts, CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, CLOSE_ICON, COMMAND_LOGS_ICON,
+  ISSUE_ICON, META_GAP, PR_ICON, RECENT_COMMITS_LIMIT, SETTINGS_ICON, WT_CREATED_ICON, WT_DELETED_ICON,
   WT_MODIFIED_ICON, WT_NAME_FLOOR,
 };
 
@@ -117,7 +130,7 @@ pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   // decision as `gwm create` / `gwm bootstrap` — closes the bypass
   // flagged in PR #113 review (issue #95).
   let app = App::new()?.with_trust_mode(trust_mode);
-  let mut terminal = enter_terminal()?;
+  let mut terminal = enter_terminal(app.mouse_capture)?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
   // #290: ExitToWorktree prints the selected path to stdout so a shell
@@ -136,7 +149,7 @@ pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
 pub fn run_workspace(root: &Path, trust_mode: crate::trust::TrustMode) -> Result<()> {
   let app =
     App::new_workspace_at_layered(root, crate::config::global_config_path().as_deref())?.with_trust_mode(trust_mode);
-  let mut terminal = enter_terminal()?;
+  let mut terminal = enter_terminal(app.mouse_capture)?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
   if let Some(path) = result? {
@@ -155,7 +168,7 @@ pub fn run_picker() -> Result<Option<PathBuf>> {
   // `App::new_picker_at` (repo discovery, config load) bubbles up with the
   // terminal still in cooked mode.
   let app = App::new_picker_at(None)?;
-  let mut terminal = enter_terminal()?;
+  let mut terminal = enter_terminal(app.mouse_capture)?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
   result
@@ -164,14 +177,20 @@ pub fn run_picker() -> Result<Option<PathBuf>> {
 /// Enable raw mode + alternate screen + mouse capture and hand back a
 /// configured `Terminal`. Centralised so `run` and `run_picker` cannot
 /// drift on the setup recipe.
-fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
+fn enter_terminal(mouse: bool) -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   enable_raw_mode()?;
   // Render the TUI to STDERR, not stdout: `exit_to_worktree` (#290) prints the
   // selected path to stdout for the `cd "$(gwm)"` shell wrapper, so stdout must
   // stay free of alt-screen / ANSI frames (the fzf/skim pattern). stderr is the
   // tty in an interactive session, so the UI still draws (Codex review #292).
   let mut stderr = io::stderr();
-  execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+  execute!(stderr, EnterAlternateScreen)?;
+  // `[tui] mouse` decides whether the very first frame reads the mouse
+  // (issue #624), so a user who turned it off never sees a frame that took
+  // the terminal's text selection away.
+  if mouse {
+    enable_mouse(&mut stderr)?;
+  }
   Ok(Terminal::new(CrosstermBackend::new(stderr))?)
 }
 
@@ -202,6 +221,62 @@ pub fn clear_without_cursor_query<B: ratatui::backend::Backend>(
 ) -> std::result::Result<(), B::Error> {
   let area = terminal.size()?.into();
   terminal.resize(area)
+}
+
+/// Turn the terminal's mouse reporting on or off (issue #624).
+///
+/// Every path that re-enters the alternate screen goes through this rather
+/// than through a bare `EnableMouseCapture`, and passes `app.mouse_capture`:
+/// the three enable sites are all *restores* after a child program ran
+/// fullscreen, and a restore that ignores the flag hands the mouse back to
+/// gwm after every lazygit, `exec` run and review launcher — silently undoing
+/// a release the user asked for. The guard belongs where all three converge.
+fn set_mouse_capture(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, on: bool) -> Result<()> {
+  if on {
+    enable_mouse(terminal.backend_mut())
+  } else {
+    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    Ok(())
+  }
+}
+
+/// Ask the terminal for the mouse events gwm reads, and only those.
+///
+/// `EnableMouseCapture` sets five modes: normal tracking (`1000`),
+/// button-event tracking (`1002`), any-event tracking (`1003`) and the two
+/// coordinate encodings. gwm reads a left press and the wheel; `1002` and
+/// `1003` exist to report drags and pointer motion, which nothing here
+/// consumes, and which between them put an event on the wire for every cell
+/// the pointer crosses. They are also what a terminal reads to decide the
+/// application wants the whole mouse, so with them on a drag never reaches
+/// the terminal's own text selection.
+///
+/// **The three cannot be layered.** They are not independent switches: a
+/// terminal keeps one tracking mode, and `1003h` supersedes `1002h`
+/// supersedes `1000h`. Setting all three and then clearing the top two —
+/// which is the obvious way to trim `EnableMouseCapture` down — turns
+/// tracking OFF entirely rather than falling back to `1000`, because the
+/// clear applies to the mode in effect and nothing restores the one under it.
+/// Measured on Ghostty 1.3.1: drag came back and the click stopped arriving.
+/// So `1000` is set on its own, never after the others.
+///
+/// Windows keeps the crossterm command: it carries a winapi path for consoles
+/// with no VT support, which no escape sequence can stand in for.
+#[doc(hidden)]
+pub fn enable_mouse<W: io::Write>(w: &mut W) -> Result<()> {
+  #[cfg(windows)]
+  {
+    execute!(w, EnableMouseCapture)?;
+  }
+  #[cfg(not(windows))]
+  {
+    // 1000: report press and release, and nothing between them.
+    // 1015 / 1006: coordinate encodings that survive past column 223, the
+    // same pair `EnableMouseCapture` sets, SGR (1006) last so it wins.
+    write!(w, "\x1b[?1000h\x1b[?1015h\x1b[?1006h")?;
+    w.flush()?;
+  }
+  Ok(())
 }
 
 /// Inverse of `enter_terminal`. Always called from the same scope as
@@ -241,7 +316,18 @@ fn confirm_fire(app: &mut App) {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) -> Result<Option<PathBuf>> {
+  // What the terminal was last told about mouse reporting (issue #624).
+  // `enter_terminal` already sent the opening state; from here the loop
+  // reconciles `app.mouse_capture` against this on every tick, so every way
+  // the flag can move — `M`, a `[tui] mouse` edit in the Settings panel, and
+  // whatever comes next — reaches the terminal through one place rather than
+  // each remembering to send the sequence itself.
+  let mut mouse_on_wire = app.mouse_capture;
   loop {
+    if app.mouse_capture != mouse_on_wire {
+      set_mouse_capture(terminal, app.mouse_capture)?;
+      mouse_on_wire = app.mouse_capture;
+    }
     let now = Instant::now();
     // Generic off-thread tasks (issue #231; GitHub fetch folded in by #255):
     // apply any worker results that landed since the last tick — the
@@ -407,7 +493,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       clear_without_cursor_query(terminal)?;
       continue;
     }
-    let Event::Key(key) = ev else { continue };
+    // Issue #624: gwm has captured the mouse since its first frame and never
+    // read an event. `handle_mouse_event` is that half. It hands back a
+    // synthesised `Esc` when the click landed on a modal's `✕`, so the button
+    // and the key share one teardown instead of growing a second copy of it.
+    let key = match ev {
+      Event::Key(k) => k,
+      Event::Mouse(m) => match handle_mouse_event(terminal, &mut app, m)? {
+        Some(k) => k,
+        None => continue,
+      },
+      _ => continue,
+    };
     if key.kind != KeyEventKind::Press {
       continue;
     }
@@ -504,12 +601,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Keybindings overlay when it outgrows the modal (#217).
       View::Help => match app.resolve_modal(KeyContext::Help, key) {
         Some(ModalAction::HelpClose) => app.view = View::List,
-        Some(ModalAction::HelpScrollDown) => app.help_scroll_down(),
-        Some(ModalAction::HelpScrollUp) => app.help_scroll_up(),
-        Some(ModalAction::HelpScrollRight) => app.help_scroll_right(),
-        Some(ModalAction::HelpScrollLeft) => app.help_scroll_left(),
-        Some(ModalAction::HelpScrollTop) => app.help_scroll = 0,
-        Some(ModalAction::HelpScrollBottom) => app.help_scroll = app.help_max_scroll,
+        Some(ModalAction::HelpScrollDown) => app.help.scroll_down(),
+        Some(ModalAction::HelpScrollUp) => app.help.scroll_up(),
+        Some(ModalAction::HelpScrollRight) => app.help.scroll_right(),
+        Some(ModalAction::HelpScrollLeft) => app.help.scroll_left(),
+        Some(ModalAction::HelpScrollTop) => app.help.scroll = 0,
+        Some(ModalAction::HelpScrollBottom) => app.help.scroll = app.help.max_scroll,
         _ => {}
       },
       // Command Logs overlay (issue #226). Scrolls like the help overlay;
@@ -537,17 +634,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Full-size commit listing (issue #593). Scrolls like the Command
       // Logs overlay; `m` re-reads one page deeper. Closes on Esc, `q` or
       // `c` — the key that opened it.
-      View::Commits => match app.resolve_modal(KeyContext::Commits, key) {
-        Some(ModalAction::CommitsClose) => app.view = View::List,
-        Some(ModalAction::CommitsLoadMore) => app.load_more_commits(),
-        Some(ModalAction::CommitsScrollDown) => app.commits.scroll_down(),
-        Some(ModalAction::CommitsScrollUp) => app.commits.scroll_up(),
-        Some(ModalAction::CommitsScrollTop) => app.commits.scroll_to_top(),
-        Some(ModalAction::CommitsScrollBottom) => app.commits.scroll_to_bottom(),
-        Some(ModalAction::CommitsHalfDown) => app.commits.scroll_half_down(),
-        Some(ModalAction::CommitsHalfUp) => app.commits.scroll_half_up(),
-        _ => {}
-      },
+      // Routing lives in a testable `App` method (the #217 shape), for the
+      // same reason the Working Tree one does: the precedence a `match`
+      // in the run loop encodes is the whole point of #613.
+      View::Commits => {
+        if app.handle_commits_key(key) {
+          app.view = View::List;
+        }
+      }
       // Settings panel (issue #232; editable in #279). While a numeric input
       // is armed, keystrokes route to the edit buffer and only Enter / Esc
       // escape — so `q` / `j` / Tab while typing a countdown never quit or
@@ -974,6 +1068,62 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
 /// honour it from any caller and defer the actual exit while a mutating
 /// worker is still in flight. The loop checks the flag at the top and
 /// bottom of every iteration.
+/// Route one mouse event into the state machine (issue #624).
+///
+/// Returns `Some(Esc)` when the click landed on a modal's close button: the
+/// per-view teardown already lives on the `Esc` path, and reproducing it here
+/// would be a second copy that drifts the first time a modal grows a
+/// close-time side effect (the note editor writes its buffer, the clean
+/// overlay disarms its countdown).
+fn handle_mouse_event(
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+  app: &mut App,
+  m: MouseEvent,
+) -> Result<Option<KeyEvent>> {
+  // `EnableMouseCapture` sends `?1003h` — any-event tracking — so the
+  // terminal reports a motion event for every cell the pointer crosses.
+  // Narrowing the stream here, before any lookup, is what keeps that free:
+  // it was free before only because nothing read the events at all.
+  let kind = match m.kind {
+    MouseEventKind::Down(MouseButton::Left) => MouseKind::Click,
+    MouseEventKind::ScrollUp => MouseKind::WheelUp,
+    MouseEventKind::ScrollDown => MouseKind::WheelDown,
+    _ => return Ok(None),
+  };
+  // The PTY overlay forwards every key to the child, and the mouse belongs to
+  // the child for the same reason — lazygit, a shell and an `exec` run all
+  // want it. Nothing forwards it today: `PtyOverlay` has a `write_key` and no
+  // mouse write path, so the event was already being dropped one branch
+  // earlier. Dropping it here is the status quo, not a regression; real
+  // forwarding needs SGR re-encoding against the overlay's inset origin and
+  // the child's own DECSET state, which is its own piece of work.
+  if app.view == View::Pty {
+    return Ok(None);
+  }
+  match app.handle_mouse(kind, m.column, m.row) {
+    MouseOutcome::Ignored | MouseOutcome::Handled => Ok(None),
+    // The header affordances open the panels their digits open, through the
+    // one dispatcher that owns every action's side effects.
+    MouseOutcome::Action(action) => {
+      run_action(terminal, app, action)?;
+      Ok(None)
+    }
+    // A clicked control fires its VERB, and the key comes from whatever the
+    // modal keymap has bound to that verb — never a hard-coded `Esc` or
+    // `Enter`. `[tui.keys.modal.confirm] confirm = ["Esc"]` is a legal
+    // rebind, and a synthesised `Esc` would then resolve as **confirm**:
+    // clicking `✕` to dismiss a delete would run it. Resolving from the verb
+    // can only ever land on the verb, and an unbound verb fires nothing
+    // rather than falling back to a key that now means something else.
+    MouseOutcome::ModalVerb(verb) => Ok(
+      app
+        .modal_keymap
+        .primary_stroke(verb)
+        .map(|stroke| KeyEvent::new(stroke.code, stroke.modifiers)),
+    ),
+  }
+}
+
 fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, action: Action) -> Result<()> {
   // Issue #304: in workspace mode, block repo-mutating actions while the
   // selected row's repo could not be activated (moved/deleted/corrupt since
@@ -1009,6 +1159,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::FocusSwap => app.toggle_focus(),
     Action::FocusWorktrees => app.focus_worktrees(),
     Action::FocusStatus => app.focus_status(),
+    // #624: only the flag flips here. The loop reconciles it against what it
+    // last put on the wire, so `M` and a `[tui] mouse` edit from the Settings
+    // panel go out through one place instead of each remembering to.
+    Action::ToggleMouse => app.toggle_mouse_capture(),
     Action::Filter => app.enter_filter(),
     // Issue #231: the user-initiated refresh runs off-thread so a large
     // repo / slow filesystem no longer freezes the TUI. A failed re-list
@@ -1101,6 +1255,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // #484: `Space` marks the cursor row. Picker-gated — `gwm switch` picks
     // exactly one path, so a mark set has nothing to act on there.
     Action::ToggleSelect if !app.picker_mode => app.toggle_select(),
+    // #680: navigation only, and a no-op outside workspace mode, so no
+    // picker gate.
+    Action::CollapseGroup => app.collapse_group(),
+    Action::ExpandGroup => app.expand_group(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
     // Issue #258: `gwm sync` of the selected worktree, off-thread.
     Action::Sync if !app.picker_mode => app.request_sync(),
@@ -1268,7 +1426,8 @@ fn run_launcher(
     let spawn = cmd.status();
 
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    set_mouse_capture(terminal, app.mouse_capture)?;
     clear_without_cursor_query(terminal)?;
 
     match spawn {
@@ -1346,7 +1505,8 @@ fn run_subshell(
 
   // Always restore the TUI, even if the child failed to spawn or exited non-zero.
   enable_raw_mode()?;
-  execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+  execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+  set_mouse_capture(terminal, app.mouse_capture)?;
   clear_without_cursor_query(terminal)?;
 
   match spawn {

@@ -62,6 +62,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "mark / unmark the highlighted worktree for a bulk delete",
     },
     PaletteEntry {
+      action: Action::CollapseGroup,
+      name: "fold-repo",
+      description: "fold the highlighted repo group down to its main worktree (workspace mode)",
+    },
+    PaletteEntry {
+      action: Action::ExpandGroup,
+      name: "unfold-repo",
+      description: "unfold the highlighted repo group (workspace mode)",
+    },
+    PaletteEntry {
       action: Action::Bootstrap,
       name: "bootstrap",
       description: "re-run bootstrap on the selected worktree",
@@ -257,6 +267,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "select the previous worktree",
     },
     PaletteEntry {
+      action: Action::ToggleMouse,
+      name: "toggle-mouse",
+      description: "release the mouse so the terminal can select text",
+    },
+    PaletteEntry {
       action: Action::CommandLogs,
       name: "command-logs",
       description: "show the command logs overlay",
@@ -369,6 +384,15 @@ impl PaletteState {
 
   pub fn highlight(&self) -> usize {
     self.highlight
+  }
+
+  /// Point the highlight straight at the `index`-th *match* (issue #624 — a
+  /// click lands on an arbitrary row, not one step away). Indexed into the
+  /// match list, which is what the overlay paints.
+  pub fn select_index(&mut self, index: usize) {
+    if index < self.matches.len() {
+      self.highlight = index;
+    }
   }
 
   /// Currently-visible entries in match-rank order. Whatever the

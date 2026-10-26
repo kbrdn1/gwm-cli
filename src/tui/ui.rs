@@ -1,12 +1,14 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
+use super::mouse::{MouseMap, PaneId, RowList, SidebarPane, Spot};
 use super::state::async_task::TaskKind;
-use super::state::commits::{CommitsSnapshot, MetaColumn};
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::{Field, Mode};
 use super::state::working_tree::WorkingTreeSnapshot;
+use super::views::commits::{draw_commits, recent_commits_lines};
+use super::views::exec_picker::draw_exec_picker;
 use std::collections::HashMap;
 
 /// The field set of the canonical `<type>/#<issue>-<desc>` triple, used as the
@@ -18,10 +20,10 @@ use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
-use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_OPEN_ICON};
+use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_CARET};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
-use crate::config::ConfigSource;
+use crate::config::{Config, ConfigSource};
 use crate::github::{CiState, IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
@@ -53,6 +55,15 @@ pub struct SidebarSections {
   pub worktree: Vec<Line<'static>>,
   /// `git status --short` lines, or `✓ clean`, or a load error.
   pub working_tree: Vec<Line<'static>>,
+  /// The `M` / `A` / `D` / `?` status letter of each Working Tree row, in
+  /// its own right-aligned column (issue #622). One entry per row, empty
+  /// on a directory and on the sentinels, so the two stay in step under
+  /// the pane's scroll.
+  pub working_tree_badges: MetaColumn,
+  /// The `+N -M` line counts of each Working Tree row, inside the letters
+  /// (issue #622). The pane reads the same two columns the full-size
+  /// overlay does, and drops this one first when it runs out of width.
+  pub working_tree_meta: MetaColumn,
   /// Per-category counts of changed files (issue #287): created / modified
   /// / deleted, driving the colour-coded nerdfont footer of the Working
   /// Tree pane.
@@ -152,6 +163,13 @@ impl Widget for LoaderWidget<'_> {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+  // Click targets are rebuilt from scratch every frame (issue #624). A
+  // surface that stopped being drawn stops being clickable, which is what
+  // lets `MouseMap::hit` stay free of any `view` branching. Published into a
+  // local rather than into `app.mouse` so the renderers below can borrow the
+  // App and the map at the same time; stamped back at the end of the frame.
+  let mut mouse = MouseMap::new();
+  let map = &mut mouse;
   // Header and footer are single borderless rows (#185); the body fills the
   // rest. The fuzzy filter no longer claims its own row — it renders inside
   // the worktrees pane title (#262), so the layout is a stable header / body /
@@ -161,8 +179,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
     .split(f.area());
 
-  draw_header(f, chunks[0], app);
-  draw_body(f, chunks[1], app);
+  draw_header(f, chunks[0], app, map);
+  draw_body(f, chunks[1], app, map);
   draw_footer(f, chunks[2], app);
 
   // #594: a compact modal has no rules, so the ground does the separating.
@@ -173,29 +191,108 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     shade_background(f.buffer_mut());
   }
 
+  // A modal makes the whole background inert, not just the rectangle it
+  // covers (Codex review on #624). The header sits outside every modal's
+  // rect, so its `⚙` stayed clickable underneath one — and clicking it from
+  // the note editor swapped `View::Note` for `View::Config` without going
+  // through the editor's teardown, putting an unsaved note out of reach. One
+  // `clear` rather than a per-surface guard: what a modal covers is not the
+  // question, what it is over is.
+  if app.view != View::List {
+    map.clear();
+  }
+
   match app.view {
-    View::Help => draw_help(f, app),
-    View::Create => draw_create(f, app),
-    View::Confirm => draw_confirm(f, app),
-    View::Report => draw_report(f, app),
-    View::OpenMenu => draw_open_menu(f, app),
-    View::LinkPrompt => draw_link_prompt(f, app),
-    View::CommandPalette => draw_command_palette(f, app),
-    View::CommandLogs => draw_command_logs(f, app),
-    View::WorkingTree => draw_working_tree(f, app),
-    View::Config => draw_config_panel(f, app),
-    View::Commits => draw_commits(f, app),
-    View::Pty => draw_pty_overlay(f, app),
-    View::Note => draw_note_editor(f, app),
+    View::Help => draw_help(f, app, map),
+    View::Create => draw_create(f, app, map),
+    View::Confirm => draw_confirm(f, app, map),
+    View::Report => draw_report(f, app, map),
+    View::OpenMenu => draw_open_menu(f, app, map),
+    View::LinkPrompt => draw_link_prompt(f, app, map),
+    View::CommandPalette => draw_command_palette(f, app, map),
+    View::CommandLogs => draw_command_logs(f, app, map),
+    View::WorkingTree => draw_working_tree(f, app, map),
+    View::Config => draw_config_panel(f, app, map),
+    View::Commits => draw_commits(f, app, map),
+    View::Pty => draw_pty_overlay(f, app, map),
+    View::Note => draw_note_editor(f, app, map),
     // #325: exec profile picker renders as a small centred modal.
-    View::ExecPicker => draw_exec_picker(f, app),
+    View::ExecPicker => draw_exec_picker(f, app, map),
     // #325: clean reclaim report renders as a centred modal.
-    View::CleanReport => draw_clean_overlay(f, app),
+    View::CleanReport => draw_clean_overlay(f, app, map),
     // #290: branch-rename inline modal renders over the list.
-    View::Edit => draw_edit_worktree(f, app),
+    View::Edit => draw_edit_worktree(f, app, map),
     // #408: generic detail overlay (agent sessions) as a centred modal.
-    View::DetailOverlay => draw_detail_overlay(f, app),
+    View::DetailOverlay => draw_detail_overlay(f, app, map),
     View::List => {}
+  }
+
+  app.mouse = mouse;
+}
+
+/// The glyph closing a modal from its top-right corner (user request on issue
+/// #624) — U+2715 MULTIPLICATION X. A BMP symbol for the same reason
+/// [`COMMAND_LOGS_ICON`] is one.
+pub const CLOSE_ICON: &str = "\u{2715}";
+
+/// Cells the close button occupies: the glyph with a pad on each side. `✕` is
+/// East-Asian-Ambiguous, so the pads keep the arithmetic right whether a
+/// terminal paints it one cell or two, and they widen a small target.
+const CLOSE_BUTTON_W: u16 = 3;
+
+/// The header affordance that opens the Command Logs panel (issue #624) —
+/// U+25A4 SQUARE WITH HORIZONTAL FILL, a stack of lines standing for the
+/// transcript.
+///
+/// Not a nerd-font codicon like the Settings tab strip uses: those live in the
+/// private use area and render as tofu everywhere the glyph is quoted outside
+/// the TUI (#595). This one and [`SETTINGS_ICON`] are ordinary BMP symbols, so
+/// the README and the changelog can name them.
+pub const COMMAND_LOGS_ICON: &str = "\u{25a4}";
+
+/// The header affordance that opens the Settings panel (issue #624) — U+2699
+/// GEAR.
+pub const SETTINGS_ICON: &str = "\u{2699}";
+
+/// Cells one affordance is given: the glyph plus a trailing pad.
+///
+/// Both glyphs are East-Asian-Ambiguous, so `cells` reports 1 while a good
+/// number of terminals paint 2. Reserving the pad makes the row's arithmetic
+/// right either way — the glyph either fills both cells or fills one and
+/// leaves a space — which is the same trick `NOTE_ICON` and the Settings tab
+/// strip already use.
+const AFFORDANCE_W: usize = 2;
+
+/// Cells the affordance group costs the row: a leading gap, both affordances,
+/// and a gap between them.
+const AFFORDANCES_W: usize = 1 + AFFORDANCE_W + 1 + AFFORDANCE_W;
+
+/// The header row plus where its two clickable affordances landed (issue
+/// #624).
+///
+/// The column ranges are produced by the same pass that lays the glyphs out,
+/// which is the whole point: recomputing them at click time would drift the
+/// first time the truncation priority changes, and the priority has changed
+/// twice already (#185, #563).
+#[derive(Debug, Clone)]
+pub struct Header {
+  /// The row itself.
+  pub line: Line<'static>,
+  /// Columns the [`COMMAND_LOGS_ICON`] occupies, `None` when the row was too
+  /// narrow to carry the affordances at all.
+  pub logs: Option<std::ops::Range<u16>>,
+  /// Columns the [`SETTINGS_ICON`] occupies.
+  pub settings: Option<std::ops::Range<u16>>,
+}
+
+impl Header {
+  /// A row with no affordances — every width too narrow to fit them.
+  fn bare(line: Line<'static>) -> Self {
+    Self {
+      line,
+      logs: None,
+      settings: None,
+    }
   }
 }
 
@@ -228,13 +325,22 @@ pub fn header_line(
   repo_name: &str,
   workdir_display: &str,
   picker_mode: bool,
+  // `release_key` is the key bound to `toggle_mouse`, or `None` when the
+  // mouse is captured and the chip is not drawn. Resolved by the caller from
+  // the live keymap rather than hard-coded: a `[tui.keys] toggle_mouse`
+  // override has to show through, or the chip names a key that no longer
+  // brings the mouse back. `Some("")` — the verb unbound — still draws the
+  // chip, because the mode is real either way.
+  release_key: Option<&str>,
   width: usize,
   theme: &Theme,
-) -> Line<'static> {
+) -> Header {
+  let mouse_released = release_key.is_some();
+  let release_key = release_key.unwrap_or_default();
   // A zero-width row can hold nothing — return an empty line rather than let
   // `trunc` floor a 1-column `…` into existence.
   if width == 0 {
-    return Line::default();
+    return Header::bare(Line::default());
   }
 
   // `sanitise_for_terminal`, not a local `is_control` pass: that one is `Cc`
@@ -262,7 +368,7 @@ pub fn header_line(
   // Priority floor: if even the right-pinned version chip cannot fit, show it
   // clipped alone — never an empty header.
   if width < version_w {
-    return Line::from(Span::styled(trunc(&version_text, width), version_style));
+    return Header::bare(Line::from(Span::styled(trunc(&version_text, width), version_style)));
   }
 
   let mut spans: Vec<Span<'static>> = Vec::new();
@@ -293,12 +399,59 @@ pub fn header_line(
     }
   }
 
+  // Affordances — reserved BEFORE the path is measured, which is what puts
+  // them ahead of it in the sacrifice order (issue #624). The path is
+  // secondary context and the row has always dropped it first; these two are
+  // the only thing on screen saying the Command Logs and Settings panels
+  // exist, so they outlive it. Everything still yields to the pinned version
+  // chip and to the current-directory badge.
+  let aff_w = if used + AFFORDANCES_W + version_w <= width {
+    AFFORDANCES_W
+  } else {
+    0
+  };
+
+  // Mouse-released chip — a mode indicator, like the picker chip beside it
+  // (issue #624). Reading the mouse and letting the terminal select text are
+  // mutually exclusive, so `M` is a mode the user sits in, and a mode with no
+  // sign on screen is one they get stuck in: every click doing nothing looks
+  // like a broken build rather than a switch they threw. The status bar says
+  // it once, at the moment of the toggle, and the next message overwrites it.
+  if mouse_released {
+    // The key is named only when it can be pressed. The picker's filter bar
+    // captures every `Char` so a query can contain `q` / `?` / `/`, which
+    // swallows the toggle too — naming it there would promise a way back that
+    // types an `M` into the query instead (Codex review on #624).
+    let chip = if release_key.is_empty() {
+      " mouse off ".to_string()
+    } else {
+      format!(" mouse off · {} ", release_key)
+    };
+    let need = 1 + cells(&chip);
+    // `aff_w` is reserved further down but has to be counted HERE: at a width
+    // where the chip and the affordances each fit alone but not together
+    // (~38-42 columns at this version string), leaving it out let the spans
+    // run past the row, clipped the pinned version chip, and moved the
+    // affordance ranges — which are measured from the right edge — off the
+    // glyphs they name.
+    let aff_reserve = if used + AFFORDANCES_W + version_w <= width {
+      AFFORDANCES_W
+    } else {
+      0
+    };
+    if used + need + aff_reserve + version_w < width {
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(chip, picker_style));
+      used += need;
+    }
+  }
+
   // Path — dimmed secondary context. It stays immediately after the current
   // directory badge and is dropped/truncated under pressure; the version chip
   // remains pinned at the end of the row.
   let path_gap = 2usize;
-  if used + path_gap + version_w < width {
-    let avail = width - used - path_gap - version_w;
+  if used + path_gap + aff_w + version_w < width {
+    let avail = width - used - path_gap - aff_w - version_w;
     let path_disp = trunc(&path, avail);
     if !path_disp.is_empty() {
       let w = cells(&path_disp);
@@ -308,13 +461,39 @@ pub fn header_line(
     }
   }
 
-  let pad = width.saturating_sub(used + version_w);
+  let pad = width.saturating_sub(used + aff_w + version_w);
   if pad > 0 {
     spans.push(Span::raw(" ".repeat(pad)));
   }
+
+  // The group is flush against the version chip, so its columns are known
+  // from the right edge rather than from `used`: whatever the padding above
+  // worked out to, the chip is pinned and the affordances sit immediately
+  // left of it. Reported from this same arithmetic — see [`Header`].
+  let (logs, settings) = if aff_w > 0 {
+    let start = (width - aff_w - version_w) as u16;
+    let logs = start + 1;
+    let settings = logs + AFFORDANCE_W as u16 + 1;
+    let affordance_style = Style::default().fg(theme.accent);
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(format!("{} ", COMMAND_LOGS_ICON), affordance_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(format!("{} ", SETTINGS_ICON), affordance_style));
+    (
+      Some(logs..logs + AFFORDANCE_W as u16),
+      Some(settings..settings + AFFORDANCE_W as u16),
+    )
+  } else {
+    (None, None)
+  };
+
   spans.push(Span::styled(version_text, version_style));
 
-  Line::from(spans)
+  Header {
+    line: Line::from(spans),
+    logs,
+    settings,
+  }
 }
 
 /// Lay out the worktree table and the optional preview sidebar for the
@@ -325,7 +504,7 @@ pub fn header_line(
 /// (issue #188). The table/sidebar ratio is per-axis (issue #217): 55/45
 /// side-by-side, 42/58 stacked — see
 /// [`ResolvedSidebarLayout::split_percentages`](super::state::sidebar::ResolvedSidebarLayout::split_percentages).
-fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
+fn draw_body(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
   use super::state::sidebar::ResolvedSidebarLayout as Resolved;
 
   let layout = app.sidebar.resolve_layout(area.width);
@@ -335,7 +514,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       // Sidebar not rendered → no scrollable surface → no max scroll to track.
       app.sidebar.max_scroll = 0;
       app.sidebar.wt_max_scroll = 0;
-      draw_list(f, area, app);
+      draw_list(f, area, app, map);
       return;
     }
   };
@@ -369,8 +548,8 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       if separator > 0 {
         draw_pane_separator(f, split[1], Direction::Horizontal, &app.theme);
       }
-      draw_list(f, list_area, app);
-      draw_sidebar(f, sidebar_area, app);
+      draw_list(f, list_area, app, map);
+      draw_sidebar(f, sidebar_area, app, map);
     }
     Resolved::Stacked => {
       // Table on top, sidebar below — the default layout (issue #217) and the
@@ -402,8 +581,8 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       if separator > 0 {
         draw_pane_separator(f, split[1], Direction::Vertical, &app.theme);
       }
-      draw_list(f, split[0], app);
-      draw_sidebar(f, split[2], app);
+      draw_list(f, split[0], app, map);
+      draw_sidebar(f, split[2], app, map);
     }
   }
 }
@@ -432,7 +611,7 @@ fn draw_pane_separator(f: &mut Frame, area: Rect, split: Direction, theme: &Them
   }
 }
 
-fn draw_header(f: &mut Frame, area: Rect, app: &App) {
+fn draw_header(f: &mut Frame, area: Rect, app: &App, map: &mut MouseMap) {
   // Tilde-compress the workdir so `$HOME`-rooted paths read as `~/…` — same
   // treatment as the sidebar identity block. The styled, width-driven layout
   // (version chip, bold repo, dimmed path, optional picker chip) lives in
@@ -441,16 +620,47 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   // Borderless single row (#185): the builder gets the full area width and the
   // line renders flush, mirroring the footer. No `Wrap` — `header_line`
   // guarantees one visual line clipped to `width`.
-  let line = header_line(
+  // Resolved from the live keymap, not hard-coded: a `[tui.keys]
+  // toggle_mouse` override has to reach the chip that names it.
+  // Empty while the filter bar is up: it consumes every `Char`, so the chord
+  // is not reachable and the chip drops it rather than promise it.
+  let release_key = (!app.mouse_capture).then(|| {
+    if app.filter.active {
+      String::new()
+    } else {
+      app.keymap.keys_display(Action::ToggleMouse)
+    }
+  });
+  let header = header_line(
     // The workspace label, which is what the user is looking at; `repo_name` is
     // the naming name and can be the same string in a workspace of one (#480).
     &app.display_repo_name,
     &workdir,
     app.picker_mode,
+    release_key.as_deref(),
     area.width as usize,
     &app.theme,
   );
-  f.render_widget(Paragraph::new(line), area);
+
+  // The columns come back from the builder rather than being measured off the
+  // rendered row (issue #624): the arithmetic that placed the glyph is the
+  // arithmetic that reports it. Offset by `area.x` because the builder works
+  // in row-relative columns.
+  for (range, spot) in [(&header.logs, Spot::CommandLogs), (&header.settings, Spot::Settings)] {
+    if let Some(r) = range {
+      map.push_spot(
+        Rect {
+          x: area.x.saturating_add(r.start),
+          y: area.y,
+          width: r.end - r.start,
+          height: 1,
+        },
+        spot,
+      );
+    }
+  }
+
+  f.render_widget(Paragraph::new(header.line), area);
 }
 
 /// Border colour for a focus-swappable panel (worktree list ↔ sidebar,
@@ -864,7 +1074,7 @@ pub fn list_pane_counter(selected: usize, visible: usize, marked: usize) -> Opti
   Some(format!("{}· {} marked ", base, marked))
 }
 
-fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
+fn draw_list(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
   // Filter-aware: the visible rows are the filtered subset (issue #21). When
   // there is no active filter, this is the identity over `app.worktrees`.
   // Borrow scoping: `filtered_indices` returns `&[usize]` rooted in
@@ -893,10 +1103,16 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Vec::new()
   };
   let repo_w = if is_workspace {
-    column_width(repo_names.iter().map(|s| s.as_str()), 6, 24)
+    column_width(repo_names.iter().map(|s| s.as_str()), 6, REPO_COL_MAX)
   } else {
     0
   };
+
+  // #680: fold state per visible row, `Some(folded)` only on a repo group
+  // header. Resolved up front for the same borrow reason as `repo_names`:
+  // `group_fold` reads `app` immutably, `list_state` is borrowed mutably at
+  // render time.
+  let group_folds: Vec<Option<bool>> = filtered.iter().map(|&raw| app.group_fold(raw)).collect();
 
   // Dynamic column widths derived from the visible subset so columns fit the
   // rows actually on screen. The path column is always last and absorbs the
@@ -974,7 +1190,11 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .iter()
     .enumerate()
     .map(|(vi, w)| {
-      let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
+      let repo = is_workspace.then(|| RepoCell {
+        name: repo_names[vi].as_str(),
+        width: repo_w,
+        fold: group_folds[vi],
+      });
       let agent = show_agent.then_some(agent_cells[vi]);
       let mark = marks.get(vi).copied();
       build_row(w, mark, repo, row_widths, agent, show_note, &theme)
@@ -1023,6 +1243,11 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     widths.push(Constraint::Length(8));
   }
   widths.push(Constraint::Fill(1));
+
+  // Row count captured before `visible` is dropped: the strip published after
+  // the render needs it, and `visible` borrows `app` immutably while
+  // `render_stateful_widget` wants `app.list_state` mutably.
+  let visible_len = visible.len();
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let chrome = Chrome::resolve(
@@ -1082,7 +1307,40 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     area
   };
 
+  // The pane first, so a click on the captions or on the blank rows below the
+  // last worktree still means "focus this pane" rather than falling through
+  // to whatever was published before it.
+  map.push_pane(area, PaneId::Worktrees);
+
   f.render_stateful_widget(table, table_area, &mut app.list_state);
+
+  // Published AFTER the render, and that ordering is load-bearing: rendering
+  // is what updates `TableState`'s offset to bring the selection into view,
+  // so reading it earlier reports the *previous* frame's scroll and every
+  // click on a scrolled list lands short by the difference (issue #624).
+  //
+  // The table paints its column captions on the first line of its own inner
+  // rect, so the data starts one line below — computed from the rect rather
+  // than hardcoded, because the two layouts get there by different routes
+  // (compact carves the header line off `area`, bordered lets the block eat
+  // it) and only happen to agree today.
+  let table_inner = if chrome.compact {
+    table_area
+  } else {
+    Block::default().borders(Borders::ALL).inner(table_area)
+  };
+  if table_inner.height > 1 {
+    map.push_rows(
+      Rect {
+        y: table_inner.y.saturating_add(1),
+        height: table_inner.height.saturating_sub(1),
+        ..table_inner
+      },
+      RowList::Worktrees,
+      app.list_state.offset(),
+      visible_len,
+    );
+  }
 }
 
 /// Details panel for the selected worktree — structured info, recent commits,
@@ -1091,7 +1349,12 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// Content is cached on `App` keyed by the selected worktree's path so the
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
-fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
+fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, map: &mut MouseMap) {
+  // The whole column focuses on a click and scrolls on the wheel; the
+  // Working Tree section publishes its own zone over this one further down,
+  // because it scrolls on a separate axis (`J` / `K`, issue #437).
+  map.push_pane(area, PaneId::Status);
+
   let chrome = Chrome::resolve(
     app.config.tui.layout.is_compact(),
     app.sidebar.focused,
@@ -1212,6 +1475,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         }
         super::state::sidebar::SidebarMode::Stashes => Vec::new(),
       },
+      // The loader row has no status letter and no counts, so both columns
+      // stay empty and the placeholder keeps the payload's shape.
+      working_tree_badges: MetaColumn::default(),
+      working_tree_meta: MetaColumn::default(),
       working_tree_counts: WorkingTreeCounts::default(),
       recent_commits: vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))],
     }
@@ -1225,10 +1492,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let prefix_lines = vec![sidebar_header_line(&w, app)];
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
   // Agents pane body (issue #408): per-frame pure snapshot + pins lookup
-  // (no config I/O — `app.agent_pins` is refreshed off-render), its
+  // (no config I/O — `app.agents.pins` is refreshed off-render), its
   // bordered block collapses to zero height when nothing is pinned.
   let agent_pins: &[String] = app
-    .agent_pins
+    .agents
+    .pins
     .get(&crate::agent_sessions::path_display_key(&w.path))
     .map(|v| v.as_slice())
     .unwrap_or(&[]);
@@ -1305,6 +1573,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   }
   let wt_scroll = app.sidebar.wt_scroll;
 
+  // The Working Tree section scrolls on its own axis, so the wheel over it
+  // has to mean `J` / `K` rather than the sidebar's own `j` / `k`. Published
+  // over the column zone above (issue #624).
+  if chunks[3].height > 0 {
+    map.push_pane(chunks[3], PaneId::WorkingTree);
+  }
+
   // Issue #34: surface the active mode in the bottom-scrollable
   // panel title. The footer keeps the `i of N` counter; the bottom
   // hint switches to "Enter: copy stash@{N}" in stashes mode.
@@ -1345,6 +1620,23 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     working_tree_counts_footer(&working_tree_counts, &theme)
   };
 
+  // The counts row is a click target for the full-size listing (issue #624).
+  // The whole bottom row of the section, not the individual figures: in
+  // either layout the footer is the last row of `chunks[3]` — the bottom rule
+  // when bordered, the band when compact — and a three-cell target per
+  // category would be a hard thing to hit for a jump that has no good
+  // destination anyway (see `Spot::WtCounts`).
+  if working_tree_footer.is_some() && chunks[3].height > 0 {
+    map.push_spot(
+      Rect {
+        y: chunks[3].y + chunks[3].height - 1,
+        height: 1,
+        ..chunks[3]
+      },
+      Spot::WtCounts,
+    );
+  }
+
   // The render borrow: sections are read by reference and never cloned (issue
   // #238). On a cache hit this copies zero commit text — the up-to-300 `git
   // log` lines stay put in `app.sidebar.cache`; `render_section` only rebuilds
@@ -1378,6 +1670,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     0,
     None,
   );
+  push_section_title(map, chunks[1], SidebarPane::IssuePr);
   if !agent_lines.is_empty() {
     render_section(
       f,
@@ -1388,13 +1681,18 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       0,
       None,
     );
+    push_section_title(map, chunks[2], SidebarPane::Agents);
   }
   if !sections.working_tree.is_empty() {
     render_section(
       f,
       chunks[3],
       working_tree_title,
-      SectionBody::new(&sections.working_tree),
+      SectionBody::with_meta(
+        &sections.working_tree,
+        &sections.working_tree_badges,
+        &sections.working_tree_meta,
+      ),
       chrome,
       wt_scroll,
       working_tree_footer,
@@ -1408,6 +1706,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     if inner.height > 0 {
       let _ = scrollable_body_area(f, inner, wt_scroll, working_tree_len, &theme);
     }
+    push_section_title(map, chunks[3], SidebarPane::WorkingTree);
   }
   render_section(
     f,
@@ -1418,6 +1717,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     scroll,
     panel_footer.map(ratatui::text::Line::from),
   );
+  // Only in `Commits` mode: the same pane reads "Stashes" in the other one,
+  // and a title that opened the full commit log from there would open
+  // something the reader is not looking at (Codex review on #624). The
+  // stashes view has no full-size counterpart to open.
+  if active_mode == super::state::sidebar::SidebarMode::Commits {
+    push_section_title(map, commits_area, SidebarPane::Commits);
+  }
 }
 
 /// Borrowed content for one [`render_section`] block (issue #238).
@@ -1432,21 +1738,60 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 struct SectionBody<'a> {
   prefix: &'a [Line<'a>],
   lines: &'a [Line<'a>],
+  /// Right-aligned columns painted beside `lines`, one entry per row, at
+  /// the section's own scroll offset (issue #622). `None` for every section
+  /// but the Working Tree.
+  meta: Option<SectionMeta<'a>>,
 }
 
 impl<'a> SectionBody<'a> {
   /// Section body with no leading live line (Issue / PR, Working Tree,
   /// Recent Commits, and the `(nothing selected)` placeholder).
   fn new(lines: &'a [Line<'a>]) -> Self {
-    Self { prefix: &[], lines }
+    Self {
+      prefix: &[],
+      lines,
+      meta: None,
+    }
+  }
+
+  /// Section body with its right-aligned columns beside it (issue #622).
+  fn with_meta(lines: &'a [Line<'a>], badges: &'a MetaColumn, stats: &'a MetaColumn) -> Self {
+    Self {
+      prefix: &[],
+      lines,
+      meta: Some(SectionMeta { badges, stats }),
+    }
   }
 
   /// Section body whose first rows are per-frame live lines — the worktree
   /// identity block, led by the `● <name>` status-dot header (and, since
   /// issue #408, an optional agent summary line).
   fn with_prefix(prefix: &'a [Line<'a>], lines: &'a [Line<'a>]) -> Self {
-    Self { prefix, lines }
+    Self {
+      prefix,
+      lines,
+      meta: None,
+    }
   }
+}
+
+/// Publish a sidebar section's title row as a click target (user feedback on
+/// issue #624).
+///
+/// The title row is the first line of the section's rect in both layouts —
+/// the top rule when bordered, the header band when compact — and the whole
+/// row is taken, not just the label: a five-cell word is a hard thing to hit,
+/// and the rest of the row carries nothing a click could mean instead.
+///
+/// A zero-height section (the responsive split collapses one when the column
+/// is short) publishes nothing, so a title that is not on screen cannot be
+/// clicked.
+fn push_section_title(map: &mut MouseMap, area: Rect, pane: SidebarPane) {
+  if area.height == 0 {
+    return;
+  }
+  map.push_spot(Rect { height: 1, ..area }, Spot::SidebarSection(pane));
 }
 
 fn render_section(
@@ -1466,7 +1811,7 @@ fn render_section(
   scroll: u16,
   footer: Option<ratatui::text::Line<'static>>,
 ) {
-  let SectionBody { prefix, lines } = body;
+  let SectionBody { prefix, lines, meta } = body;
   // Pad content with one leading space per line for breathing room against
   // the left border. Each padded line BORROWS its span content from the
   // source line (`Span::styled(&str, style)` yields a `Cow::Borrowed`, zero
@@ -1497,12 +1842,10 @@ fn render_section(
       height: area.height.saturating_sub(1),
       ..area
     };
-    f.render_widget(
-      Paragraph::new(padded).style(chrome.body_style()).scroll((scroll, 0)),
-      body_area,
-    );
+    render_section_body(f, body_area, padded, meta.as_ref(), chrome.body_style(), scroll);
     return;
   }
+
   let mut block = Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
@@ -1514,11 +1857,121 @@ fn render_section(
   // `body_style` applies here too, not only on the compact path above:
   // `dim_unfocused` is about focus, not about how the pane is framed
   // (Codex review, PR #546 — the bordered sidebar was never dimmed).
-  let paragraph = Paragraph::new(padded)
-    .block(block)
-    .style(chrome.body_style())
-    .scroll((scroll, 0));
-  f.render_widget(paragraph, area);
+  // Without a right-hand column the paragraph keeps carrying its own
+  // block: `Paragraph::style` paints the whole rect, rules included, and
+  // splitting the render would move that ground off the border.
+  let Some(meta) = meta.filter(|m| m.badges.width > 0 || m.stats.width > 0) else {
+    let paragraph = Paragraph::new(padded)
+      .block(block)
+      .style(chrome.body_style())
+      .scroll((scroll, 0));
+    f.render_widget(paragraph, area);
+    return;
+  };
+  let inner = block.inner(area);
+  f.render_widget(
+    Paragraph::new(Vec::<Line<'_>>::new())
+      .block(block)
+      .style(chrome.body_style()),
+    area,
+  );
+  render_section_body(f, inner, padded, Some(&meta), chrome.body_style(), scroll);
+}
+
+/// Paint a section's rows into `area`, with its right-hand column beside
+/// them when there is one and the rect can seat it (issue #622).
+///
+/// The column is inset by whatever the scrollbar the caller draws over this
+/// same rect will claim. [`scrollbar_reserve`] is the single owner of that
+/// rule, so the letters can never end up under the thumb.
+fn render_section_body(
+  f: &mut Frame,
+  area: Rect,
+  lines: Vec<Line<'_>>,
+  meta: Option<&SectionMeta<'_>>,
+  style: Style,
+  scroll: u16,
+) {
+  let Some(meta) = meta.filter(|m| m.badges.width > 0 || m.stats.width > 0) else {
+    f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), area);
+    return;
+  };
+  // The scrollbar the caller paints over this same rect claims the right
+  // edge; the columns sit inside whatever it leaves.
+  let usable = Rect {
+    width: area.width.saturating_sub(scrollbar_reserve(area, lines.len())),
+    ..area
+  };
+  let (left, [badges, stats]) = carve_meta_columns(
+    usable,
+    [(meta.badges.width, WT_BADGE_FLOOR), (meta.stats.width, WT_NAME_FLOOR)],
+  );
+  f.render_widget(Paragraph::new(lines).style(style).scroll((scroll, 0)), left);
+  for (rect, column) in [(badges, meta.badges), (stats, meta.stats)] {
+    if let Some(rect) = rect {
+      f.render_widget(
+        Paragraph::new(column.lines.clone())
+          .style(style)
+          .right_aligned()
+          .scroll((scroll, 0)),
+        rect,
+      );
+    }
+  }
+}
+
+/// The right-hand columns a section paints beside its rows (issue #622):
+/// the status letters outermost, the `+N -M` counts inside them. Borrowed
+/// from the sidebar cache, so a warm frame copies neither.
+#[derive(Clone, Copy)]
+struct SectionMeta<'a> {
+  badges: &'a MetaColumn,
+  stats: &'a MetaColumn,
+}
+
+/// Take `width` cells plus a [`META_GAP`] off the right of `area`, returning
+/// the content rect and the column rect.
+fn carve_right(area: Rect, width: usize) -> (Rect, Rect) {
+  let [left, _gap, right] = Layout::horizontal([
+    Constraint::Min(0),
+    Constraint::Length(META_GAP as u16),
+    Constraint::Length(width as u16),
+  ])
+  .areas(area);
+  (left, right)
+}
+
+/// Lay out up to N right-hand columns against `area`, outermost first.
+///
+/// `columns` is `(width, floor)` per column in **outside-in** order, so the
+/// Working Tree passes its status letter before its `+N -M` counts: the
+/// letter takes the outer slot, and a narrowing rect drops the counts first.
+/// Returns the rect left for the content plus one `Option<Rect>` per column,
+/// in the order given.
+///
+/// Every column is afforded against the width the terminal gave, minus what
+/// the columns already granted cost, and only then carved. Deciding against
+/// an already-carved rect would price a column twice.
+fn carve_meta_columns<const N: usize>(area: Rect, columns: [(usize, usize); N]) -> (Rect, [Option<Rect>; N]) {
+  let mut granted = [None; N];
+  let mut spent = 0usize;
+  for (i, (width, floor)) in columns.iter().enumerate() {
+    let Some(picked) = meta_pick((area.width as usize).saturating_sub(spent), &[*width], *floor) else {
+      continue;
+    };
+    granted[i] = Some(picked);
+    spent += picked + META_GAP;
+  }
+  let mut rest = area;
+  let mut rects = [None; N];
+  for (i, picked) in granted.iter().enumerate() {
+    if let Some(picked) = picked {
+      let (left, right) = carve_right(rest, *picked);
+      rest = left;
+      rects[i] = Some(right);
+    }
+  }
+  (rest, rects)
 }
 
 /// Lazygit-style header line: `● <name>` where the dot's colour tracks
@@ -1646,14 +2099,16 @@ pub fn build_sidebar_sections(
     // follow-up list; v1 ships `<ref>  <subject>` only.
     SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
-  let (working_tree, working_tree_counts) = match mode {
-    SidebarMode::Commits => working_tree_lines(w, theme),
-    SidebarMode::Stashes => (Vec::new(), WorkingTreeCounts::default()),
+  let listing = match mode {
+    SidebarMode::Commits => working_tree_listing(w, theme),
+    SidebarMode::Stashes => WorkingTreeSnapshot::default(),
   };
   SidebarSections {
     worktree: worktree_identity_lines(w, diff.as_ref(), theme, status_one_line),
-    working_tree,
-    working_tree_counts,
+    working_tree: listing.lines,
+    working_tree_badges: listing.badges,
+    working_tree_meta: listing.meta,
+    working_tree_counts: listing.counts,
     recent_commits: body,
   }
 }
@@ -1930,36 +2385,35 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-/// Build the Working Tree file-explorer rows for one worktree plus their
-/// per-category counts, from one `git status --porcelain -z` read.
-///
-/// `pub(super)` since #592: the full-size overlay snapshots the same rows
-/// the sidebar pane paints, and it is deliberately NOT routed through
-/// [`build_sidebar_sections`], which would also run `git log` / `git stash
-/// list` / the diff-vs-base stat for panes the overlay does not show.
-pub(super) fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
-  // The sidebar pane paints rows only. It stops here rather than calling
-  // [`working_tree_listing`] on purpose: the column that read adds costs a
-  // second git process, and this one runs on every selection change.
-  let (lines, _, counts) = working_tree_rows(w, theme);
-  (lines, counts)
-}
-
 /// The full result of one read of the working tree: the rows, the
-/// per-category counts, and the right-hand `+N -M` column (issue #592).
+/// per-category counts, and the two right-hand columns (issues #592, #622).
 ///
-/// The counts come from `git status`, the column from a `git diff
-/// --numstat` in the same worker. Folded into one read rather than chained
-/// the way the commit listing's stats are (#593): there, the second read is
-/// a `git log --raw --numstat` over 300 commits and takes seconds, so the
-/// rows have to appear without it. Here it is a single diff against `HEAD`,
-/// far quicker than the `git status` that precedes it, so splitting would
-/// buy a flicker and cost a whole second identity to match payloads on.
+/// The counts come from `git status`, the `+N -M` column from a `git diff
+/// --numstat` in the same worker, the status letters free with the rows.
+/// Folded into one read rather than chained the way the commit listing's
+/// stats are (#593): there, the second read is a `git log --raw --numstat`
+/// over 300 commits and takes seconds, so the rows have to appear without
+/// it. Here it is a single diff against `HEAD`, far quicker than the `git
+/// status` that precedes it, so splitting would buy a flicker and cost a
+/// whole second identity to match payloads on.
+///
+/// The sidebar pane routes here too since #622. It used to stop at the rows
+/// to save that diff, because it re-reads on every selection change; the
+/// pane now shows the same two columns the overlay does, so it pays for the
+/// same read. It runs on the sidebar worker (#343), never on the render
+/// path, and it is still NOT routed through [`build_sidebar_sections`],
+/// which would also run `git log` / `git stash list` / the diff-vs-base
+/// stat for panes the overlay does not show.
 pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnapshot {
-  let (lines, paths, counts) = working_tree_rows(w, theme);
+  let rows = working_tree_rows(w, theme);
   let stats = worktree::working_tree_stats(&w.path).unwrap_or_default();
-  let meta = working_tree_meta_column(&paths, &stats, theme);
-  WorkingTreeSnapshot { lines, counts, meta }
+  let meta = working_tree_meta_column(&rows.paths, &stats, theme);
+  WorkingTreeSnapshot {
+    lines: rows.lines,
+    counts: rows.counts,
+    meta,
+    badges: meta_column(rows.badges),
+  }
 }
 
 /// Render the working tree of `w` into rows, the repo-relative path each
@@ -1968,16 +2422,12 @@ pub fn working_tree_listing(w: &WorktreeInfo, theme: &Theme) -> WorkingTreeSnaps
 /// `paths` is `None` on a directory row and on each of the three sentinels
 /// (`✓ clean`, `… N more`, a load error), so it always has exactly as many
 /// entries as there are rows.
-fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>, WorkingTreeCounts) {
+fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> WtRows {
   match worktree::git_status_short(&w.path) {
-    Ok((s, _)) if s.trim().is_empty() => (
-      vec![Line::from(Span::styled(
-        "✓ clean".to_string(),
-        Style::default().fg(theme.clean),
-      ))],
-      vec![None],
-      WorkingTreeCounts::default(),
-    ),
+    Ok((s, _)) if s.trim().is_empty() => WtRows::sentinel(Line::from(Span::styled(
+      "✓ clean".to_string(),
+      Style::default().fg(theme.clean),
+    ))),
     Ok((s, scan_truncated)) => {
       let counts = working_tree_status_counts(&s);
       let records = wt_tree::parse_status_z(&s);
@@ -1986,7 +2436,7 @@ fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Ve
       // remainder as a single muted `… N more` row, so the non-scrollable
       // section can't be sized from tens of thousands of files.
       let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
-      let (mut lines, mut paths) = working_tree_tree_lines(&tree, theme);
+      let (mut lines, mut paths, mut badges) = working_tree_tree_lines(&tree, theme);
       if overflow > 0 {
         // After a scan truncation the real remainder is unknown (git was
         // killed at the cap), so `overflow` is only a lower bound — render
@@ -1998,18 +2448,72 @@ fn working_tree_rows(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, Ve
         };
         lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
         paths.push(None);
+        badges.push(Line::default());
       }
-      (lines, paths, counts)
+      WtRows {
+        lines,
+        paths,
+        badges,
+        counts,
+      }
     }
-    Err(e) => (
-      vec![Line::from(Span::styled(
-        format!("! {}", e),
-        Style::default().fg(theme.prunable),
-      ))],
-      vec![None],
-      WorkingTreeCounts::default(),
-    ),
+    Err(e) => WtRows::sentinel(Line::from(Span::styled(
+      format!("! {}", e),
+      Style::default().fg(theme.prunable),
+    ))),
   }
+}
+
+/// One read of the working tree, before it is packaged for either surface:
+/// the rows, the repo-relative path each row describes, the status letter
+/// each row carries, and the per-category counts.
+///
+/// The three vectors are in lockstep by construction, since [`push_wt_nodes`]
+/// fills them in a single walk, so an entry can never slide onto the row
+/// below it. That invariant is why they are one struct rather than three
+/// return values a caller could pair up wrongly.
+struct WtRows {
+  lines: Vec<Line<'static>>,
+  paths: Vec<Option<String>>,
+  badges: Vec<Line<'static>>,
+  counts: WorkingTreeCounts,
+}
+
+impl WtRows {
+  /// The one-row shape the three sentinels share (`✓ clean`, a load error):
+  /// no path to key a diff on, no status letter, no counts.
+  fn sentinel(line: Line<'static>) -> Self {
+    Self {
+      lines: vec![line],
+      paths: vec![None],
+      badges: vec![Line::default()],
+      counts: WorkingTreeCounts::default(),
+    }
+  }
+}
+
+/// One right-hand metadata column: its rows and the width they need.
+///
+/// The width is measured once, when the column is built, so it cannot jump
+/// while the user scrolls: every row is padded to the same column.
+///
+/// A rendering type, not the state of any one view: the commit listing
+/// carries three of these and the working tree two, and
+/// `meta_column` below is the only thing that builds one. It lived in
+/// `state::commits` until #635 moved the Commits view out, which would
+/// otherwise have left the working tree importing its own metadata column
+/// from another view.
+#[derive(Debug, Default, Clone)]
+pub struct MetaColumn {
+  pub lines: Vec<Line<'static>>,
+  pub width: usize,
+}
+
+/// Package a set of parallel rows into a [`MetaColumn`], measuring the
+/// width once so the column cannot jump while the listing scrolls.
+fn meta_column(lines: Vec<Line<'static>>) -> MetaColumn {
+  let width = lines.iter().map(Line::width).max().unwrap_or(0);
+  MetaColumn { lines, width }
 }
 
 /// Build the right-hand `+N -M` column for a working-tree listing.
@@ -2023,17 +2527,16 @@ pub fn working_tree_meta_column(
   stats: &HashMap<String, worktree::FileStat>,
   theme: &Theme,
 ) -> MetaColumn {
-  let mut col = MetaColumn::default();
+  let mut col: Vec<Line<'static>> = Vec::with_capacity(paths.len());
   for key in paths {
     let spans = key
       .as_deref()
       .and_then(|p| stats.get(p))
       .map(|s| working_tree_stat_spans(*s, theme))
       .unwrap_or_default();
-    col.lines.push(Line::from(spans));
+    col.push(Line::from(spans));
   }
-  col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
-  col
+  meta_column(col)
 }
 
 /// One file's line counts as coloured spans: `+120 -34`.
@@ -2042,7 +2545,8 @@ pub fn working_tree_meta_column(
 /// added reads the same colour in both listings. A zero side is left out
 /// rather than printed, and a file with neither renders nothing at all:
 /// unlike a commit, whose silence would read as "not loaded yet", a row
-/// here already carries a badge saying what happened to it.
+/// here already has a status letter in the column beside it saying what
+/// happened to it.
 pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span<'static>> {
   let mut spans: Vec<Span<'static>> = Vec::new();
   if s.insertions > 0 {
@@ -2069,22 +2573,38 @@ pub fn working_tree_stat_spans(s: worktree::FileStat, theme: &Theme) -> Vec<Span
 /// - **Connector lines**: each row is prefixed with box-drawing branches
 ///   (`├─ ` / `└─ ` with `│  ` / `   ` carried down from ancestors) in the
 ///   muted role, so the hierarchy reads like `tree(1)`.
+/// - **Directories** lead with the [`WT_DIR_CARET`] disclosure marker and no
+///   file glyph (issue #622), so a directory row and a file row are told
+///   apart by shape rather than by indentation alone. One space after it,
+///   not the two a nerd-font glyph needs: the caret is a single cell.
 /// - **Directory colour is retroactive**: a folder is painted by the
 ///   aggregate git category of its subtree — only-modified → yellow,
 ///   only-new → green, only-deleted → red, mixed (or none) → neutral
 ///   `accent`.
-/// - **Files** carry a category-coloured status badge + a nerd-font
-///   file-type icon + the leaf name, painted in the file's change-category
-///   colour so a row's colour matches the footer count it belongs to (the
-///   #287 invariant, preserved).
-/// - An **extra space** follows each nerd-font glyph: most glyphs render
-///   double-width but occupy a single terminal cell, so the pad keeps the
-///   following text from being clipped.
-fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> (Vec<Line<'static>>, Vec<Option<String>>) {
+/// - **Files** carry a nerd-font file-type icon + the leaf name, painted in
+///   the file's change-category colour so a row's colour matches the footer
+///   count it belongs to (the #287 invariant, preserved). The status letter
+///   itself left the row in #622: it is returned as a parallel column so the
+///   renderer can pin it to a fixed offset.
+/// - An **extra space** follows each nerd-font FILE glyph: most glyphs
+///   render double-width but occupy a single terminal cell, so the pad keeps
+///   the following text from being clipped.
+type WtTreeLines = (Vec<Line<'static>>, Vec<Option<String>>, Vec<Line<'static>>);
+
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> WtTreeLines {
   let mut out = Vec::new();
   let mut paths = Vec::new();
-  push_wt_nodes(&mut out, &mut paths, nodes, String::new(), String::new(), theme);
-  (out, paths)
+  let mut badges = Vec::new();
+  push_wt_nodes(
+    &mut out,
+    &mut paths,
+    &mut badges,
+    nodes,
+    String::new(),
+    String::new(),
+    theme,
+  );
+  (out, paths, badges)
 }
 
 /// Join a path prefix and a node name the way git spells a path.
@@ -2113,6 +2633,7 @@ fn wt_join(prefix: &str, name: &str) -> String {
 fn push_wt_nodes(
   out: &mut Vec<Line<'static>>,
   paths: &mut Vec<Option<String>>,
+  badges: &mut Vec<Line<'static>>,
   nodes: &[WtNode],
   prefix: String,
   path_prefix: String,
@@ -2135,13 +2656,22 @@ fn push_wt_nodes(
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
           Span::styled(
-            format!("{}  {}", WT_DIR_OPEN_ICON, wt_tree::sanitize_name(name)),
+            format!("{} {}", WT_DIR_CARET, wt_tree::sanitize_name(name)),
             Style::default().fg(color),
           ),
         ]));
         paths.push(None);
+        badges.push(Line::default());
         let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        push_wt_nodes(out, paths, children, child_prefix, wt_join(&path_prefix, name), theme);
+        push_wt_nodes(
+          out,
+          paths,
+          badges,
+          children,
+          child_prefix,
+          wt_join(&path_prefix, name),
+          theme,
+        );
       }
       WtNode::File {
         name,
@@ -2152,13 +2682,13 @@ fn push_wt_nodes(
         let color = working_tree_category_color(*category, theme);
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
-          Span::styled(format!("{} ", badge), Style::default().fg(color)),
           Span::styled(
             format!("{}  {}", icon, wt_tree::sanitize_name(name)),
             Style::default().fg(color),
           ),
         ]));
         paths.push(Some(wt_join(&path_prefix, name)));
+        badges.push(Line::from(Span::styled(badge.to_string(), Style::default().fg(color))));
       }
     }
   }
@@ -2183,6 +2713,18 @@ impl WorkingTreeCounts {
   /// so the Working Tree footer renders nothing rather than a bare ` 0 `.
   pub fn is_empty(&self) -> bool {
     self.created == 0 && self.modified == 0 && self.deleted == 0
+  }
+
+  /// Changed files across every category, for the Working Tree overlay's
+  /// header count (issue #622).
+  ///
+  /// Derived from the counts rather than from the row vector on purpose:
+  /// the rows also hold directories, the `… N more` overflow notice and the
+  /// `✓ clean` sentinel, none of which is a changed file. Each file is
+  /// counted once, in the single category its porcelain `XY` pair falls
+  /// into, so this is the same population the footer segments add up to.
+  pub fn total(&self) -> usize {
+    self.created + self.modified + self.deleted
   }
 }
 
@@ -2307,59 +2849,8 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
 /// dense on tall terminals without paginating.
 pub const RECENT_COMMITS_LIMIT: usize = 300;
 
-/// Number of hex chars rendered for each commit's SHA in the sidebar.
-/// Matches lazygit's `Gui.CommitHashLength` default of 8.
-pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
-
-/// Produce the styled rows of the Recent Commits sidebar block for a
-/// worktree, limited to `limit` entries. Each `Line` mirrors lazygit's
-/// per-row format:
-///
-/// ```text
-/// <8-char hash>  <author initials>  <graph>  <subject>
-/// ```
-///
-/// where `<graph>` is the per-row output of the topology renderer in
-/// [`super::commit_graph`] — a sequence of `2 * (max_pos + 1)` cells
-/// drawing `○` / `◎` nodes plus the `│ ─ ╮ ╭ ╯ ╰ …` connectors that
-/// link consecutive commits across branch / merge boundaries. The
-/// graph width is deterministic on the commit list — independent of
-/// terminal width — so the cache stays valid across resizes.
-///
-/// The subject is **not** truncated here — the renderer relies on
-/// ratatui's view-level hard-clip (no `Wrap`) to match lazygit's gocui
-/// behaviour: one commit per visual line, overflow cut at the right
-/// edge without `…`.
-pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
-  // The sidebar pane paints rows only, so the metadata columns it never
-  // shows are built and dropped. Cheap next to the revwalk that precedes
-  // them, and one listing routine is one place for the row format to live.
-  recent_commits_listing(w, limit, worktree::unix_now(), theme).lines
-}
-
 /// Gap, in cells, between the commit subject and the metadata column.
 pub const META_GAP: usize = 2;
-
-/// Cells the subject must keep for the metadata column to be worth showing.
-///
-/// The graph is variable-width (`build_pipe_sets` sizes it on the branch
-/// topology), so what the left side needs cannot be derived from a
-/// constant: the policy is stated as a floor on what survives instead. A
-/// merge-heavy history at 80 columns would otherwise leave a subject of ten
-/// cells to buy an author column, which is a worse listing than no column.
-pub const COMMITS_SUBJECT_FLOOR: usize = 30;
-
-/// Pick the widest metadata column that leaves the subject its floor.
-///
-/// `body_w` is the text area AFTER the scrollbar column is reserved. The
-/// tiers are tried widest first; `None` means even the narrowest does not
-/// fit and the listing renders full-width as it did before.
-///
-/// A pure function on widths so the policy is testable without a terminal:
-/// the render path only decides which `MetaColumn` this names.
-pub fn commits_meta_pick(body_w: usize, tiers: [usize; 3]) -> Option<usize> {
-  meta_pick(body_w, &tiers, COMMITS_SUBJECT_FLOOR)
-}
 
 /// Pick the widest metadata column that leaves the left side `floor` cells.
 ///
@@ -2374,179 +2865,26 @@ pub fn meta_pick(body_w: usize, tiers: &[usize], floor: usize) -> Option<usize> 
 /// Cells a Working Tree row must keep for its `+N -M` column to be worth
 /// showing.
 ///
-/// Lower than [`COMMITS_SUBJECT_FLOOR`] because the row is a leaf name
-/// under a connector prefix, not a sentence: `ui.rs` stays readable at a
+/// Lower than [`crate::tui::COMMITS_SUBJECT_FLOOR`] because the row is a leaf
+/// name under a connector prefix, not a sentence: `ui.rs` stays readable at a
 /// width where a commit subject would be a fragment. The connectors grow
 /// with the nesting depth, so what a row needs cannot be derived from a
 /// constant here either — the floor states the policy instead.
 pub const WT_NAME_FLOOR: usize = 24;
 
-/// Build the two right-hand metadata columns for a commit listing.
+/// Name floor for the Working Tree's **status-letter** column (issue #622).
 ///
-/// `wide` carries `author · age`, `narrow` the age alone — the initials are
-/// already on the left, so the full author is the second tier of
-/// information, not the first. The age is what the listing genuinely lacks
-/// today.
+/// Far below [`WT_NAME_FLOOR`], and deliberately: that floor prices a
+/// `+120 -34` column, which is a detail a narrow pane can do without. The
+/// letter is the subject of the row, and before #622 it was an inline badge
+/// costing two cells that no width ever dropped. Charging it 24 cells of
+/// name would make it vanish from a side-by-side sidebar on a 60-column
+/// terminal, which is a capability the listing had and would have lost.
 ///
-/// Ages are computed against `now` HERE, not stored on the row: the rows
-/// are memoised by `(repo, tip, limit)`, so an age baked into them would be
-/// frozen at the first read. They are still a snapshot in the sense that
-/// the overlay does not re-read itself while open, so a listing left up for
-/// an hour keeps saying `2m`.
-pub fn commit_meta_columns(
-  rows: &[worktree::CommitRow],
-  now: i64,
-  stats: &HashMap<git2::Oid, worktree::CommitStat>,
-  theme: &Theme,
-) -> [MetaColumn; 3] {
-  let mut wide = MetaColumn::default();
-  let mut mid = MetaColumn::default();
-  let mut narrow = MetaColumn::default();
-  let sep = || Span::styled(" · ".to_string(), Style::default().fg(theme.muted));
-
-  for row in rows {
-    let age_d = worktree::commit_age(row.time, now);
-    let age = worktree::format_relative_duration(age_d);
-    let age_style = Style::default().fg(freshness_color(age_d, theme));
-    let age_span = || Span::styled(age.clone(), age_style);
-    let author = row.author.trim();
-    // Absent means "not read yet", which is not the same as a commit that
-    // changed nothing — the second read fills the map and the columns are
-    // rebuilt from it.
-    let stat = stats.get(&row.hash).copied();
-
-    narrow.lines.push(Line::from(age_span()));
-
-    let mut mid_spans: Vec<Span<'static>> = Vec::new();
-    if let Some(s) = stat {
-      mid_spans.extend(commit_stat_spans(s, theme));
-      mid_spans.push(sep());
-    }
-    mid_spans.push(age_span());
-    mid.lines.push(Line::from(mid_spans));
-
-    let mut wide_spans: Vec<Span<'static>> = Vec::new();
-    if !author.is_empty() {
-      wide_spans.push(Span::styled(author.to_string(), Style::default().fg(theme.muted)));
-      wide_spans.push(sep());
-    }
-    if let Some(s) = stat {
-      wide_spans.extend(commit_stat_spans(s, theme));
-      wide_spans.push(sep());
-    }
-    wide_spans.push(age_span());
-    wide.lines.push(Line::from(wide_spans));
-  }
-
-  for col in [&mut wide, &mut mid, &mut narrow] {
-    col.width = col.lines.iter().map(Line::width).max().unwrap_or(0);
-  }
-  [wide, mid, narrow]
-}
-
-/// One commit's diff counts as coloured spans: `3~ 1+ 1- +120 -34`.
-///
-/// The file counts reuse the working-tree pane's roles (#287) so a created
-/// file reads the same colour here as it does there, and the line counts
-/// reuse the diff pair. A category with nothing in it is omitted rather
-/// than printed as a zero: five zeroes on every quiet commit is noise, and
-/// the row is competing with the subject for width.
-pub fn commit_stat_spans(s: worktree::CommitStat, theme: &Theme) -> Vec<Span<'static>> {
-  let mut spans: Vec<Span<'static>> = Vec::new();
-  let mut push = |text: String, color: Color| {
-    if !spans.is_empty() {
-      spans.push(Span::raw(" "));
-    }
-    spans.push(Span::styled(text, Style::default().fg(color)));
-  };
-  if s.files_modified > 0 {
-    push(format!("{}~", s.files_modified), theme.dirty);
-  }
-  if s.files_added > 0 {
-    push(format!("{}+", s.files_added), theme.clean);
-  }
-  if s.files_deleted > 0 {
-    push(format!("{}-", s.files_deleted), theme.prunable);
-  }
-  if s.insertions > 0 {
-    push(format!("+{}", s.insertions), theme.clean);
-  }
-  if s.deletions > 0 {
-    push(format!("-{}", s.deletions), theme.prunable);
-  }
-  if spans.is_empty() {
-    // An empty commit, or a merge that brought nothing onto its first
-    // parent. Silence would read as "not loaded yet".
-    spans.push(Span::styled("0".to_string(), Style::default().fg(theme.muted)));
-  }
-  spans
-}
-
-/// The full result of one read of the log: the rows, the commit count, and
-/// the two right-hand metadata columns.
-///
-/// The count is not `lines.len()` and the difference is not cosmetic: an
-/// unborn HEAD, an empty history or a failed read all paint exactly ONE
-/// sentinel row, so a caller inferring the count from the rows reads them
-/// as a repository with one commit (Codex review, PR #614). The
-/// commit-listing overlay (issue #593) titles itself with this count and
-/// decides whether a page is full from it.
-///
-/// `now` is passed in rather than read here so the ages are deterministic
-/// under test.
-pub fn recent_commits_listing(w: &WorktreeInfo, limit: usize, now: i64, theme: &Theme) -> CommitsSnapshot {
-  match worktree::recent_commits_cached(w, limit) {
-    Ok(rows) if !rows.is_empty() => {
-      let loaded = rows.len();
-      let tiers = commit_meta_columns(&rows, now, &HashMap::new(), theme);
-      let graphs = super::commit_graph::render_commits(&rows, theme);
-      let lines = rows
-        .iter()
-        .cloned()
-        .zip(graphs)
-        .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
-        .collect();
-      CommitsSnapshot {
-        lines,
-        loaded,
-        rows,
-        tiers,
-      }
-    }
-    Ok(_) => CommitsSnapshot {
-      lines: vec![Line::from(Span::styled(
-        "(no commits)".to_string(),
-        Style::default().fg(theme.muted),
-      ))],
-      ..Default::default()
-    },
-    Err(e) => CommitsSnapshot {
-      lines: vec![Line::from(Span::styled(
-        format!("! {}", e),
-        Style::default().fg(theme.prunable),
-      ))],
-      ..Default::default()
-    },
-  }
-}
-
-fn commit_row_line(row: worktree::CommitRow, graph: Vec<Span<'static>>, theme: &Theme) -> Line<'static> {
-  let mut short_hash = row.hash.to_string();
-  short_hash.truncate(COMMIT_HASH_DISPLAY_LEN);
-  let initials = author_initials(&row.author);
-  let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + graph.len());
-  spans.push(Span::styled(short_hash, Style::default().fg(theme.dirty)));
-  spans.push(Span::raw("  "));
-  spans.push(Span::styled(
-    format!("{:<2}", initials),
-    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-  ));
-  spans.push(Span::raw("  "));
-  spans.extend(graph);
-  spans.push(Span::raw(" "));
-  spans.push(Span::raw(row.subject));
-  Line::from(spans)
-}
+/// Eight cells is what a clipped leaf name still reads in (`mod.rs` behind
+/// its three-cell connector); under that the row is unreadable whether or
+/// not it says `M`.
+pub const WT_BADGE_FLOOR: usize = 8;
 
 /// Derive lazygit-style author initials from a full name. Closely
 /// mirrors `getInitials` in lazygit's
@@ -2891,6 +3229,46 @@ fn note_cell(has_note: bool, theme: &Theme) -> Cell<'static> {
   }
 }
 
+/// What workspace mode adds to a table row: the `REPO` cell (issue #36) and,
+/// when the row heads its repo's accordion, that group's fold state (issue
+/// #680). One value rather than two parameters because they carry the same
+/// precondition: outside workspace mode there is no repo cell AND no group to
+/// fold, so `None` states both at once.
+#[derive(Debug, Clone, Copy)]
+struct RepoCell<'a> {
+  name: &'a str,
+  width: u16,
+  /// `Some(folded)` when this row is its group's header, `None` otherwise.
+  fold: Option<bool>,
+}
+
+/// Disclosure markers for a repo group header in workspace mode (issue #680):
+/// `REPO_GROUP_OPEN` when the group shows its worktrees, `REPO_GROUP_FOLDED`
+/// when it is folded down to its main row. Plain Unicode rather than a
+/// nerd-font codepoint, like [`super::wt_tree::WT_DIR_CARET`], so a header
+/// still reads on a terminal without a patched font.
+pub const REPO_GROUP_OPEN: &str = "\u{25be}";
+/// Folded counterpart of [`REPO_GROUP_OPEN`].
+pub const REPO_GROUP_FOLDED: &str = "\u{25b8}";
+
+/// The chevron a repo group header carries for its fold state (issue #680).
+pub fn repo_group_chevron(folded: bool) -> &'static str {
+  if folded {
+    REPO_GROUP_FOLDED
+  } else {
+    REPO_GROUP_OPEN
+  }
+}
+
+/// Ceiling on the workspace `REPO` column (issue #680).
+///
+/// It was 24, which had exactly zero margin: the longest repo basename on the
+/// workspace root this was measured against is 24 cells, so one more
+/// character truncated the name of a repo the column exists to name. The
+/// floor stays at 6, and the column is still a hard `Length`, so the extra
+/// ceiling only costs width on a root that actually has a name that long.
+pub const REPO_COL_MAX: u16 = 32;
+
 /// The three width-constrained column budgets a row truncates against.
 /// Grouped rather than passed one by one so the mark column (#484) could join
 /// `build_row`'s signature without pushing it past the argument limit.
@@ -2910,7 +3288,7 @@ fn build_row(
   // #484: `Some(is_marked)` while the mark column is shown (i.e. at least one
   // row is marked anywhere in the list), `None` when it is absent entirely.
   mark: Option<bool>,
-  repo: Option<(&str, u16)>,
+  repo: Option<RepoCell<'_>>,
   widths: RowWidths,
   // Outer `Option` = is the AGENT column shown at all (round D:
   // conditional on any detected session); inner = this row's top agent.
@@ -2920,6 +3298,20 @@ fn build_row(
   show_note: bool,
   theme: &Theme,
 ) -> Row<'static> {
+  // #680: `Some(folded)` on a repo group header, `None` on every other row.
+  // Drives the chevron and the flat muted repaint below.
+  let group = repo.and_then(|r| r.fold);
+  // #680: a folded header paints flat `muted`, and it does so by swapping the
+  // theme rather than by threading a `dim` flag: every cell below reads its
+  // roles off `theme`, including the sub-builders, so one swap dims the spans
+  // inside a cell too, which a row-level style cannot reach.
+  let folded_palette;
+  let theme = if group == Some(true) {
+    folded_palette = super::theme::folded_group_theme(theme);
+    &folded_palette
+  } else {
+    theme
+  };
   let RowWidths {
     name: name_w,
     branch: branch_w,
@@ -2948,8 +3340,19 @@ fn build_row(
   // freshness palette (green/yellow/darkgray) reads as noise next to the
   // more important BRANCH-status colour, so we keep it muted in the table
   // and let the sidebar's `Created:` row carry the colour-coded signal.
-  let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
-  let age_cell = Cell::from(age_label).style(Style::default().fg(theme.muted));
+  //
+  // #680: on a repo group header the slot carries the fold chevron instead.
+  // It is free real estate: `branch_age` returns `None` for a trunk branch,
+  // so a main worktree row renders `-` there. `accent` while the group is
+  // open makes the chevron read as the affordance it is; folded, the swapped
+  // palette above takes it back down to `muted` with the rest of the row.
+  let age_cell = match group {
+    Some(folded) => Cell::from(repo_group_chevron(folded)).style(Style::default().fg(theme.accent)),
+    None => {
+      let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+      Cell::from(age_label).style(Style::default().fg(theme.muted))
+    }
+  };
 
   // The path column paints with the `path` role (issue #210; default
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
@@ -2965,10 +3368,9 @@ fn build_row(
     cells.push(mark_cell(marked, theme));
   }
   cells.push(age_cell);
-  if let Some((repo_name, repo_w)) = repo {
+  if let Some(RepoCell { name, width, .. }) = repo {
     cells.push(
-      Cell::from(trunc(repo_name, repo_w as usize))
-        .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+      Cell::from(trunc(name, width as usize)).style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
     );
   }
   cells.push(Cell::from(marker));
@@ -3426,11 +3828,13 @@ impl HintContext {
         Hint::Modal(ModalAction::NoteOpenEditor, "$EDITOR"),
         Hint::Modal(ModalAction::NoteClose, "normal mode"),
       ],
-      HintContext::Help => &[
-        Hint::Lit("j/k", "scroll"),
-        Hint::Lit("h/l", "pan"),
-        Hint::Modal(ModalAction::HelpClose, "close"),
-      ],
+      // No `h/l pan` since #623: every row of this overlay is now laid out to
+      // the body width exactly, so `help_max_x_scroll` is zero whatever the
+      // terminal, and the hint named a key that could not move anything. The
+      // `help.scroll_left` / `scroll_right` verbs stay bound rather than being
+      // deleted, so a config that rebound them still loads; removing them is a
+      // separate call about the keymap contract.
+      HintContext::Help => &[Hint::Lit("j/k", "scroll"), Hint::Modal(ModalAction::HelpClose, "close")],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
       // #325: pick a profile then run it in a PTY. The j/k movement pair
       // stays literal (no single resolved key captures it), matching the
@@ -3611,6 +4015,17 @@ pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap, compact: bool
   pane_title(compact, label, &action_chord(keymap, Action::LazyGitFullscreen, "l"))
 }
 
+/// Cells [`modal_hint_line`] spends on `hints`: `key label` per pair, two
+/// spaces between pairs. Shared with the callers that have to decide whether a
+/// footer fits, so the budget and the layout cannot drift apart.
+pub fn hint_line_cells<K: AsRef<str>, L: AsRef<str>>(hints: &[(K, L)]) -> usize {
+  hints
+    .iter()
+    .map(|(k, l)| cells(k.as_ref()) + 1 + cells(l.as_ref()))
+    .sum::<usize>()
+    + 2 * hints.len().saturating_sub(1)
+}
+
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
   let key_style = hint_key_style(theme);
   let label_style = hint_label_style(theme);
@@ -3653,20 +4068,28 @@ pub fn config_nav_footer_hints(
   modal: &ModalKeymap,
   tab: SettingsTab,
   selected_kind: Option<FieldKind>,
+  cols: u16,
 ) -> Vec<(String, String)> {
   let mut hints: Vec<(String, String)> = Vec::new();
   if tab == SettingsTab::All {
     hints.push(("j/k".to_string(), "scroll".to_string()));
   } else {
-    let label = if tab == SettingsTab::Keys {
-      "rebind"
-    } else if matches!(selected_kind, Some(FieldKind::Choice | FieldKind::Bool)) {
-      "cycle"
-    } else {
-      "edit"
-    };
-    if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
-      hints.push((k, label.to_string()));
+    // Movement first (issue #623). It stays a literal pair, the same rule the
+    // `All` tab's `j/k` already follows: no single resolved key captures a
+    // movement pair.
+    hints.push(("j/k".to_string(), "move".to_string()));
+    if matches!(selected_kind, Some(FieldKind::Choice | FieldKind::Bool)) {
+      // On a cyclable field the arrows ARE the activate verb, walking the same
+      // list in both directions (#623 wired them; before that they were dead
+      // off the `All` tab). Naming both `←/→ adjust` and `Space cycle` would
+      // spend twelve cells saying one thing twice, and this line is centred:
+      // overflow clips it at BOTH ends, so the cost is not a wrap but a
+      // truncated `Esc close` and a vanished leading hint.
+      hints.push(("←/→".to_string(), "adjust".to_string()));
+    } else if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
+      // Everywhere else `activate` does something the arrows cannot, so it
+      // keeps its resolved key and a verb of its own.
+      hints.push((k, if tab == SettingsTab::Keys { "rebind" } else { "edit" }.to_string()));
     }
   }
   for (action, label) in [
@@ -3677,6 +4100,20 @@ pub fn config_nav_footer_hints(
     if let Some(k) = modal.primary_key(action) {
       hints.push((k, label.to_string()));
     }
+  }
+  // `modal_hint_line` centres its spans and the frame hard-clips them, so an
+  // overflowing footer does not wrap: it loses its FIRST and LAST hints, which
+  // costs the leading verb outright and leaves `Esc close` as `Esc c`.
+  //
+  // The pre-#623 four verbs needed 44 cells and so fitted down to a 54-column
+  // terminal; five need 53 and would have fitted only from 63. Rather than
+  // narrow that by nine columns, `move` drops out when the line will not fit:
+  // `↑` / `↓` moving a selection is the one convention a user does not need
+  // told, while `adjust` is the affordance this panel just gained and `close`
+  // is the way out. The `All` tab's `j/k scroll` is not touched, since it is
+  // that tab's only movement verb and dropping it would leave none.
+  if hint_line_cells(&hints) > cols as usize {
+    hints.retain(|(_, label)| label != "move");
   }
   hints
 }
@@ -3735,38 +4172,6 @@ pub fn working_tree_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
     ("g/G".to_string(), "top/bottom".to_string()),
   ];
   if let Some(k) = modal.primary_key(ModalAction::WorkingTreeClose) {
-    hints.push((k, "close".to_string()));
-  }
-  hints
-}
-
-/// Commit-listing overlay footer hints (issue #593). `load more` / `close`
-/// resolve from the `Commits*` modal bindings so a rebind of
-/// `[tui.keys.modal.commits]` shows through; the scroll / top-bottom
-/// movement pairs stay literal, as the Command Logs footer does.
-///
-/// `load more` is dropped when `more` is false — there is no deeper page,
-/// either because the revwalk ran out of history or because the paging cap
-/// was reached. Advertising a key that does nothing is how a working
-/// overlay reads as broken. While `loading`, the slot says so instead: the
-/// key is equally inert there, but for a reason that resolves on its own.
-pub fn commits_footer_hints(modal: &ModalKeymap, more: bool, loading: bool) -> Vec<(String, String)> {
-  let mut hints: Vec<(String, String)> = vec![
-    ("j/k".to_string(), "scroll".to_string()),
-    ("D/U".to_string(), "half page".to_string()),
-    ("g/G".to_string(), "top/bottom".to_string()),
-  ];
-  if loading {
-    // `more` is false while a read is out, so without this the hint slot
-    // would simply go blank and a deeper page would look refused rather
-    // than under way.
-    hints.push(("…".to_string(), "loading".to_string()));
-  } else if more {
-    if let Some(k) = modal.primary_key(ModalAction::CommitsLoadMore) {
-      hints.push((k, "load more".to_string()));
-    }
-  }
-  if let Some(k) = modal.primary_key(ModalAction::CommitsClose) {
     hints.push((k, "close".to_string()));
   }
   hints
@@ -3859,7 +4264,7 @@ pub fn modal_hint_for_context_with_fields(
   modal_hint_line(&hints, theme)
 }
 
-fn push_modal_hint(
+pub(crate) fn push_modal_hint(
   lines: &mut Vec<Line<'static>>,
   ctx: HintContext,
   keymap: &Keymap,
@@ -4221,43 +4626,33 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     HelpRow::Blank,
     HelpRow::Section("Global".to_string()),
     HelpRow::Blank,
-    entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
+    entry(Action::Quit, "quit (Esc too, when the filter is clear)"),
     fixed("Ctrl-C", "quit (hard-coded escape hatch)"),
     HelpRow::Blank,
     HelpRow::Section("List View".to_string()),
     HelpRow::Blank,
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
-    entry(Action::WtScrollDown, "scroll the Working Tree pane down (status focus)"),
-    entry(Action::WtScrollUp, "scroll the Working Tree pane up (status focus)"),
+    entry(Action::WtScrollDown, "scroll the Working Tree pane down"),
+    entry(Action::WtScrollUp, "scroll the Working Tree pane up"),
     entry(Action::Top, "jump to first worktree"),
     entry(Action::Bottom, "jump to last worktree"),
+    entry(Action::CollapseGroup, "fold the repo group (workspace mode)"),
+    entry(Action::ExpandGroup, "unfold the repo group (workspace mode)"),
   ];
   if picker_mode {
     rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
   } else {
     rows.push(entry(Action::Create, "new worktree"));
-    rows.push(entry(
-      Action::CreateFromIssue,
-      "new worktree from an existing issue (derives type + slug)",
-    ));
+    rows.push(entry(Action::CreateFromIssue, "new worktree from an existing issue"));
     // #484: the mark set is what `d` acts on when it is non-empty.
-    rows.push(entry(
-      Action::ToggleSelect,
-      "mark / unmark this worktree for a bulk delete",
-    ));
-    rows.push(entry(
-      Action::DeleteConfirm,
-      "delete the marked worktrees (or this one)",
-    ));
+    rows.push(entry(Action::ToggleSelect, "mark / unmark for a bulk delete"));
+    rows.push(entry(Action::DeleteConfirm, "delete the marked worktrees, or this one"));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
-  rows.push(entry(
-    Action::TerminalFullscreen,
-    "open per [tui.open]: shell / editor / finder",
-  ));
-  rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
-  rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
+  rows.push(entry(Action::TerminalFullscreen, "open per [tui.open]"));
+  rows.push(entry(Action::TerminalPty, "open $SHELL in a PTY overlay"));
+  rows.push(entry(Action::OpenDocs, "open the gwm docs in the browser"));
   rows.push(entry(Action::YankPath, "yank selected worktree path to clipboard"));
   rows.push(entry(Action::YankBranchName, "yank selected branch name to clipboard"));
   rows.push(entry(
@@ -4271,73 +4666,44 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     Action::ToggleSidebarMode,
     "cycle sidebar mode (commits / stashes)",
   ));
-  rows.push(entry(
-    Action::CycleSidebarLayout,
-    "cycle sidebar layout (auto / side-by-side / stacked)",
-  ));
+  rows.push(entry(Action::CycleSidebarLayout, "cycle sidebar layout"));
   rows.push(entry(
     Action::ToggleSidebarPosition,
     "toggle sidebar position (left / right)",
   ));
-  rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
+  rows.push(entry(Action::FocusSwap, "swap focus between list and sidebar"));
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
   rows.push(entry(Action::MergePr, "merge the linked PR (asks first)"));
-  rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
+  rows.push(entry(Action::FocusStatus, "focus the status pane (opens if hidden)"));
+  rows.push(entry(Action::ToggleMouse, "release / recapture the mouse"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
-  rows.push(entry(Action::WorkingTree, "show the working tree listing at full size"));
-  rows.push(entry(
-    Action::Commits,
-    "show the commit listing full size, with load-more",
-  ));
+  rows.push(entry(Action::WorkingTree, "show the working tree at full size"));
+  rows.push(entry(Action::Commits, "show the commit listing full size"));
   // #334 review: the exec / clean overlays are picker-gated (`run_action`
   // no-ops them in `gwm switch`), so only advertise them outside picker mode.
   if !picker_mode {
-    rows.push(entry(
-      Action::ExecOverlay,
-      "pick an [exec.profiles] profile and run it in a PTY",
-    ));
-    rows.push(entry(
-      Action::CleanOverlay,
-      "preview and reclaim build artifacts (with confirm)",
-    ));
-    rows.push(entry(
-      Action::AgentSessions,
-      "show the agent sessions attached to this worktree",
-    ));
-    rows.push(entry(
-      Action::CiChecks,
-      "list the linked PR's CI checks (also `c` with status focus)",
-    ));
-    rows.push(entry(
-      Action::RichView,
-      "open the linked PR/issue: description, checks, reviews, comments",
-    ));
+    rows.push(entry(Action::ExecOverlay, "pick an [exec.profiles] profile to run"));
+    rows.push(entry(Action::CleanOverlay, "preview and reclaim build artifacts"));
+    rows.push(entry(Action::AgentSessions, "show this worktree's agent sessions"));
+    rows.push(entry(Action::CiChecks, "list the linked PR's CI checks"));
+    rows.push(entry(Action::RichView, "open the linked PR/issue in full"));
   }
-  rows.push(entry(
-    Action::Filter,
-    "open fuzzy filter bar (enter: sticky, esc: clear)",
-  ));
+  rows.push(entry(Action::Filter, "fuzzy filter (enter sticky, esc clear)"));
   rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
-    rows.push(entry(Action::Sync, "sync selected worktree onto its upstream (rebase)"));
-    rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
-    rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
+    rows.push(entry(Action::Sync, "sync onto its upstream (rebase)"));
+    rows.push(entry(Action::Pull, "pull the branch from upstream"));
+    rows.push(entry(Action::Push, "push the branch to remote"));
     rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
     rows.push(entry(Action::EditNote, "edit the selected worktree's note"));
-    rows.push(entry(
-      Action::ExitToWorktree,
-      "quit TUI and print selected path to stdout",
-    ));
-    rows.push(entry(Action::MuxPane, "open selected worktree in new mux pane/tab"));
+    rows.push(entry(Action::ExitToWorktree, "quit and print the path to stdout"));
+    rows.push(entry(Action::MuxPane, "open in a new mux pane / tab"));
     rows.push(entry(Action::Macro1, "run [tui.macro1] command"));
     rows.push(entry(Action::Macro2, "run [tui.macro2] command"));
     rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
     rows.push(entry(Action::ReviewFullscreen, "run [review] launcher fullscreen"));
-    rows.push(entry(
-      Action::ReviewPty,
-      "run [review] launcher in embedded PTY overlay",
-    ));
+    rows.push(entry(Action::ReviewPty, "run [review] in a PTY overlay"));
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
@@ -4381,7 +4747,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       parts.push(format!("or {}", picks.join("/")));
     }
     parts.push("then digits".to_string());
-    rows.push(entry(Action::LinkPrompt, &format!("link prompt: {}", parts.join(", "))));
+    rows.push(entry(Action::LinkPrompt, &format!("link: {}", parts.join(", "))));
   }
   rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
@@ -4397,15 +4763,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreateNextField, "next field"),
       modal_entry(ModalAction::CreatePrevField, "previous field"),
       modal_entry(ModalAction::CreateSubmit, "submit (on the last field) / next field"),
-      modal_entry(
-        ModalAction::CreateToggleMode,
-        "toggle structured fields ↔ free-form name",
-      ),
+      modal_entry(ModalAction::CreateToggleMode, "toggle structured / free-form naming"),
       modal_entry(ModalAction::CreateCancel, "cancel"),
-      fixed(
-        "0-9",
-        "type into the issue field, where the patterns ask for one (digits only)",
-      ),
+      fixed("0-9", "type into the issue field (digits only)"),
       fixed("any char", "type into the focused text field"),
       fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
@@ -4414,16 +4774,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfirmFocusConfirm, "focus the Confirm button"),
       modal_entry(ModalAction::ConfirmFocusCancel, "focus the Cancel button"),
       modal_entry(ModalAction::ConfirmToggleFocus, "toggle the focused button"),
-      modal_entry(
-        ModalAction::ConfirmActivate,
-        "activate the focused button (defaults to Cancel)",
-      ),
+      modal_entry(ModalAction::ConfirmActivate, "activate the focused button"),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
-      modal_entry(
-        ModalAction::ConfirmCycleMethod,
-        "cycle merge / squash / rebase (merge confirmations only)",
-      ),
+      modal_entry(ModalAction::ConfirmCycleMethod, "cycle merge / squash / rebase"),
     ]);
     // #453: one section per modal context, in workflow order, every verb
     // resolved live against the modal keymap so rebinds show through (and
@@ -4439,10 +4793,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Section("Browse Links".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::OpenMenuToggle, "toggle issue / pull request"),
-      modal_entry(
-        ModalAction::OpenMenuAccept,
-        "open the highlighted target in the browser",
-      ),
+      modal_entry(ModalAction::OpenMenuAccept, "open the highlighted target"),
       modal_entry(ModalAction::OpenMenuIssue, "open the linked issue directly"),
       modal_entry(ModalAction::OpenMenuPr, "open the linked pull request directly"),
       modal_entry(ModalAction::OpenMenuClose, "close"),
@@ -4481,22 +4832,19 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::DetailAttach, "attach to the selected session"),
       modal_entry(ModalAction::DetailDetach, "detach the selected session"),
       modal_entry(ModalAction::DetailInput, "attach by id (palette-style prompt)"),
-      modal_entry(
-        ModalAction::DetailOpenPane,
-        "resume the selected session in a multiplexer pane",
-      ),
-      fixed("any char", "attach prompt: type to filter the session ids"),
-      fixed("Backspace", "attach prompt: delete the last character"),
-      fixed("Up/Down", "attach prompt: move the highlight"),
-      fixed("enter", "attach prompt: attach the highlighted session"),
-      fixed("Esc", "attach prompt: back to the list"),
+      modal_entry(ModalAction::DetailOpenPane, "resume the session in a mux pane"),
+      fixed("any char", "attach: filter the session ids"),
+      fixed("Backspace", "attach: delete the last character"),
+      fixed("Up/Down", "attach: move the highlight"),
+      fixed("enter", "attach: the highlighted session"),
+      fixed("Esc", "attach: back to the list"),
       modal_entry(ModalAction::DetailClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("CI Checks".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::CiChecksNext, "next check"),
       modal_entry(ModalAction::CiChecksPrev, "previous check"),
-      modal_entry(ModalAction::CiChecksOpen, "open the check's details URL in the browser"),
+      modal_entry(ModalAction::CiChecksOpen, "open the check's URL in the browser"),
       modal_entry(ModalAction::CiChecksFilter, "filter the checks by name"),
       modal_entry(ModalAction::CiChecksRefresh, "re-fetch the PR and refresh the rows"),
       fixed("any char", "filter: type to narrow the checks"),
@@ -4527,17 +4875,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       HelpRow::Section("Note Editor".to_string()),
       HelpRow::Blank,
-      fixed("Left/Right/Up/Down", "move the cursor"),
+      fixed("←/→/↑/↓", "move the cursor"),
       fixed("Home/End", "start / end of line"),
       fixed("PgUp/PgDn", "page through the note"),
       modal_entry(
         ModalAction::NoteToggleBullet,
         "make the line a list item, or plain again",
       ),
-      modal_entry(
-        ModalAction::NoteToggleCheckbox,
-        "tick the box on the line, spawning one first",
-      ),
+      modal_entry(ModalAction::NoteToggleCheckbox, "tick the box, spawning one first"),
       modal_entry(ModalAction::NoteOpenEditor, "open the same file in $EDITOR"),
       modal_entry(ModalAction::NoteClose, "save and close (empty it to delete)"),
       HelpRow::Blank,
@@ -4555,12 +4900,12 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Section("Note Editor · normal mode ([tui] note_vim, on by default)".to_string()),
       HelpRow::Blank,
       fixed("h j k l", "move"),
-      fixed("w b e", "word forward / back / end (W B E: blank-separated)"),
+      fixed("w b e", "word forward / back / end (W B E: blank)"),
       fixed("0 ^ $", "first column / first non-blank / last char"),
       fixed("gg G", "first / last line"),
       fixed("x dd", "delete the char under the caret / the line"),
-      fixed("i I a A o O", "enter insert (o / O open a line, carrying the marker)"),
-      fixed("Esc", "insert to normal; from normal, save and close"),
+      fixed("i I a A o O", "enter insert (o / O open a line)"),
+      fixed("Esc", "to normal, or save and close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
@@ -4580,7 +4925,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CommandPaletteNext, "next command"),
       modal_entry(ModalAction::CommandPalettePrev, "previous command"),
       modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
-      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
+      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase)"),
       fixed("Backspace", "delete the last filter character"),
       modal_entry(ModalAction::CommandPaletteClose, "close"),
       HelpRow::Blank,
@@ -4625,37 +4970,22 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
       modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
       modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
-      modal_entry(
-        ModalAction::ConfigActivate,
-        "toggle / edit the selected setting (Keys tab: start a key capture; a modal verb commits on its first stroke)",
-      ),
+      modal_entry(ModalAction::ConfigActivate, "toggle / edit the value, or capture a key"),
       modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
       modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
       modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
       modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
-      modal_entry(
-        ModalAction::ConfigEditSubmit,
-        "commit the edited value / the captured global chord",
-      ),
+      modal_entry(ModalAction::ConfigEditSubmit, "commit the value or the captured chord"),
       modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
-      fixed(
-        "any char",
-        "type the value: free text for text fields, digits for numeric ones",
-      ),
-      fixed(
-        "Backspace",
-        "erase the last character / drop the last stroke of a global capture",
-      ),
-      fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
-      fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
+      fixed("any char", "type the value (digits on numeric fields)"),
+      fixed("Backspace", "erase the last character or stroke"),
+      fixed("enter", "capture: commit the global chord"),
+      fixed("Esc", "capture: cancel"),
       modal_entry(ModalAction::ConfigClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("PTY Overlay".to_string()),
       HelpRow::Blank,
-      fixed(
-        "Esc",
-        "close the overlay; other keys pass through (any key but Ctrl-C closes a finished exec run)",
-      ),
+      fixed("Esc", "close; other keys pass through to the run"),
     ]);
     rows.extend([
       HelpRow::Blank,
@@ -4717,16 +5047,46 @@ pub fn badge_group_width(keys: &str) -> usize {
   glyphs + chords.len().saturating_sub(1)
 }
 
-/// One documented-binding row for the Keybindings overlay (issue #279):
-/// the chord(s) as flat accent-bold glyphs (no reverse-video badge),
-/// padded to `max_group_w` so every label lines up in one column, then the
-/// human label. An unbound action reads as a muted `(unbound)` placeholder.
-/// Extracted as a pure builder so the de-badged treatment is pinned by
+/// Cells the Keybindings body indents its rows by, under its section rules.
+const HELP_ROW_INDENT: usize = 2;
+
+/// One documented-binding row for the Keybindings overlay: the human label,
+/// then the chord(s) as flat accent-bold glyphs (no reverse-video badge, issue
+/// #279) right-aligned in a column of their own. An unbound action reads as a
+/// muted `(unbound)` placeholder.
+///
+/// Label first since #623, which is the order the Settings panel's Keys tab
+/// already used for the same data — that tab is this overlay's editable twin,
+/// and the two disagreeing on which half leads made them read as unrelated
+/// lists. `label_w` and `key_w` are the widest of each over the whole body and
+/// `gap` is what the panel has left between them, so the caller measures once
+/// rather than every row asking the same question.
+///
+/// Extracted as a pure builder so the treatment is pinned by
 /// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
-pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Theme) -> Line<'static> {
+pub fn help_entry_line(
+  label: &str,
+  keys: &str,
+  label_w: usize,
+  key_w: usize,
+  gap: usize,
+  theme: &Theme,
+) -> Line<'static> {
   let key_style = hint_key_style(theme);
   let muted_style = Style::default().fg(theme.muted);
-  let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+  // Truncated to its column rather than allowed to push the chords out of the
+  // overlay: the chord is what the reader came for, the label is the gloss. A
+  // hard clip at the frame would take the chords AND say nothing about it, so
+  // the cut is explicit and cell-accurate.
+  let label = trunc(label, label_w);
+  let mut spans: Vec<Span<'static>> = vec![
+    Span::raw(" ".repeat(HELP_ROW_INDENT)),
+    Span::styled(label.clone(), help_label_style(theme)),
+  ];
+  // Padding BEFORE the chords, never after: a line that ends in spaces widens
+  // `Line::width`, which is what publishes the overlay's `max_x_scroll`.
+  let pad = label_w.saturating_sub(cells(&label)) + gap + key_w.saturating_sub(badge_group_width(keys));
+  spans.push(Span::raw(" ".repeat(pad)));
   if keys.is_empty() || keys == "(unbound)" {
     spans.push(Span::styled("(unbound)", muted_style));
   } else {
@@ -4737,14 +5097,15 @@ pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Them
       spans.push(Span::styled(chord.to_string(), key_style));
     }
   }
-  let pad = max_group_w.saturating_sub(badge_group_width(keys)) + 1;
-  spans.push(Span::raw(" ".repeat(pad)));
-  spans.push(Span::styled(label.to_string(), help_label_style(theme)));
   Line::from(spans)
 }
 
-fn draw_help(f: &mut Frame, app: &mut App) {
-  let area = centered_viewport(60, 64, 96, 60, f.area());
+fn draw_help(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
+  // Wider than the 60% every prompt-shaped modal takes (issue #623): this one
+  // is a reference, and since its labels and its chords are two columns rather
+  // than one run, 60% of a 100-column terminal is 64 cells for a body that
+  // wants ~73. The ceiling is unchanged, so nothing grows on a wide terminal.
+  let area = centered_viewport(78, 64, 96, 60, f.area());
   // Use the underlying pane context, not the view-priority `hint_context`
   // (which would be `Help` while this overlay is up) — `?` documents the
   // pane you opened it from, and the picker gating depends on it.
@@ -4753,55 +5114,64 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
   let accent = app.theme.accent;
+  let muted = app.theme.muted;
 
   // Subtitle reads in a distinct accent hue (the theme's branch colour) +
   // italic, so the context name is clearly a different colour from both the
   // bold title and the muted key labels (issue #217 follow-up).
   let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
-  // Align every label to the same column: pad each chord *group* out to the
-  // widest one so the descriptions line up under one another.
-  let max_group_w = rows
-    .iter()
-    .filter_map(|r| match r {
-      HelpRow::Entry { keys, .. } => Some(badge_group_width(keys)),
-      _ => None,
-    })
-    .max()
-    .unwrap_or(0);
-
   // Issue #279: split the overlay into a FIXED header (title + subtitle), a
   // SCROLLABLE body (sections + entries), and a FIXED footer hint. Pre-#279
   // the whole content scrolled in one `Paragraph`, so the title and the
   // close hint rolled off the top/bottom as soon as the body outgrew the
   // modal. Title/subtitle are the leading rows; everything else is body.
-  let mut header_lines: Vec<Line<'static>> = Vec::new();
-  let mut body_lines: Vec<Line<'static>> = Vec::new();
+  //
+  // The body is sorted before it is rendered, because since #623 its rows are
+  // laid out against the overlay's width and the overlay is laid out against
+  // the row count. Sorting is the half that needs neither.
+  //
   // `HelpRow::Title` no longer renders as a row: since #549 it rides the
   // modal's top rule, so it is captured here rather than pushed. The
   // subtitle stays a header row — it is live context (the active view),
   // not the modal's name.
+  //
+  // The body's own blanks are dropped and one is put back per section break:
+  // it carried two per heading, above and below, which on a dozen sections is
+  // two dozen rows of nothing. The rule is the separation, and the single
+  // blank ahead of it is the breathing room that keeps a section from reading
+  // as a continuation of the one before. None ahead of the first, which would
+  // only be a gap under the subtitle, and none after the last, where the
+  // footer's own gap row already sits.
+  let mut header_lines: Vec<Line<'static>> = Vec::new();
+  let mut body: Vec<HelpRow> = Vec::new();
   let mut modal_title = String::new();
   for row in rows {
     match row {
       HelpRow::Title(t) => modal_title = t,
       // The subtitle is centred (issue #217) and pinned in the header.
-      HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
-      // Section headers stay left-aligned so they anchor their groups
-      // lazygit-style.
-      HelpRow::Section(t) => body_lines.push(Line::from(Span::styled(
-        t,
-        help_section_style(help_body_section_color(&app.theme)),
-      ))),
-      HelpRow::Blank => body_lines.push(Line::from(String::new())),
-      HelpRow::Entry { keys, label } => {
-        body_lines.push(help_entry_line(&keys, &label, max_group_w, &app.theme));
+      HelpRow::Subtitle(t) => {
+        header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
+        // A spacer under it, the way the Settings header has had one between
+        // its subtitle and its tab strip since #279: the subtitle names the
+        // context, and without a gap the first section rule reads as belonging
+        // to it rather than opening the body.
+        header_lines.push(Line::from(String::new()));
       }
+      HelpRow::Blank => {}
+      HelpRow::Section(t) => {
+        if !body.is_empty() {
+          body.push(HelpRow::Blank);
+        }
+        body.push(HelpRow::Section(t));
+      }
+      other => body.push(other),
     }
   }
+  let body_rows = body.len();
 
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let inner_area = frame.render(f, area, &modal_title, None);
+  let frame = ModalFrame::resolve_for(app, accent);
+  let inner_area = frame.render(f, map, area, &modal_title, None);
 
   // header (fixed) | body (scrollable) | footer hint (fixed). The header is
   // exactly as tall as its line count; the footer is one row; the body
@@ -4817,20 +5187,74 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 
   f.render_widget(Paragraph::new(header_lines), header_area);
 
+  // The width the rows are laid out against: the body rect, less what the
+  // scrollbar is about to take, less a cell of gutter so the chord column does
+  // not butt against the thumb. `scrollbar_reserve` is the predicate
+  // `scrollable_body_area` itself uses (#622 split it out for this).
+  let reserve = scrollbar_reserve(body_area, body_rows);
+  let text_w = body_area.width.saturating_sub(reserve + u16::from(reserve > 0)) as usize;
+
+  // The chords sit in a column of their own, right-aligned against that width,
+  // the way every Settings tab does since #623. Both halves are measured over
+  // the whole body so a short section does not get its own alignment.
+  let label_w = body
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { label, .. } => Some(cells(label)),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0);
+  let key_w = body
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } => Some(badge_group_width(keys)),
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0);
+  // Capped so the chord column always survives. The labels here are prose and
+  // run past fifty cells; left uncapped, the widest of them pushes the chords
+  // off the right edge and the overlay shows a page of descriptions and not
+  // one key, which is the opposite of what it is for. A label that does not
+  // fit is truncated with an ellipsis instead, by `help_entry_line`.
+  let label_w = label_w.min(text_w.saturating_sub(HELP_ROW_INDENT + MODAL_VALUE_GAP + key_w));
+  let lead_w = HELP_ROW_INDENT + label_w;
+  let gap = text_w.saturating_sub(lead_w + key_w).max(MODAL_VALUE_GAP);
+  let rule_w = (lead_w + gap + key_w).min(text_w.max(1));
+
+  let section_color = help_body_section_color(&app.theme);
+  let body_lines: Vec<Line<'static>> = body
+    .into_iter()
+    .map(|row| match row {
+      HelpRow::Section(t) => modal_section_rule(&t, rule_w, section_color, muted),
+      HelpRow::Entry { keys, label } => help_entry_line(&label, &keys, label_w, key_w, gap, &app.theme),
+      // Filtered out above; the arm exists so a new variant fails to compile
+      // here rather than rendering as nothing.
+      HelpRow::Title(t) | HelpRow::Subtitle(t) => Line::from(t),
+      HelpRow::Blank => Line::from(String::new()),
+    })
+    .collect();
+  debug_assert_eq!(
+    body_lines.len(),
+    body_rows,
+    "the row count the overlay was sized to must be the number of lines built"
+  );
+
   // Publish the scroll bounds against the BODY viewport only (issue #279) —
   // not the whole inner height — so the clamp matches what actually scrolls
   // and the last body rows stay reachable.
   let body_viewport = body_area.height as usize;
-  app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
-  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let scroll = app.help_scroll;
+  app.help.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  app.help.scroll = app.help.scroll.min(app.help.max_scroll);
+  let scroll = app.help.scroll;
   // Reserve the scrollbar column FIRST, then bound the horizontal pan against
   // the reduced text width so the final cell stays reachable (review P3).
   let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
   let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
-  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
-  let x_scroll = app.help_x_scroll;
+  app.help.max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
+  app.help.x_scroll = app.help.x_scroll.min(app.help.max_x_scroll);
+  let x_scroll = app.help.x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_for_context(HintContext::Help, &app.keymap, &app.modal_keymap, &app.theme),
@@ -4848,35 +5272,9 @@ fn draw_help(f: &mut Frame, app: &mut App) {
 ///
 /// `None` once another process removes the worktree and the refresh drops it
 /// from the list. The row degrades rather than lying.
-fn overlay_worktree<'a>(app: &'a App, path: Option<&std::path::Path>) -> Option<&'a WorktreeInfo> {
+pub(crate) fn overlay_worktree<'a>(app: &'a App, path: Option<&std::path::Path>) -> Option<&'a WorktreeInfo> {
   let path = path?;
   app.worktrees.iter().find(|w| w.path == path)
-}
-
-/// The fixed context row above the Commits listing (issue #629): the branch
-/// the log was walked on.
-///
-/// Both full-size overlays paint a snapshot with no statement of what it is a
-/// snapshot *of* — a commit graph could be any branch's. The modal title
-/// cannot carry it: it is centred, so it is clipped from the LEFT, and this
-/// one already spends itself on the row count.
-///
-/// The branch wears the same worst-state colour it wears in the table and the
-/// identity card (PR #73), so the overlay reads as the same block at a
-/// different size. `-` on a detached HEAD, and on a worktree the refresh
-/// dropped from the list.
-fn commits_context_line(w: Option<&WorktreeInfo>, theme: &Theme) -> Line<'static> {
-  let muted = Style::default().fg(theme.muted);
-  let mut value = Span::styled("-".to_string(), muted);
-  if let Some(w) = w {
-    if let Some(b) = w.branch.as_deref() {
-      value = Span::styled(
-        crate::naming::sanitise_for_terminal(b),
-        Style::default().fg(branch_name_color(&w.status, theme)),
-      );
-    }
-  }
-  Line::from(vec![Span::styled("Branch  ".to_string(), muted), value])
 }
 
 /// The fixed context row above the Working Tree listing (issue #629): the
@@ -4916,23 +5314,34 @@ fn working_tree_context_line(w: Option<&WorktreeInfo>, path: Option<&std::path::
 /// Full-size Working Tree listing (issue #592) — the sidebar pane's tree
 /// given the whole modal area.
 ///
-/// Same shell as the Command Logs overlay: a fixed title on the top rule,
-/// a scrollable body with a scrollbar when it overflows, and a fixed footer
-/// hint line. The pane's change-count line (issue #287) rides the bottom
+/// Same shell as the Command Logs overlay: a title on the top rule carrying
+/// the changed-file count (issue #622), a scrollable body with a scrollbar
+/// when it overflows, and a fixed footer hint line. The pane's change-count line (issue #287) rides the bottom
 /// rule right-aligned, exactly where the bordered sidebar pane puts it, so
 /// the two surfaces read as the same block at two sizes.
 ///
 /// The rows are NOT rebuilt here — they are the snapshot
 /// [`App::enter_working_tree`] took, so this frame shells out to nothing
 /// (the #343 rule).
-fn draw_working_tree(f: &mut Frame, app: &mut App) {
+fn draw_working_tree(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let area = centered(90, 85, f.area());
   let theme = app.theme;
   let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), theme.accent, &theme);
+  // The changed-file count rides the title (issue #622) the way the commit
+  // listing's does (#593), and for the same reason: the top rule is clipped
+  // from the LEFT when centred, so the count sits last. It is withheld while
+  // the worker is out: the counts are zero then, and `(0)` over a listing
+  // that has not been read yet is a claim rather than a count.
+  let title = if app.working_tree.loading {
+    "Working Tree".to_string()
+  } else {
+    format!("Working Tree ({})", app.working_tree.counts.total())
+  };
   let inner = frame.render(
     f,
+    map,
     area,
-    "Working Tree",
+    &title,
     working_tree_counts_footer(&app.working_tree.counts, &theme),
   );
 
@@ -4999,29 +5408,39 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
     })
     .collect();
 
-  // The counts ride their own rect on the right rather than being appended
+  // Both columns ride their own rect on the right rather than being appended
   // to each row, the shape the commit listing uses (#593): the tree is
   // hard-clipped without an ellipsis, so narrowing the left rect IS that
-  // same rule applied at a nearer edge. Both paragraphs take the same
+  // same rule applied at a nearer edge. Every paragraph takes the same
   // scroll offset, so the columns stay aligned.
-  let meta_w = meta_pick(text_area.width as usize, &[app.working_tree.meta.width], WT_NAME_FLOOR);
-  match meta_w {
-    Some(meta_w) => {
-      let [left, _gap, right] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(META_GAP as u16),
-        Constraint::Length(meta_w as u16),
-      ])
-      .areas(text_area);
-      f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), left);
+  //
+  // The status letters are carved out FIRST, which puts them at the right
+  // edge and makes the counts the column a narrowing terminal drops (issue
+  // #622). That order is the whole point: `+120 -34` says how much, the
+  // letter says what. A row that no longer says what it is has lost
+  // its subject, not its detail.
+  //
+  // Each column is afforded at its OWN floor, and the letter's is far lower
+  // than the counts': see [`WT_BADGE_FLOOR`]. The same cascade the sidebar
+  // pane runs, so the two surfaces cannot drift apart.
+  let (name_rect, [badge_rect, stats_rect]) = carve_meta_columns(
+    text_area,
+    [
+      (app.working_tree.badges.width, WT_BADGE_FLOOR),
+      (app.working_tree.meta.width, WT_NAME_FLOOR),
+    ],
+  );
+  f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), name_rect);
+  for (rect, column) in [
+    (badge_rect, &app.working_tree.badges),
+    (stats_rect, &app.working_tree.meta),
+  ] {
+    if let Some(rect) = rect {
       f.render_widget(
-        Paragraph::new(app.working_tree.meta.lines.clone())
-          .right_aligned()
-          .scroll((scroll, 0)),
-        right,
+        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
+        rect,
       );
     }
-    None => f.render_widget(Paragraph::new(padded).scroll((scroll, 0)), text_area),
   }
 
   let footer_owned = working_tree_footer_hints(&app.modal_keymap);
@@ -5036,114 +5455,7 @@ fn draw_working_tree(f: &mut Frame, app: &mut App) {
 /// against the live viewport so `App`'s scroll cursor can never run past
 /// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
 /// fail / `muted` output) so a theme override applies here too.
-/// Render the full-size commit listing (issue #593).
-///
-/// The same `~90% x 85%` canvas the Command Logs overlay uses, painting the
-/// snapshot `App::enter_commits` took — one row per commit, short hash /
-/// author initials / `o`-`@` graph / subject, exactly as the sidebar pane
-/// paints them.
-///
-/// No horizontal pan: `recent_commits_lines` deliberately leaves subjects
-/// untruncated and relies on ratatui's hard clip at the right edge, which is
-/// lazygit's behaviour. The whole point of the overlay is that the canvas is
-/// wide enough for that clip to stop mattering.
-///
-/// The title carries the row count so `load more` has visible feedback; a
-/// trailing `+` means a deeper page exists. It rides the top rule, which is
-/// clipped from the LEFT when centred, so the count sits last on purpose.
-fn draw_commits(f: &mut Frame, app: &mut App) {
-  let area = centered(90, 85, f.area());
-  let accent = app.theme.accent;
-  let muted = app.theme.muted;
-
-  let more = app.commits_can_load_more();
-  let loading = app.commits.loading;
-  // The `+` tracks "a deeper page exists", which is true while one is being
-  // read too: `can_load_more` is false then only because the read is out.
-  let deeper = more || (loading && app.commits.loaded >= app.commits.limit);
-  let title = format!("Commits ({}{})", app.commits.loaded, if deeper { "+" } else { "" });
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let inner = frame.render(f, area, &title, None);
-
-  // The branch this log was walked on, pinned above the scroll region
-  // (issue #629). Built before the mutable borrows below.
-  let context = commits_context_line(overlay_worktree(app, app.commits.path.as_deref()), &app.theme);
-
-  // A blank row between the listing and the hints, the gap every other
-  // modal already leaves: content never sits flush against the footer.
-  let [context_area, body_area, _gap, footer_area] = Layout::vertical([
-    Constraint::Length(1),
-    Constraint::Min(1),
-    Constraint::Length(1),
-    Constraint::Length(1),
-  ])
-  .areas(inner);
-  f.render_widget(Paragraph::new(context), context_area);
-
-  // A muted loader rather than an empty canvas while the first page is
-  // being walked: blank reads as "no commits", which is the one answer this
-  // overlay must not give by accident. A deeper page keeps the rows it
-  // already has on screen instead, and says `loading` in the footer.
-  let lines: Vec<Line<'static>> = if !app.commits.lines.is_empty() {
-    app.commits.lines.clone()
-  } else if loading {
-    vec![Line::from(Span::styled(
-      " loading…".to_string(),
-      Style::default().fg(muted),
-    ))]
-  } else {
-    vec![Line::from(Span::styled(
-      "No commits.".to_string(),
-      Style::default().fg(muted),
-    ))]
-  };
-
-  // Publish the scroll bound against the BODY viewport only (issue #279).
-  let body_viewport = body_area.height as usize;
-  app.commits.viewport = body_area.height;
-  app.commits.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
-  app.commits.scroll = app.commits.scroll.min(app.commits.max_scroll);
-  let scroll = app.commits.scroll;
-  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
-
-  // The metadata rides its own rect on the right rather than being appended
-  // to each row: the subject is deliberately hard-clipped without an
-  // ellipsis (lazygit's gocui behaviour, documented on
-  // `recent_commits_lines` and shared with the sidebar pane), so narrowing
-  // the left rect IS that same rule applied at a nearer edge. Both
-  // paragraphs take the same scroll offset, so the columns stay aligned.
-  let widths = [
-    app.commits.tiers[0].width,
-    app.commits.tiers[1].width,
-    app.commits.tiers[2].width,
-  ];
-  let meta = commits_meta_pick(text_area.width as usize, widths);
-
-  match meta {
-    Some(meta_w) => {
-      let column = &app.commits.tiers[widths.iter().position(|&w| w == meta_w).unwrap_or(2)];
-      let meta_w = meta_w as u16;
-      let [left, _gap, right] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(META_GAP as u16),
-        Constraint::Length(meta_w),
-      ])
-      .areas(text_area);
-      f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), left);
-      f.render_widget(
-        Paragraph::new(column.lines.clone()).right_aligned().scroll((scroll, 0)),
-        right,
-      );
-    }
-    None => f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text_area),
-  }
-
-  let footer_owned = commits_footer_hints(&app.modal_keymap, more, loading);
-  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
-  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
-}
-
-fn draw_command_logs(f: &mut Frame, app: &mut App) {
+fn draw_command_logs(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
@@ -5154,8 +5466,8 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
 
   // Scrollable body / fixed footer hint (issue #279) —
   // the title and the close hint stay pinned while the transcript scrolls.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let inner = frame.render(f, area, "Command Logs", None);
+  let frame = ModalFrame::resolve_for(app, accent);
+  let inner = frame.render(f, map, area, "Command Logs", None);
 
   // The title rides the top rule since #549, so the fixed header row it
   // used to occupy is gone and the transcript starts one row higher.
@@ -5242,9 +5554,9 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
 /// area shrunk by one column to make room. When everything fits, the area
 /// is returned unchanged and no scrollbar is drawn. The thumb tracks the
 /// theme `accent`; the track reads `muted`.
-fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
+pub(crate) fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
   let viewport = area.height as usize;
-  if content_len <= viewport || area.width < 2 {
+  if scrollbar_reserve(area, content_len) == 0 {
     return area;
   }
   // ratatui maps the thumb over `content_length - 1`, but our scroll offset
@@ -5268,11 +5580,55 @@ fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usi
   }
 }
 
+/// Cells [`scrollable_body_area`] will take off the right of `area` for its
+/// thumb: `1` when the content overflows the viewport, `0` otherwise.
+///
+/// Its own function so a caller that paints inside the same rect, the
+/// Working Tree's status column (issue #622), asks the same question
+/// rather than re-deriving the predicate and drifting from it.
+fn scrollbar_reserve(area: Rect, content_len: usize) -> u16 {
+  if content_len > area.height as usize && area.width >= 2 {
+    1
+  } else {
+    0
+  }
+}
+
 /// Build the read-only `All`-tab body: the resolved config grouped by
 /// top-level section with a colour-coded source column (repo / user /
 /// default). The pre-#279 Configuration view, now one tab of the Settings
 /// overlay.
-fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
+/// A Settings tab's body: the lines, which row each line belongs to, and
+/// which line the selection is on.
+///
+/// The three come out of one pass because they are one fact. A tab draws
+/// section rules and blank spacers between its rows, so body line N is not
+/// row N — and re-deriving the offset at click time (`selected + sections so
+/// far`) is the placement rule written a second time, which is exactly what
+/// the comment on `selected_line` already refuses to do for the scroll.
+struct SettingsBody {
+  lines: Vec<Line<'static>>,
+  /// Row index per body line; `None` on a rule or a spacer, which are not
+  /// clickable.
+  rows: Vec<Option<usize>>,
+  /// Body line the selected row is drawn on, so the renderer can scroll it
+  /// into view.
+  selected_line: Option<usize>,
+}
+
+impl SettingsBody {
+  /// A body with no selectable rows at all — the `All` tab, and the empty
+  /// states.
+  fn inert(lines: Vec<Line<'static>>) -> Self {
+    Self {
+      rows: vec![None; lines.len()],
+      lines,
+      selected_line: None,
+    }
+  }
+}
+
+fn settings_all_lines(app: &App, width: usize) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
@@ -5283,17 +5639,28 @@ fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
     return lines;
   }
+  // Same column arithmetic as the other tabs (#623). The ` = ` that used to
+  // join the key and its value goes with it: the value now sits in a column of
+  // its own, and an `=` stranded next to a left-aligned key would point at
+  // nothing. A wide value collapses the gap to `MODAL_VALUE_GAP` and the
+  // row reads exactly as it did before, which is the case this tab is full of.
+  let key_w = app.config_panel.rows.iter().map(|r| cells(&r.key)).max().unwrap_or(0);
+  let value_w = app.config_panel.rows.iter().map(|r| cells(&r.value)).max().unwrap_or(0);
+  let lead_w = 2 + SETTINGS_SOURCE_W + 2 + key_w;
+  let gap = width.saturating_sub(lead_w + value_w).max(MODAL_VALUE_GAP);
+  let rule_w = (lead_w + gap + value_w).min(width.max(1));
+
   let mut current_section: Option<String> = None;
   for row in &app.config_panel.rows {
     let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
     if current_section.as_deref() != Some(section.as_str()) {
+      // The same labelled rule the other tabs wear since #623, in place of a
+      // bare `[table]`, with the blank moved from above the heading to ahead
+      // of the break.
       if current_section.is_some() {
         lines.push(Line::from(String::new()));
       }
-      lines.push(Line::from(Span::styled(
-        format!("[{section}]"),
-        help_section_style(accent),
-      )));
+      lines.push(modal_section_rule(&format!("[{section}]"), rule_w, accent, muted));
       current_section = Some(section);
     }
     let src_color = match row.source {
@@ -5301,39 +5668,228 @@ fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
       ConfigSource::User => app.theme.branch,
       ConfigSource::Default => muted,
     };
+    let pad = key_w.saturating_sub(cells(&row.key)) + gap + value_w.saturating_sub(cells(&row.value));
     lines.push(Line::from(vec![
       Span::raw("  "),
-      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::styled(
+        format!("{:<width$}", row.source.label(), width = SETTINGS_SOURCE_W),
+        Style::default().fg(src_color),
+      ),
       Span::raw("  "),
       Span::styled(row.key.clone(), label_style),
-      Span::styled(" = ", muted_style),
+      Span::raw(" ".repeat(pad)),
       Span::styled(row.value.clone(), Style::default().fg(Color::White)),
     ]));
   }
   lines
 }
 
-/// Build an editable-tab body: one row per [`SettingField`], the selected
-/// row marked and its value in the accent. The `Uint` field under edit
-/// shows its live buffer with a cursor; a field whose effective value is
-/// shadowed by a higher-precedence layer carries an inline guidance note
-/// (issue #279 — honours "edit both layers" without a silent dead edit).
-fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static>> {
+/// The value as it is painted in the Settings value column (issue #623).
+///
+/// The shape carries the kind, which is the whole point of giving the values a
+/// column of their own: a choice wears `\u{2039} \u{203a}`, and those markers double as
+/// the hint that it cycles \u{2014} which is what the arrows do since #623 wired
+/// them. A bool becomes a checkbox, so sixteen rows of `true` / `false` turn
+/// into a column the eye reads in one pass. A typed value wears nothing, since
+/// claiming it cycles would be a lie about which keys work on it.
+///
+/// An unset optional text field reads `(unset)` rather than empty. Three of
+/// them default to `None`, and in a right-aligned column three blank rows read
+/// as a rendering bug instead of as "nothing configured"; the Keys tab already
+/// solved the same problem with `(unbound)`.
+pub fn settings_value_cell(field: SettingField, cfg: &Config) -> String {
+  let raw = field.current(cfg);
+  match field.kind() {
+    FieldKind::Bool => if raw == "true" { "[\u{2713}]" } else { "[ ]" }.to_string(),
+    FieldKind::Choice => format!("\u{2039} {raw} \u{203a}"),
+    FieldKind::Text | FieldKind::Uint if raw.is_empty() => "(unset)".to_string(),
+    FieldKind::Text | FieldKind::Uint => raw,
+  }
+}
+
+/// Cells the selection-marker column costs (` › `).
+const SETTINGS_MARKER_W: usize = 3;
+
+/// Cells the `repo` / `user` / `default` source badge column costs.
+const SETTINGS_SOURCE_W: usize = 7;
+
+/// Smallest gap between a label and its value, for the panel too narrow to
+/// hold the full block (issue #623). Above it the gap is whatever is left.
+const MODAL_VALUE_GAP: usize = 2;
+
+/// Whether the selected field's edit would be shadowed by a higher-precedence
+/// layer (issue #279): editing the Global layer for a field the repo overrides
+/// will not change the effective value.
+///
+/// Its own predicate because the guidance takes a line of its own since #623,
+/// so the row counter that sizes the panel and the renderer that paints it
+/// have to agree on whether that line exists.
+fn settings_shadow_note(app: &App, fields: &[SettingField]) -> bool {
+  let panel = &app.config_panel;
+  panel.layer.source() == ConfigSource::User
+    && fields
+      .get(panel.selected)
+      .is_some_and(|f| panel.field_source(*f) == Some(ConfigSource::Repo))
+}
+
+/// Rows [`settings_fields_lines`] will produce: one per field, one per section
+/// rule, and one for the shadow guidance when it applies.
+///
+/// Split out because the two now depend on each other in a circle: the lines
+/// need the body width, which comes from the layout, which needs the row count.
+/// The count is the half that does not need the width.
+fn settings_fields_rows(app: &App, fields: &[SettingField]) -> usize {
+  let mut rows = fields.len() + usize::from(settings_shadow_note(app, fields));
+  let mut current: Option<&'static str> = None;
+  for field in fields {
+    if let Some(section) = field.section() {
+      if current != Some(section) {
+        rows += if current.is_none() { 1 } else { 2 };
+        current = Some(section);
+      }
+    }
+  }
+  rows
+}
+
+/// Rows [`settings_all_lines`] will produce: one per resolved row, one per
+/// section rule. Same reason as [`settings_fields_rows`]: the lines need the
+/// body width, the layout needs the count.
+fn settings_all_rows(app: &App) -> usize {
+  if app.config_panel.rows.is_empty() {
+    return 1;
+  }
+  let mut rows = app.config_panel.rows.len();
+  let mut current: Option<&str> = None;
+  for row in &app.config_panel.rows {
+    let section = row.key.split(['.', '[']).next().unwrap_or("");
+    if current != Some(section) {
+      rows += if current.is_none() { 1 } else { 2 };
+      current = Some(section);
+    }
+  }
+  rows
+}
+
+/// Rows [`settings_keys_lines`] will produce: one per binding, one per scope
+/// rule.
+fn settings_keys_rows(app: &App) -> usize {
+  if app.config_panel.key_rows.is_empty() {
+    return 1;
+  }
+  let mut rows = app.config_panel.key_rows.len();
+  let mut current: Option<&str> = None;
+  for row in &app.config_panel.key_rows {
+    if current != Some(row.scope.as_str()) {
+      rows += if current.is_none() { 1 } else { 2 };
+      current = Some(row.scope.as_str());
+    }
+  }
+  rows
+}
+
+/// A labelled rule opening a section inside a modal body (issue #623):
+/// `─ Sidebar ───`, drawn to the body width so it rails the eye from the
+/// label across to the value column instead of stopping short of it.
+///
+/// No blank row above it. The rule *is* the separation, and the surfaces that
+/// wear it pay for every one: the Settings TUI tab has seven sections and the
+/// Keybindings overlay a dozen, which used to spend a blank line on each side
+/// of every heading.
+pub fn modal_section_rule(name: &str, width: usize, section: Color, muted: Color) -> Line<'static> {
+  let lead = format!(" ─ {name} ");
+  let tail = width.saturating_sub(cells(&lead));
+  let rule = Style::default().fg(muted);
+  Line::from(vec![
+    // The separator is muted and the name is not. The rule is chrome, so it
+    // recedes; the name is the one thing on the row that is meant to be read,
+    // so it keeps the theme role the bare headings wore before #623 gave them
+    // a rule to sit in.
+    Span::styled(" ─ ".to_string(), rule),
+    Span::styled(name.to_string(), help_section_style(section)),
+    Span::styled(format!(" {}", "─".repeat(tail)), rule),
+  ])
+}
+
+/// Build an editable-tab body: one row per [`SettingField`], grouped under the
+/// labelled rules of [`SettingField::section`], with the values right-aligned
+/// in a column of their own (issue #623). The selected row is marked and its
+/// value reads in the accent; the field under edit shows its live buffer with
+/// a cursor.
+///
+/// Returns the line index of the selected row, the way [`settings_keys_lines`]
+/// already did. The section rules mean the field index is no longer the line
+/// index, and recovering the offset at the call site would be the placement
+/// rule computed a second time, which is the whole of #550's story.
+///
+/// **The column is right-aligned against `width`**, the body the panel
+/// actually gives it, so the values reach the panel's edge instead of sitting
+/// in a content-sized block with the rest of the box empty beside them. The
+/// section rules span the same width, which is what keeps the row and its
+/// value visually joined across the gap the panel's own width opens up.
+///
+/// The gap collapses to [`MODAL_VALUE_GAP`] when the block outgrows the
+/// body, which is the narrow-terminal case: the line then overflows and the
+/// existing horizontal pan reaches it, rather than the label and the value
+/// running into each other.
+fn settings_fields_lines(app: &App, fields: &[SettingField], width: usize) -> SettingsBody {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
   let panel = &app.config_panel;
   let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut rows: Vec<Option<usize>> = Vec::new();
+  let mut selected_line: Option<usize> = None;
 
-  for (i, field) in fields.iter().enumerate() {
+  // Every value is rendered before a single line is built: the column is as
+  // wide as the widest of them, and the edit buffer of the selected row is one
+  // of them, so the column does not shift a cell as the user types.
+  let values: Vec<String> = fields
+    .iter()
+    .enumerate()
+    .map(|(i, field)| {
+      if i == panel.selected && panel.editing.is_some() {
+        format!("{}_", panel.editing.as_deref().unwrap_or(""))
+      } else {
+        settings_value_cell(*field, &app.config)
+      }
+    })
+    .collect();
+  // Widths in CELLS, through the renderer's own measure. Not `{:>w$}`, which
+  // pads to a count of `char`s: #554 is the story of what that does to a
+  // column the moment a value stops being ASCII.
+  let label_w = fields.iter().map(|f| cells(f.label())).max().unwrap_or(0);
+  let value_w = values.iter().map(|v| cells(v)).max().unwrap_or(0);
+  let gap = width
+    .saturating_sub(SETTINGS_MARKER_W + label_w + value_w)
+    .max(MODAL_VALUE_GAP);
+  let rule_w = (SETTINGS_MARKER_W + label_w + gap + value_w).min(width.max(1));
+
+  let mut current_section: Option<&'static str> = None;
+  for ((i, field), value) in fields.iter().enumerate().zip(values.iter()) {
+    if let Some(section) = field.section() {
+      if current_section != Some(section) {
+        // A blank ahead of every break but the first: the rule is the
+        // separation, and the blank is what stops a section reading as a
+        // continuation of the one above it. Counted by
+        // [`settings_fields_rows`], which the panel is sized against.
+        if current_section.is_some() {
+          lines.push(Line::from(String::new()));
+          rows.push(None);
+        }
+        lines.push(modal_section_rule(section, rule_w, accent, muted));
+        rows.push(None);
+        current_section = Some(section);
+      }
+    }
     let selected = i == panel.selected;
-    let editing = selected && panel.editing.is_some();
-    let value = if editing {
-      format!("{}_", panel.editing.as_deref().unwrap_or(""))
-    } else {
-      field.current(&app.config)
-    };
+    // Recorded as the row is pushed, never as `selected + sections_so_far`:
+    // that second form is the placement rule re-derived, and it goes wrong the
+    // day a tab sections only half its fields.
+    if selected {
+      selected_line = Some(lines.len());
+    }
     let marker = if selected { "›" } else { " " };
     let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let value_style = if selected {
@@ -5341,21 +5897,43 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
     } else {
       Style::default().fg(Color::White)
     };
-    let mut spans = vec![
+    // The padding goes BEFORE the value, never after. A line that ends in
+    // spaces widens `Line::width`, which is what publishes `max_x_scroll`, so
+    // a trailing pad would buy the user a horizontal pan into empty space.
+    let pad = label_w.saturating_sub(cells(field.label())) + gap + value_w.saturating_sub(cells(value));
+    lines.push(Line::from(vec![
       Span::styled(format!(" {marker} "), marker_style),
-      Span::styled(format!("{:<24}", field.label()), label_style),
-      Span::styled(value, value_style),
-    ];
-    // Shadow guidance: editing the Global layer for a field the repo
-    // overrides won't change the effective value (repo wins). Surface it
-    // rather than silently no-op or hard-disable the field.
-    if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
-    {
-      spans.push(Span::styled("  (set in .gwm.toml; switch to Project)", muted_style));
+      Span::styled(field.label().to_string(), label_style),
+      Span::raw(" ".repeat(pad)),
+      Span::styled(value.clone(), value_style),
+    ]));
+    rows.push(Some(i));
+    // Shadow guidance: editing the Global layer for a field the repo overrides
+    // won't change the effective value (repo wins). Surface it rather than
+    // silently no-op or hard-disable the field.
+    //
+    // On a line of its own since the value column reaches the panel's edge:
+    // trailing the value, it had nowhere left to go and would only be readable
+    // by panning sideways.
+    if selected && settings_shadow_note(app, fields) {
+      lines.push(Line::from(Span::styled(
+        format!(
+          "{}set in .gwm.toml; switch to Project to change it",
+          " ".repeat(SETTINGS_MARKER_W + 2)
+        ),
+        muted_style,
+      )));
+      // The note belongs to the row above it but is not that row: clicking
+      // an explanation must not re-select what it explains, and the row is
+      // already selected anyway.
+      rows.push(None);
     }
-    lines.push(Line::from(spans));
   }
-  lines
+  SettingsBody {
+    lines,
+    rows,
+    selected_line,
+  }
 }
 
 /// Build the Keys-tab body (issue #294): the rebindable bindings grouped by
@@ -5365,30 +5943,45 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
 /// strokes. Returns the line index of the selected row so the caller can keep
 /// it in view (this body is far taller than the viewport). Mirrors
 /// [`settings_all_lines`]'s section grouping + source colours.
-fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
+fn settings_keys_lines(app: &App, width: usize) -> SettingsBody {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
   let panel = &app.config_panel;
   let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut rows: Vec<Option<usize>> = Vec::new();
   let mut selected_line: Option<usize> = None;
 
   if panel.key_rows.is_empty() {
-    lines.push(Line::from(Span::styled("No bindings resolved.", muted_style)));
-    return (lines, None);
+    return SettingsBody::inert(vec![Line::from(Span::styled("No bindings resolved.", muted_style))]);
   }
+
+  // Same column arithmetic as the editable tabs (#623): the source badge and
+  // the label lead, the binding is right-aligned against the body the panel
+  // gives it. `(unbound)` and the `[ … ]` capture input are part of the
+  // measure, so arming a capture does not shift the column.
+  let label_w = panel.key_rows.iter().map(|r| cells(&r.label)).max().unwrap_or(0);
+  let key_w = panel
+    .key_rows
+    .iter()
+    .map(|r| cells(if r.keys.is_empty() { "(unbound)" } else { &r.keys }))
+    .chain(std::iter::once(cells("[ 0000000000_ ]")))
+    .max()
+    .unwrap_or(0);
+  let lead_w = SETTINGS_MARKER_W + SETTINGS_SOURCE_W + 1 + label_w;
+  let gap = width.saturating_sub(lead_w + key_w).max(MODAL_VALUE_GAP);
+  let rule_w = (lead_w + gap + key_w).min(width.max(1));
 
   let mut current_scope: Option<String> = None;
   for (i, row) in panel.key_rows.iter().enumerate() {
     if current_scope.as_deref() != Some(row.scope.as_str()) {
       if current_scope.is_some() {
         lines.push(Line::from(String::new()));
+        rows.push(None);
       }
-      lines.push(Line::from(Span::styled(
-        format!("[{}]", row.scope),
-        help_section_style(accent),
-      )));
+      lines.push(modal_section_rule(&format!("[{}]", row.scope), rule_w, accent, muted));
+      rows.push(None);
       current_scope = Some(row.scope.clone());
     }
 
@@ -5405,41 +5998,48 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
       ConfigSource::Default => muted,
     };
 
-    let key_span = if capturing {
+    let (shown, key_style) = if capturing {
       let pending = panel
         .capture
         .as_ref()
         .map(|c| c.pending.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" "))
         .unwrap_or_default();
-      Span::styled(
+      (
         format!("[ {pending}_ ]"),
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
       )
+    } else if row.keys.is_empty() {
+      ("(unbound)".to_string(), muted_style)
+    } else if selected {
+      (
+        row.keys.clone(),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      )
     } else {
-      let shown = if row.keys.is_empty() {
-        "(unbound)".to_string()
-      } else {
-        row.keys.clone()
-      };
-      let style = if row.keys.is_empty() {
-        muted_style
-      } else if selected {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-      } else {
-        Style::default().fg(Color::White)
-      };
-      Span::styled(shown, style)
+      (row.keys.clone(), Style::default().fg(Color::White))
     };
 
+    // Padding BEFORE the binding, so a row never ends in spaces: `Line::width`
+    // is what publishes `max_x_scroll`, and a trailing pad is a pan into void.
+    let pad = label_w.saturating_sub(cells(&row.label)) + gap + key_w.saturating_sub(cells(&shown));
     lines.push(Line::from(vec![
       Span::styled(format!(" {marker} "), marker_style),
-      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::styled(
+        format!("{:<width$}", row.source.label(), width = SETTINGS_SOURCE_W),
+        Style::default().fg(src_color),
+      ),
       Span::raw(" "),
-      Span::styled(format!("{:<24}", row.label), label_style),
-      key_span,
+      Span::styled(row.label.clone(), label_style),
+      Span::raw(" ".repeat(pad)),
+      Span::styled(shown, key_style),
     ]));
+    rows.push(Some(i));
   }
-  (lines, selected_line)
+  SettingsBody {
+    lines,
+    rows,
+    selected_line,
+  }
 }
 
 /// Render the Settings overlay (issue #232; editable in #279): same modal
@@ -5448,7 +6048,7 @@ fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
 /// tab's fields, or the read-only resolved config on the `All` tab) with a
 /// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
 /// `config_panel.max_scroll` against the live body viewport.
-fn draw_config_panel(f: &mut Frame, app: &mut App) {
+fn draw_config_panel(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
@@ -5468,42 +6068,45 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // panel's name.
   let subtitle = Line::from(Span::styled(app.config_panel.layer.label(), subtitle_style)).centered();
   let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+  // Where each tab lands, accumulated by the same walk that lays them out
+  // (issue #624). Measured in cells rather than characters because the
+  // glyphs are codicons.
+  let mut tab_spots: Vec<(u16, u16, SettingsTab)> = Vec::with_capacity(SettingsTab::ALL.len());
+  let mut tab_col = 1usize;
   for (i, t) in SettingsTab::ALL.iter().enumerate() {
     if i > 0 {
       tab_spans.push(Span::raw("  "));
+      tab_col += 2;
     }
     let style = if *t == tab { chip_style(accent) } else { muted_style };
-    tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
+    // The glyph leads, then a space: most nerd-font glyphs render two cells
+    // wide while measuring one, which is the repo-wide convention for spacing
+    // them (see `NOTE_ICON`).
+    let text = format!(" {} {} ", t.glyph(), t.label());
+    let w = cells(&text);
+    tab_spots.push((tab_col as u16, w as u16, *t));
+    tab_col += w;
+    tab_spans.push(Span::styled(text, style));
   }
-  let header_lines = vec![subtitle, Line::from(String::new()), Line::from(tab_spans)];
+  // Subtitle, spacer, tab strip, spacer: the trailing one so the first section
+  // rule opens the body rather than hanging off the strip, matching what the
+  // Keybindings overlay does under its own subtitle.
+  let header_lines = vec![
+    subtitle,
+    Line::from(String::new()),
+    Line::from(tab_spans),
+    Line::from(String::new()),
+  ];
 
-  // Body depends on the active tab. Every tab with a selection reports the line
-  // index of the selected row so the renderer can scroll it into view.
-  //
-  // This used to be Keys-only, on the reasoning that "the field tabs are short
-  // enough to never need this". That was wrong on any short terminal: the modal
-  // is 60% of the height, so 24 lines leave ~6 body rows, and the TUI tab has
-  // had more fields than that since well before #367 added an 8th. The result
-  // was a selection that walked off screen — the user cycling or editing a row
-  // they cannot see (Codex review #368 P2).
-  //
-  // `settings_fields_lines` renders exactly one line per field, so the field
-  // index *is* the line index.
-  let mut selected_line: Option<usize> = None;
-  let body_lines = match tab {
-    SettingsTab::All => settings_all_lines(app),
-    SettingsTab::Keys => {
-      let (lines, sel) = settings_keys_lines(app);
-      selected_line = sel;
-      lines
-    }
-    other => {
-      let fields = other.fields();
-      if !fields.is_empty() {
-        selected_line = Some(app.config_panel.selected.min(fields.len().saturating_sub(1)));
-      }
-      settings_fields_lines(app, fields)
-    }
+  // Since #623 the body is built in two passes, because the two halves depend
+  // on each other in a circle: every tab right-aligns a column against the
+  // body width, which comes from the layout, and the layout is sized to the
+  // row count. The count is the half that does not need the width, so it goes
+  // first and the lines are built once the rect exists.
+  let body_rows = match tab {
+    SettingsTab::All => settings_all_rows(app),
+    SettingsTab::Keys => settings_keys_rows(app),
+    other => settings_fields_rows(app, other.fields()),
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
@@ -5512,14 +6115,6 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // review) so a rebind of `[tui.keys.modal.config(.edit)]` shows through
   // instead of literal keys.
   let capture_single = app.config_panel.capture.as_ref().map(|c| c.single_only);
-  let footer_owned = if let Some(single) = capture_single {
-    config_capture_footer_hints(&app.modal_keymap, single)
-  } else if editing {
-    config_edit_footer_hints(&app.modal_keymap)
-  } else {
-    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind)
-  };
-  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
   let header_h = header_lines.len() as u16;
 
@@ -5533,8 +6128,8 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // deliberate trade: the tabs are genuinely different lengths (3 rows for
   // Worktree, 173 for Keys), and with the floor and ceiling in place it
   // settles into two sizes rather than a continuum.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let content_rows = header_h + body_lines.len() as u16 + 2 /* gap + footer */ + frame.rows();
+  let frame = ModalFrame::resolve_for(app, accent);
+  let content_rows = header_h + body_rows as u16 + 2 /* gap + footer */ + frame.rows();
   let (min_rows, max_rows) = SETTINGS_HEIGHT_BOUNDS;
   let area = centered_content(
     60,
@@ -5544,7 +6139,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     f.area(),
   );
 
-  let inner = frame.render(f, area, "Settings", None);
+  let inner = frame.render(f, map, area, "Settings", None);
 
   let [header_area, body_area, _gap, footer_area] = Layout::vertical([
     Constraint::Length(header_h),
@@ -5555,6 +6150,67 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   .areas(inner);
 
   f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // The strip is the third header line (subtitle, blank, strip, blank), and
+  // the columns come from the walk that built it rather than from a second
+  // measure of the finished spans.
+  const TAB_STRIP_ROW: u16 = 2;
+  if header_area.height > TAB_STRIP_ROW {
+    for (x, w, t) in &tab_spots {
+      map.push_spot(
+        Rect {
+          x: header_area.x.saturating_add(*x),
+          y: header_area.y + TAB_STRIP_ROW,
+          width: *w,
+          height: 1,
+        },
+        Spot::ConfigTab(*t),
+      );
+    }
+  }
+
+  // The width the lines are laid out against: the body rect, less whatever the
+  // scrollbar is about to take, less one cell of gutter so a right-aligned
+  // column does not butt straight against the thumb. `scrollbar_reserve` is
+  // the predicate `scrollable_body_area` itself uses (issue #622 split it out
+  // for exactly this), so the column cannot end up under the thumb; the gutter
+  // only exists when the thumb does.
+  let reserve = scrollbar_reserve(body_area, body_rows);
+  let text_w = body_area.width.saturating_sub(reserve + u16::from(reserve > 0)) as usize;
+
+  // Every tab with a selection reports the line index of the selected row so
+  // the renderer can scroll it into view.
+  //
+  // This used to be Keys-only, on the reasoning that "the field tabs are short
+  // enough to never need this". That was wrong on any short terminal: the modal
+  // is 60% of the height, so 24 lines leave ~6 body rows, and the TUI tab has
+  // had more fields than that since well before #367 added an 8th. The result
+  // was a selection that walked off screen — the user cycling or editing a row
+  // they cannot see (Codex review #368 P2).
+  let body = match tab {
+    SettingsTab::All => SettingsBody::inert(settings_all_lines(app, text_w)),
+    SettingsTab::Keys => settings_keys_lines(app, text_w),
+    other => settings_fields_lines(app, other.fields(), text_w),
+  };
+  let SettingsBody {
+    lines: body_lines,
+    rows: body_rows_map,
+    selected_line,
+  } = body;
+  debug_assert_eq!(
+    body_lines.len(),
+    body_rows_map.len(),
+    "every body line has to say which row it belongs to, or the click map lies"
+  );
+  // Row count taken from the map rather than from `panel.selectable_count()`:
+  // one of them is what was drawn, and that is the one a click has to agree
+  // with.
+  let selectable = body_rows_map.iter().flatten().copied().max().map_or(0, |m| m + 1);
+  debug_assert_eq!(
+    body_lines.len(),
+    body_rows,
+    "the row count the panel was sized to must be the number of lines built"
+  );
 
   // Publish scroll bounds against the BODY viewport only (issue #279).
   let body_viewport = body_area.height as usize;
@@ -5578,6 +6234,25 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
   let x_scroll = app.config_panel.x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+
+  // Rows, with the line→row map the body pass already produced (issue #624).
+  // Published against `text_area`, the rect the paragraph rendered into, so
+  // the scrollbar column is not a click target.
+  if selectable > 0 {
+    map.push_mapped_rows(text_area, RowList::Config, scroll as usize, selectable, body_rows_map);
+  }
+
+  // Resolved against the rect the line actually renders into, not against a
+  // width recomputed from the frame: #550 is the story of a second copy of a
+  // sizing rule, and the nav footer drops a verb rather than be clipped.
+  let footer_owned = if let Some(single) = capture_single {
+    config_capture_footer_hints(&app.modal_keymap, single)
+  } else if editing {
+    config_edit_footer_hints(&app.modal_keymap)
+  } else {
+    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind, footer_area.width)
+  };
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
@@ -5696,21 +6371,26 @@ fn form_field_lines(
   type_desc: &str,
   value_w: usize,
   label_w: usize,
-) -> (Vec<Line<'static>>, Option<usize>) {
+) -> (Vec<Line<'static>>, Option<usize>, Vec<Option<usize>>) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let surface = app.theme.selection_bg;
   let label = |s: &str| format!("{:<label_w$}", s);
 
   let mut lines: Vec<Line<'static>> = Vec::new();
+  // Field index per body line, for the click map (user feedback on #624).
+  // The form spaces its rows out, so line N is not field N.
+  let mut rows: Vec<Option<usize>> = Vec::new();
   let mut focused_row = None;
-  for field in app.create_form.fields() {
+  for (i, field) in app.create_form.fields().iter().enumerate() {
     if !lines.is_empty() {
       lines.push(Line::from(String::new()));
+      rows.push(None);
     }
     if *field == app.create_form.field {
       focused_row = Some(lines.len());
     }
+    rows.push(Some(i));
     lines.push(match field {
       Field::Type => type_selector_line(
         &label("Type"),
@@ -5739,10 +6419,13 @@ fn form_field_lines(
         surface,
       ),
       // `Name` belongs to free-form mode, which never reaches this list.
-      Field::Name => continue,
+      Field::Name => {
+        rows.pop();
+        continue;
+      }
     });
   }
-  (lines, focused_row)
+  (lines, focused_row, rows)
 }
 
 /// The vertical scroll that keeps line `focus` inside a `height`-row viewport,
@@ -5767,7 +6450,7 @@ pub fn form_field_scroll(focus: usize, height: u16) -> u16 {
   (focus + 1).saturating_sub(height as usize) as u16
 }
 
-fn draw_create(f: &mut Frame, app: &App) {
+fn draw_create(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let clean = app.theme.clean;
@@ -5784,7 +6467,7 @@ fn draw_create(f: &mut Frame, app: &App) {
     Mode::FromIssue => "New Worktree (from issue)",
     Mode::Structured => "New Worktree",
   };
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
+  let frame = ModalFrame::resolve_for(app, clean);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
   let inner_w = frame.inner(outer).width as usize;
@@ -5838,6 +6521,10 @@ fn draw_create(f: &mut Frame, app: &App) {
   // Which row carries the focused input, so a form taller than the terminal
   // can scroll it into view rather than lose it off the bottom (issue #553).
   let focused_row;
+  // Field index per body line for the click map — empty in the one-input
+  // modes, where the single field already holds the focus and a click on it
+  // would change nothing (user feedback on issue #624).
+  let mut field_rows: Vec<Option<usize>> = Vec::new();
   if from_issue {
     // One input, whatever the patterns carry: the number is fetched, not
     // written, so a `{type}/{desc}` repo still has an issue to read.
@@ -5864,14 +6551,16 @@ fn draw_create(f: &mut Frame, app: &App) {
     ));
   } else {
     let base = lines.len();
-    let (fields, focused) = form_field_lines(app, type_str, type_desc, value_w, label_w);
+    let (fields, focused, rows) = form_field_lines(app, type_str, type_desc, value_w, label_w);
     focused_row = focused.map(|row| base + row);
+    // Offset into the whole body: the preview rows above are not fields.
+    field_rows = std::iter::repeat_n(None, base).chain(rows).collect();
     lines.extend(fields);
   }
 
   let height = lines.len() as u16 + 4 + frame.rows();
   let area = centered_content(70, 56, 72, height, term);
-  let content = frame.render(f, area, title, None);
+  let content = frame.render(f, map, area, title, None);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -5883,7 +6572,15 @@ fn draw_create(f: &mut Frame, app: &App) {
     ])
     .split(content);
 
-  render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  let body = render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  // Nothing clickable while the create is in flight: the event loop already
+  // ignores the keyboard on this view, and the worker runs against the values
+  // captured at submit. A chevron that still moved `type_index` would leave a
+  // failure showing a branch type other than the one it failed on (Codex
+  // review on #624).
+  if !app.is_create_worktree_loading() {
+    push_form_targets(map, &body, &field_rows, app, type_str, label_w);
+  }
 
   if app.is_create_worktree_loading() {
     f.render_widget(
@@ -5896,7 +6593,7 @@ fn draw_create(f: &mut Frame, app: &App) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.create_failure.as_deref() {
+  } else if let Some(error) = app.create_form.create_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("create failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
@@ -5928,11 +6625,94 @@ fn draw_create(f: &mut Frame, app: &App) {
 /// The scrollbar comes from the Settings panel's helper, which paints nothing
 /// while the content fits, so a form that did not have to scroll looks exactly
 /// as it did and one that did says so instead of truncating in silence.
-fn render_form_body(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, focused_row: Option<usize>, theme: &Theme) {
+/// Publish the structured create / rename form's click targets (user feedback
+/// on issue #624).
+///
+/// `field_rows` is the field index per body line, produced by the same pass
+/// that built the lines. Empty in the one-input modes, where the single field
+/// already holds the focus and a click on it would change nothing.
+fn push_form_targets(
+  map: &mut MouseMap,
+  body: &FormBody,
+  field_rows: &[Option<usize>],
+  app: &App,
+  type_str: &str,
+  label_w: usize,
+) {
+  if field_rows.is_empty() {
+    return;
+  }
+  let count = field_rows.iter().flatten().copied().max().map_or(0, |m| m + 1);
+  map.push_mapped_rows(
+    body.rect,
+    RowList::CreateForm,
+    body.offset as usize,
+    count,
+    field_rows.to_vec(),
+  );
+
+  // The two chevrons of the branch-type selector. They read as controls — the
+  // value sits between them as a chip — so they get their own targets rather
+  // than making the whole row cycle, which a click meant only to focus the
+  // field would then trip.
+  let Some(line) = app
+    .create_form
+    .fields()
+    .iter()
+    .position(|f| *f == Field::Type)
+    .and_then(|idx| field_rows.iter().position(|r| *r == Some(idx)))
+  else {
+    return;
+  };
+  // The row may be scrolled off the top of the viewport (issue #553), in
+  // which case it published nothing this frame.
+  let Some(row) = line.checked_sub(body.offset as usize) else {
+    return;
+  };
+  if row >= body.rect.height as usize {
+    return;
+  }
+  // Column arithmetic mirrored from `type_selector_line`: two indent cells,
+  // the label column, two gap cells, then `‹ `, the padded value, and ` ›`.
+  let gutter = 2 + label_w + 2;
+  let left = body.rect.x.saturating_add(gutter as u16);
+  let right = left.saturating_add(2 + cells(type_str) as u16 + 2);
+  for (x, forward) in [(left, false), (right, true)] {
+    map.push_spot(
+      Rect {
+        x,
+        y: body.rect.y.saturating_add(row as u16),
+        width: 2,
+        height: 1,
+      },
+      Spot::TypeChevron { forward },
+    );
+  }
+}
+
+/// Where [`render_form_body`] put the body, so the caller can publish click
+/// targets against the rect it actually drew into and the scroll it applied
+/// (issue #624).
+struct FormBody {
+  rect: Rect,
+  offset: u16,
+}
+
+fn render_form_body(
+  f: &mut Frame,
+  area: Rect,
+  lines: Vec<Line<'static>>,
+  focused_row: Option<usize>,
+  theme: &Theme,
+) -> FormBody {
   let total = lines.len();
   let offset = focused_row.map_or(0, |row| form_field_scroll(row, area.height));
   let text_area = scrollable_body_area(f, area, offset, total, theme);
   f.render_widget(Paragraph::new(lines).scroll((offset, 0)), text_area);
+  FormBody {
+    rect: text_area,
+    offset,
+  }
 }
 
 /// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).
@@ -6110,13 +6890,19 @@ pub fn modal_height(term_height: u16, content_rows: u16, min_rows: u16, max_rows
 /// Height bounds for the Settings panel (issue #569).
 ///
 /// The floor is the shortest tab that carries a real form: Worktree, whose
-/// three fields make an 11-row box. Only Theme is shorter (one row), and it
+/// three fields make a 12-row box. Only Theme is shorter (one row), and it
 /// gains two blank rows rather than shrinking to a sliver. The ceiling leaves
-/// about 25 rows of body, which covers the resolved-config tab outright and
+/// about 32 rows of body, which covers the resolved-config tab outright and
 /// gives the 173-row Keys tab a scroll window worth having without the panel
 /// swallowing the terminal. Both tabs scrolled before this change (#279), so
 /// a ceiling costs nothing they did not already handle.
-const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (11, 32);
+///
+/// Both moved by one and eight in #623, which is what the section rules and
+/// the blank ahead of each break cost: the TUI tab is 29 body rows now, and at
+/// the old 32-row ceiling a form the user opened deliberately would have
+/// scrolled by seven. The ceiling is still a ceiling, and `modal_height` takes
+/// `term_height - 4` after it, so a short terminal is unaffected.
+const SETTINGS_HEIGHT_BOUNDS: (u16, u16) = (12, 40);
 
 /// Modal width for the Link / Open prompts: wide enough for an issue or PR
 /// summary, capped so it stays a prompt rather than a page.
@@ -6291,6 +7077,17 @@ pub fn link_target_keys(ctx: HintContext, modal: &ModalKeymap) -> (String, Strin
 }
 
 pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
+  link_open_modal_body(app, title, selected).0
+}
+
+/// [`link_open_modal_lines`] plus the body line the first of the two target
+/// rows lands on (issue #624).
+///
+/// Returned by the builder rather than recomputed by the renderer: the rows
+/// sit under a status block whose height depends on what the forge fetch has
+/// landed, so counting them a second time would go wrong the moment that
+/// block grows a line.
+fn link_open_modal_body(app: &App, title: &str, selected: Option<LinkTarget>) -> (Vec<Line<'static>>, usize) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   // `title` no longer renders here — since #549 it rides the modal's top
@@ -6308,10 +7105,11 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
   let mut lines: Vec<Line<'static>> = Vec::new();
   lines.extend(github_status_lines(app, 56));
   lines.push(Line::from(""));
+  let first_target = lines.len();
   lines.push(link_target_line(&issue_key, "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
   lines.push(link_target_line(&pr_key, "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
   push_modal_hint(&mut lines, ctx, &app.keymap, &app.modal_keymap, &app.theme);
-  lines
+  (lines, first_target)
 }
 
 /// The merge confirmation (issue #551).
@@ -6326,7 +7124,7 @@ pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget
 /// the resolved method AND what that method does to the history, and the CI
 /// rollup. That last one is why the modal earns its keypress; merging on a
 /// red CI is the mistake worth one moment of friction.
-fn draw_confirm_merge(f: &mut Frame, app: &App) {
+fn draw_confirm_merge(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let danger = app.theme.prunable;
   let muted = app.theme.muted;
   let Some(m) = app.pending_merge() else {
@@ -6374,7 +7172,7 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
     Style::default().fg(muted),
   )));
 
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
+  let frame = ModalFrame::resolve_for(app, danger);
   let height = content.len() as u16 + 4 /* loader, buttons, gap, hint */ + frame.rows();
   let area = centered_content(62, 56, 80, height, f.area());
   let inner = Layout::default()
@@ -6386,7 +7184,7 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(frame.render(f, area, "Merge", None));
+    .split(frame.render(f, map, area, "Merge", None));
 
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
@@ -6434,6 +7232,7 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
       .alignment(Alignment::Center),
       inner[2],
     );
+    push_confirm_buttons(map, inner[2]);
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
         // The merge's own verbs (validation feedback): `delete branch`
@@ -6451,12 +7250,12 @@ fn draw_confirm_merge(f: &mut Frame, app: &App) {
   }
 }
 
-fn draw_confirm(f: &mut Frame, app: &App) {
+fn draw_confirm(f: &mut Frame, app: &App, map: &mut MouseMap) {
   // What this modal is about (issue #551). The countdown, the danger
   // border and the button row are shared; the summary is not, because the
   // consequence is not.
   if app.confirm_kind() == crate::tui::ConfirmKind::MergePr {
-    draw_confirm_merge(f, app);
+    draw_confirm_merge(f, app, map);
     return;
   }
   let muted = app.theme.muted;
@@ -6468,12 +7267,12 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // #484: the overlay is about the batch snapshotted when it opened, not
   // about wherever the cursor sits now.
   let targets = app.pending_delete();
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), danger, &app.theme);
+  let frame = ModalFrame::resolve_for(app, danger);
   if targets.is_empty() {
     let lines: Vec<Line<'static>> = vec![Line::from("nothing selected").centered()];
     let height = lines.len() as u16 + frame.rows();
     let area = centered_content(40, 40, 64, height, f.area());
-    let content = frame.render(f, area, delete_worktree_title(), None);
+    let content = frame.render(f, map, area, delete_worktree_title(), None);
     f.render_widget(Paragraph::new(lines), content);
     return;
   }
@@ -6585,7 +7384,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
-    .split(frame.render(f, area, &title, None));
+    .split(frame.render(f, map, area, &title, None));
 
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
@@ -6601,7 +7400,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.delete_failure.as_deref() {
+  } else if let Some(error) = app.confirm_ctx.delete_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("delete failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
@@ -6633,6 +7432,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       .alignment(Alignment::Center),
       inner[2],
     );
+    push_confirm_buttons(map, inner[2]);
 
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
@@ -6653,6 +7453,42 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 /// defaults to Cancel, so the destructive button is never the one a stray
 /// `Enter` lands on. Pure so the chip contract is pinned by
 /// `tests/tui_ui_helpers_tests.rs`.
+/// Publish the confirmation modal's two buttons (user feedback on issue
+/// #624).
+///
+/// The row is centre-aligned, so the columns come from the line's own widths
+/// rather than from the rect: ` Confirm `, three spaces, ` Cancel `, centred
+/// in `area`. Kept beside [`confirm_buttons_line`], which owns those widths,
+/// so the two cannot drift.
+fn push_confirm_buttons(map: &mut MouseMap, area: Rect) {
+  const CONFIRM: u16 = 9; // " Confirm "
+  const GAP: u16 = 3;
+  const CANCEL: u16 = 8; // " Cancel "
+  let total = CONFIRM + GAP + CANCEL;
+  if area.height == 0 || area.width < total {
+    return;
+  }
+  let start = area.x + (area.width - total) / 2;
+  map.push_spot(
+    Rect {
+      x: start,
+      y: area.y,
+      width: CONFIRM,
+      height: 1,
+    },
+    Spot::ConfirmButton { confirm: true },
+  );
+  map.push_spot(
+    Rect {
+      x: start + CONFIRM + GAP,
+      y: area.y,
+      width: CANCEL,
+      height: 1,
+    },
+    Spot::ConfirmButton { confirm: false },
+  );
+}
+
 pub fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
   let focused = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
@@ -6753,7 +7589,7 @@ pub fn bootstrap_report_lines(report: Option<&BootstrapReport>, theme: &Theme) -
   lines
 }
 
-fn draw_report(f: &mut Frame, app: &App) {
+fn draw_report(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let logs = bootstrap_report_lines(app.report.as_ref(), &app.theme);
 
@@ -6761,14 +7597,16 @@ fn draw_report(f: &mut Frame, app: &App) {
   // screen so a long report stays on-screen rather than a fixed 80%-tall
   // box (#187).
   let term = f.area();
-  // The nested ` Logs ` pane follows `[tui] layout` like every other
-  // section (issue #594): boxed it costs two rows, compact one.
-  let logs_chrome = Chrome::resolve(app.config.tui.layout.is_compact(), true, false, &app.theme);
-  let logs_height = (logs.len() as u16 + logs_chrome.rows()).max(3);
-  // Two rows shorter than pre-#549: the title and its spacer row moved
-  // into the top rule.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let height = (logs_height + 2 /* gap + hint */ + frame.rows()).min(term.height.saturating_mul(80) / 100);
+  // `Logs` is the subtitle, not a nested pane (issue #623). It used to be a
+  // `render_section` with its own chrome, which under `[tui] layout =
+  // "compact"` paints the same full-width accent band the modal's own title
+  // rides: two identical bars stacked, the second reading as a second title
+  // rather than as a label for what is under it. The other overlays put their
+  // live context on one centred subtitle row, so this one does too.
+  let frame = ModalFrame::resolve_for(app, accent);
+  let height = (logs.len() as u16 + 2 /* subtitle + spacer */ + 2 /* gap + hint */ + frame.rows())
+    .max(6)
+    .min(term.height.saturating_mul(80) / 100);
   // A text canvas, so a bare percentage rather than the bounded
   // [`modal_width`] policy (issue #550) — the same call the PTY overlay, the
   // command-log transcript and the note editor make, and for the same
@@ -6782,20 +7620,28 @@ fn draw_report(f: &mut Frame, app: &App) {
   // matters: the worst case is a compiler error, and the cap cut 64 cells
   // off it at 200 columns. No defect ever motivated the cap.
   let area = centered_abs(term.width.saturating_mul(80) / 100, height, term);
-  let inner = frame.render(f, area, "Bootstrap Report", None);
-  let layout = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([
-      Constraint::Min(3),    // logs pane
-      Constraint::Length(1), // hint gap
-      Constraint::Length(1), // hint
-    ])
-    .split(inner);
-  // The nested ` Logs ` pane keeps its own rules whatever the modal frame
-  // spends: it is a section *inside* a surface, the way the sidebar's are,
-  // and the modal has already spent the layout's chrome budget for the
-  // frame around it.
-  render_section(f, layout[0], " Logs ", SectionBody::new(&logs), logs_chrome, 0, None);
+  let inner = frame.render(f, map, area, "Bootstrap Report", None);
+  let [subtitle_area, body_area, _gap, hint_area] = Layout::vertical([
+    Constraint::Length(2), // subtitle + its spacer
+    Constraint::Min(1),    // the steps
+    Constraint::Length(1), // hint gap
+    Constraint::Length(1), // hint
+  ])
+  .areas(inner);
+  // The same subtitle treatment the Settings panel and the Keybindings overlay
+  // wear: the branch hue, italic, centred, so it reads as a label for the body
+  // rather than as the surface's name.
+  f.render_widget(
+    Paragraph::new(
+      Line::from(Span::styled(
+        "Logs",
+        Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC),
+      ))
+      .centered(),
+    ),
+    subtitle_area,
+  );
+  f.render_widget(Paragraph::new(logs), body_area);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::Report,
@@ -6803,7 +7649,7 @@ fn draw_report(f: &mut Frame, app: &App) {
       &app.modal_keymap,
       &app.theme,
     )),
-    layout[2],
+    hint_area,
   );
 }
 
@@ -6817,7 +7663,7 @@ fn draw_report(f: &mut Frame, app: &App) {
 /// which is why [`crate::tui::state::note_editor::NoteEditor`] does not try
 /// to know its own viewport ahead of a resize. That same call teaches the
 /// editor what a page key should move by.
-fn draw_note_editor(f: &mut Frame, app: &mut App) {
+fn draw_note_editor(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let area = centered(80, 80, f.area());
 
   let title = match app.note_editor.as_ref() {
@@ -6846,8 +7692,8 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
   };
   // Already rode the top rule before #549; routed through the shared
   // helper so it picks up the same bold accent as every other modal.
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme);
-  let inner = frame.render(f, area, &title, None);
+  let frame = ModalFrame::resolve_for(app, app.theme.accent);
+  let inner = frame.render(f, map, area, &title, None);
 
   // #557: the modal carries its own mode line on its last row. The
   // statusbar already says the same thing through the same
@@ -6923,7 +7769,7 @@ fn draw_note_editor(f: &mut Frame, app: &mut App) {
 /// occupies ~90 % × 90 % of the terminal, centred and drawn over the list
 /// view. The rendered PTY content fills the entire inner area of the block
 /// so the child process gets as much screen real-estate as possible.
-fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
+fn draw_pty_overlay(f: &mut Frame, app: &mut App, map: &mut MouseMap) {
   let term = f.area();
   let area = centered(90, 90, term);
 
@@ -6942,9 +7788,14 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   // No footer band: every row inside is the child process's own screen,
   // and a ground painted under its last line would read as a footer that
   // is not one.
-  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), app.theme.accent, &app.theme)
+  // No close button either (issue #624): the mouse belongs to the child here,
+  // so the event loop drops the event before the hit test and a painted `✕`
+  // would advertise a way out that does not work. `Esc` is the way out, and
+  // the footer hint says so.
+  let inner = ModalFrame::resolve_for(app, app.theme.accent)
     .without_footer()
-    .render(f, area, title, None);
+    .without_close()
+    .render(f, map, area, title, None);
 
   if let Some(pty) = app.pty_overlay.as_ref() {
     let pseudo_terminal = tui_term::widget::PseudoTerminal::new(pty.parser.screen());
@@ -6972,7 +7823,7 @@ fn viewport_height(pct_y: u16, area: Rect) -> u16 {
 /// has — the PTY overlay, the command-log transcript and the note editor. Every
 /// other overlay goes through [`centered_viewport`] or [`modal_width`], which
 /// bound the width (issue #550).
-fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+pub(crate) fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
   let v = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -7161,6 +8012,10 @@ pub struct ModalFrame {
   footer_fill: Color,
   /// `false` on the surfaces whose last row is content, not a footer.
   footer: bool,
+  /// `false` on the PTY overlay (issue #624): the mouse belongs to the child
+  /// there, so the event loop drops the event before the hit test runs and a
+  /// painted `✕` would be a button that can never be pressed.
+  close: bool,
 }
 
 impl ModalFrame {
@@ -7168,6 +8023,18 @@ impl ModalFrame {
   /// colour (`theme.accent` for most, `theme.prunable` for the destructive
   /// ones), and it drives the rules in one layout and the header band in
   /// the other.
+  /// [`Self::resolve`], with the close button dropped while the modal is
+  /// taking typed input (Codex review on #624) — see
+  /// [`App::modal_is_typing`].
+  pub fn resolve_for(app: &App, accent: Color) -> Self {
+    let frame = Self::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+    if app.modal_is_typing() {
+      frame.without_close()
+    } else {
+      frame
+    }
+  }
+
   pub fn resolve(compact: bool, accent: Color, theme: &Theme) -> Self {
     Self {
       compact,
@@ -7178,7 +8045,13 @@ impl ModalFrame {
       header: compact_header_style(true, theme),
       footer_fill: theme.section_bg,
       footer: true,
+      close: true,
     }
+  }
+
+  /// Drop the close button: this modal's clicks do not reach the hit test.
+  pub fn without_close(self) -> Self {
+    Self { close: false, ..self }
   }
 
   /// Drop the footer band: this modal's last row carries content, and a
@@ -7237,8 +8110,19 @@ impl ModalFrame {
   /// the Working Tree's per-category counts today. Compact has no rule to
   /// put it in, so it rides the right of the footer band, which is where
   /// the compact panes put their counter too.
-  pub fn render(&self, f: &mut Frame, area: Rect, title: &str, footer_right: Option<Line<'static>>) -> Rect {
+  pub fn render(
+    &self,
+    f: &mut Frame,
+    map: &mut MouseMap,
+    area: Rect,
+    title: &str,
+    footer_right: Option<Line<'static>>,
+  ) -> Rect {
     f.render_widget(Clear, area);
+    // Every modal is a lid over the list: a click anywhere on it belongs to
+    // it, not to the row underneath. Published first so the close button and
+    // whatever listing the caller draws land on top of it (issue #624).
+    map.push_pane(area, PaneId::Modal);
     if !self.compact {
       let mut block = overlay_block_titled(title, self.accent);
       if let Some(right) = footer_right {
@@ -7246,6 +8130,7 @@ impl ModalFrame {
       }
       let inner = block.inner(area);
       f.render_widget(block, area);
+      self.close_button(f, map, area, Style::default().fg(self.accent));
       return inner;
     }
 
@@ -7264,6 +8149,7 @@ impl ModalFrame {
       .style(Style::default().bg(self.fill)),
       header_area,
     );
+    self.close_button(f, map, area, self.header.bg(self.fill));
 
     // Footer band, painted before the caller's content so the hint line it
     // renders into that same row lands on top of the ground rather than
@@ -7287,6 +8173,46 @@ impl ModalFrame {
     }
 
     self.inner(area)
+  }
+
+  /// Paint the close affordance in the modal's top-right corner and report
+  /// it as a click target (user request on issue #624).
+  ///
+  /// Modals are opened with a key and closed with `Esc`, which the footer
+  /// hints say — but only once you have learned to read the footer. A `✕`
+  /// where every other program puts one is the affordance that needs no
+  /// learning, and it costs the corner, which carries nothing: the title is
+  /// centred and the bordered footer count rides the bottom rule.
+  ///
+  /// Lives here rather than in each `draw_*` because every modal in the TUI
+  /// goes through this one function — eighteen call sites, one button, no
+  /// modal that can be added later without one.
+  ///
+  /// Painted directly rather than as a block title so the rect the click
+  /// resolves against is the rect the glyph was drawn on. `✕` is
+  /// East-Asian-Ambiguous like the header affordances, so it is given a pad
+  /// cell on each side; the whole three-cell rect is clickable, which is the
+  /// forgiving half of a small target.
+  fn close_button(&self, f: &mut Frame, map: &mut MouseMap, area: Rect, style: Style) {
+    // A modal narrow enough that the button would collide with its own
+    // corner goes without: an unreachable title is worse than no button. Nor
+    // is one drawn where a click cannot reach it (see [`Self::close`]) — a
+    // dead button is worse than none, because it says the modal closes that
+    // way and it does not.
+    if !self.close || area.width < CLOSE_BUTTON_W + 4 || area.height == 0 {
+      return;
+    }
+    let rect = Rect {
+      x: area.x + area.width - CLOSE_BUTTON_W - 1,
+      y: area.y,
+      width: CLOSE_BUTTON_W,
+      height: 1,
+    };
+    f.render_widget(
+      Paragraph::new(Line::from(Span::styled(format!(" {} ", CLOSE_ICON), style))),
+      rect,
+    );
+    map.push_spot(rect, Spot::CloseModal);
   }
 }
 
@@ -7471,32 +8397,49 @@ fn trunc(s: &str, max: usize) -> String {
 
 // ---- Issue/PR linking (issue #67) ---------------------------------------
 
-fn draw_open_menu(f: &mut Frame, app: &App) {
+fn draw_open_menu(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let title = "Open in Browser";
-  let lines = link_open_modal_lines(app, title, Some(app.open_menu_selected));
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let (lines, first_target) = link_open_modal_body(app, title, Some(app.open_menu_selected));
+  let frame = ModalFrame::resolve_for(app, accent);
   let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
-  let content = frame.render(f, area, title, None);
+  let content = frame.render(f, map, area, title, None);
   f.render_widget(Paragraph::new(lines), content);
+
+  // Issue then Pull Request, in the order they were pushed (issue #624).
+  map.push_rows(
+    Rect {
+      y: content.y.saturating_add(first_target as u16),
+      height: 2,
+      ..content
+    },
+    RowList::OpenMenu,
+    0,
+    2,
+  );
 }
 
-fn draw_link_prompt(f: &mut Frame, app: &App) {
+fn draw_link_prompt(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   // Each stage names the frame it draws (issue #549): the title rides the
   // top rule now, so it is resolved alongside the lines rather than
   // prepended to them.
   let mut title = String::from("Link");
+  // Body line the two target rows start on, for the click map — `None` in the
+  // number stage, which has no rows to pick (issue #624).
+  let mut first_target: Option<usize> = None;
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => {
       // A vertical selectable list (#217): j/k move the highlight, Enter
       // links the highlighted row, i/p stay direct picks. The highlighted
       // row reads in the accent.
       let selected = app.link_prompt_selected();
-      link_open_modal_lines(app, "Link", Some(selected))
+      let (lines, first) = link_open_modal_body(app, "Link", Some(selected));
+      first_target = Some(first);
+      lines
     }
     LinkPromptStage::InputNumber => {
       let label = match app.link_prompt_target() {
@@ -7517,13 +8460,25 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       lines
     }
   };
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let height = lines.len() as u16 + frame.rows();
   let term = f.area();
   let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
-  let content = frame.render(f, area, &title, None);
+  let content = frame.render(f, map, area, &title, None);
   f.render_widget(Paragraph::new(lines), content);
+  if let Some(first) = first_target {
+    map.push_rows(
+      Rect {
+        y: content.y.saturating_add(first as u16),
+        height: 2,
+        ..content
+      },
+      RowList::LinkPrompt,
+      0,
+      2,
+    );
+  }
 }
 
 /// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
@@ -7576,7 +8531,7 @@ pub fn picker_window(len: usize, selected: usize, max_visible: usize) -> (usize,
 /// the labels start at the same column and the selection highlight reads as a
 /// full-width bar — and the visible window follows `selected` with
 /// `↑ / ↓ N more` markers (centred) when the list overflows `max_visible`.
-fn picker_lines(
+pub(crate) fn picker_lines(
   labels: &[&str],
   selected: usize,
   max_visible: usize,
@@ -7625,47 +8580,12 @@ fn picker_lines(
   out
 }
 
-/// Render the exec profile picker overlay (issue #325). A small centred
-/// modal listing the `[exec.profiles.*]` names; the highlighted row reads in
-/// the accent (with a selection bar) and a `▸` marker, the rest muted. The
-/// list is aligned, same-width, and scrolls to keep the highlight in view.
-/// `Enter` resolves the highlight and the run loop spawns it in a PTY overlay.
-fn draw_exec_picker(f: &mut Frame, app: &App) {
-  let accent = app.theme.accent;
-  let term = f.area();
-  let width = overlay_modal_width(term.width);
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
-  let inner = width.saturating_sub(frame.cols()) as usize;
-  let mut lines: Vec<Line<'static>> = Vec::new();
-  // Leave room for the title + hint + borders; the picker scrolls past that.
-  let max_visible = (term.height as usize).saturating_sub(8).max(3);
-  let labels: Vec<&str> = app.exec_picker.profiles().iter().map(String::as_str).collect();
-  lines.extend(picker_lines(
-    &labels,
-    app.exec_picker.selected_index(),
-    max_visible,
-    inner,
-    &app.theme,
-  ));
-  push_modal_hint(
-    &mut lines,
-    HintContext::ExecPicker,
-    &app.keymap,
-    &app.modal_keymap,
-    &app.theme,
-  );
-  let height = lines.len() as u16 + frame.rows();
-  let area = centered_abs(width, height, term);
-  let content = frame.render(f, area, "Run an exec profile", None);
-  f.render_widget(Paragraph::new(lines), content);
-}
-
 /// Render the generic detail overlay (issue #408). A centred modal listing
 /// `(label, value)` rows with theme-mapped roles — agent sessions today, the
 /// rich PR/Issue view tomorrow. Content is prebuilt state
 /// ([`crate::tui::state::detail_overlay::DetailOverlay`]); this function
 /// only paints it, so the render path stays pure.
-fn draw_detail_overlay(f: &mut Frame, app: &App) {
+fn draw_detail_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
   use crate::tui::state::detail_overlay::{DetailMode, DetailRole};
   let accent = app.theme.accent;
   let term = f.area();
@@ -7676,7 +8596,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // width and painting at another either ellipsises the tail of every line
   // or leaves a column of dead space down the right edge.
   let width = detail_overlay_width(app.detail_overlay.kind, term.width);
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme);
+  let frame = ModalFrame::resolve_for(app, accent);
   let inner = width.saturating_sub(frame.cols()) as usize;
   let ov = &app.detail_overlay;
 
@@ -7733,7 +8653,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let filter_frame = frame.without_footer();
     let height = (2 + list_h) as u16 + filter_frame.rows();
     let area = centered_abs(width, height, term);
-    let content = filter_frame.render(f, area, "Filter CI checks", None);
+    let content = filter_frame.render(f, map, area, "Filter CI checks", None);
     f.render_widget(Paragraph::new(lines), content);
     // Scrollbar over the LISTING sub-area (Codex review #455): the rows
     // start after the frame's own chrome plus the query line and its blank
@@ -7747,6 +8667,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     .intersection(area);
     if list_rect.height > 0 {
       let _ = scrollable_body_area(f, list_rect, start as u16, matches.len(), &app.theme);
+      map.push_rows(list_rect, RowList::DetailInput, start, matches.len());
     }
     return;
   }
@@ -7818,7 +8739,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     ));
     let height = lines.len() as u16 + frame.rows();
     let area = centered_abs(width, height, term);
-    let content = frame.render(f, area, "Attach a session", None);
+    let content = frame.render(f, map, area, "Attach a session", None);
     f.render_widget(Paragraph::new(lines), content);
     // Scrollbar over the listing sub-area when the candidates overflow the
     // fixed window — same affordance as the detail mode below (issue #445).
@@ -7834,6 +8755,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     .intersection(area);
     if list_rect.height > 0 {
       let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
+      map.push_rows(list_rect, RowList::DetailInput, start, candidates.len());
     }
     return;
   }
@@ -8039,7 +8961,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let chrome = if tabs.is_empty() { 2 } else { 4 };
   let height = (visible + chrome) as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  let content = frame.render(f, area, &ov.title, None);
+  let content = frame.render(f, map, area, &ov.title, None);
   f.render_widget(Paragraph::new(lines), content);
   // Scrollbar over the rows sub-area (right padding column) when the list
   // overflows — the missing affordance from the feedback.
@@ -8054,6 +8976,9 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   .intersection(area);
   if rows_rect.height > 0 {
     let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
+    // The same rect the scrollbar is measured against, which is the rect the
+    // rows are painted on (issue #624).
+    map.push_rows(rows_rect, RowList::Detail, start, total);
   }
 }
 
@@ -8063,7 +8988,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
 /// preserved names, and a danger-coloured armed indicator while the safety
 /// countdown runs. The live countdown progresses on the status bar; the
 /// border switches to the danger colour once armed.
-fn draw_clean_overlay(f: &mut Frame, app: &App) {
+fn draw_clean_overlay(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let danger = app.theme.prunable;
@@ -8071,16 +8996,21 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let border = if armed { danger } else { accent };
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), border, &app.theme);
+  let frame = ModalFrame::resolve_for(app, border);
   let inner = width.saturating_sub(frame.cols()) as usize;
 
   let mut lines: Vec<Line<'static>> = Vec::new();
 
   // Profile picker — the `(default)` choice plus any `[clean.profiles]`.
   // Full-width, scrollable; only rendered when named profiles exist.
+  // The picker's window, kept so the rows can be published against the
+  // content rect once the frame exists (issue #624).
+  let mut picker_rows: Option<(usize, usize, usize)> = None;
   if app.clean_overlay.has_profiles() {
     let labels = app.clean_overlay.choice_labels();
     let max_visible = (term.height as usize).saturating_sub(14).max(3);
+    let (start, end) = picker_window(labels.len(), app.clean_overlay.selected_index(), max_visible);
+    picker_rows = Some((start, end, labels.len()));
     lines.extend(picker_lines(
       &labels,
       app.clean_overlay.selected_index(),
@@ -8177,8 +9107,25 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   );
   let height = lines.len() as u16 + frame.rows();
   let area = centered_abs(width, height, term);
-  let content = frame.render(f, area, "Reclaim build artifacts", None);
+  let content = frame.render(f, map, area, "Reclaim build artifacts", None);
   f.render_widget(Paragraph::new(lines), content);
+
+  // The picker leads the modal, so its rows start at the content rect — one
+  // lower when a `↑ N more` marker took the first line.
+  if let Some((start, end, total)) = picker_rows {
+    if end > start {
+      map.push_rows(
+        Rect {
+          y: content.y + u16::from(start > 0),
+          height: (end - start) as u16,
+          ..content
+        },
+        RowList::CleanPicker,
+        start,
+        total,
+      );
+    }
+  }
 }
 
 /// Render the command palette overlay (issue #32).
@@ -8192,9 +9139,9 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
 /// same Create form state (Type / Issue / Desc) pre-filled from the current
 /// branch — plus a `From :` line showing the original branch, an async
 /// "renaming…" loader, and an inline failure surfaced from
-/// `App::edit_failure`. State lives on `App::create_form` +
-/// `App::edit_original_branch`.
-fn draw_edit_worktree(f: &mut Frame, app: &App) {
+/// `CreateForm::edit_failure`. State lives on `App::create_form` +
+/// `CreateForm::edit_original_branch`.
+fn draw_edit_worktree(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let clean = app.theme.clean;
@@ -8207,7 +9154,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     .unwrap_or(("", "(no branch types configured)"));
 
   let title = "Rename Worktree";
-  let frame = ModalFrame::resolve(app.config.tui.layout.is_compact(), clean, &app.theme);
+  let frame = ModalFrame::resolve_for(app, clean);
   let term = f.area();
   let outer = centered_content(70, 56, 72, 1, term);
   let inner_w = frame.inner(outer).width as usize;
@@ -8217,6 +9164,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 
   let label = |s: &str| format!("{:<label_w$}", s);
   let old_branch = app
+    .create_form
     .edit_original_branch
     .as_deref()
     .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
@@ -8256,6 +9204,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   // here in the first place was that these rows did not exist. Which rows the
   // structured side needs comes from the patterns (#418).
   let focused_row;
+  let mut field_rows: Vec<Option<usize>> = Vec::new();
   if freeform {
     focused_row = Some(lines.len());
     lines.push(field_input_line(
@@ -8269,14 +9218,15 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     ));
   } else {
     let base = lines.len();
-    let (fields, focused) = form_field_lines(app, type_str, type_desc, value_w, label_w);
+    let (fields, focused, rows) = form_field_lines(app, type_str, type_desc, value_w, label_w);
     focused_row = focused.map(|row| base + row);
+    field_rows = std::iter::repeat_n(None, base).chain(rows).collect();
     lines.extend(fields);
   }
 
   let height = lines.len() as u16 + 4 + frame.rows();
   let area = centered_content(70, 56, 72, height, term);
-  let content = frame.render(f, area, title, None);
+  let content = frame.render(f, map, area, title, None);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -8288,7 +9238,12 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     ])
     .split(content);
 
-  render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  let body = render_form_body(f, inner[0], lines, focused_row, &app.theme);
+  // Same load lock as the create form: the rename worker runs against the
+  // values captured at submit.
+  if !app.is_edit_worktree_loading() {
+    push_form_targets(map, &body, &field_rows, app, type_str, label_w);
+  }
 
   if app.is_edit_worktree_loading() {
     f.render_widget(
@@ -8301,7 +9256,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       .alignment(Alignment::Center),
       inner[1],
     );
-  } else if let Some(error) = app.edit_failure.as_deref() {
+  } else if let Some(error) = app.create_form.edit_failure.as_deref() {
     f.render_widget(
       LoaderWidget::failed("rename failed", Some(error), &app.theme).alignment(Alignment::Center),
       inner[1],
@@ -8328,15 +9283,10 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   }
 }
 
-fn draw_command_palette(f: &mut Frame, app: &App) {
+fn draw_command_palette(f: &mut Frame, app: &App, map: &mut MouseMap) {
   let area = centered_viewport(60, 64, 96, 50, f.area());
   let accent = app.theme.accent;
-  let inner = ModalFrame::resolve(app.config.tui.layout.is_compact(), accent, &app.theme).render(
-    f,
-    area,
-    "Command Palette",
-    None,
-  );
+  let inner = ModalFrame::resolve_for(app, accent).render(f, map, area, "Command Palette", None);
 
   // Input-first layout (issue #262): the `:` input field
   // (background-filled, mirroring the New Worktree modal's
@@ -8401,6 +9351,10 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     )));
   }
   f.render_widget(Paragraph::new(lines), layout[2]);
+  // One line per match, unscrolled — the palette never pages (issue #624).
+  // The empty-state line published nothing: `entries` is empty, so the length
+  // bound rejects every row.
+  map.push_rows(layout[2], RowList::Palette, 0, entries.len());
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::CommandPalette,

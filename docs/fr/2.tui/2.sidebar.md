@@ -104,20 +104,38 @@ nerd-font** imbriqué (issue [#300](https://github.com/kbrdn1/gwm-cli/issues/300
 plutôt qu'une liste plate `XY PATH` :
 
 ```
- src/
-├─  tui/
-│  ├─  app.rs        M
-│  └─  theme.rs      A
-└─  worktree.rs      M
- docs/               ?
+├─ ▾ src/tui
+│  ├─  app.rs                    M
+│  └─  theme.rs                  A
+├─  worktree.rs                  M
+└─ ▾ docs
+   └─  README.md                 ?
 ```
 
 - **Les dossiers sont triés avant les fichiers**, par ordre alphabétique au sein
   de chaque niveau.
 - **Les chaînes de dossiers à enfant unique sont fusionnées** (`src/tui/` affiché
-  sur une seule ligne, puis le fichier en dessous).
+  sur une seule ligne, puis les fichiers en dessous).
+- **Les lignes de dossier commencent par un chevron `▾`** et ne portent aucune
+  icône de fichier (issue
+  [#622](https://github.com/kbrdn1/gwm-cli/issues/622)), pour que les deux
+  niveaux se distinguent par la forme et pas seulement par l'indentation.
 - Chaque ligne de fichier porte une **icône de type de fichier pilotée par
-  l'extension** plus son badge de statut `M` / `A` / `D` / `?`.
+  l'extension** et son nom.
+- La **lettre de statut** `M` / `A` / `D` / `?` occupe **sa propre colonne
+  alignée à droite** (issue
+  [#622](https://github.com/kbrdn1/gwm-cli/issues/622)) au lieu de précéder le
+  nom, pour qu'un gros changeset se lise comme une seule colonne de lettres.
+  Elle garde la couleur de sa catégorie, et reste collée au bord droit du
+  panneau à toutes les largeurs : la lettre est facturée bien moins cher que
+  la colonne `+N -M`, donc un panneau trop étroit pour les compteurs porte
+  quand même la lettre.
+- À l'intérieur des lettres, les **compteurs de lignes** `+N -M` de chaque
+  fichier, la même colonne que la surcouche plein écran (issue
+  [#592](https://github.com/kbrdn1/gwm-cli/issues/592)). Un dossier, un
+  fichier non suivi et un fichier binaire n'en portent aucun. C'est la
+  première chose qu'un panneau qui rétrécit abandonne, la lettre la
+  dernière.
 - Les **lignes de connexion de l'arbre** (`├─` / `└─` / `│`) dessinent la
   hiérarchie comme `tree(1)`, peintes dans le rôle muted. Un espace
   supplémentaire complète chaque glyphe nerd-font (la plupart sont rendus en

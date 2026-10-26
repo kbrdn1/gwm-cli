@@ -2,8 +2,15 @@
 # Captured against the real gwm-cli repo, because the acme-api demo has no
 # remote and this pane needs one. It reads the checkout's current branch, so it
 # wants to run from a branch whose PR is open; `F` fetches, then screenshot.
-# No filter: the pane follows the selected row, and the default selection is the
-# checkout the tape cds into.
+# No filter: the pane follows the selected row, and that row is the repo's main
+# checkout, not the directory the tape cds into. Measured on a run launched from
+# a clean linked worktree: the capture came back on the trunk's branch, with the
+# trunk's PR and the trunk's uncommitted files.
+#
+# The path comes from GWM_CAPTURE_REPO, which generate.sh sets to the trunk of
+# the repo it is capturing, so the cd lands on the tree the script gated as
+# clean; the fallback keeps a bare `vhs docs/_capture/github-linking.tape`
+# working, on the one machine that path exists (#631).
 Output docs/_capture/.tmp/github-linking.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
@@ -16,7 +23,7 @@ Set Theme { "name": "gwm-grey", "background": "#141414", "foreground": "#d6d6d6"
 Hide
 Type `export PS1="$ "`
 Enter
-Type "cd /Users/kbrdn1/Projects/Perso/gwm-cli"
+Type `cd "${GWM_CAPTURE_REPO:-/Users/kbrdn1/Projects/Perso/gwm-cli}"`
 Enter
 Type "clear"
 Enter

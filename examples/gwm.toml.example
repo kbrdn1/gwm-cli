@@ -307,6 +307,18 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #   [tui]
 #   dim_unfocused = true
 #
+# `mouse` decides whether the TUI reads mouse events at all (issue #624). On
+# by default: clicking a row, a pane, a modal listing or the header's `▤` /
+# `⚙` all go through it. It is a real trade — reading the mouse and letting
+# the terminal run its own text selection are mutually exclusive, since while
+# gwm is reading, a drag belongs to gwm — so set it to `false` if you copy
+# paths with the pointer more often than you click rows. `M` flips it for the
+# session either way, and the header carries a ` mouse off · M ` chip while it
+# is off.
+#
+#   [tui]
+#   mouse = false
+#
 # The header fill is the `section_bg` theme role (`gwm theme show` lists it
 # with the rest), an indexed colour rather than a translucent white so it
 # survives a terminal without truecolor.

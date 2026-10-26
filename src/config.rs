@@ -879,6 +879,21 @@ pub struct TuiConfig {
   #[serde(default)]
   pub dim_unfocused: bool,
 
+  /// Whether the TUI reads mouse events (issue #624).
+  ///
+  /// Default `true`: clicking a row, a pane, a modal listing or the header's
+  /// panel affordances all go through it, and it is what the capture gwm has
+  /// always enabled was finally spent on.
+  ///
+  /// It is a genuine trade rather than a strict improvement. Reading the
+  /// mouse and letting the terminal run its own text selection are mutually
+  /// exclusive — while gwm is reading, a drag belongs to gwm — so a user who
+  /// copies paths with the pointer more often than they click rows is better
+  /// off with `false`. `M` flips it for the session either way, and the
+  /// header says which state it is in.
+  #[serde(default = "default_mouse")]
+  pub mouse: bool,
+
   /// Fold the sidebar's Status block onto a single line (issue #547).
   ///
   /// Default `true`: the four values (branch · head · state · diff ·
@@ -1107,6 +1122,7 @@ impl Default for TuiConfig {
       macro2: None,
       layout: TuiLayout::Compact,
       dim_unfocused: false,
+      mouse: default_mouse(),
       status_one_line: default_status_one_line(),
       mux_open_in: MuxTarget::default(),
       mux_pane_direction: SplitDirection::default(),
@@ -1693,6 +1709,12 @@ fn default_note_vim() -> bool {
 
 fn default_auto_refresh_secs() -> u64 {
   60
+}
+
+/// gwm reads the mouse out of the box. See [`TuiConfig::mouse`] for the trade
+/// that makes it a knob rather than a fact.
+fn default_mouse() -> bool {
+  true
 }
 
 /// Read a config file as a raw `toml::Value` (always a table at the

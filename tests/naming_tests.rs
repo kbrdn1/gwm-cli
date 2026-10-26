@@ -1340,8 +1340,14 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   // `(` that the first version of this scan assumed: #494 turned the chain of
   // `replace("{token}", …)` calls into a `match token { "{token}" => … }`, so
   // anchoring on the paren silently found nothing and the guard passed while
-  // classifying an empty set. The `found.len() >= 5` assertion below is what
-  // caught that, and is why it is written as a floor rather than a comment.
+  // classifying an empty set. The `found.len()` assertion below is what caught
+  // that, and is why it is written as a floor rather than a comment.
+  //
+  // The floor is 7, the exact size of the substituted set, re-measured for
+  // #649: it had been left at 5 while two tokens were added, so two could drop
+  // back out of the scan with the classification below still green over the
+  // remaining five. Exact on purpose, per the floor policy that issue settled:
+  // this is a set the repo owns, so a red here is an edit to acknowledge.
   let mut found: Vec<String> = Vec::new();
   let mut rest = body;
   while let Some(open) = rest.find("\"{") {
@@ -1353,7 +1359,7 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   found.sort();
   found.dedup();
   assert!(
-    found.len() >= 5,
+    found.len() >= 7,
     "the token scan found only {:?} — the extraction broke, not the compiler",
     found
   );
@@ -2211,8 +2217,14 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
   // `(` that the first version of this scan assumed: #494 turned the chain of
   // `replace("{token}", …)` calls into a `match token { "{token}" => … }`, so
   // anchoring on the paren silently found nothing and the guard passed while
-  // classifying an empty set. The `found.len() >= 5` assertion below is what
-  // caught that, and is why it is written as a floor rather than a comment.
+  // classifying an empty set. The `found.len()` assertion below is what caught
+  // that, and is why it is written as a floor rather than a comment.
+  //
+  // The floor is 7, the exact size of the substituted set, re-measured for
+  // #649: it had been left at 5 while two tokens were added, so two could drop
+  // back out of the scan with the classification below still green over the
+  // remaining five. Exact on purpose, per the floor policy that issue settled:
+  // this is a set the repo owns, so a red here is an edit to acknowledge.
   let mut found: Vec<String> = Vec::new();
   let mut rest = body;
   while let Some(open) = rest.find("\"{") {
@@ -2224,7 +2236,7 @@ fn every_substituted_token_is_either_context_resolved_or_a_form_field() {
   found.sort();
   found.dedup();
   assert!(
-    found.len() >= 5,
+    found.len() >= 7,
     "the token scan found only {:?} — the extraction broke, not the classification",
     found
   );

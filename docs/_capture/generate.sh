@@ -4,9 +4,29 @@
 #   ./docs/_capture/generate.sh            # rebuild demo + all captures
 #   GWM_KEEP_DEMO=1 ./docs/_capture/generate.sh   # reuse the existing demo
 #
-# Run from the repo root. Requires: vhs, gwm (installed), a Nerd Font.
+# Run from anywhere inside the checkout being captured. Requires: vhs, cargo,
+# a Nerd Font, and (for the one capture taken off the demo repo) `gh` plus a
+# branch with an open PR.
 # PNG stills come from `Screenshot` inside each tape; the tape's gif Output is
 # a throwaway written under .tmp/. Animated captures Output their gif directly.
+#
+# The order below is three constraints rather than a preference (#631):
+#
+#   1. the binary is built *here* and put first on PATH. 17 tapes photograph
+#      the TUI header, which paints `gwm X.Y.Z` from CARGO_PKG_VERSION, so
+#      whichever `gwm` a shell resolves decides what the docs claim.
+#      version-stamp.tape asks vhs itself, and the run stops when the answer is
+#      not the version in Cargo.toml.
+#   2. github-linking.tape runs *first*, and only against a clean trunk: it
+#      opens the TUI on this repo, so its Working Tree pane photographs
+#      whatever is uncommitted there, starting with the captures this run
+#      rewrites. The trunk, not the current worktree: the pane follows the
+#      selected row, and that is row 1 wherever the tape was launched.
+#   3. demo.tape runs *last*: it creates and deletes a worktree and drops
+#      `.git/gwm/notes` in the demo fixture.
+#
+# Constraint 1 is also why a release regenerates *after* the version bump is
+# committed and not before; the whole sequence is in CONTRIBUTING.md § Releases.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -18,10 +38,45 @@ mkdir -p "$CAP/.tmp"
 # `run()`.
 mkdir -p docs/2.tui/_assets docs/3.cli/_assets docs/4.configuration/_assets
 
-if [[ "${GWM_KEEP_DEMO:-}" != "1" ]]; then
-  echo "▸ rebuilding demo repo"
-  bash "$CAP/setup-demo.sh" >/dev/null
+# ── the binary every tape drives ───────────────────────────────────────────
+# `gwm` is resolved by the shell vhs spawns, so without this the whole set
+# documents whichever build happens to sit on PATH: that is how v1.10.0 nearly
+# shipped captures of a UI 175 commits old, green and correctly sized (#631).
+# Built from the tree being captured and put first on PATH; the stamp below
+# proves it took, because a shell startup file can still shadow it.
+ROOT=$PWD
+VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+echo "▸ building gwm $VERSION from this tree"
+# `--locked`: after a version bump whose lock has not been regenerated, a plain
+# build rewrites Cargo.lock, which dirties the tree (so github-linking is
+# skipped) and captures from a resolution nobody committed, while release.yml
+# rebuilds with --locked and can fail. Better to stop here and say so.
+cargo build --release --locked >/dev/null
+# Where cargo actually put it, asked rather than derived. `CARGO_TARGET_DIR`
+# and `build.target-dir` move the tree; `CARGO_BUILD_TARGET` and `[build]
+# target` additionally insert a triple directory that `cargo metadata` does not
+# report. Cargo names the file itself in its artefact messages, so ask it: this
+# second build is fresh and costs nothing, and it keeps the first one's errors
+# human-readable instead of buried in JSON. `sed` rather than a JSON parser
+# because python3 is not a documented requirement of this script (and on a
+# stock recent macOS it is a stub that installs the command line tools).
+BIN=$(cargo build --release --locked --message-format=json |
+  sed -n 's/.*"executable":"\([^"]*\/gwm\)".*/\1/p' | tail -1)
+if [[ -z "$BIN" || ! -x "$BIN" ]]; then
+  echo "  ✗ cargo build --release reported no gwm executable (got '${BIN:-nothing}')"
+  exit 1
 fi
+BIN_DIR=$(dirname "$BIN")
+export PATH="$BIN_DIR:$PATH"
+# The one tape that opens the TUI on a real repo photographs the *selected
+# row*, and that row is the repo's main checkout whatever directory the tape
+# was launched from: gwm discovers the repo, not the worktree, and the default
+# selection is row 1. Measured rather than assumed. Run from a clean worktree,
+# the capture came back showing the trunk's branch, the trunk's PR and the
+# trunk's uncommitted `.gwm.toml`. So the tape is pointed at the trunk, and the
+# trunk is the tree the gate below reads.
+TRUNK=$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
+export GWM_CAPTURE_REPO="$TRUNK"
 
 # vhs exits 0 whether or not it wrote what the tape asked for, so a run has to
 # be checked against the files on disk rather than against its status. Two
@@ -64,19 +119,96 @@ run() {
 # branch or a commit owes the same pre-clean before it can go through here.
 run_checked() { run "$1" || { echo "  ↻ retrying $1"; run "$1"; }; }
 
+FAILED=()
+
+# ── provenance: the version every TUI capture is about to paint ───────────
+# Through vhs rather than from this shell: the tapes run an interactive bash
+# whose startup files can prepend a directory of their own, and only vhs's own
+# resolution answers the question the captures answer.
+STAMP="$CAP/.tmp/version.txt"
+WHICH="$CAP/.tmp/which.txt"
+rm -f "$STAMP" "$WHICH"
+echo "▸ version-stamp.tape"
+vhs "$CAP/version-stamp.tape" >/dev/null 2>&1 || true
+if [[ ! -s "$STAMP" ]]; then
+  echo "  ✗ version-stamp.tape produced nothing: is vhs installed, and is 'gwm' runnable?"
+  exit 1
+fi
+CAPTURED=$(tr -d '\r' < "$STAMP" | head -n 1)
+if [[ "$CAPTURED" != "gwm $VERSION" ]]; then
+  echo "  ✗ vhs resolves '$CAPTURED' but this tree is gwm $VERSION."
+  echo "    Every TUI capture would paint the wrong version chip. The build above put"
+  echo "    $BIN_DIR first on PATH, so something in the vhs shell's startup (a ~/.bashrc"
+  echo "    prepending ~/.cargo/bin, typically) is getting in front of it."
+  exit 1
+fi
+# The version is not enough on its own: a stale build carrying the same number
+# answers it identically, which is the shape the v1.10.0 near miss had (175
+# commits behind, same version). So compare the file. `-ef` is same device and
+# inode, so a symlink or a /private prefix does not read as a difference.
+RESOLVED=$(tr -d '\r' < "$WHICH" | head -n 1)
+if [[ -z "$RESOLVED" || ! "$RESOLVED" -ef "$BIN" ]]; then
+  echo "  ✗ vhs resolves gwm at '${RESOLVED:-nothing}', not the build at '$BIN'."
+  echo "    Same version is not the same binary: a build from another worktree answers"
+  echo "    the version check and paints a UI this tree never had. Something in the vhs"
+  echo "    shell's startup (a ~/.bashrc prepending ~/.cargo/bin, typically) is ahead of"
+  echo "    $BIN_DIR on PATH."
+  exit 1
+fi
+echo "  ✓ captured by $CAPTURED at $RESOLVED"
+
+# ── github-linking: the one capture taken off the demo fixture ────────────
+# It opens the TUI on a real repo, because the Issue·PR pane needs a remote
+# with a live PR and the demo has neither. Both of its preconditions live in
+# the trunk (see above) and both are invisible at capture time, since vhs exits
+# 0 over a dirty Working Tree pane and over an empty Issue·PR pane alike. So
+# they are checked here and the tape is skipped out loud rather than publishing
+# a photograph of a release in progress (#631).
+#
+# The corollary is that the capture documents the trunk, so a release wants to
+# be cut there: from a worktree, the shot shows whatever the trunk is on.
+GITHUB_LINKING=""
+BRANCH=$(git -C "$TRUNK" rev-parse --abbrev-ref HEAD)
+if [[ -n "$(git -C "$TRUNK" status --porcelain)" ]]; then
+  GITHUB_LINKING="$TRUNK is not clean, and its Working Tree pane is the shot"
+elif ! PR=$(cd "$TRUNK" && gh pr view --json number,state -q 'select(.state == "OPEN") | .number' 2>/dev/null) ||
+  [[ -z "$PR" ]]; then
+  # `state`, not merely a hit: `gh pr view` answers with a merged or closed PR
+  # just as readily, and the pane only has something to show for an open one.
+  GITHUB_LINKING="no open PR on $BRANCH in $TRUNK, so the Issue·PR pane would be empty"
+else
+  echo "▸ github-linking: $BRANCH → PR #$PR"
+  run_checked github-linking.tape || FAILED+=("github-linking.tape")
+fi
+# Said here as well as in the closing summary: the decision is taken in the
+# first seconds and the summary lands twenty minutes of tapes later, which is
+# too late to fix the tree and rerun.
+if [[ -n "$GITHUB_LINKING" ]]; then
+  echo "! github-linking skipped: $GITHUB_LINKING"
+fi
+
+# Everything above is the release-critical half: the binary, the version it
+# stamps, and the one capture whose preconditions live outside the fixture.
+# `tests/capture_pipeline_tests.rs` drives exactly that half against a
+# throwaway repo with stubbed cargo/vhs/gh, and stops here. The tapes below
+# need a real terminal, a Nerd Font and the demo fixture, so they stay out of
+# the suite and are checked by looking at the pixels.
+if [[ "${GWM_CAPTURE_PREFLIGHT_ONLY:-}" == "1" ]]; then
+  echo "✓ preflight only (GWM_CAPTURE_PREFLIGHT_ONLY=1)"
+  exit 0
+fi
+
+if [[ "${GWM_KEEP_DEMO:-}" != "1" ]]; then
+  echo "▸ rebuilding demo repo"
+  bash "$CAP/setup-demo.sh" >/dev/null
+fi
+
 # ── still + animated captures that use the default (grey) theme ────────────
 #
-# Two tapes are deliberately absent from this list and neither is reported at
-# the end, so the closing tick covers a set that still holds them stale (#575):
-#
-#   demo.tape            the one long-form recording; run on its own, after the
-#                        fixture exists (see docs/_capture/README.md)
-#   github-linking.tape  needs a remote with an open PR, which the demo fixture
-#                        has not, so it cds to the real gwm-cli checkout and
-#                        photographs whatever state it is in. Not reproducible
-#                        by anyone but the maintainer, and only meaningful from
-#                        a branch whose PR is open.
-FAILED=()
+# Every tape the demo fixture drives. The two that do not (github-linking
+# above, demo below) are ordered around this loop rather than left out of the
+# script: they were run by hand until #631, which is how the closing tick came
+# to cover a set holding two stale assets (#575).
 for t in hero sidebar side-by-side narrow  palette keymap keybindings \
          doctor trust-ledger bootstrap \
          agents cli-list cli-agents config-panel launchers open-dispatch \
@@ -149,6 +281,18 @@ if [[ -f "$CAP/bordered.tape" ]]; then
   [[ $rc -ne 0 ]] && { echo "  ✗ vhs failed on bordered.tape"; exit $rc; }
 fi
 
+# ── the long-form recording, last ──────────────────────────────────────────
+# Last because it is the only tape that changes the fixture for the ones after
+# it: it creates and deletes a worktree, and `rm -rf`s `.git/gwm/notes`. It
+# cleans up after itself at both ends, so the retry in run_checked is safe.
+#
+# It also degrades silently without the agent store: vhs records a perfectly
+# valid GIF where the AGENT column is simply absent, and no check here can see
+# that. Look at frame 0 before committing it (docs/_capture/README.md).
+if [[ -f "$CAP/demo.tape" ]]; then
+  run_checked demo.tape || FAILED+=("demo.tape")
+fi
+
 # ── shrink PNGs for the repo (lossless) ────────────────────────────────────
 if command -v oxipng >/dev/null 2>&1; then
   echo "▸ optimising PNGs"
@@ -163,4 +307,12 @@ if (( ${#FAILED[@]} )); then
   echo "✗ ${#FAILED[@]} tape(s) did not produce their asset, twice: ${FAILED[*]}"
   exit 1
 fi
-echo "✓ captures regenerated"
+
+# The provenance `tests/docs_assets_tests.rs` reads back, written only on a run
+# that produced everything: a half-finished set must not claim to be current.
+cp "$STAMP" "$CAP/captured-version.txt"
+
+if [[ -n "$GITHUB_LINKING" ]]; then
+  echo "! docs/5.integrations/_assets/github-linking.png left as it was: $GITHUB_LINKING"
+fi
+echo "✓ captures regenerated, $CAPTURED"

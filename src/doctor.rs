@@ -139,6 +139,7 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
   }
 
   report.checks.push(check_orphan_notes(ctx));
+  report.checks.push(check_orphan_branch_config(ctx));
   report.checks.push(check_base_dir_writable(ctx));
   report.checks.push(check_tui_keymap(ctx));
   report.checks.push(check_branch_pattern(ctx));
@@ -832,6 +833,85 @@ fn check_orphan_notes(ctx: &DoctorCtx<'_>) -> Check {
     "the branch is gone: delete the file under {} when the work has landed",
     crate::notes::notes_dir(ctx.repo).display()
   ))
+}
+
+/// Check (issue #633): `branch.<name>.gwm-*` keys whose branch is gone.
+///
+/// Not cosmetic, unlike the two orphan checks above. `gwm list` opens one
+/// `Repository` per worktree and libgit2 reparses `.git/config` on every
+/// open; `statuses()` and `branch.upstream()` then each take a
+/// `git_config_snapshot`, which duplicates every entry. Both costs are
+/// linear in the file's size, so the listing pays for branches that died
+/// months ago. Measured for this change, hyperfine, 8 worktrees held
+/// constant and the config size the only variable: 45 ms at 13 config
+/// lines, 184 ms at 1434.
+///
+/// The keys only ever accumulate: `gwm create` writes ~7 per branch,
+/// nothing removes them when the branch dies, and "never delete the source
+/// branch" (CONTRIBUTING) means none disappear on their own.
+///
+/// Warning, never Failed, and never purged as a side effect of running the
+/// doctor: this edits `.git/config`. `gwm doctor --fix` is the opt-in.
+fn check_orphan_branch_config(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "no orphan branch config";
+
+  let orphans = match crate::github::orphan_branch_config(ctx.repo) {
+    Ok(o) => o,
+    Err(e) => return Check::failed(name, format!("could not read branch config: {}", e)),
+  };
+  if orphans.is_empty() {
+    return Check::ok(name, "no gwm keys left behind by a deleted branch");
+  }
+
+  // A repo that has never been swept carries hundreds of these; naming
+  // them all would bury every other check in the report.
+  const SAMPLE: usize = 5;
+  let sample = |branches: &[(String, usize)]| {
+    let mut names: Vec<String> = branches
+      .iter()
+      .take(SAMPLE)
+      .map(|(b, _)| crate::naming::sanitise_for_terminal(b))
+      .collect();
+    if branches.len() > SAMPLE {
+      names.push(format!("… and {} more", branches.len() - SAMPLE));
+    }
+    names.join(", ")
+  };
+  let count = |branches: &[(String, usize)]| -> usize { branches.iter().map(|(_, n)| n).sum() };
+
+  let mut detail = Vec::new();
+  if !orphans.purgeable.is_empty() {
+    detail.push(format!(
+      "{} key(s) from {} deleted branch(es): {}",
+      count(&orphans.purgeable),
+      orphans.purgeable.len(),
+      sample(&orphans.purgeable)
+    ));
+  }
+  if !orphans.out_of_reach.is_empty() {
+    detail.push(format!(
+      "{} key(s) from {} deleted branch(es) live in a file pulled in by `include.path`: {}",
+      count(&orphans.out_of_reach),
+      orphans.out_of_reach.len(),
+      sample(&orphans.out_of_reach)
+    ));
+  }
+
+  // The hint has to name a remedy that can actually work. `--fix` rewrites
+  // `.git/config` and nothing else, so pointing at it for a key defined in
+  // an included file left the user in a loop: warn, run `--fix`, warn
+  // again, forever, with CI stuck at exit 1 (review of PR #640).
+  let hint = match (orphans.purgeable.is_empty(), orphans.out_of_reach.is_empty()) {
+    (false, true) => "run `gwm doctor --fix` to drop them: it edits `.git/config` and nothing else".to_string(),
+    (true, false) => {
+      "gwm does not rewrite an included file: delete those keys from it by hand, or drop the `include.path` entry".to_string()
+    }
+    _ => {
+      "run `gwm doctor --fix` for the first group; the included ones are in a file gwm does not rewrite, delete them there by hand".to_string()
+    }
+  };
+
+  Check::warning(name, detail.join("; ")).with_hint(hint)
 }
 
 /// Check #7: the configured worktree `base` directory exists and is

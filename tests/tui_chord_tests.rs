@@ -449,7 +449,7 @@ fn help_rows_link_descriptions_track_modal_rebindings() {
     open_menu.contains("x=issue") && !open_menu.contains("i=issue"),
     "open-menu help must use the rebound issue key: {open_menu:?}"
   );
-  let link_prompt = label_of("link prompt");
+  let link_prompt = label_of("link: ");
   assert!(
     link_prompt.contains('z'),
     "link-prompt help must use the rebound choose-target issue key: {link_prompt:?}"
@@ -490,7 +490,7 @@ fn help_rows_link_descriptions_drop_unbound_keys() {
     open_menu.contains("pull request"),
     "the still-bound pr pick must remain: {open_menu:?}"
   );
-  let link_prompt = label_of("link prompt");
+  let link_prompt = label_of("link: ");
   assert!(
     !link_prompt.contains("i/p"),
     "the unbound link issue pick must drop (no `i/p`): {link_prompt:?}"

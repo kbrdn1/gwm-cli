@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::init_repo;
+use common::{git_only_bin, init_repo};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -43,9 +43,10 @@ fn stage(repo: &Path, relative_path: &str, content: &str) {
 }
 
 fn run_hook(repo: &Path, stub_dir: Option<&Path>, extra_env: &[(&str, &str)]) -> Output {
+  let git = git_only_bin().display();
   let path = match stub_dir {
-    Some(p) => format!("{}:/usr/bin:/bin", p.display()),
-    None => "/usr/bin:/bin".into(),
+    Some(p) => format!("{}:{git}:/usr/bin:/bin", p.display()),
+    None => format!("{git}:/usr/bin:/bin"),
   };
   let mut cmd = Command::new("sh");
   cmd

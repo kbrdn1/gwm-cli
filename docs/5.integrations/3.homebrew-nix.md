@@ -55,6 +55,8 @@ The flake exports:
 - `overlays.default`: for downstream NixOS / nix-darwin configs
 - `devShells.<system>.default`: pinned Rust toolchain + `rust-analyzer`, `clippy`, `rustfmt`, `cargo-watch`, `cargo-edit`, and the libgit2 build deps. Used by [Development → Testing](/development/testing).
 
+`<system>` is one of `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`, named in the flake rather than taken from `flake-utils`' defaults. Intel macOS (`x86_64-darwin`) is left out because the pinned nixpkgs dropped it: the `flake` job in CI evaluates every system the flake lists, so a platform the pin no longer serves fails a pull request instead of reaching a user.
+
 Test the flake locally before pushing changes:
 
 ```bash

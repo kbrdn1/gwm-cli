@@ -7,6 +7,18 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# What every job here does is check out and build, and no step of this file
+# names a token of its own. Some hold the default one anyway, `actions/checkout`
+# through its `token:` default and the nix action through its fallback, and
+# scoping that default is what this grant is for. With no `permissions:` the
+# jobs took whatever `default_workflow_permissions` said, a repository setting
+# no diff in this repo records, and a flip to write would hand a token that can
+# push here to every build script of the dependency graph, to `cargo install
+# cargo-audit`, and to the nix action that copies it into `/etc/nix/nix.conf`
+# (issue #677).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -122,8 +134,85 @@ jobs:
           git config --global user.name "ci"
       - name: cargo build
         run: cargo build --verbose
-      - name: cargo test
-        run: cargo test --verbose
+      # `cargo-nextest` schedules 3525 tests across 110 binaries in ONE global
+      # pool and gives each test its own process, where `cargo test` runs the
+      # binaries in sequence with a fresh thread pool each (issue #634). The
+      # tests themselves are untouched, and all 3525 pass under it.
+      #
+      # The wall-clock case is weaker than the issue expected. Measured over
+      # 11 `cargo test` runs on `dev` against 4 of this job (nextest's own
+      # `Summary` against the sum of `cargo test`'s per-binary `finished
+      # in`), normalised per test because the suite grew from 3273 to 3525
+      # over the window, the median moves -8.9% on ubuntu, -6.5% on macos
+      # and +0.8% on windows. Real and in the same direction on the two Unix
+      # runners, but single-digit, and inside a band that is far wider: 29.2s
+      # to 42.2s of execution on ubuntu for the same command on the same
+      # suite. Every macos and windows sample lands inside the `cargo test`
+      # spread. Not a saving anyone can plan around, and nowhere near 1.76x.
+      # (The 4 samples are 3 commits plus a re-run of one, so two of them
+      # share a commit and a warm cache and are not independent draws; the
+      # 11 baseline runs are 11 different commits on different days.)
+      #
+      # The 1.76x in the issue is not refuted, it does not transfer: it was
+      # measured on a local 8-core machine, where a binary holding a handful
+      # of tests leaves most cores idle. A runner has fewer cores, so a
+      # per-binary pool already saturates them and process-spawn overhead eats
+      # what is left. The step is compile-bound either way: building the 110
+      # test binaries was the larger half of it in both runs, and that half is
+      # identical under either runner.
+      #
+      # What the swap does buy is process-per-test isolation, which `cargo
+      # test` structurally cannot give: a shared-fixture race that a
+      # `OnceLock` hides inside one process becomes a failure. The very first
+      # run under nextest found one, in `tests/common/mod.rs`. Windows also
+      # reports `3 leaky` (passing tests that outlive their own process)
+      # which `cargo test` never surfaced.
+      #
+      # Installed from a prebuilt binary: `cargo install cargo-nextest` builds
+      # it from source on every runner, minutes against seconds, which a swap
+      # that is time-neutral on wall-clock cannot afford.
+      #
+      # nextest does not run doctests, and there are none to run (issue
+      # #659). A `cargo test --doc` step stood here and ran zero: every
+      # fenced block in the doc comments is `text`, `toml` or `go`, so it
+      # could not fail. The lib is the internal test seam behind
+      # `#![doc(hidden)]`, not an API anyone is meant to read examples for,
+      # so Cargo.toml declares `doctest = false` instead of the step keeping
+      # an empty check alive. Adding doctests means flipping that key and
+      # restoring the step together; `doctests_are_declared_off_rather_than_run_empty`
+      # fails on either half alone.
+      - uses: taiki-e/install-action@nextest
+      - name: cargo nextest run
+        run: cargo nextest run
+
+  bench:
+    name: benches
+    runs-on: ubuntu-latest
+    # The perf benches were dead for 1086 commits (issue #634) because nothing
+    # ran them: `benches/sidebar_cache_hit.rs` still asserted the pre-#343
+    # contract that a render frame warms the sidebar cache, panicked, and
+    # `cargo bench` aborted before reaching the third bench. Fixing it without
+    # a job that runs it just digs the same hole again.
+    #
+    # ubuntu-only and single-shot on purpose: this is a compile-and-run guard,
+    # not a perf gate. Criterion's `--test` runs each benchmark exactly once
+    # and measures nothing, so the job fails on a panic or a build break and
+    # never on timing noise from a shared runner, which is what would make it
+    # flaky enough to be switched off again.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: configure git identity (libgit2 commit needs one)
+        run: |
+          git config --global user.email "ci@gwm.test"
+          git config --global user.name "ci"
+      # Deliberately unpiped: `| tail` / `| grep` would report the pipe's exit
+      # code, not the bench runner's, and this job exists to read that code.
+      - name: cargo bench --test
+        run: cargo bench --benches -- --test
 
   hook-smoke:
     name: pre-commit hook smoke
@@ -189,6 +278,42 @@ jobs:
       # is a conscious decision (issue #340).
       - name: cargo audit
         run: cargo audit --deny warnings
+
+  flake:
+    name: flake version (nix eval)
+    runs-on: ubuntu-latest
+    # The flake's version drifted for eight releases (#393) and the text guard
+    # that followed, `flake_derives_its_version_from_cargo_toml`, reads
+    # bindings by name: an `inherit`, a dynamic attribute name or a set merged
+    # into the derivation's arguments can still hand it a pinned version, and
+    # four review passes of #648 each found a new such form (#672). So ask nix
+    # what the package is and compare it with what Cargo.toml says.
+    #
+    # Only the packages are evaluated, not the dev shell: that one asserts the
+    # MSRV floor against nixpkgs' rustc, a different verdict. Evaluation only,
+    # nothing is built, so the cost is installing nix and fetching the pinned
+    # nixpkgs.
+    #
+    # Every system `packages` exposes, not just this runner's: evaluation is
+    # system-independent, and a system the pinned nixpkgs no longer serves
+    # fails the eval outright instead of waiting for a user on that platform to
+    # find out, which is how x86_64-darwin went unnoticed (#675). The key set
+    # is compared by value, so a platform dropped from the flake's list is a
+    # red job rather than one fewer entry nobody counts.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: the flake's package is Cargo.toml's version
+        run: |
+          want=$(nix eval --raw --impure --expr '(builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version')
+          got=$(nix eval --json .#packages --apply 'builtins.mapAttrs (_: ps: "${ps.gwm.name} ${ps.gwm.version}")')
+          echo "Cargo.toml: $want, flake: $got"
+          if ! printf '%s' "$got" | jq -e --arg v "$want" '(keys == ["aarch64-darwin", "aarch64-linux", "x86_64-linux"]) and all(.[]; . == "gwm-\($v) \($v)")' > /dev/null; then
+            echo "::error file=flake.nix::the flake builds $got while Cargo.toml is at $want (#393, #672, #675)"
+            exit 1
+          fi
 
   doctor:
     name: gwm doctor (advisory)

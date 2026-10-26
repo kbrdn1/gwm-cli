@@ -200,3 +200,74 @@ impl ConfirmModal {
     remaining.as_secs() + extra
   }
 }
+
+/// What an open `View::Confirm` is asking about.
+///
+/// Exhaustive matches, no `_` arm: the modal carries a safety countdown and
+/// a danger border because what follows cannot be taken back, and a third
+/// use must state its own answer rather than inherit the delete flow's.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum ConfirmKind {
+  #[default]
+  DeleteWorktree,
+  /// Landing a PR / MR on its base branch (issue #551).
+  MergePr,
+}
+
+/// The merge a confirmation is holding, snapshotted when it opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMerge {
+  pub number: u64,
+  pub title: String,
+  pub head_ref: String,
+  pub base_ref: String,
+  pub method: crate::forge::MergeMethod,
+  /// The CI rollup as it stood when the modal opened, rendered in the
+  /// summary. Merging on a red CI is the case the confirmation earns its
+  /// cost, and gwm shows it rather than deciding for the forge: `main` here
+  /// carries required checks, so the server refuses on its own and its
+  /// error is more accurate than a rule invented in this process.
+  pub ci: crate::forge::CiState,
+  pub checks_passed: u32,
+  pub checks_total: u32,
+  /// `PR` / `MR`, resolved by the caller.
+  pub noun: String,
+}
+
+/// What the open confirmation modal is about, what it is holding, and what
+/// the attempt left behind (issues #257, #551).
+///
+/// Separate from [`ConfirmModal`], which is the reusable countdown-and-focus
+/// mechanism — `CleanOverlay` owns one of those too, and has neither a
+/// worktree to delete nor a PR to land. This is what the *list's*
+/// confirmation carries, and the four fields sat flat on `App` until #635.
+#[derive(Debug, Default)]
+pub struct ConfirmContext {
+  /// Last delete-worktree failure shown inside the confirm modal (issue
+  /// #257). It lives here rather than on [`ConfirmModal`] because it is the outcome of
+  /// the async worktree deletion side effect rather than countdown state.
+  pub delete_failure: Option<String>,
+
+  /// What the open confirmation modal is about (validation feedback on
+  /// issue #551).
+  ///
+  /// The modal was single-purpose — `View::Confirm` meant "delete a
+  /// worktree" and nothing else — and a merge needs the same ceremony:
+  /// countdown, danger border, a summary naming what is about to happen.
+  /// Discriminated the way `DetailKind` discriminates the detail overlay,
+  /// with exhaustive matches and no `_` arm, so a third use has to answer
+  /// the question rather than inherit the delete flow's behaviour.
+  pub(crate) kind: ConfirmKind,
+
+  /// The merge the confirmation is holding, snapshotted when it opened.
+  ///
+  /// A snapshot for the same reason `App::pending_delete` is one (#484): an
+  /// auto-refresh can land during the safety countdown, and the row under
+  /// the cursor is not necessarily the row the user aimed at.
+  pub(crate) pending_merge: Option<PendingMerge>,
+
+  /// The error banner a failed merge leaves in the modal, mirroring
+  /// [`Self::delete_failure`]: the forge's own words, kept where the decision was
+  /// made rather than flashed on a status bar the reader may miss.
+  pub(crate) merge_failure: Option<String>,
+}

@@ -127,7 +127,7 @@ fn a_tui_delete_writes_the_undo_journal_entry() {
     !doomed.exists(),
     "the worktree must actually be gone (status: {}, failure: {:?})",
     app.status,
-    app.delete_failure
+    app.confirm_ctx.delete_failure
   );
 
   let journal = history::Journal::load(&journal_path).unwrap();
@@ -201,7 +201,7 @@ fn a_tui_delete_runs_the_remove_hooks() {
     !doomed.exists(),
     "the worktree must be gone (status: {}, failure: {:?})",
     app.status,
-    app.delete_failure
+    app.confirm_ctx.delete_failure
   );
   assert!(witness.exists(), "the pre_remove hook must run on the TUI path");
   assert!(
@@ -260,7 +260,7 @@ fn a_pre_remove_refusal_keeps_the_worktree_and_reports_it() {
   wait_for_delete(&mut app);
 
   assert!(doomed.exists(), "a refused pre_remove must leave the worktree alone");
-  let banner = app.delete_failure.clone().unwrap_or_default();
+  let banner = app.confirm_ctx.delete_failure.clone().unwrap_or_default();
   assert!(
     banner.contains("pre_remove"),
     "the failure must name the hook that refused, got: {banner:?} (status: {})",
@@ -330,7 +330,7 @@ fn remove_hooks_are_gated_on_the_trust_ledger() {
     "an untrusted config must not have its worktree removed"
   );
   assert!(!witness.exists(), "the hook must not have run");
-  let banner = app.delete_failure.clone().unwrap_or_default();
+  let banner = app.confirm_ctx.delete_failure.clone().unwrap_or_default();
   assert!(
     banner.contains("trust"),
     "the failure must point at the trust ledger, got: {banner:?} (status: {})",
@@ -404,7 +404,7 @@ fn the_batch_removes_the_path_it_confirmed_not_whatever_the_id_now_names() {
 
   assert!(moved.exists(), "the worktree at its new path must survive");
   assert!(
-    app.delete_failure.is_some(),
+    app.confirm_ctx.delete_failure.is_some(),
     "the batch must report the refusal (status: {})",
     app.status
   );
@@ -468,7 +468,7 @@ fn a_failing_post_remove_hook_is_not_reported_as_a_failed_removal() {
 
   assert!(!doomed.exists(), "the worktree is gone (status: {})", app.status);
   assert_eq!(
-    app.delete_failure, None,
+    app.confirm_ctx.delete_failure, None,
     "a hook failing after the removal must not read as a failed removal"
   );
   assert!(
@@ -619,7 +619,7 @@ fn a_moved_target_runs_no_hook_before_it_is_refused() {
     app.status
   );
   assert!(
-    app.delete_failure.is_some(),
+    app.confirm_ctx.delete_failure.is_some(),
     "the batch must report the refusal (status: {})",
     app.status
   );
@@ -674,7 +674,7 @@ fn a_warn_hook_reaches_the_status_line() {
   wait_for_delete(&mut app);
 
   assert!(!doomed.exists(), "a warn hook does not stop the removal");
-  assert_eq!(app.delete_failure, None, "a warning is not a failure");
+  assert_eq!(app.confirm_ctx.delete_failure, None, "a warning is not a failure");
   assert!(
     app.status.contains("noisy cleanup"),
     "the warning must name its step, got: {}",
@@ -749,7 +749,7 @@ fn a_remove_hook_from_the_global_config_needs_no_repo_approval() {
     !doomed.exists(),
     "an unapproved repo file that runs nothing on a removal must not block it (status: {}, failure: {:?})",
     app.status,
-    app.delete_failure
+    app.confirm_ctx.delete_failure
   );
   assert!(witness.exists(), "the user's own global hook still runs");
 

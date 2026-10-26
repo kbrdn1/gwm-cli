@@ -401,14 +401,20 @@ fn every_test_that_can_observe_a_rewritten_env_var_locks_first() {
   }
 
   // A sweep that silently stops finding binaries reports "no offenders" for
-  // the same reason an empty one does. Nine rewrite the environment today
+  // the same reason an empty one does. Eleven rewrite the environment today
   // (this file is skipped: its own fixtures contain the strings being searched
   // for). The floor moves up when a binary is added, never down without saying
   // why. It read ten until the membership test became a call rather than a
   // substring: `bootstrap_when_tests` mutates nothing, and was counted for the
   // `set_var(` inside `env_set_false_for_unset_var()`.
+  //
+  // Exact, not under: the subject is a set of files this repo owns, so every
+  // move of the count is a deliberate edit somebody made. It sat at nine while
+  // two env-rewriting binaries were added (#649), which is the upkeep this
+  // very comment asks for, not done. Two could have dropped out of the audit
+  // with the floor still met.
   assert!(
-    audited >= 9,
+    audited >= 11,
     "expected the sweep to find the env-rewriting binaries, found {audited}"
   );
   assert!(

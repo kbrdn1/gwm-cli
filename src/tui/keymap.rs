@@ -111,12 +111,17 @@ define_actions! {
   CycleSidebarLayout => "cycle_sidebar_layout",
   ToggleSidebarPosition => "toggle_sidebar_position",
   FocusSwap         => "focus_swap",
+  // #624: hand the terminal's own text selection back, on demand.
+  ToggleMouse       => "toggle_mouse",
   FocusWorktrees    => "focus_worktrees",
   FocusStatus       => "focus_status",
   // Filter
   Filter            => "filter",
   // #484: mark the cursor row for a bulk action (delete today).
   ToggleSelect      => "toggle_select",
+  // #680: fold / unfold the cursor's repo group (workspace mode).
+  CollapseGroup     => "collapse_group",
+  ExpandGroup       => "expand_group",
   // Lifecycle / mutating
   Refresh           => "refresh",
   Sync              => "sync",
@@ -528,6 +533,9 @@ impl Keymap {
       def(Action::CycleSidebarLayout, &["z"]),
       def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
+      // #624: `M` for mouse. `m` is MergePr, and the pairing reads the way
+      // the other case-pairs in this map do.
+      def(Action::ToggleMouse, &["M"]),
       def(Action::FocusWorktrees, &["1"]),
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
@@ -558,6 +566,9 @@ impl Keymap {
       def(Action::Filter, &["/"]),
       // #484: Space marks / unmarks the cursor row for a bulk delete.
       def(Action::ToggleSelect, &["Space"]),
+      // #680: the tree-view pair. Both arrows were unbound in the list view.
+      def(Action::CollapseGroup, &["Left"]),
+      def(Action::ExpandGroup, &["Right"]),
       def(Action::Refresh, &["f"]),
       // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
       def(Action::Sync, &["s"]),

@@ -55,6 +55,8 @@ Le flake exporte :
 - `overlays.default` : pour les configs NixOS / nix-darwin en aval
 - `devShells.<system>.default` : toolchain Rust épinglée + `rust-analyzer`, `clippy`, `rustfmt`, `cargo-watch`, `cargo-edit`, et les dépendances de build de libgit2. Utilisé par [Développement → Tests](/fr/development/testing).
 
+`<system>` vaut `x86_64-linux`, `aarch64-linux` ou `aarch64-darwin`, nommés dans le flake plutôt que repris des valeurs par défaut de `flake-utils`. macOS Intel (`x86_64-darwin`) en est absent parce que le nixpkgs épinglé l'a abandonné : le job `flake` de la CI évalue chaque système que le flake déclare, donc une plateforme que le pin ne sert plus fait échouer une pull request au lieu d'atteindre un utilisateur.
+
 Testez le flake localement avant de pousser des changements :
 
 ```bash
