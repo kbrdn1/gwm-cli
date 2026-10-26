@@ -71,24 +71,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Two behaviours changed, below. Separately, a form that repeats a key, even
   one `gwm` reads none of (a second `name:`), no longer parses, where
-  `serde_yaml_ng` let it through. Two paths read a form and they fail it
+  `serde_yaml_ng` let it through. Two paths parse a form and they fail it
   differently. `gwm new` refuses it, in `serde-saphyr`'s wording, as it does
   any form it cannot parse. `gwm create --from-issue` and the TUI's prefill
-  from an issue read only its `title:` and treat a form they cannot parse as
-  having no prefix, so the whole issue title lands in the slug
+  from an issue parse the whole form to take its `title:`, and treat a form
+  they cannot parse as having no prefix: unless the type's config sets
+  `title_prefix`, the whole issue title lands in the slug
   (`feature-add-config-types` rather than `add-config-types`).
 
   **A YAML merge key now contributes its fields.** `serde_yaml_ng` did not
   resolve `<<:`, so an issue form factoring fields out through an anchor lost
   the optional ones with no error, or was rejected when the merge carried a
   required one such as `type`; `serde-saphyr` resolves merge keys, a YAML 1.1
-  type. The command that shows it is `gwm new`, which renders the merged
-  fields into the issue it opens; `gwm create --from-issue` reads only a
-  form's `title:`. None of the forms this repo ships uses an anchor, so
-  nothing moves here today, and it is pinned as a contract rather than left to
-  be discovered the first time somebody factors two forms. Resolution is
-  bounded by the reader's default alias budget, so a hostile form cannot
-  expand without limit.
+  type. `gwm new` renders the merged fields into the issue it opens.
+  `gwm create --from-issue` and the TUI's prefill move the other way: a form
+  rejected for a `type` its merge carried used to contribute no prefix, and
+  now contributes its `title:`, so unless the type's config sets
+  `title_prefix` the slug drops the prefix it used to carry. None of the forms
+  this repo ships uses an anchor, so nothing moves here today, and it is
+  pinned as a contract rather than left to be discovered the first time
+  somebody factors two forms. Resolution is bounded by the reader's default
+  alias budget, so a hostile form cannot expand without limit.
 
   **Mapping equality is now sensitive to key order**, which is test-side only.
   `MappingOwned` is a `LinkedHashMap` comparing element by element, where the
