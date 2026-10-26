@@ -22,7 +22,8 @@ use std::fs;
 use std::path::PathBuf;
 
 mod common;
-use common::{assert_job_is_blocking, effective_matrix_os};
+use common::{assert_job_is_blocking, effective_matrix_os, yaml_doc, At};
+use saphyr::YamlOwned;
 
 fn repo_file(rel: &str) -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -93,16 +94,16 @@ fn every_live_msrv_claim_matches_cargo_toml() {
 /// `toolchain: 1.95` while keeping that step would have kept the old guard
 /// green, reintroducing exactly the drift it exists to block. The value of the
 /// input is now compared to the step output it must reference.
-fn ci_workflow() -> serde_yaml_ng::Value {
-  serde_yaml_ng::from_str(&read(".github/workflows/ci.yml")).expect("ci.yml must be valid YAML")
+fn ci_workflow() -> YamlOwned {
+  yaml_doc(".github/workflows/ci.yml", &read(".github/workflows/ci.yml"))
 }
 
-fn msrv_job() -> serde_yaml_ng::Value {
-  ci_workflow()["jobs"]["msrv"].clone()
+fn msrv_job() -> YamlOwned {
+  ci_workflow().at("jobs").at("msrv").clone()
 }
 
-fn steps(job: &serde_yaml_ng::Value) -> Vec<serde_yaml_ng::Value> {
-  job["steps"].as_sequence().cloned().unwrap_or_default()
+fn steps(job: &YamlOwned) -> Vec<YamlOwned> {
+  job.at("steps").as_sequence().cloned().unwrap_or_default()
 }
 
 #[test]
@@ -131,15 +132,15 @@ fn ci_feeds_the_msrv_job_the_toolchain_declared_in_cargo_toml() {
 
   let reader = steps
     .iter()
-    .find(|s| s["id"].as_str() == Some("msrv"))
+    .find(|s| s.at("id").as_str() == Some("msrv"))
     .expect("the msrv job needs a step with `id: msrv` that reads the declared floor");
-  let script = reader["run"].as_str().unwrap_or_default();
+  let script = reader.at("run").as_str().unwrap_or_default();
   assert!(
     script.contains("rust-version") && script.contains("Cargo.toml"),
     "the `id: msrv` step must read `rust-version` out of Cargo.toml, got: {script:?}"
   );
   assert!(
-    reader["shell"].as_str() == Some("bash"),
+    reader.at("shell").as_str() == Some("bash"),
     "the reader step must force `shell: bash`: windows-latest defaults to \
      PowerShell, which has no grep or cut"
   );
@@ -147,19 +148,19 @@ fn ci_feeds_the_msrv_job_the_toolchain_declared_in_cargo_toml() {
   let toolchain = steps
     .iter()
     .find(|s| {
-      s["uses"]
+      s.at("uses")
         .as_str()
         .is_some_and(|u| u.starts_with("dtolnay/rust-toolchain@"))
     })
     .expect("the msrv job must install a toolchain via dtolnay/rust-toolchain");
   assert_eq!(
-    toolchain["uses"].as_str(),
+    toolchain.at("uses").as_str(),
     Some("dtolnay/rust-toolchain@master"),
     "pin the action at @master and pass the version as an input; a \
      `rust-toolchain@<version>` ref is a literal that drifts from the manifest"
   );
   assert_eq!(
-    toolchain["with"]["toolchain"].as_str(),
+    toolchain.at("with").at("toolchain").as_str(),
     Some("${{ steps.msrv.outputs.version }}"),
     "the installed toolchain must be the value read from Cargo.toml, not a \
      literal. A literal here is the drift this whole job exists to catch (#491)"
@@ -170,7 +171,7 @@ fn ci_feeds_the_msrv_job_the_toolchain_declared_in_cargo_toml() {
 fn ci_checks_the_msrv_locked_and_without_default_features() {
   let commands = steps(&msrv_job())
     .iter()
-    .filter_map(|s| s["run"].as_str().map(str::to_owned))
+    .filter_map(|s| s.at("run").as_str().map(str::to_owned))
     .collect::<Vec<_>>()
     .join("\n");
 

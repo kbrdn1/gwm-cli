@@ -79,8 +79,17 @@ pub fn render_form_markdown(raw: &str, ctx: &TemplateContext, defaults: &FormDef
   Ok(out.trim_end().to_string())
 }
 
+/// The one parse of an issue form, so a change of reader reaches users through
+/// exactly these paths (#688):
+///
+/// - `gwm new` (`render_issue_draft`): title prefix, labels and body; a parse
+///   error fails the command.
+/// - `gwm create --issue` and the TUI's prefill from an issue
+///   (`title_prefix_for`): the title prefix only; a parse error reads as no
+///   prefix, and unless the type's config sets `title_prefix` the whole issue
+///   title lands in the slug.
 fn parse_issue_form(raw: &str) -> Result<IssueForm> {
-  serde_yaml_ng::from_str(raw).map_err(|e| GwmError::Config(format!("issue template YAML: {}", e)))
+  serde_saphyr::from_str(raw).map_err(|e| GwmError::Config(format!("issue template YAML: {}", e)))
 }
 
 fn field_value(item: &IssueFormItem, defaults: &FormDefaults) -> Option<String> {

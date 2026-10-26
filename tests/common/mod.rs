@@ -2,8 +2,136 @@
 //! integration target (cargo treats top-level `tests/*.rs` files as targets).
 
 use git2::{Repository, Signature};
+use saphyr::{LoadableYamlNode, MappingOwned, SafelyIndex, ScalarOwned, YamlOwned};
 use std::path::Path;
+use std::sync::OnceLock;
 use tempfile::TempDir;
+
+// ---------------------------------------------------------------------------
+// Reading a workflow (#688).
+//
+// `serde_yaml_ng` is gone: `RUSTSEC-2024-0449` marks the `unsafe-libyaml`
+// under it unmaintained, and the advisory names `saphyr` as the safe-Rust
+// replacement. The two readers differ on exactly one thing that matters to
+// every sweep in these files, and `at` is where that difference is absorbed.
+//
+// `serde_yaml_ng` indexed a mapping with `[]` and answered `Null` for a key
+// that was not there, so `workflow["jobs"]["nope"]["deeper"]` was legal and
+// null, and `.is_null()` was how a guard asked "is this absent". `saphyr`
+// panics instead, by design, and a panic is not an assertion failure: it
+// carries no message about the rule that was broken. `at` restores the old
+// answer, so the hundred-odd reads in these files keep their shape and their
+// meaning.
+//
+// It restores the old conflation with it: an absent key and a key whose value
+// is YAML null both read as null, because the old reader could not tell them
+// apart and every `must carry no X:` assertion here was written against that.
+// That is now a deliberate choice rather than an inherited one, and
+// `workflow_reader_tests.rs` pins it, along with the two cheaper replacements
+// that were measured and rejected.
+// ---------------------------------------------------------------------------
+
+/// A node that is not there. One shared instance, so `at` can hand out a
+/// reference for a key it did not find.
+fn absent() -> &'static YamlOwned {
+  static ABSENT: OnceLock<YamlOwned> = OnceLock::new();
+  ABSENT.get_or_init(|| YamlOwned::Value(ScalarOwned::Null))
+}
+
+/// Index a mapping the way `serde_yaml_ng` did: the value at `key`, or a node
+/// that is not there.
+///
+/// `saphyr` offers `SafelyIndex::get`, which answers `Option` and is the right
+/// shape for new code. It is the wrong shape here: it would turn every
+/// `job["if"].is_null()` into a match, and `.get("a").get("b")` does not even
+/// compile because the middle `Option` is a temporary the borrow outlives.
+/// Answering with a null node instead keeps the reads as they were written.
+pub trait At {
+  /// The value at `key`, or a node that is not there.
+  fn at(&self, key: &str) -> &YamlOwned;
+}
+
+impl At for YamlOwned {
+  fn at(&self, key: &str) -> &YamlOwned {
+    untagged(self).get(key).map(untagged).unwrap_or_else(|| absent())
+  }
+}
+
+/// The node under a tag, the way `serde_yaml_ng` read it. `saphyr` wraps a
+/// node carrying a non-core tag (`!x`) in `Tagged`, which `get`, `as_str` and
+/// `as_mapping` answer `None` through: a guard would read an empty `env:`.
+fn untagged(node: &YamlOwned) -> &YamlOwned {
+  node.get_tagged_node().unwrap_or(node)
+}
+
+/// A YAML string scalar. Replaces the `.into()` the old reader provided
+/// through `From<&str>`, which `saphyr` does not implement for its owned node.
+#[allow(dead_code)] // used by the test binaries that build an expected tree.
+pub fn scalar(text: &str) -> YamlOwned {
+  YamlOwned::Value(ScalarOwned::String(text.to_string()))
+}
+
+/// A YAML null, for the expected trees that assert a key carries nothing.
+#[allow(dead_code)] // used by the test binaries that build an expected tree.
+pub fn yaml_null() -> YamlOwned {
+  YamlOwned::Value(ScalarOwned::Null)
+}
+
+/// Set `key` on a mapping node, inserting it when it is not there.
+///
+/// `serde_yaml_ng`'s `IndexMut` created a missing key on assignment, so
+/// `job["steps"][2]["run"] = x` worked whether or not the step already carried
+/// a `run:`. `saphyr`'s panics instead, which is the right default for a
+/// reader and the wrong one for the expected-tree builders here: they patch a
+/// template whose steps hold only some of the keys they set.
+#[allow(dead_code)] // used by the test binaries that build an expected tree.
+pub fn set(node: &mut YamlOwned, key: &str, value: YamlOwned) {
+  let mapping = node
+    .as_mapping_mut()
+    .unwrap_or_else(|| panic!("cannot set `{key}`: the node is not a mapping"));
+  let key = scalar(key);
+  // In place when the key is already there, because `MappingOwned` is a
+  // `LinkedHashMap` that keeps insertion order *and* compares order-sensitively:
+  // re-inserting an existing key moves it to the end, and the expected trees
+  // these builders feed are compared by value. Three guards read as
+  // changed on exactly that, with identical keys in a different order: the two
+  // publish jobs and the `flake` job of `ci.yml`, which is not a publish guard
+  // and was miscounted as one here.
+  match mapping.get_mut(&key) {
+    Some(slot) => *slot = value,
+    None => {
+      mapping.insert(key, value);
+    }
+  }
+}
+
+/// Every scalar of a node, keys and values, flattened to one searchable
+/// string.
+///
+/// Replaces `serde_yaml_ng::to_string` (#688). The sweep that uses it wants
+/// the text of the workflow *as parsed*, to catch a token written anywhere in
+/// it; `saphyr`'s `YamlEmitter` dumps the borrowing `Yaml` rather than the
+/// owned node these sweeps hold, and round-tripping one into the other to get
+/// a string back would be more machinery than the question needs.
+///
+/// The ceiling, measured: `{:?}` **escapes**, so a `run:` holding
+/// `echo "a<tab>b\c"` renders with `\t` and `\\`. The two words the caller
+/// searches, `token` and `secret`, and the three canaries it checks are all
+/// escape-free, so the sweep is exact for them; one carrying a quote, a
+/// backslash or a tab would be missed. The caller's canary assertion catches a
+/// flattening that stopped carrying the steps, not one that escaped a needle.
+#[allow(dead_code)] // used by the test binaries that search a whole workflow.
+pub fn flatten(node: &YamlOwned) -> String {
+  format!("{node:?}")
+}
+
+/// The first document of a YAML file, parsed.
+#[allow(dead_code)] // used by the test binaries that parse a workflow.
+pub fn yaml_doc(path: &str, text: &str) -> YamlOwned {
+  let mut docs = YamlOwned::load_from_str(text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
+  assert!(!docs.is_empty(), "{path} must hold a YAML document");
+  docs.remove(0)
+}
 
 /// Initialize a tempdir with a fresh git repo on `main` carrying one empty
 /// commit. Returns the tempdir (kept alive by the caller) and the repo handle.
@@ -116,8 +244,8 @@ pub fn git_only_bin() -> &'static Path {
 /// Five ways to neutralise a job, one invariant on the commands it runs, and
 /// the two assertions that keep this from passing over nothing:
 ///
-/// - the job must **exist**, and hold at least one step. An absent job parses
-///   to `Value::Null`, and `null["if"]` is null, `null["steps"]` yields an
+/// - the job must **exist**, and hold at least one step. An absent job reads
+///   as null, `at("if")` on null is null, `at("steps")` on null yields an
 ///   empty sequence, and `.all()` over an empty sequence is true. Deleting a
 ///   job outright would otherwise walk past every assertion below;
 /// - no `if:` on the job, and none on any step;
@@ -150,28 +278,28 @@ pub fn git_only_bin() -> &'static Path {
 /// does for an absent key, and the canonical way to switch something off would
 /// take the "no `if:` at all" arm (the defect fixed at `6bb82758`).
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
-  let job = &workflow["jobs"][job_name];
+pub fn assert_job_is_blocking(workflow: &YamlOwned, job_name: &str) {
+  let job = workflow.at("jobs").at(job_name);
   assert!(
     !job.is_null(),
     "ci.yml must define a `{job_name}` job: an absent job parses to null, and every \
      assertion below passes over null, so deleting the job would go unseen"
   );
   assert!(
-    job["if"].is_null(),
+    job.at("if").is_null(),
     "the `{job_name}` job must carry no `if:`: a job-level condition switches every step \
      off at once while step-level guards stay green, got `if: {:?}`",
-    job["if"]
+    job.at("if")
   );
   assert!(
-    job["continue-on-error"].is_null(),
+    job.at("continue-on-error").is_null(),
     "the `{job_name}` job must carry no `continue-on-error:` at all. The key has to be \
      absent, not `false`, so that a later `true` is a diff against nothing rather than a \
      one-word edit. Got `continue-on-error: {:?}`",
-    job["continue-on-error"]
+    job.at("continue-on-error")
   );
 
-  let steps = job["steps"].as_sequence().cloned().unwrap_or_default();
+  let steps = job.at("steps").as_sequence().cloned().unwrap_or_default();
   assert!(
     !steps.is_empty(),
     "the `{job_name}` job must hold at least one step: emptying `steps:` leaves a job that \
@@ -187,18 +315,18 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
     if seen.contains(&dep) {
       continue;
     }
-    let upstream = &workflow["jobs"][dep.as_str()];
+    let upstream = workflow.at("jobs").at(dep.as_str());
     assert!(
       !upstream.is_null(),
       "the `{job_name}` job waits on `{dep}`, which ci.yml does not define: the workflow \
        would not start at all"
     );
     assert!(
-      upstream["if"].is_null(),
+      upstream.at("if").is_null(),
       "the `{job_name}` job waits on `{dep}`, which is narrowed with `if: {:?}`. GitHub \
        skips a job whose dependency was skipped, so this switches `{job_name}` off on every \
        event the condition excludes while its own `if:` and `continue-on-error:` stay clean",
-      upstream["if"]
+      upstream.at("if")
     );
     pending.extend(job_needs(upstream));
     seen.push(dep);
@@ -207,16 +335,16 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
   for step in &steps {
     let label = step_label(step);
     assert!(
-      step["continue-on-error"].is_null(),
+      step.at("continue-on-error").is_null(),
       "no step of the `{job_name}` job may swallow its own failure: step {label:?} carries \
        `continue-on-error: {:?}`",
-      step["continue-on-error"]
+      step.at("continue-on-error")
     );
 
     assert!(
-      step["if"].is_null(),
+      step.at("if").is_null(),
       "step {label:?} of the `{job_name}` job may not be conditioned away: it carries `if: {:?}`",
-      step["if"]
+      step.at("if")
     );
 
     assert_run_cannot_swallow_its_failure(workflow, job, step, job_name, label);
@@ -330,13 +458,13 @@ pub fn assert_job_is_blocking(workflow: &serde_yaml_ng::Value, job_name: &str) {
 /// runs. #656 holds that trade-off.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
 fn assert_run_cannot_swallow_its_failure(
-  workflow: &serde_yaml_ng::Value,
-  job: &serde_yaml_ng::Value,
-  step: &serde_yaml_ng::Value,
+  workflow: &YamlOwned,
+  job: &YamlOwned,
+  step: &YamlOwned,
   job_name: &str,
   label: &str,
 ) {
-  let Some(script) = step["run"].as_str() else {
+  let Some(script) = step.at("run").as_str() else {
     return;
   };
   let lines: Vec<&str> = script.lines().collect();
@@ -352,13 +480,13 @@ fn assert_run_cannot_swallow_its_failure(
   // whole job or the whole workflow, and those are the only two levels it
   // exists at.
   for (shell, where_) in [
-    (&step["shell"], "on this step".to_string()),
+    (&step.at("shell"), "on this step".to_string()),
     (
-      &job["defaults"]["run"]["shell"],
+      &job.at("defaults").at("run").at("shell"),
       format!("in `defaults.run` on the `{job_name}` job"),
     ),
     (
-      &workflow["defaults"]["run"]["shell"],
+      &workflow.at("defaults").at("run").at("shell"),
       "in the workflow's `defaults.run`".to_string(),
     ),
   ] {
@@ -427,8 +555,8 @@ fn assert_run_cannot_swallow_its_failure(
 /// over names, and `include:` can add a row back after `exclude` removed it,
 /// so either one silently changes what the returned list means.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<String> {
-  let matrix = &job["strategy"]["matrix"];
+pub fn effective_matrix_os(job: &YamlOwned, job_name: &str) -> Vec<String> {
+  let matrix = &job.at("strategy").at("matrix");
   let keys: Vec<String> = matrix
     .as_mapping()
     .map(|m| string_keys(m, &format!("the `{job_name}` matrix")))
@@ -443,19 +571,21 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
     );
   }
 
-  let declared: Vec<String> = matrix["os"]
+  let declared: Vec<String> = matrix
+    .at("os")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .iter()
     .filter_map(|v| v.as_str().map(str::to_owned))
     .collect();
-  let excluded: Vec<String> = matrix["exclude"]
+  let excluded: Vec<String> = matrix
+    .at("exclude")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .iter()
-    .filter_map(|e| e["os"].as_str().map(str::to_owned))
+    .filter_map(|e| e.at("os").as_str().map(str::to_owned))
     .collect();
 
   // `runs-on:` is what actually decides where a row executes, and it sits one
@@ -465,7 +595,7 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
   // contexts on `main`, while nothing ever compiles the
   // `[target."cfg(windows)".dependencies]` block. Worse than the `exclude:`
   // this function exists to catch, which at least deletes the row.
-  let runs_on = job["runs-on"].as_str().unwrap_or_default();
+  let runs_on = job.at("runs-on").as_str().unwrap_or_default();
   assert_eq!(
     runs_on, "${{ matrix.os }}",
     "the `{job_name}` job has a matrix, so its `runs-on:` must derive from it. A literal \
@@ -479,14 +609,14 @@ pub fn effective_matrix_os(job: &serde_yaml_ng::Value, job_name: &str) -> Vec<St
 /// The keys of a YAML mapping, as strings, in document order (issue #673).
 ///
 /// A key the parser does not read as a string panics instead of being
-/// skipped. serde_yaml_ng reads `true:` and `false:` as booleans, where GitHub
+/// skipped. YAML reads `true:` and `false:` as booleans, where GitHub
 /// Actions reads the job, or the matrix dimension, named `true` or `false`. A
 /// sweep collecting keys through `filter_map(as_str)` drops that job and
 /// passes over it green: review measured it on the permissions sweep of
 /// `release.yml` (#669), where a `true:` job kept the workflow's write token.
 /// `what` names the mapping in the panic.
 #[allow(dead_code)] // used by the test binaries that sweep a workflow's keys.
-pub fn string_keys(mapping: &serde_yaml_ng::Mapping, what: &str) -> Vec<String> {
+pub fn string_keys(mapping: &MappingOwned, what: &str) -> Vec<String> {
   mapping
     .keys()
     .map(|k| {
@@ -501,31 +631,37 @@ pub fn string_keys(mapping: &serde_yaml_ng::Mapping, what: &str) -> Vec<String> 
 /// string and a sequence, and a job with no dependency parses to null, so the
 /// three shapes are read here rather than at each call site.
 #[allow(dead_code)] // used by the test binaries that parse a workflow's jobs.
-pub fn job_needs(job: &serde_yaml_ng::Value) -> Vec<String> {
-  match &job["needs"] {
-    serde_yaml_ng::Value::String(one) => vec![one.clone()],
-    serde_yaml_ng::Value::Sequence(many) => many
+pub fn job_needs(job: &YamlOwned) -> Vec<String> {
+  let needs = job.at("needs");
+  if needs.is_null() {
+    return Vec::new();
+  }
+  if let Some(one) = needs.as_str() {
+    return vec![one.to_string()];
+  }
+  if let Some(many) = needs.as_sequence() {
+    return many
       .iter()
       .map(|v| {
         v.as_str()
           .unwrap_or_else(|| panic!("a `needs:` entry must be a job name, got {v:?}"))
           .to_string()
       })
-      .collect(),
-    serde_yaml_ng::Value::Null => Vec::new(),
-    other => panic!("`needs:` must be a job name or a list of them, got {other:?}"),
+      .collect();
   }
+  panic!("`needs:` must be a job name or a list of them, got {needs:?}")
 }
 
 /// How a step is named in an assertion message. `name:` first because that is
 /// what the workflow author reads, then `uses:` for the action-only steps that
 /// carry no name, then the script itself.
 #[allow(dead_code)] // used by the two test binaries that parse ci.yml.
-pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
-  step["name"]
+pub fn step_label(step: &YamlOwned) -> &str {
+  step
+    .at("name")
     .as_str()
-    .or_else(|| step["uses"].as_str())
-    .or_else(|| step["run"].as_str())
+    .or_else(|| step.at("uses").as_str())
+    .or_else(|| step.at("run").as_str())
     .unwrap_or("<unnamed step>")
 }
 
@@ -541,17 +677,19 @@ pub fn step_label(step: &serde_yaml_ng::Value) -> &str {
 /// only set for the steps after it: a step read by name and pinned by value
 /// can still be moved below its reader.
 #[allow(dead_code)] // used by the suites that pin a release workflow step.
-pub fn workflow_step(path: &str, job: &str, name: &str) -> (usize, serde_yaml_ng::Value) {
+pub fn workflow_step(path: &str, job: &str, name: &str) -> (usize, YamlOwned) {
   let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&text).unwrap_or_else(|e| panic!("{path} must be valid YAML: {e}"));
-  let mut hits: Vec<(usize, serde_yaml_ng::Value)> = workflow["jobs"][job]["steps"]
+  let workflow = yaml_doc(path, &text);
+  let mut hits: Vec<(usize, YamlOwned)> = workflow
+    .at("jobs")
+    .at(job)
+    .at("steps")
     .as_sequence()
     .cloned()
     .unwrap_or_default()
     .into_iter()
     .enumerate()
-    .filter(|(_, s)| s["name"].as_str() == Some(name))
+    .filter(|(_, s)| s.at("name").as_str() == Some(name))
     .collect();
   assert_eq!(
     hits.len(),
