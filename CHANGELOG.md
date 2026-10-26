@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Replaced by the pair the advisory itself names, both written in safe Rust:
   `serde-saphyr` for the one typed parse in `src/`, and `saphyr` for the
   dynamic tree the workflow guards read. `unsafe-libyaml` is gone from the
-  graph entirely rather than satisfied by an `ignore`, which is what the
-  alternative would have been and which this repo's own rules forbid: a guard
-  silenced to make a check pass.
+  graph entirely rather than accepted through an `ignore` in `audit.toml`,
+  which `ci.yml` allows with a rationale (#340) and which #688 offered as the
+  other outcome.
 
   The other candidates, and why each was not taken. `serde_norway` depends on
   `unsafe-libyaml-norway`, the same translated C under a new name, which
@@ -69,8 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about every behaviour. An earlier measurement covered an adapter that was
   replaced before this shipped, which is why it was redone rather than quoted.
 
-  Two behaviours changed. Separately, a form `gwm new` cannot parse is now
-  reported in `serde-saphyr`'s wording rather than `serde_yaml_ng`'s.
+  Two behaviours changed, below. Separately, `gwm new` reports a form it
+  cannot parse in `serde-saphyr`'s wording, and refuses a form that repeats a
+  key even where it reads none of it (a second `name:`), which
+  `serde_yaml_ng` let through.
 
   **A YAML merge key now contributes its fields.** `serde_yaml_ng` did not
   resolve `<<:`, so an issue form factoring fields out through an anchor lost

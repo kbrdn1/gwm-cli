@@ -147,3 +147,24 @@ body:
      error: {rendered}"
   );
 }
+
+/// Issue #688. A duplicate key is refused even under a key `gwm` does not read.
+///
+/// `serde-saphyr` refuses a duplicate mapping key by default, and checks every
+/// mapping, where `serde_yaml_ng` let a repeated key through when the struct
+/// ignored it. So a form repeating its `name:` now fails `gwm new` instead of
+/// rendering. The same form with one `name:` must parse, or the refusal below
+/// would hold for a reason that has nothing to do with the duplicate.
+#[test]
+fn a_duplicate_key_gwm_does_not_read_is_refused() {
+  let once = "name: Feature\ntitle: \"[Feature]: \"\nbody: []\n";
+  let twice = "name: Feature\nname: Again\ntitle: \"[Feature]: \"\nbody: []\n";
+  assert!(
+    issue_form_metadata(once).is_ok(),
+    "the form with one `name:` must parse"
+  );
+  assert!(
+    issue_form_metadata(twice).is_err(),
+    "a repeated `name:`, which no field of the form struct reads, must be refused"
+  );
+}
