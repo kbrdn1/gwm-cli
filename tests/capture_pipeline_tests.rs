@@ -265,8 +265,9 @@ fn a_stamp_that_was_never_written_stops_the_run() {
 ///
 /// This is vhs 0.12.0 (vhs#787), and the stamp cannot see it on its own: the
 /// stamp is written by the shell inside the tape, so it lands either way. It
-/// went unseen from 2026-09-10 to the v1.11.0 cut, where every tape failed
-/// twice before the closing summary said so.
+/// went unseen from 2026-09-10 to the v1.11.0 cut, where each tape the run
+/// reached failed twice, read as the write race, until the theme gallery's
+/// own check stopped it.
 #[test]
 fn a_vhs_that_writes_none_of_its_own_output_stops_the_run() {
   let (dir, out) = run_preflight(Fixture {

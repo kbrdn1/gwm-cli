@@ -143,9 +143,10 @@ fi
 # files above are written by a redirection inside the tape. vhs 0.12.0 runs
 # every command, prints `Creating ….gif`, exits 0 and never starts the encoder
 # (charmbracelet/vhs#787). It passed this preflight from 2026-09-10 to the
-# v1.11.0 cut, where every tape then failed twice at the end of a full run,
-# each one read as the write race above. The gif is the cheap question that
-# tells the two apart, asked once before any tape.
+# v1.11.0 cut, where each tape the run reached then failed twice, each failure
+# read as the write race above, until the theme gallery's own check stopped
+# it. The gif is the cheap question that tells the two apart, asked once
+# before any tape.
 if [[ ! -s "$STAMP_GIF" ]]; then
   echo "  ✗ vhs ran version-stamp.tape but wrote none of its own output ($STAMP_GIF)."
   echo "    Every tape would exit 0 and leave its capture untouched. vhs 0.12.0 does"

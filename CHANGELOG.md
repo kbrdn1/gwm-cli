@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoder ([charmbracelet/vhs#787](https://github.com/charmbracelet/vhs/issues/787)).
   It was installed on the release machine on 2026-09-10 and nobody saw it until
   the v1.11.0 cut. The per-tape freshness check in `generate.sh` did fire, and
-  the run did exit 1, but only after every tape had failed twice, each failure
-  reported as the write race the retry exists for. The preflight, the half
+  the run did exit 1, but only after each tape it reached had failed twice,
+  every failure reported as the write race the retry exists for, until the
+  theme gallery's own check stopped it. The preflight, the half
   `tests/capture_pipeline_tests.rs` drives, checked vhs through
   `version-stamp.tape`, whose stamp is written by a shell redirection inside
   the tape and so lands whether vhs can write or not. The preflight now also
