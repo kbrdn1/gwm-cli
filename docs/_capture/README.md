@@ -20,7 +20,9 @@ it covers the whole set. `demo.tape` and `github-linking.tape` used to be run by
 hand, which is how a run could finish on a tick over two assets it had left
 stale (#575).
 
-Requirements: `vhs`, `cargo`, a Nerd Font (`CaskaydiaCove Nerd Font Mono`, as
+Requirements: `vhs` 0.12.1 or later (0.12.0 exits 0 and writes nothing,
+[vhs#787](https://github.com/charmbracelet/vhs/issues/787)), `cargo`, a Nerd
+Font (`CaskaydiaCove Nerd Font Mono`, as
 set in each tape's `Set FontFamily`), and `gh` for the one capture taken off the
 demo repo. The run opens with a release build, so a cold tree pays a few minutes
 before the first tape; a warm one pays seconds.
@@ -30,7 +32,7 @@ before the first tape; a warm one pays seconds.
 | Step | Why it cannot move |
 |---|---|
 | build `gwm` from this tree, its release directory first on `PATH` | the TUI header paints a `gwm X.Y.Z` chip out of `CARGO_PKG_VERSION`, so the binary vhs resolves is what the docs end up claiming. A build from an unrelated worktree renders a capture that exists, sizes correctly and shows the wrong UI: v1.10.0 came within a commit of publishing a set 175 commits stale. The directory comes from `cargo metadata`, not from `./target`, because `CARGO_TARGET_DIR` and `build.target-dir` both move it. |
-| `version-stamp.tape` | asks vhs what it actually resolved, version and path, and writes both as text. The run stops when the version is not the one in `Cargo.toml`, and when the file is not the one cargo just built: a shell startup file can still put another `gwm` in front, and a stale build carrying the same version number answers the version check perfectly. |
+| `version-stamp.tape` | asks vhs what it actually resolved, version and path, and writes both as text. The run stops when the version is not the one in `Cargo.toml`, and when the file is not the one cargo just built: a shell startup file can still put another `gwm` in front, and a stale build carrying the same version number answers the version check perfectly. It also stops when the tape's own gif is missing: the stamp is written by the shell inside the tape, so only the gif proves vhs itself can write, which 0.12.0 cannot. |
 | `github-linking.tape`, first | it opens the TUI on a real checkout of this repo, and the pane follows the selected row, which is the **main checkout** wherever the tape was launched from. So it photographs the trunk's branch, PR and uncommitted files. It runs before anything else writes under `docs/`, and only when the trunk is clean and its branch has an open PR; otherwise the script skips it and says so. During a release that means the PR is opened **before** this runs, or the capture is skipped and stays on the previous version. |
 | the demo-driven tapes | the bulk of the set, against the fixture `setup-demo.sh` builds. |
 | `demo.tape`, last | it creates and deletes a worktree and `rm -rf`s `.git/gwm/notes` in the fixture, so nothing else may run after it. |
