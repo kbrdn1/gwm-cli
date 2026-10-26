@@ -69,19 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about every behaviour. An earlier measurement covered an adapter that was
   replaced before this shipped, which is why it was redone rather than quoted.
 
-  Two behaviours changed, and only one of them is visible in what `gwm`
-  prints.
+  Two behaviours changed. Separately, a form `gwm new` cannot parse is now
+  reported in `serde-saphyr`'s wording rather than `serde_yaml_ng`'s.
 
-  **A YAML merge key now contributes its fields.** `serde_yaml_ng` dropped
-  `<<:` silently, so an issue form factoring a shared field out through an
-  anchor lost it with no error; `serde-saphyr` resolves it, which is the
-  correct YAML 1.2 reading. This is the only change that reaches a user:
-  `gwm create --from-issue` renders the merged fields where it used to skip
-  them. None of the forms this repo ships uses an anchor, so nothing moves
-  here today, and it is pinned as a contract rather than left to be discovered
-  the first time somebody factors two forms. Resolution is bounded by the
-  reader's default alias budget, so a hostile form cannot expand without
-  limit.
+  **A YAML merge key now contributes its fields.** `serde_yaml_ng` did not
+  resolve `<<:`, so an issue form factoring fields out through an anchor lost
+  the optional ones with no error, or was rejected when the merge carried a
+  required one such as `type`; `serde-saphyr` resolves merge keys, a YAML 1.1
+  type. The command that shows it is `gwm new`, which renders the merged
+  fields into the issue it opens; `gwm create --from-issue` reads only a
+  form's `title:`. None of the forms this repo ships uses an anchor, so
+  nothing moves here today, and it is pinned as a contract rather than left to
+  be discovered the first time somebody factors two forms. Resolution is
+  bounded by the reader's default alias budget, so a hostile form cannot
+  expand without limit.
 
   **Mapping equality is now sensitive to key order**, which is test-side only.
   `MappingOwned` is a `LinkedHashMap` comparing element by element, where the

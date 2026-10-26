@@ -55,7 +55,7 @@ body:
   assert!(rendered.contains("**Owner:** platform"), "{rendered}");
 }
 
-/// Issue #688. The four issue forms this repo ships parse through the public
+/// Issue #688. The three issue forms this repo ships parse through the public
 /// path, with the reader that replaced `serde_yaml_ng`.
 ///
 /// `src/templating.rs` is the only `src/` module the parser swap touched, and
@@ -76,7 +76,7 @@ fn every_shipped_issue_form_parses_and_renders() {
       .and_then(|n| n.to_str())
       .unwrap_or_default()
       .to_string();
-    if !name.ends_with(".yml") || name == "config.yml" {
+    if !(name.ends_with(".yml") || name.ends_with(".yaml")) || name == "config.yml" {
       continue;
     }
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -85,7 +85,7 @@ fn every_shipped_issue_form_parses_and_renders() {
     assert!(
       meta.title.as_deref().is_some_and(|t| !t.trim().is_empty()),
       "{name} must yield its `title:` prefix: a reader that parsed the file but read no title \
-       would have `gwm create --from-issue` open an issue with no prefix and no error, got {:?}",
+       would have `gwm new` open an issue with no prefix and no error, got {:?}",
       meta.title
     );
     assert!(
@@ -99,7 +99,7 @@ fn every_shipped_issue_form_parses_and_renders() {
     assert!(
       !rendered.trim().is_empty(),
       "{name} rendered to nothing: a reader that parsed the file into an empty `body` would \
-       leave `gwm create --from-issue` writing a blank description with no error"
+       leave `gwm new` writing a blank description with no error"
     );
     parsed += 1;
   }
@@ -113,15 +113,17 @@ fn every_shipped_issue_form_parses_and_renders() {
   );
 }
 
-/// Issue #688, the one measured difference the parser swap makes on user YAML.
+/// Issue #688, the difference the parser swap makes in which forms parse and
+/// what they yield.
 ///
-/// `serde_yaml_ng` dropped a `<<:` merge key, so a form built on an anchor
-/// lost the merged fields silently. `serde-saphyr` resolves it, which is the
-/// more correct reading of YAML 1.2 and the reason this is pinned rather than
-/// worked around. None of the forms this repo ships uses an anchor today, so
-/// nothing changes for them; this is here so the difference is a documented
-/// contract instead of a surprise the first time somebody factors a shared
-/// field out of two forms.
+/// `serde_yaml_ng` did not resolve a `<<:` merge key, so a form built on an
+/// anchor lost the merged optional fields silently, or was rejected when the
+/// merge carried a required one such as `type`, as it does here.
+/// `serde-saphyr` resolves merge keys (a YAML 1.1 type), and this is pinned
+/// rather than worked around. None of the forms this repo ships uses an
+/// anchor today, so nothing changes for them; this is here so the difference
+/// is a documented contract instead of a surprise the first time somebody
+/// factors a shared field out of two forms.
 #[test]
 fn a_merge_key_contributes_its_fields() {
   let yaml = r#"
