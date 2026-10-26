@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The capture preflight passed a vhs that writes nothing**
+  ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)). vhs 0.12.0 runs a
+  tape to the end, prints `Creating ….gif`, exits 0 and never starts the
+  encoder ([charmbracelet/vhs#787](https://github.com/charmbracelet/vhs/issues/787)).
+  It was installed on the release machine on 2026-09-10 and nobody saw it until
+  the v1.11.0 cut. The per-tape freshness check in `generate.sh` did fire, and
+  the run did exit 1, but only after every tape had failed twice, each failure
+  reported as the write race the retry exists for. The preflight, the half
+  `tests/capture_pipeline_tests.rs` drives, checked vhs through
+  `version-stamp.tape`, whose stamp is written by a shell redirection inside
+  the tape and so lands whether vhs can write or not. The preflight now also
+  requires the tape's own gif, the one file only vhs writes, and stops before
+  any tape when it is missing. Measured against the real vhs both ways: 0.12.1
+  wrote the gif 10 runs out of 10, and a no-op `ffmpeg` first on `PATH`, which
+  reproduces 0.12.0's signature, stops the preflight. The floor, vhs 0.12.1 or
+  later, is in CONTRIBUTING.md § Releases and `docs/_capture/README.md`.
+
 
 ## Past releases
 
