@@ -1,0 +1,20 @@
+{
+  "logo": "docs/_assets/logo.svg",
+  "logoLight": "docs/_assets/logo-light.svg",
+  "eyebrow": "Git Worktree Manager",
+  "version": "v1.11.0",
+  "wordmark": "gwm",
+  "tagline": "One binary. Every worktree. Setup already done.",
+  "chips": ["CLI + TUI", "Create from issue", "Mouse support", "Agent sessions", "tmux · zellij · herdr", "3583 tests"],
+  "install": "cargo install gwm-cli",
+  "footer": "github.com/kbrdn1/gwm-cli · Rust · MIT OR Apache-2.0",
+  "branchGraph": [
+    { "label": "feat/#680-repo-groups", "color": "#c15f3c", "fill": true },
+    { "label": "feat/#624-mouse", "color": "#d99a63" },
+    { "label": "feat/#623-settings", "color": "#6bc97f" },
+    { "label": "perf/#633-list-config", "color": "#7ab8ff" },
+    { "label": "fix/#688-serde-yaml", "color": "#888" }
+  ],
+  "width": 1600,
+  "height": 600
+}
