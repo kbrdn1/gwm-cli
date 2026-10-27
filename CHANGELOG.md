@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gwm doctor --fix`. CONTRIBUTING.md links the docs site at `gwm.kbrdn.dev`,
   the address it is served at, instead of a `gwm-docs` subdomain that does
   not resolve ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)).
+- **The README banner takes the kbrdn.dev design**: a pixel field, a rounded
+  panel, rounded chips and install box, a dashed rule over the footer. Same
+  content as the v1.11.0 banner. Its generator config now lives beside it as
+  `docs/_assets/promo.config.json`
+  ([#704](https://github.com/kbrdn1/gwm-cli/issues/704)).
 
 
 ## Past releases
