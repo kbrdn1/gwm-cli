@@ -30,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproduces 0.12.0's signature, stops the preflight. The floor, vhs 0.12.1 or
   later, is in CONTRIBUTING.md § Releases and `docs/_capture/README.md`.
 
+### Security
+
+- ⬆️ Bumped `libz-sys` `1.1.29` → `1.1.31` to clear [RUSTSEC-2026-0418]
+  (its build script leaks environment variables into the build directory),
+  published on 2026-10-28 and failing the `cargo audit --deny warnings` CI
+  gate from then on. It is both a direct dependency (declared for its static
+  zlib) and pulled by `git2 → libgit2-sys`; the `version = "1"` requirement
+  already allows 1.1.31, so only `Cargo.lock` changes.
+
+[RUSTSEC-2026-0418]: https://rustsec.org/advisories/RUSTSEC-2026-0418
+
 ### Docs
 
 - `skills/SKILL.md` presents 1.11.0 as the current line and gains the 1.10.0
