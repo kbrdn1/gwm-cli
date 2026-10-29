@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content as the v1.11.0 banner. Its generator config now lives beside it as
   `docs/_assets/promo.config.json`
   ([#704](https://github.com/kbrdn1/gwm-cli/issues/704)).
+- **The README banner draws gwm instead of photographing it**: the card's
+  thumbnail is an isometric illustration, the repo's `.git` at the base and
+  three worktrees stacked on it, the newest one fresh out of
+  `gwm create feat 42 user-auth` with its `.env` copied and `post_create` run.
+  The TUI capture stays three lines below in the README. The test chip reads
+  3585, the nextest summary of CI on `be7e3a80`.
 
 
 ## Past releases
