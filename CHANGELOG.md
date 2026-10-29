@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published on 2026-10-28 and failing the `cargo audit --deny warnings` CI
   gate from then on. It is both a direct dependency (declared for its static
   zlib) and pulled by `git2 → libgit2-sys`; the `version = "1"` requirement
-  already allows 1.1.31, so only `Cargo.lock` changes.
+  already allows 1.1.31, so `Cargo.lock` moves and `third-party/README.md`
+  records the new provenance. The zlib notice 1.1.31 vendors is
+  byte-identical, so `third-party/zlib-LICENSE` keeps its blob id.
 
 [RUSTSEC-2026-0418]: https://rustsec.org/advisories/RUSTSEC-2026-0418
 

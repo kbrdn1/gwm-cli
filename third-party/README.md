@@ -29,7 +29,7 @@ purpose, and #577 is this.
 | File | Library | Comes from | Recorded version |
 |---|---|---|---|
 | `libgit2-COPYING` | libgit2 | `libgit2-sys` crate, `libgit2/COPYING` | `libgit2-sys 0.18.7+1.9.6` (libgit2 1.9.6) |
-| `zlib-LICENSE` | zlib | `libz-sys` crate, `src/zlib/LICENSE` | `libz-sys 1.1.29` |
+| `zlib-LICENSE` | zlib | `libz-sys` crate, `src/zlib/LICENSE` | `libz-sys 1.1.31` |
 
 Both are byte-for-byte copies. `tests/third_party_notices_tests.rs` pins each
 one by git blob id, so an edit reddens the suite:
