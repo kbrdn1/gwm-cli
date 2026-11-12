@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`cargo install gwm-cli` without `--locked` could build a TUI that misplaces
+  halfwidth katakana** ([#725](https://github.com/kbrdn1/gwm-cli/issues/725)).
+  It ignores the committed lockfile and resolved `unicode-width` 0.2.3, which
+  gives the halfwidth sound marks (U+FF9E, U+FF9F) a cell that `ratatui-core`
+  0.1.2 then adds a second time: `ｶﾞ` took three cells instead of two, shifting
+  the rest of the line. `unicode-width` is now capped below 0.2.3 until
+  `ratatui-core` releases the fix
+  ([#721](https://github.com/kbrdn1/gwm-cli/issues/721)). `--locked`,
+  `cargo binstall`, the release archives and the packages were not affected.
+
 - **The undo journal evicted real entries before dead ones**
   ([#713](https://github.com/kbrdn1/gwm-cli/issues/713)). `history.toml` is
   capped at 100 entries across all repos and used to drop the oldest one on

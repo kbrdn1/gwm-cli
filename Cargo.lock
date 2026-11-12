@@ -966,6 +966,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "saphyr",
+ "semver",
  "serde",
  "serde-saphyr",
  "serde_json",
