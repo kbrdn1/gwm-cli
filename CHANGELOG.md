@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The undo journal evicted real entries before dead ones**
+  ([#713](https://github.com/kbrdn1/gwm-cli/issues/713)). `history.toml` is
+  capped at 100 entries across all repos and used to drop the oldest one on
+  overflow, whatever its repo. A tool that ran real `gwm remove` in temporary
+  repos from its test suite left entries that can never be undone, and each
+  one pushed out a genuine, older entry. On overflow the journal now drops the
+  oldest entry whose repo no longer exists, otherwise the oldest entry of the
+  repo holding the most entries, so one repo can no longer flush another's
+  history. Nothing is purged on write: a repo on an unmounted disk keeps its
+  entries until the room is needed. A single-repo journal rotates exactly as
+  before. The variables that keep a consumer's test suite off the user's
+  journal, trust ledger and config are now listed in
+  [Daemon consumers](docs/5.integrations/4.daemon-consumers.md#isolating-gwm-in-a-consumers-tests).
+
 - **The capture preflight passed a vhs that writes nothing**
   ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)). vhs 0.12.0 runs a
   tape to the end, prints `Creating ….gif`, exits 0 and never starts the
