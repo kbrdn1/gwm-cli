@@ -221,7 +221,7 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde-saphyr = "2.0.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
@@ -244,7 +244,7 @@ interprocess = "2.4.2"
 # touch and which pulls `encoding_rs < 0.8.40` into the graph: `encoding_rs_io`
 # already holds the 0.8 slot, so cargo backtracks to the 0.7 series and compiles
 # `encoding_rs 0.7.2` plus `cfg-if 0.1.10` for nothing.
-saphyr = { version = "0.2.2", default-features = false }
+saphyr = { version = "0.3.3", default-features = false }
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"

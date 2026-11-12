@@ -216,8 +216,10 @@ fn an_idle_connection_survives_between_two_requests() {
     .to_ns_name::<GenericNamespaced>()
     .expect("pipe name");
   let stream = Stream::connect(name).expect("connect");
-  let (recv, mut send) = stream.split();
-  let mut reader = BufReader::new(recv);
+  // `&Stream` is both `Read` and `Write`, so one connection serves both
+  // directions without `Stream::split`, deprecated in interprocess 2.4.7.
+  let mut send = &stream;
+  let mut reader = BufReader::new(&stream);
 
   for round in 0..2u8 {
     writeln!(send, "{LIST_REQUEST}").expect("request write");
