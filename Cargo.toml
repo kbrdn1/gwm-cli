@@ -221,7 +221,7 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde-saphyr = "2.0.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
