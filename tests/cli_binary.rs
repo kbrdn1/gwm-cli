@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn help_prints_subcommands() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.arg("--help");
   // Match the subcommand-listing column exactly: clap aligns subcommand
   // names with two leading spaces and at least two trailing spaces before
@@ -96,7 +96,7 @@ fn commit_prefix_resolves_branch_to_shortcode_form() {
   // prints `:sparkles: feat(#41):` — the prefix every commit in this
   // repo starts with. The shortcode form is the default (matches
   // most commit hooks and tooling that lint emoji on raw text).
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["commit-prefix", "--branch", "feat/#41-foo"]);
   cmd
     .assert()
@@ -109,7 +109,7 @@ fn commit_prefix_unicode_emits_real_emoji() {
   // The `--unicode` flag swaps `:sparkles:` for ✨ — meant for shell
   // prompts and the commit-msg hook (which wants the final byte
   // sequence in the message body, not the shortcode form).
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["commit-prefix", "--branch", "feat/#41-foo", "--unicode"]);
   cmd.assert().success().stdout(predicate::str::contains("✨ feat(#41):"));
 }
@@ -120,7 +120,7 @@ fn commit_prefix_for_fix_branch_uses_bug_emoji() {
   // most-used emojis in the history both need an end-to-end test
   // so a future refactor that breaks one trips a binary-level
   // assertion.
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["commit-prefix", "--branch", "fix/#10-bar"]);
   cmd
     .assert()
@@ -140,7 +140,7 @@ fn commit_prefix_with_explicit_branch_honours_repo_gitmoji_overrides() {
   let cfg = "[gitmoji]\nfeat = \":rocket:\"\n";
   std::fs::write(dir.path().join(".gwm.toml"), cfg).expect("seed .gwm.toml");
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["commit-prefix", "--branch", "feat/#41-foo"]);
@@ -157,7 +157,7 @@ fn commit_prefix_on_non_gwm_branch_reports_error() {
   // pointer to the convention" rather than silently rendering a
   // bogus prefix. The user typed `--branch <name>` explicitly, so
   // there's no auto-fallback to CWD to fall back to.
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["commit-prefix", "--branch", "random"]);
   cmd.assert().failure().stderr(predicate::str::contains("random"));
 }
@@ -171,7 +171,7 @@ fn commit_prefix_unicode_normalizes_known_shortcode_override() {
   // `gwm types --gitmoji`'s unicode column was the original bug.
   let (dir, _repo) = init_repo();
   std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
@@ -187,7 +187,7 @@ fn commit_prefix_unicode_leaves_unknown_shortcode_override_verbatim() {
   // `:question:`/❓ (which would hide the user's intent).
   let (dir, _repo) = init_repo();
   std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":foo:\"\n").expect("seed .gwm.toml");
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
@@ -206,7 +206,7 @@ fn types_gitmoji_normalizes_known_shortcode_override_in_unicode_column() {
   // greppable on the same row.
   let (dir, _repo) = init_repo();
   std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
   let assert = cmd.assert().success();
   let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
@@ -235,7 +235,7 @@ fn types_with_gitmoji_flag_includes_emoji_columns() {
   // shortcode is asserted via `:sparkles:` (textual, deterministic);
   // the unicode column is asserted via the ✨ character.
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
   cmd
     .assert()
@@ -253,7 +253,7 @@ fn types_without_gitmoji_flag_does_not_include_emoji_columns() {
   // shortcodes into its output — every scripted parser of the
   // pre-#85 surface depends on the two-column layout.
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).arg("types");
   cmd
     .assert()
@@ -269,7 +269,7 @@ fn hooks_install_commit_msg_creates_executable_hook() {
   // exits 0. We assert on the resulting file (not the stdout
   // message), so the test is robust to cosmetic copy changes.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
   cmd.assert().success();
 
@@ -294,7 +294,7 @@ fn hooks_install_commit_msg_refuses_existing_hook_without_force() {
   let hook_path = hooks_dir.join("commit-msg");
   std::fs::write(&hook_path, "#!/bin/sh\necho 'pre-existing hook'\n").expect("seed hook");
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
   cmd.assert().failure().stderr(predicate::str::contains("--force"));
 
@@ -314,7 +314,7 @@ fn hooks_install_commit_msg_force_overwrites() {
   let hook_path = hooks_dir.join("commit-msg");
   std::fs::write(&hook_path, "#!/bin/sh\necho 'old'\n").expect("seed hook");
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["hooks", "install", "commit-msg", "--force"]);
@@ -332,7 +332,7 @@ fn hooks_install_commit_msg_force_overwrites() {
 
 #[test]
 fn labels_help_lists_list_and_push() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["labels", "--help"]);
   cmd
     .assert()
@@ -344,7 +344,7 @@ fn labels_help_lists_list_and_push() {
 #[test]
 fn labels_list_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["labels", "list"])
@@ -359,7 +359,7 @@ fn labels_list_with_no_declared_labels_is_a_no_op() {
   // out to `gh`, just print a single line and exit 0. The test
   // doesn't need `gh` on PATH to pass — that's the whole point.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["labels", "list"])
@@ -375,7 +375,7 @@ fn sync_unknown_pattern_errors() {
   // A pattern that resolves to no worktree must fail loudly with the
   // worktree name, not silently no-op.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["sync", "does-not-exist"])
@@ -389,7 +389,7 @@ fn sync_in_repo_without_upstream_reports_missing_upstream() {
   // `gwm sync` with no pattern targets the CWD worktree. A fresh repo
   // on `main` with no remote has no upstream → clear, actionable error.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .arg("sync")
@@ -447,7 +447,7 @@ fn sync_from_subdir_names_the_worktree_root_not_the_subdir() {
   let sub = wt.join("src/deep");
   std::fs::create_dir_all(&sub).unwrap();
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(&sub)
     .arg("sync")
@@ -464,7 +464,7 @@ fn labels_push_with_no_declared_labels_is_a_no_op() {
   // nothing to push — that would surface `gh: not found` to users
   // who haven't yet configured `[[labels]]` and tried the command.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["labels", "push"])
@@ -476,7 +476,7 @@ fn labels_push_with_no_declared_labels_is_a_no_op() {
 #[test]
 fn labels_push_dry_run_with_no_declared_labels_succeeds() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["labels", "push", "--dry-run"])
@@ -500,7 +500,7 @@ color = "not-a-hex"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["labels", "list"])
@@ -514,7 +514,7 @@ color = "not-a-hex"
 
 #[test]
 fn milestones_help_lists_list_and_push() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["milestones", "--help"]);
   cmd
     .assert()
@@ -526,7 +526,7 @@ fn milestones_help_lists_list_and_push() {
 #[test]
 fn milestones_list_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["milestones", "list"])
@@ -541,7 +541,7 @@ fn milestones_list_with_no_declared_is_a_no_op() {
   // test passes without `gh` on PATH — that's the whole point of the
   // fast path.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["milestones", "list"])
@@ -555,7 +555,7 @@ fn milestones_push_with_no_declared_is_a_no_op() {
   // Same fast path as `list`. Push must not call `gh` when there's
   // nothing to push.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["milestones", "push"])
@@ -567,7 +567,7 @@ fn milestones_push_with_no_declared_is_a_no_op() {
 #[test]
 fn milestones_push_dry_run_with_no_declared_succeeds() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["milestones", "push", "--dry-run"])
@@ -591,7 +591,7 @@ due_on = "not-a-date"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["milestones", "list"])
@@ -612,7 +612,7 @@ state = "draft"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["milestones", "list"])
@@ -626,7 +626,7 @@ state = "draft"
 fn switch_alias_s_resolves_to_switch() {
   // Issue #22: `gwm s` is the daily-driver alias for `gwm switch`. Resolving
   // `gwm s --help` to the switch help text proves the alias is wired in.
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["s", "--help"]);
   cmd
     .assert()
@@ -640,7 +640,7 @@ fn top_level_help_advertises_switch_alias() {
   // discover `gwm s` without reading the subcommand-specific page. `aliases?`
   // tolerates clap's singular/plural rendering (4.6.1 `[aliases: s]`, 4.6.2
   // `[alias: s]`).
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.arg("--help");
   cmd
     .assert()
@@ -653,7 +653,7 @@ fn switch_outside_git_repo_fails() {
   // Same contract as the other repo-bound subcommands: bail out with a
   // clear error rather than dropping the user into an empty TUI.
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .arg("switch")
@@ -665,7 +665,7 @@ fn switch_outside_git_repo_fails() {
 #[test]
 fn doctor_on_fresh_repo_prints_checks() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   // Exit code is intentionally not asserted to be 0: in environments
   // without `lazygit` on PATH (most CI runners) or a pre-existing
   // `~/cc-worktree/` parent, the report legitimately surfaces Warning
@@ -687,7 +687,7 @@ fn doctor_on_fresh_repo_prints_checks() {
 #[test]
 fn doctor_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .arg("doctor")
@@ -712,7 +712,7 @@ command = "definitely-not-on-path-review-cli {base}..{head}"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .arg("doctor")
@@ -725,7 +725,7 @@ command = "definitely-not-on-path-review-cli {base}..{head}"
 fn doctor_exits_two_on_invalid_config() {
   let (dir, _repo) = init_repo();
   std::fs::write(dir.path().join(".gwm.toml"), "broken = [unterminated").unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .arg("doctor")
@@ -736,7 +736,7 @@ fn doctor_exits_two_on_invalid_config() {
 
 #[test]
 fn version_flag() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.arg("--version");
   cmd.assert().success().stdout(predicate::str::contains("gwm"));
 }
@@ -748,7 +748,7 @@ fn types_lists_branch_types() {
   // defaults and surface the `built-in defaults` footer so users can
   // tell they're not looking at a `.gwm.toml` override.
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).arg("types");
   cmd
     .assert()
@@ -781,7 +781,7 @@ description = "Database migration"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).arg("types");
   cmd
     .assert()
@@ -803,7 +803,7 @@ fn types_inside_bare_repo_falls_back_to_built_in_defaults() {
   // defaults)` footer.
   let dir = tempfile::TempDir::new().unwrap();
   git2::Repository::init_bare(dir.path()).expect("init bare repo");
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).arg("types");
   cmd
     .assert()
@@ -816,7 +816,7 @@ fn types_inside_bare_repo_falls_back_to_built_in_defaults() {
 #[test]
 fn create_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir.path()).arg("list");
   cmd
     .assert()
@@ -834,8 +834,7 @@ fn list_detect_pr_flag_adds_pr_column_with_detected_number() {
   let fake_bin = tempfile::TempDir::new().unwrap();
   let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -865,8 +864,7 @@ fn list_detect_pr_dispatches_to_glab_on_a_gitlab_origin() {
     "{}",
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GLAB", &fake_glab)
     .env("GWM_FAKE_LOG", &log)
@@ -903,8 +901,7 @@ fn the_glab_child_does_not_inherit_the_environment_that_would_retarget_it() {
   let log = fake_bin.path().join("calls.log");
   let fake_glab = write_recording_glab(fake_bin.path(), "[]", "{}");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GLAB", &fake_glab)
     .env("GWM_FAKE_LOG", &log)
@@ -959,8 +956,7 @@ fn list_without_detect_pr_flag_has_no_pr_column() {
   let (dir, repo) = init_repo();
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["list"])
     .assert()
@@ -972,7 +968,7 @@ fn list_without_detect_pr_flag_has_no_pr_column() {
 
 #[test]
 fn completions_zsh_emits_compdef_header() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["completions", "zsh"]);
   cmd
     .assert()
@@ -983,7 +979,7 @@ fn completions_zsh_emits_compdef_header() {
 
 #[test]
 fn completions_bash_emits_complete_directive() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["completions", "bash"]);
   cmd
     .assert()
@@ -994,7 +990,7 @@ fn completions_bash_emits_complete_directive() {
 
 #[test]
 fn completions_fish_emits_complete_directive() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["completions", "fish"]);
   cmd
     .assert()
@@ -1004,7 +1000,7 @@ fn completions_fish_emits_complete_directive() {
 
 #[test]
 fn completions_powershell_emits_register_block() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["completions", "powershell"]);
   cmd
     .assert()
@@ -1015,7 +1011,7 @@ fn completions_powershell_emits_register_block() {
 
 #[test]
 fn completions_rejects_unknown_shell() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["completions", "tcsh"]);
   cmd.assert().failure();
 }
@@ -1023,7 +1019,7 @@ fn completions_rejects_unknown_shell() {
 #[test]
 fn list_format_names_emits_one_name_per_line() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["list", "--format=names"])
@@ -1046,8 +1042,7 @@ fn list_format_json_emits_a_parseable_worktree_array() {
   // an editor / statusbar consumer wants the full set, and resolves the
   // active worktree from it. A fresh repo has exactly the main worktree.
   let (dir, _repo) = init_repo();
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["list", "--format=json"])
     .output()
@@ -1077,8 +1072,7 @@ fn list_format_json_with_detect_pr_populates_the_pr_field() {
   let fake_bin = tempfile::TempDir::new().unwrap();
   let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -1111,8 +1105,7 @@ fn list_format_json_detect_pr_keeps_explicit_link_when_detection_cannot_run() {
     .set_i64(&format!("branch.{branch}.gwm-pr"), 77)
     .unwrap();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["list", "--format=json", "--detect-pr"])
     .output()
@@ -1147,8 +1140,7 @@ fn list_format_json_detect_pr_clears_a_stale_persisted_pr() {
   // `gh pr list --head` returns no PR → detection clears the cache.
   let fake_gh = write_dispatch_gh(fake_bin.path(), "[]", "{}");
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -1167,8 +1159,7 @@ fn list_format_json_detect_pr_clears_a_stale_persisted_pr() {
 #[test]
 fn doctor_format_json_emits_checks_severity_and_exit_code() {
   let (dir, _repo) = init_repo();
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["doctor", "--format=json"])
     .output()
@@ -1201,16 +1192,14 @@ fn path_format_json_emits_name_path_branch() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "38", "json-path"])
     .assert()
     .success();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["path", "json-path", "--format=json"])
     .output()
@@ -1242,8 +1231,7 @@ fn daemon_rejects_zero_poll_ms() {
   // `--poll-ms 0` would spin a subscribe loop with no wait; clap rejects
   // it at parse time (range 1..) so the daemon never starts (issue #38
   // review). No repo / socket needed — validation fails first.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .args(["daemon", "--poll-ms", "0"])
     .assert()
     .failure()
@@ -1259,8 +1247,7 @@ fn statusline_without_a_daemon_prints_blank_and_exits_zero() {
   // blank line (issue #309 graceful-degradation contract).
   let sock_dir = tempfile::TempDir::new().unwrap();
   let missing = sock_dir.path().join("no-daemon.sock");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .arg("statusline")
     .arg("--socket")
     .arg(&missing)
@@ -1271,8 +1258,7 @@ fn statusline_without_a_daemon_prints_blank_and_exits_zero() {
 
 #[test]
 fn statusline_help_documents_watch_and_socket() {
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .args(["statusline", "--help"])
     .assert()
     .success()
@@ -1283,7 +1269,7 @@ fn statusline_help_documents_watch_and_socket() {
 #[test]
 fn cd_unknown_pattern_fails_with_not_found() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["cd", "nope"])
@@ -1295,7 +1281,7 @@ fn cd_unknown_pattern_fails_with_not_found() {
 #[test]
 fn cd_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["cd", "anything"])
@@ -1311,7 +1297,7 @@ fn cd_outside_git_repo_fails() {
 // parses the whole eval'd block before running any of it.
 #[test]
 fn shell_init_bash_emits_gcd_function() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "bash"]);
   // Pin the invocation site: a regression that mentions `gwm cd` only in
   // a comment but doesn't actually call it from the function body would
@@ -1327,7 +1313,7 @@ fn shell_init_bash_emits_gcd_function() {
 
 #[test]
 fn shell_init_zsh_emits_gcd_function() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "zsh"]);
   cmd
     .assert()
@@ -1346,7 +1332,7 @@ fn shell_init_posix_unaliases_gcd_first() {
   // regression: oh-my-zsh's git plugin defines `gcd='git checkout'` which
   // shadowed our gcd function ("defining function based on alias").
   for shell in ["bash", "zsh"] {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd.args(["shell-init", shell]);
     cmd.assert().success().stdout(predicate::str::contains("unalias gcd"));
   }
@@ -1354,7 +1340,7 @@ fn shell_init_posix_unaliases_gcd_first() {
 
 #[test]
 fn shell_init_powershell_unaliases_gcd_first() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "powershell"]);
   cmd
     .assert()
@@ -1365,7 +1351,7 @@ fn shell_init_powershell_unaliases_gcd_first() {
 
 #[test]
 fn shell_init_fish_emits_function_block() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "fish"]);
   cmd
     .assert()
@@ -1383,7 +1369,7 @@ fn shell_init_fish_emits_function_block() {
 fn shell_init_fish_quotes_target_with_double_dash() {
   // regression: fish wildcard expansion mangled paths containing `[`, `]`,
   // or `*` when the helper used `cd $target` without `cd -- "$target"`.
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "fish"]);
   cmd
     .assert()
@@ -1393,7 +1379,7 @@ fn shell_init_fish_quotes_target_with_double_dash() {
 
 #[test]
 fn shell_init_powershell_emits_function_block() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "powershell"]);
   cmd
     .assert()
@@ -1409,7 +1395,7 @@ fn shell_init_powershell_emits_function_block() {
 #[test]
 fn shell_init_posix_no_arg_invokes_switch() {
   for shell in ["bash", "zsh"] {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd.args(["shell-init", shell]);
     cmd
       .assert()
@@ -1421,7 +1407,7 @@ fn shell_init_posix_no_arg_invokes_switch() {
 
 #[test]
 fn shell_init_fish_no_arg_invokes_switch() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "fish"]);
   cmd
     .assert()
@@ -1432,7 +1418,7 @@ fn shell_init_fish_no_arg_invokes_switch() {
 
 #[test]
 fn shell_init_powershell_no_arg_invokes_switch() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "powershell"]);
   cmd
     .assert()
@@ -1450,7 +1436,7 @@ fn shell_init_powershell_no_arg_invokes_switch() {
 #[test]
 fn shell_init_posix_header_documents_no_arg_route() {
   for shell in ["bash", "zsh"] {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd.args(["shell-init", shell]);
     cmd
       .assert()
@@ -1461,7 +1447,7 @@ fn shell_init_posix_header_documents_no_arg_route() {
 
 #[test]
 fn shell_init_fish_header_documents_no_arg_route() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "fish"]);
   cmd
     .assert()
@@ -1471,7 +1457,7 @@ fn shell_init_fish_header_documents_no_arg_route() {
 
 #[test]
 fn shell_init_powershell_header_documents_no_arg_route() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "powershell"]);
   cmd
     .assert()
@@ -1484,7 +1470,7 @@ fn shell_init_powershell_header_documents_no_arg_route() {
 // wrapper from `gwm shell-init`, not the raw `cd "$(gwm switch)"` form.
 #[test]
 fn switch_help_mentions_gcd_wrapper() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["switch", "--help"]);
   cmd
     .assert()
@@ -1494,7 +1480,7 @@ fn switch_help_mentions_gcd_wrapper() {
 
 #[test]
 fn shell_init_rejects_unknown_shell() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["shell-init", "tcsh"]);
   cmd.assert().failure();
 }
@@ -1502,7 +1488,7 @@ fn shell_init_rejects_unknown_shell() {
 #[test]
 fn list_format_table_is_default() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .arg("list")
@@ -1541,7 +1527,7 @@ fn tmux_outside_tmux_session_fails_with_clear_error() {
   // must refuse loudly rather than spawn `tmux` against no server, which
   // would either start a brand-new tmux server or error opaquely.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("TMUX")
@@ -1554,7 +1540,7 @@ fn tmux_outside_tmux_session_fails_with_clear_error() {
 #[test]
 fn zellij_outside_zellij_session_fails_with_clear_error() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("ZELLIJ")
@@ -1570,7 +1556,7 @@ fn herdr_outside_herdr_session_fails_with_clear_error() {
   // command must refuse rather than shell out to a herdr that would go
   // looking for a socket that isn't there.
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("HERDR_ENV")
@@ -1593,8 +1579,7 @@ fn tmux_direction_rejects_a_value_no_backend_can_honour() {
   // spells. It must fail at the parse rather than reach a builder that
   // would have to guess.
   let (dir, _repo) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("TMUX", "/fake-socket,1,0")
     .args(["tmux", "anything", "--direction", "sideways"])
@@ -1639,8 +1624,7 @@ mux_pane_direction = "down"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "589", "mux-dir"])
@@ -1651,8 +1635,7 @@ mux_pane_direction = "down"
   write_recording_mux(fake.path(), "tmux");
 
   let run = |args: &[&str]| {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .env("PATH", prepend_path(fake.path()))
       .env("TMUX", "/fake-socket,1,0")
@@ -1709,7 +1692,7 @@ fn tmux_outside_git_repo_fails() {
   // `NotInGitRepo` wins over the multiplexer-not-running gate when both
   // apply — the user is told to fix the more fundamental problem first.
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("TMUX")
@@ -1722,7 +1705,7 @@ fn tmux_outside_git_repo_fails() {
 #[test]
 fn zellij_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("ZELLIJ")
@@ -1735,7 +1718,7 @@ fn zellij_outside_git_repo_fails() {
 #[test]
 fn herdr_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("HERDR_ENV")
@@ -1752,7 +1735,7 @@ fn herdr_outside_git_repo_fails() {
 #[test]
 fn tmux_outside_tmux_error_does_not_escape_dollar() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("TMUX")
@@ -1767,7 +1750,7 @@ fn tmux_outside_tmux_error_does_not_escape_dollar() {
 #[test]
 fn zellij_outside_zellij_error_does_not_escape_dollar() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("ZELLIJ")
@@ -1781,7 +1764,7 @@ fn zellij_outside_zellij_error_does_not_escape_dollar() {
 #[test]
 fn herdr_outside_herdr_error_does_not_escape_dollar() {
   let (dir, _repo) = init_repo();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env_remove("HERDR_ENV")
@@ -1797,21 +1780,21 @@ fn tmux_help_mentions_split_flag() {
   // The `-p` flag (split-pane instead of new-window) is the one knob users
   // care about; it must show up in `--help` so it's discoverable without
   // reading the README.
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["tmux", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--split"));
 }
 
 #[test]
 fn zellij_help_mentions_split_flag() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["zellij", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--split"));
 }
 
 #[test]
 fn herdr_help_mentions_split_flag() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["herdr", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--split"));
 }
@@ -1820,7 +1803,7 @@ fn herdr_help_mentions_split_flag() {
 
 #[test]
 fn link_help_documents_issue_and_pr_targets() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["link", "--help"]);
   cmd
     .assert()
@@ -1831,7 +1814,7 @@ fn link_help_documents_issue_and_pr_targets() {
 
 #[test]
 fn unlink_help_documents_issue_and_pr_targets() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["unlink", "--help"]);
   cmd
     .assert()
@@ -1842,7 +1825,7 @@ fn unlink_help_documents_issue_and_pr_targets() {
 
 #[test]
 fn open_help_documents_issue_and_pr_and_print_url() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["open", "--help"]);
   cmd
     .assert()
@@ -1854,7 +1837,7 @@ fn open_help_documents_issue_and_pr_and_print_url() {
 
 #[test]
 fn status_help_documents_json_flag() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["status", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--json"));
 }
@@ -1862,7 +1845,7 @@ fn status_help_documents_json_flag() {
 #[test]
 fn link_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["link", "issue", "42"])
@@ -1883,8 +1866,7 @@ fn link_issue_persists_and_status_reflects_it() {
   repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
 
   // link
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["link", "issue", "99"])
     .assert()
@@ -1892,8 +1874,7 @@ fn link_issue_persists_and_status_reflects_it() {
     .stdout(predicate::str::contains("issue #99"));
 
   // status --json
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["status", "--json"])
     .assert()
@@ -1910,22 +1891,19 @@ fn unlink_issue_falls_back_to_branch_name_auto_detect() {
   repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
 
   // Override then unlink.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["link", "issue", "99"])
     .assert()
     .success();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["unlink", "issue"])
     .assert()
     .success();
 
   // After unlink the branch-name auto-detect should resurface (issue #42).
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["status", "--json"])
     .assert()
@@ -1952,8 +1930,7 @@ fn status_auto_detects_pr_when_none_explicitly_linked() {
     r#"{"number":128,"title":"Auto-detect PR","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/128"}"#,
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -1979,8 +1956,7 @@ fn status_persists_detected_pr_title_after_fetch() {
     r#"{"number":128,"title":"Auto-detect PR","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/128"}"#,
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -2020,8 +1996,7 @@ fn review_resolves_pr_metadata_and_names_branch_end_to_end() {
     r#"{"number":1,"author":{"login":"alice"},"headRefName":"feat/spike-x","baseRefName":"main"}"#,
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -2052,15 +2027,13 @@ fn status_explicit_pr_link_wins_over_detection() {
     r#"{"number":61,"title":"Explicit","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/61"}"#,
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["link", "pr", "61"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -2081,8 +2054,7 @@ fn open_print_url_emits_url_without_spawning_browser() {
   repo.branch("feat/#42-tui-search", &head, false).unwrap();
   repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["open", "issue", "--print-url"])
     .assert()
@@ -2099,8 +2071,7 @@ fn open_pr_without_link_fails_clearly() {
   repo.branch("random-branch", &head, false).unwrap();
   repo.set_head("refs/heads/random-branch").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["open", "pr", "--print-url"])
     .assert()
@@ -2115,8 +2086,7 @@ fn status_on_branch_with_no_link_reports_no_link() {
   repo.branch("random-branch", &head, false).unwrap();
   repo.set_head("refs/heads/random-branch").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["status"])
     .assert()
@@ -2136,7 +2106,10 @@ fn status_on_branch_with_no_link_reports_no_link() {
 // CLI surface of those subcommands.
 //
 // Worktree-creating tests pin `[worktree].base` to a `tempfile::TempDir`
-// so the test runner never writes under `~/cc-worktree/...`. The branch
+// so each one owns where its worktrees go. A test that does not still
+// stays out of `~/cc-worktree/...` on unix: `common::gwm()` points `$HOME`
+// at the test's scratch directory (#724), and the default base is
+// `{home}/cc-worktree/{repo}`. On Windows `$HOME` is not read, so pin. The branch
 // pattern is left at its default (`{type}/#{issue}-{desc}`) to exercise
 // the production naming pipeline.
 
@@ -2155,8 +2128,7 @@ fn init_writes_gwm_toml_with_expected_sections() {
   let cfg_path = dir.path().join(".gwm.toml");
   assert!(!cfg_path.exists(), "precondition: no .gwm.toml in fresh repo");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .arg("init")
     .assert()
@@ -2193,8 +2165,7 @@ fn init_refuses_to_overwrite_existing_gwm_toml() {
   let cfg_path = dir.path().join(".gwm.toml");
   std::fs::write(&cfg_path, "# user edits\n[worktree]\nbase = \"/custom\"\n").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .arg("init")
     .assert()
@@ -2215,8 +2186,7 @@ fn init_outside_git_repo_fails() {
   // `cmd_init` calls `discover_repo` first — the standard `NotInGitRepo`
   // error wins so the user is steered to `git init` before configuring.
   let dir = tempfile::TempDir::new().unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .arg("init")
     .assert()
@@ -2231,8 +2201,7 @@ fn init_list_presets_enumerates_builtins() {
   // `--list-presets` is a pure stdout enumeration — it must work without a
   // git repo (it returns before `discover_repo`) and name every built-in.
   let dir = tempfile::TempDir::new().unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["init", "--list-presets"])
     .assert()
@@ -2252,8 +2221,7 @@ fn init_preset_show_prints_without_writing() {
   let (dir, _repo) = init_repo();
   let cfg_path = dir.path().join(".gwm.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["init", "--preset", "rust", "--show"])
     .assert()
@@ -2272,8 +2240,7 @@ fn init_preset_writes_stack_config() {
   let (dir, _repo) = init_repo();
   let cfg_path = dir.path().join(".gwm.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["init", "--preset", "laravel"])
     .assert()
@@ -2295,8 +2262,7 @@ fn init_preset_writes_symfony_config() {
   let (dir, _repo) = init_repo();
   let cfg_path = dir.path().join(".gwm.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["init", "--preset", "symfony"])
     .assert()
@@ -2327,8 +2293,7 @@ fn init_unknown_preset_fails() {
   // An unknown preset name must fail loudly and point the user at
   // `--list-presets` rather than silently writing the generic template.
   let (dir, _repo) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["init", "--preset", "cobol"])
     .assert()
@@ -2343,8 +2308,7 @@ fn init_preset_nuxt_alias_writes_node_body() {
   let (dir, _repo) = init_repo();
   let cfg_path = dir.path().join(".gwm.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["init", "--preset", "nuxt"])
     .assert()
@@ -2598,8 +2562,7 @@ fn create_adds_worktree_dir_and_branch_at_head() {
   write_test_config(dir.path(), base.path());
   let head_oid = repo.head().unwrap().target().unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     // Issue #95: this test writes a `.gwm.toml` and runs `gwm
     // create` non-interactively, so the TOFU prompt would block.
@@ -2656,8 +2619,7 @@ required = true
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     // Issue #95: bypass the TOFU prompt — the test's whole point
     // is to assert that bootstrap.copy actually runs, which is
@@ -2703,8 +2665,7 @@ run = "printf legacy > legacy-post-create.txt"
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "88", "hooks"])
@@ -2779,8 +2740,7 @@ feat = {{ template = "feature_request.yml", surface = "cli", title_prefix = "[Fe
   );
   fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_GH", &fake_gh)
@@ -2827,8 +2787,7 @@ on_fail = "abort"
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "88", "blocked"])
@@ -2867,8 +2826,7 @@ on_fail = "ignore"
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "88", "nonfatal"])
@@ -2899,8 +2857,7 @@ run = "false"
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "88", "skip", "--skip-hooks", "pre_create"])
@@ -2939,15 +2896,13 @@ run = "printf post > post-bootstrap.txt"
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
   std::fs::write(dir.path().join("seed.txt"), "seed").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["create", "feat", "88", "boot-hooks", "--no-bootstrap"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["bootstrap", "feat-88-boot-hooks"])
@@ -2974,8 +2929,7 @@ fn remove_runs_pre_and_post_remove_hooks_and_force_skips_them() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["create", "feat", "88", "remove-hooks", "--no-bootstrap"])
     .assert()
@@ -3000,8 +2954,7 @@ run = "printf removed-{{branch}} > post-remove.txt"
   );
   std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["remove", "remove-hooks"])
@@ -3010,8 +2963,7 @@ run = "printf removed-{{branch}} > post-remove.txt"
     .stderr(predicate::str::contains("hook pre_remove 'block remove' failed"));
   assert!(base.path().join("feat-88-remove-hooks").exists());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["remove", "remove-hooks", "--force"])
@@ -3050,8 +3002,7 @@ required = true
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["create", "feat", "8", "bootstrap-off", "--no-bootstrap"])
     .assert()
@@ -3076,8 +3027,7 @@ fn create_rejects_unknown_branch_type() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["create", "blarg", "9", "nope"])
     .assert()
@@ -3103,8 +3053,7 @@ fn create_rejects_non_digit_issue() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["create", "feat", "abc", "thing"])
     .assert()
@@ -3149,8 +3098,7 @@ fn create_refuses_stale_branch_without_reuse_flag() {
   let new_head = repo.head().unwrap().target().unwrap().to_string();
   assert_ne!(new_head, stale_oid, "precondition: HEAD must diverge from stale branch");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "99", "stale"])
@@ -3178,8 +3126,7 @@ fn create_reuses_stale_branch_with_flag() {
   let head = repo.head().unwrap().peel_to_commit().unwrap();
   repo.branch("feat/#99-stale", &head, false).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "99", "stale", "--reuse-branch"])
@@ -3200,8 +3147,7 @@ fn create_subcommand_outside_git_repo_fails() {
   // `create_outside_git_repo_fails` test (line ~327) that — despite the
   // name — actually exercises `gwm list`.
   let dir = tempfile::TempDir::new().unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["create", "feat", "1", "x"])
     .assert()
@@ -3311,8 +3257,7 @@ fn create_from_issue_derives_the_branch_from_the_labels_and_the_title() {
     &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_GH", &fake_gh)
@@ -3345,7 +3290,7 @@ fn create_from_issue_refuses_a_closed_issue_until_forced() {
   );
 
   let run = |args: &[&str]| {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(dir.path())
       .env("GWM_ALLOW_BOOTSTRAP", "1")
@@ -3387,7 +3332,7 @@ fn create_from_issue_is_safe_to_re_run() {
   );
 
   let run = || {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(dir.path())
       .env("GWM_ALLOW_BOOTSTRAP", "1")
@@ -3419,8 +3364,7 @@ fn create_from_issue_re_run_check_precedes_the_closed_refusal() {
     fake_bin.path(),
     &issue_json(594, "[Feature]: modals should follow layout", "OPEN", &["feature"]),
   );
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_GH", &open)
@@ -3435,8 +3379,7 @@ fn create_from_issue_re_run_check_precedes_the_closed_refusal() {
     closed_bin.path(),
     &issue_json(594, "[Feature]: modals should follow layout", "CLOSED", &["feature"]),
   );
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_GH", &closed)
@@ -3460,7 +3403,7 @@ fn create_from_issue_refuses_labels_that_do_not_separate_two_types() {
   );
 
   let run = |args: &[&str]| {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(dir.path())
       .env("GWM_ALLOW_BOOTSTRAP", "1")
@@ -3494,8 +3437,7 @@ fn create_issue_flag_is_exclusive_with_the_positional_triple_and_with_name() {
     vec!["create", "--issue", "594", "feat", "594", "x"],
     vec!["create", "--issue", "594", "--name", "spike"],
   ] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .args(&args)
       .assert()
@@ -3515,8 +3457,7 @@ fn create_type_and_force_are_only_meaningful_alongside_issue() {
     vec!["create", "feat", "1", "x", "--type", "fix"],
     vec!["create", "feat", "1", "x", "--force"],
   ] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .args(&args)
       .assert()
@@ -3525,8 +3466,7 @@ fn create_type_and_force_are_only_meaningful_alongside_issue() {
   }
 
   for args in [vec!["create", "--type", "fix"], vec!["create", "--force"]] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .args(&args)
       .assert()
@@ -3557,8 +3497,7 @@ fn create_from_issue_never_echoes_a_control_byte_it_was_handed() {
     &issue_json(594, "[Feature]: modal layout", "OPEN", &["feature"]),
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_GH", &fake_gh)
@@ -3575,8 +3514,7 @@ fn create_from_issue_never_echoes_a_control_byte_it_was_handed() {
 
 #[test]
 fn create_help_documents_the_issue_flag() {
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .args(["create", "--help"])
     .assert()
     .success()
@@ -3598,8 +3536,7 @@ fn remove_deletes_worktree_dir_and_keeps_branch_by_default() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1") // issue #95: TOFU bypass for the setup step
     .args(["create", "feat", "10", "remove-me"])
@@ -3608,8 +3545,7 @@ fn remove_deletes_worktree_dir_and_keeps_branch_by_default() {
   let wt_dir = base.path().join("feat-10-remove-me");
   assert!(wt_dir.exists());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "remove-me"])
     .assert()
@@ -3632,16 +3568,14 @@ fn remove_with_delete_branch_drops_branch() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1") // issue #95: TOFU bypass for the setup step
     .args(["create", "feat", "11", "drop-branch"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "drop-branch", "--delete-branch"])
     .assert()
@@ -3666,8 +3600,7 @@ fn remove_takes_several_patterns_in_one_command() {
   write_test_config(dir.path(), base.path());
 
   for (issue, slug) in [("20", "bulk-one"), ("21", "bulk-two"), ("22", "bulk-three")] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .env("GWM_ALLOW_BOOTSTRAP", "1")
       .args(["create", "feat", issue, slug])
@@ -3675,8 +3608,7 @@ fn remove_takes_several_patterns_in_one_command() {
       .success();
   }
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "bulk-one", "bulk-three", "--delete-branch"])
     .assert()
@@ -3705,16 +3637,14 @@ fn remove_resolves_every_pattern_before_touching_anything() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "23", "survivor"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "survivor", "ghost"])
     .assert()
@@ -3734,8 +3664,7 @@ fn remove_dry_run_prints_one_plan_per_pattern() {
   write_test_config(dir.path(), base.path());
 
   for (issue, slug) in [("24", "plan-one"), ("25", "plan-two")] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .env("GWM_ALLOW_BOOTSTRAP", "1")
       .args(["create", "feat", issue, slug])
@@ -3743,8 +3672,7 @@ fn remove_dry_run_prints_one_plan_per_pattern() {
       .success();
   }
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "plan-one", "plan-two", "--dry-run"])
     .assert()
@@ -3770,16 +3698,14 @@ fn remove_deduplicates_patterns_that_resolve_to_the_same_worktree() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "26", "twice"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "twice", "twice"])
     .assert()
@@ -3798,8 +3724,7 @@ fn a_batch_removal_continues_past_a_failing_target() {
   write_test_config(dir.path(), base.path());
 
   for (issue, slug) in [("27", "batch-ok"), ("28", "batch-blocked")] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .args(["create", "feat", issue, slug, "--no-bootstrap"])
       .assert()
@@ -3822,8 +3747,7 @@ run = "test ! -f .block"
   );
   std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["remove", "batch-ok", "batch-blocked"])
@@ -3869,8 +3793,7 @@ fn a_batch_refuses_a_target_whose_path_moved_since_it_was_resolved() {
   write_test_config(dir.path(), base.path());
 
   for (issue, slug) in [("30", "moved-first"), ("31", "moved-second")] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .args(["create", "feat", issue, slug, "--no-bootstrap"])
       .assert()
@@ -3907,8 +3830,7 @@ run = "git -C {repo} worktree move {second} {relocated}"
 
   let history_dir = tempfile::TempDir::new().unwrap();
   let history_file = history_dir.path().join("history.toml");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_HISTORY_FILE", &history_file)
@@ -3952,8 +3874,7 @@ fn a_failing_post_remove_hook_is_not_reported_as_a_failed_removal() {
   write_test_config(dir.path(), base.path());
 
   for (issue, slug) in [("32", "post-a"), ("33", "post-b")] {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .args(["create", "feat", issue, slug, "--no-bootstrap"])
       .assert()
@@ -3975,8 +3896,7 @@ run = "false"
   );
   std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["remove", "post-a", "post-b"])
@@ -3997,8 +3917,7 @@ fn remove_unknown_pattern_fails() {
   // doing nothing would mask a user typo and leave them wondering why
   // their worktree is still around.
   let (dir, _repo) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "ghost"])
     .assert()
@@ -4009,8 +3928,7 @@ fn remove_unknown_pattern_fails() {
 #[test]
 fn remove_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "anything"])
     .assert()
@@ -4030,8 +3948,7 @@ fn remove_dry_run_prints_plan_and_keeps_worktree_intact() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "31", "preview"])
@@ -4040,8 +3957,7 @@ fn remove_dry_run_prints_plan_and_keeps_worktree_intact() {
   let wt_dir = base.path().join("feat-31-preview");
   assert!(wt_dir.exists());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "preview", "--dry-run"])
     .assert()
@@ -4067,16 +3983,14 @@ fn remove_dry_run_with_delete_branch_flags_branch_deletion() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "32", "preview-drop"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "preview-drop", "--delete-branch", "--dry-run"])
     .assert()
@@ -4100,23 +4014,20 @@ fn remove_dry_run_on_ambiguous_pattern_still_fails() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "33", "ambiguous-one"])
     .assert()
     .success();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "34", "ambiguous-two"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["remove", "ambiguous", "--dry-run"])
     .assert()
@@ -4134,8 +4045,7 @@ fn prune_dry_run_prints_plan_without_pruning() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "35", "stale"])
@@ -4153,8 +4063,7 @@ fn prune_dry_run_prints_plan_without_pruning() {
   let admin_dir = dir.path().join(".git").join("worktrees").join("feat-35-stale");
   assert!(admin_dir.exists(), "precondition: admin entry must still exist");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["prune", "--dry-run"])
     .assert()
@@ -4175,8 +4084,7 @@ fn prune_dry_run_reports_no_candidates_when_clean() {
   // with a friendly "0 worktree(s) to prune" so scripts that pipe the
   // output get a stable signal instead of an empty stdout.
   let (dir, _repo) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["prune", "--dry-run"])
     .assert()
@@ -4188,7 +4096,7 @@ fn prune_dry_run_reports_no_candidates_when_clean() {
 
 #[test]
 fn trust_help_lists_list_revoke_show() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["trust", "--help"]);
   cmd
     .assert()
@@ -4205,8 +4113,7 @@ fn trust_list_empty_prints_zero_entries() {
   // is hermetic on CI runners that have an empty $HOME.
   let dir = tempfile::TempDir::new().unwrap();
   let ledger = dir.path().join("trust.toml");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "list"])
     .assert()
@@ -4218,8 +4125,7 @@ fn trust_list_empty_prints_zero_entries() {
 fn trust_show_when_absent_says_so() {
   let dir = tempfile::TempDir::new().unwrap();
   let ledger = dir.path().join("absent.toml");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "show"])
     .assert()
@@ -4231,8 +4137,7 @@ fn trust_show_when_absent_says_so() {
 fn trust_revoke_no_matching_origin_is_a_no_op() {
   let dir = tempfile::TempDir::new().unwrap();
   let ledger = dir.path().join("trust.toml");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "revoke", "git@github.com:foo/bar.git"])
     .assert()
@@ -4260,8 +4165,7 @@ trusted_by = "kylian@laptop"
   .unwrap();
 
   // list ----------------------------------------------------------
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "list"])
     .assert()
@@ -4271,8 +4175,7 @@ trusted_by = "kylian@laptop"
     .stdout(predicate::str::contains("deadbeefdead"));
 
   // show prints the raw toml -------------------------------------
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "show"])
     .assert()
@@ -4280,8 +4183,7 @@ trusted_by = "kylian@laptop"
     .stdout(predicate::str::contains("kylian@laptop"));
 
   // revoke removes it --------------------------------------------
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "revoke", "git@github.com:kbrdn1/gwm-cli.git"])
     .assert()
@@ -4289,8 +4191,7 @@ trusted_by = "kylian@laptop"
     .stdout(predicate::str::contains("✓ revoked 1"));
 
   // and list is empty again --------------------------------------
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["trust", "list"])
     .assert()
@@ -4304,7 +4205,7 @@ fn allow_bootstrap_flag_is_global_and_documented() {
   // global flag (e.g. accidentally scoped to one subcommand), the
   // `gwm bootstrap --allow-bootstrap` invocation in user scripts
   // silently fails. Pin it down at the help level.
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["--help"]);
   cmd
     .assert()
@@ -4333,8 +4234,7 @@ run  = "echo trapped"
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     // No `GWM_ALLOW_BOOTSTRAP` env, no flag → must abort.
@@ -4359,20 +4259,22 @@ fn create_with_allow_bootstrap_flag_bypasses_the_prompt() {
   // anything — the test is about the trust gate, not the bootstrap
   // step itself.
   let (dir, _repo) = init_repo();
+  // Pinned so the worktree stays out of the real home on Windows, where
+  // `$HOME` does not move `{home}` (#724).
+  let base = tempfile::TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    r#"[[bootstrap.command]]
-name = "echo"
-run  = "echo would-have-run"
-"#,
+    format!(
+      "[worktree]\nbase = \"{}\"\n\n[[bootstrap.command]]\nname = \"echo\"\nrun  = \"echo would-have-run\"\n",
+      toml_basic_string(base.path())
+    ),
   )
   .unwrap();
 
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     // No env-var bypass — the flag must do the work on its own.
@@ -4400,20 +4302,22 @@ fn create_with_gwm_allow_bootstrap_env_bypasses_the_prompt() {
   // the CI-runner code path — scripts can't always inject extra
   // args, so the env-var path has to keep working independently.
   let (dir, _repo) = init_repo();
+  // Pinned so the worktree stays out of the real home on Windows, where
+  // `$HOME` does not move `{home}` (#724).
+  let base = tempfile::TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    r#"[[bootstrap.command]]
-name = "echo"
-run  = "echo would-have-run"
-"#,
+    format!(
+      "[worktree]\nbase = \"{}\"\n\n[[bootstrap.command]]\nname = \"echo\"\nrun  = \"echo would-have-run\"\n",
+      toml_basic_string(base.path())
+    ),
   )
   .unwrap();
 
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_ALLOW_BOOTSTRAP", "1")
@@ -4456,8 +4360,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
   // No --allow-bootstrap, no env bypass, no ledger entry, no tty —
   // the gate would normally abort. With an empty bootstrap surface
   // it must short-circuit and let the create proceed.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["create", "feat", "13", "empty-surface"])
@@ -4478,9 +4381,15 @@ fn allow_bootstrap_succeeds_even_when_ledger_is_malformed() {
   // trust.toml on the CI host must NOT make the bypass fail — the
   // Allow check has to short-circuit before the ledger is touched.
   let (dir, _repo) = init_repo();
+  // Pinned so the worktree stays out of the real home on Windows, where
+  // `$HOME` does not move `{home}` (#724).
+  let base = tempfile::TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+    format!(
+      "[worktree]\nbase = \"{}\"\n\n[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+      toml_basic_string(base.path())
+    ),
   )
   .unwrap();
 
@@ -4488,8 +4397,7 @@ fn allow_bootstrap_succeeds_even_when_ledger_is_malformed() {
   let ledger = ledger_dir.path().join("trust.toml");
   std::fs::write(&ledger, b"this is not valid toml @@@@").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_ALLOW_BOOTSTRAP", "1")
@@ -4513,8 +4421,7 @@ fn deny_bootstrap_aborts_even_when_trusted() {
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .args(["--deny-bootstrap", "bootstrap"])
@@ -4527,7 +4434,7 @@ fn deny_bootstrap_aborts_even_when_trusted() {
 
 #[test]
 fn aliases_help_lists_list() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["aliases", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("list"));
 }
@@ -4539,7 +4446,7 @@ fn aliases_list_prints_built_in_section_outside_repo() {
   // config. The user fallback (`~/.config/gwm/aliases.toml`) is
   // silently empty when missing.
   let dir = tempfile::TempDir::new().unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     // Isolate the test from the developer's real `~/.config/gwm/aliases.toml`.
@@ -4572,7 +4479,7 @@ ll = "list --format names"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4603,7 +4510,7 @@ copy = "path"
   )
   .unwrap();
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4642,7 +4549,7 @@ copy = "path foo"
   )
   .unwrap();
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4667,7 +4574,7 @@ list = "create feat 0 wip"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4692,7 +4599,7 @@ lst = "list --format names"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4716,7 +4623,7 @@ typ = "types"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4741,7 +4648,7 @@ types = "list"
 "#,
   )
   .unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
@@ -4773,8 +4680,7 @@ fn binary_tolerates_non_utf8_argv() {
   let dir = tempfile::TempDir::new().unwrap();
   let invalid_utf8: OsString = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
 
-  let output = Command::cargo_bin("gwm")
-    .unwrap()
+  let output = common::gwm()
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", dir.path())
     .env("HOME", dir.path())
@@ -4843,8 +4749,7 @@ fn history_empty_journal_reports_no_ops() {
   let tmp = tempfile::TempDir::new().unwrap();
   let history_file = tmp.path().join("history.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("history")
@@ -4866,8 +4771,7 @@ fn history_lists_recorded_remove_op() {
   let history_file = tmp.path().join("history.toml");
   write_seed_history(&history_file, &repo_root, "feat-29-foo", "feat/#29-foo");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("history")
@@ -4920,8 +4824,7 @@ repo_root = "/nonexistent/other-repo"
   }
   std::fs::write(&history_file, body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("history")
@@ -4956,8 +4859,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_HISTORY_FILE", &history_file)
@@ -4973,8 +4875,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
   );
 
   // Now remove it — the journal must capture the op.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .args(["remove", "feat-29-doomed"])
@@ -5026,8 +4927,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_HISTORY_FILE", &history_file)
@@ -5036,8 +4936,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
     .success();
 
   // dry-run must not write to the journal.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .args(["remove", "feat-31-preview", "--dry-run"])
@@ -5073,8 +4972,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
   // 1. Create.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_HISTORY_FILE", &history_file)
@@ -5086,8 +4984,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 
   // 2. Remove (with --delete-branch so we exercise the harder
   //    resurrection path).
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .args(["remove", "feat-29-undo-rt", "--delete-branch"])
@@ -5103,8 +5000,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 
   // 3. Undo. The branch must come back at the same OID, and the
   //    worktree dir must reappear.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("undo")
@@ -5122,8 +5018,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 
   // 4. The journal entry is consumed — a second undo errors with
   //    "nothing to undo".
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("undo")
@@ -5165,8 +5060,7 @@ run  = "echo trapped"
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
   // 1. Create — bypass the gate via the env var, skip the shell step.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .env("GWM_TRUST_LEDGER", &ledger)
@@ -5176,8 +5070,7 @@ run  = "echo trapped"
     .success();
 
   // 2. Remove — records the journal entry `undo` will replay.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_HISTORY_FILE", &history_file)
@@ -5188,8 +5081,7 @@ run  = "echo trapped"
   // 3. `undo --bootstrap` with an empty ledger and no allow-bypass,
   //    from a non-tty → the trust gate must abort rather than running
   //    the `[[bootstrap.command]]` shell unprompted.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_HISTORY_FILE", &history_file)
@@ -5212,8 +5104,7 @@ run  = "echo trapped"
   // …and a follow-up `undo` (no --bootstrap → no gate) must still find
   //    the journal entry and restore the worktree, proving the denied
   //    run consumed nothing.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_HISTORY_FILE", &history_file)
@@ -5264,8 +5155,7 @@ repo_root = "{repo_root}"
   );
   std::fs::write(&history_file, body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("undo")
@@ -5288,8 +5178,7 @@ fn history_with_zero_limit_prints_nothing_but_does_not_lie() {
   let history_file = tmp.path().join("history.toml");
   write_seed_history(&history_file, &repo_root, "feat-zero-foo", "feat/#1-zero");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .args(["history", "--limit", "0"])
@@ -5308,8 +5197,7 @@ fn undo_with_empty_journal_errors_clearly() {
   let history_dir = tempfile::TempDir::new().unwrap();
   let history_file = history_dir.path().join("history.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .arg("undo")
@@ -5356,8 +5244,7 @@ repo_root = "/nonexistent/other-repo"
   std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
   std::fs::write(&history_file, body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &history_file)
     .args(["history", "--all"])
@@ -5439,8 +5326,7 @@ body = """
 "###;
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["pr", "--render"])
     .assert()
@@ -5475,8 +5361,7 @@ body = "## Summary\n{desc} (#{issue})\n"
 "###;
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -5531,8 +5416,7 @@ fn pr_body_travels_on_stdin_and_never_reaches_the_glab_argv() {
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GLAB", &fake_glab)
     .env("GWM_FAKE_LOG", &log)
@@ -5594,8 +5478,7 @@ body = "draft body for {desc}"
 "###;
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
@@ -5637,8 +5520,7 @@ body = "summary: {desc} (#{issue})\ncommits:\n{commits}\n"
 "###;
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["pr", "--render"])
     .assert()
@@ -5663,8 +5545,7 @@ fn pr_errors_when_no_template_configured() {
   );
   std::fs::write(dir.path().join(".gwm.toml"), "").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["pr", "--render"])
     .assert()
@@ -5683,8 +5564,7 @@ fn tui_keys_lists_default_bindings() {
   // in the table layout or the defaults map fails loudly.
   let (dir, _) = init_repo();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["tui", "keys"])
     .assert()
@@ -5712,8 +5592,7 @@ down = ["Ctrl+n"]
   )
   .unwrap();
 
-  let output = Command::cargo_bin("gwm")
-    .unwrap()
+  let output = common::gwm()
     .current_dir(dir.path())
     .args(["tui", "keys"])
     .assert()
@@ -5754,8 +5633,7 @@ fn theme_list_includes_builtin_presets() {
   // shipped by the binary. Catppuccin is the named example in the
   // issue; the exact catalogue can grow over time.
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "list"])
     .assert()
@@ -5770,8 +5648,7 @@ fn theme_show_claude_dark_emits_the_orange_accent_as_hex() {
   // render its accent as a copy-pasteable `#RRGGBB` string that
   // round-trips through the `[theme]` parser.
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "claude-dark"])
     .assert()
@@ -5785,8 +5662,7 @@ fn theme_show_emits_toml_block_users_can_copy() {
   // `gwm theme show catppuccin` dumps a `[theme]` block that, when
   // pasted into a `.gwm.toml`, reproduces the preset.
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "catppuccin"])
     .assert()
@@ -5800,8 +5676,7 @@ fn theme_show_includes_name_and_path_chrome_roles() {
   // #210: the `name` / `path` chrome roles must be part of the dumpable
   // block so users can discover and override them like any other role.
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "catppuccin"])
     .assert()
@@ -5815,8 +5690,7 @@ fn theme_show_includes_git_status_family_roles() {
   // #211: the staged / modified / untracked roles must be dumpable so
   // users can discover and override the working-tree colours.
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "catppuccin"])
     .assert()
@@ -5834,8 +5708,7 @@ fn theme_show_includes_the_compact_section_fill_role() {
   // it, so a role missing here is a role that cannot be retuned without
   // reading the source (Codex review, PR #546).
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "catppuccin"])
     .assert()
@@ -5846,8 +5719,7 @@ fn theme_show_includes_the_compact_section_fill_role() {
 #[test]
 fn theme_show_rejects_unknown_preset() {
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "does-not-exist"])
     .assert()
@@ -5866,8 +5738,7 @@ fn theme_show_output_round_trips_through_gwm_toml() {
   // an override), write the rest as `.gwm.toml`, reload, assert
   // no error.
   let (dir, _) = init_repo();
-  let output = Command::cargo_bin("gwm")
-    .unwrap()
+  let output = common::gwm()
     .current_dir(dir.path())
     .args(["theme", "show", "catppuccin"])
     .assert()
@@ -5879,8 +5750,7 @@ fn theme_show_output_round_trips_through_gwm_toml() {
   // succeed — every value in the block has to be a TOML string.
   let target = dir.path().join(".gwm.toml");
   std::fs::write(&target, &toml_block).unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["doctor"])
     .assert()
@@ -5899,8 +5769,7 @@ fn tui_keys_lists_modal_contexts() {
   // Issue #219: the listing prints the contextual modal bindings under
   // their `[tui.keys.modal.<context>]` headings, including nested link stages.
   let (dir, _) = init_repo();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["tui", "keys"])
     .assert()
@@ -5922,8 +5791,7 @@ fn repo_with_one_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
   // Reuse the shared writer so the tempdir path is TOML-escaped (backslashes
   // on Windows CI would otherwise make `.gwm.toml` invalid).
   write_test_config(dir.path(), base.path());
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "1", "wt"])
@@ -5939,8 +5807,7 @@ fn exec_runs_the_command_inside_each_worktree() {
   let (dir, _base, wt) = repo_with_one_worktree();
   // The command's CWD is the worktree, so the marker lands there — proving
   // discovery + per-worktree execution, not just a parse.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "sh", "-c", "echo hi > exec_marker.txt"])
@@ -5957,8 +5824,7 @@ fn exec_runs_the_command_inside_each_worktree() {
 #[test]
 fn exec_exits_nonzero_when_a_worktree_command_fails() {
   let (dir, _base, _wt) = repo_with_one_worktree();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "sh", "-c", "exit 5"])
@@ -5989,8 +5855,7 @@ fn exec_runs_a_named_profile_command() {
     dir.path(),
     "[exec.profiles.greet]\ncommand = [\"sh\", \"-c\", \"echo hi > prof_marker.txt\"]\n",
   );
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--profile", "greet"])
@@ -6009,8 +5874,7 @@ fn exec_jobs_runs_the_parallel_capture_path() {
   // captured and printed as a block (after its header), and the command still
   // runs and rolls up ✓.
   let (dir, _base, wt) = repo_with_one_worktree();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args([
@@ -6039,8 +5903,7 @@ fn exec_jobs_preserves_raw_binary_output() {
   // `String::from_utf8_lossy` would mangle a non-UTF-8 byte (0xFF) into the
   // U+FFFD replacement char. `printf '\377'` emits a literal 0xFF.
   let (dir, _base, _wt) = repo_with_one_worktree();
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--jobs", "2", "--", "printf", "\\377"])
@@ -6061,8 +5924,7 @@ fn exec_inline_inside_bare_repo_does_not_require_a_workdir() {
   // here instead of failing with `NotInGitRepo` (#324 review).
   let dir = tempfile::TempDir::new().unwrap();
   git2::Repository::init_bare(dir.path()).expect("init bare repo");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "true"])
@@ -6078,8 +5940,7 @@ fn exec_jobs_flag_skips_config_when_inline() {
   // `gwm exec --jobs N -- <cmd>` (#324 review).
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[exec.profiles.bad]\ncommand = []\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--jobs", "2", "--", "true"])
@@ -6094,8 +5955,7 @@ fn exec_inline_jobs_default_tolerates_a_semantic_sibling_profile() {
   // `command = []` sibling doesn't block the inline run.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[exec]\njobs = 1\n[exec.profiles.bad]\ncommand = []\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "true"])
@@ -6107,8 +5967,7 @@ fn exec_inline_jobs_default_tolerates_a_semantic_sibling_profile() {
 fn exec_jobs_flag_parses_and_propagates_failure() {
   // The parallel path propagates a non-zero rollup just like sequential.
   let (dir, _base, _wt) = repo_with_one_worktree();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--jobs", "3", "--", "sh", "-c", "exit 4"])
@@ -6126,8 +5985,7 @@ fn exec_inline_command_ignores_a_broken_gwm_toml() {
   // load, yet the inline command still runs.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "nonsense_key = true\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "sh", "-c", "true"])
@@ -6142,8 +6000,7 @@ fn exec_profile_tolerates_an_unrelated_config_error() {
   // typo (exit 1 either way, but for the right reason).
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "nonsense_key = true\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--profile", "whatever"])
@@ -6159,8 +6016,7 @@ fn exec_profile_surfaces_a_malformed_exec_section() {
   // an unknown field in a profile is rejected by `deny_unknown_fields`.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[exec.profiles.bad]\ncommand = [\"true\"]\nbogus = 1\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--profile", "bad"])
@@ -6173,8 +6029,7 @@ fn exec_profile_surfaces_a_malformed_exec_section() {
 fn exec_profile_and_inline_command_are_mutually_exclusive() {
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[exec.profiles.t]\ncommand = [\"true\"]\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--profile", "t", "--", "echo", "hi"])
@@ -6187,8 +6042,7 @@ fn exec_profile_and_inline_command_are_mutually_exclusive() {
 #[test]
 fn exec_unknown_profile_exits_one() {
   let (dir, _base, _wt) = repo_with_one_worktree();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--profile", "ghost"])
@@ -6201,8 +6055,7 @@ fn exec_unknown_profile_exits_one() {
 #[test]
 fn clean_unknown_profile_exits_one() {
   let (dir, _base, _wt) = repo_with_one_worktree();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--profile", "ghost"])
@@ -6219,8 +6072,7 @@ fn clean_builtin_ignores_a_broken_gwm_toml() {
   // only the `[clean]` section is read, so it falls back to the built-in dirs.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "nonsense_key = true\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
@@ -6242,8 +6094,7 @@ fn clean_honors_default_profile_despite_an_unrelated_config_error() {
     dir.path(),
     "nonsense_key = true\n[clean.profiles.default]\ndirs = [\"coverage\"]\n",
   );
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
@@ -6259,8 +6110,7 @@ fn clean_surfaces_a_malformed_clean_section() {
   // be silently ignored before a destructive clean.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[clean.profiles.broken]\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
@@ -6279,8 +6129,7 @@ fn clean_rejects_a_sibling_invalid_profile() {
     dir.path(),
     "[clean.profiles.good]\ndirs = [\"target\"]\n[clean.profiles.bad]\ndirs = [\"..\"]\n",
   );
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--profile", "good"])
@@ -6299,8 +6148,7 @@ fn exec_rejects_a_sibling_invalid_profile() {
     dir.path(),
     "[exec.profiles.good]\ncommand = [\"true\"]\n[exec.profiles.bad]\ncommand = []\n",
   );
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--profile", "good"])
@@ -6316,8 +6164,7 @@ fn clean_profile_with_an_unsafe_dir_exits_one() {
   // resolution, before any filesystem scan — exit 1, nothing walked.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[clean.profiles.evil]\ndirs = [\"..\"]\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--profile", "evil"])
@@ -6336,8 +6183,7 @@ fn clean_named_profile_scopes_the_reclaim_to_its_dirs() {
   std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
   std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
   append_config(dir.path(), "[clean.profiles.cov]\ndirs = [\"coverage\"]\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--profile", "cov"])
@@ -6356,8 +6202,7 @@ fn clean_reclaims_a_leading_dash_profile_dir() {
   std::fs::write(wt.join("-cache/blob.bin"), vec![0u8; 2048]).unwrap();
   std::fs::write(wt.join(".gitignore"), "/-cache/\n").unwrap();
   append_config(dir.path(), "[clean.profiles.dash]\ndirs = [\"-cache\"]\n");
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--profile", "dash", "--yes"])
@@ -6378,8 +6223,7 @@ fn clean_reports_artifacts_without_deleting_by_default() {
   fs::create_dir_all(wt.join("target")).unwrap();
   fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
@@ -6399,8 +6243,7 @@ fn clean_preview_excludes_non_deletable_dirs_from_total() {
   fs::create_dir_all(wt.join("dist")).unwrap();
   fs::write(wt.join("dist").join("keep.txt"), b"hand-authored").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
@@ -6420,8 +6263,7 @@ fn clean_yes_deletes_gitignored_artifacts() {
   fs::create_dir_all(wt.join("target")).unwrap();
   fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--yes"])
@@ -6443,8 +6285,7 @@ fn clean_yes_refuses_to_delete_non_ignored_artifacts() {
   fs::create_dir_all(wt.join("dist")).unwrap();
   fs::write(wt.join("dist").join("keep.txt"), b"non-regenerable work").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--yes"])
@@ -6476,8 +6317,7 @@ fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
     .status()
     .expect("git add -f");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--yes"])
@@ -6559,8 +6399,7 @@ fn workspace_main_only() -> tempfile::TempDir {
 #[test]
 fn exec_fans_out_across_workspace_child_repos() {
   let root = workspace_with_worktrees();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6582,8 +6421,7 @@ fn exec_workspace_scopes_to_a_matching_slug() {
   // A slug matching a worktree in only one child repo scopes the fan-out to
   // that repo (the others contribute nothing — not an error).
   let root = workspace_with_worktrees();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6608,8 +6446,7 @@ fn exec_workspace_scoped_slug_ignores_an_unrelated_repos_missing_profile() {
     "[exec.profiles.fmt]\ncommand = [\"sh\", \"-c\", \"echo hi > prof.txt\"]\n",
   )
   .unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6624,8 +6461,7 @@ fn exec_workspace_errors_on_a_slug_matching_no_child_repo() {
   // A typo that matches nothing in ANY child repo is an error, not a silent
   // exit-0 having run nothing (#326 review).
   let root = workspace_with_worktrees();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6639,8 +6475,7 @@ fn exec_workspace_errors_on_a_slug_matching_no_child_repo() {
 #[test]
 fn exec_workspace_aggregates_a_nonzero_exit() {
   let root = workspace_with_worktrees();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6662,8 +6497,7 @@ fn clean_fans_out_across_workspace_child_repos() {
     std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
     std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
   }
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--workspace"])
     .arg(root.path())
@@ -6688,8 +6522,7 @@ fn clean_workspace_yes_deletes_in_every_child_repo() {
     std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
     std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
   }
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--workspace"])
     .arg(root.path())
@@ -6715,8 +6548,7 @@ fn clean_workspace_errors_before_deleting_on_a_corrupt_child_repo() {
   std::fs::create_dir_all(&corrupt).unwrap();
   std::fs::write(corrupt.join(".git"), "gitdir: /nonexistent-gitdir\n").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--workspace"])
     .arg(root.path())
@@ -6734,8 +6566,7 @@ fn exec_workspace_all_empty_errors_on_a_missing_command() {
   // Every repo is main-only (no targets), but a usage error (neither inline
   // command nor --profile) must still surface, not a silent exit 0 (#326 rev).
   let root = workspace_main_only();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6748,8 +6579,7 @@ fn exec_workspace_all_empty_errors_on_a_missing_command() {
 #[test]
 fn exec_workspace_all_empty_errors_on_an_unknown_profile() {
   let root = workspace_main_only();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6764,8 +6594,7 @@ fn exec_workspace_all_empty_errors_on_an_unknown_profile() {
 fn exec_workspace_all_empty_inline_command_exits_zero() {
   // A valid inline command with no targets anywhere is "nothing to do", exit 0.
   let root = workspace_main_only();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -6780,8 +6609,7 @@ fn clean_workspace_all_empty_errors_on_an_unknown_profile() {
   // A typo'd `--profile` with no targets anywhere must surface, not silently
   // report "nothing to reclaim" (#326 review).
   let root = workspace_main_only();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--workspace"])
     .arg(root.path())
@@ -6798,8 +6626,7 @@ fn workspace_refuses_a_still_unsupported_subcommand() {
   // list/create/exec/clean and the bare TUI do).
   let (dir, _base, _wt) = repo_with_one_worktree();
   let ws = tempfile::TempDir::new().unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["sync", "--workspace", ws.path().to_str().unwrap()])
@@ -6835,7 +6662,7 @@ mod agents_cmd {
   }
 
   fn gwm_in(dir: &Path, home: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd.current_dir(dir).env("GWM_AGENTS_HOME", home);
     cmd
   }
@@ -6941,7 +6768,7 @@ mod agents_cmd {
       .unwrap();
     drop(conn);
 
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(repo_dir.path())
       .env_remove("GWM_AGENTS_HOME")
@@ -7208,7 +7035,7 @@ mod agents_cmd {
     let root = workspace_with_worktrees();
     let home = tempfile::TempDir::new().unwrap();
     seed_codex(home.path(), &root.path().join("alpha-wt"), "aaaa-ws");
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(root.path())
       .env("GWM_AGENTS_HOME", home.path())
@@ -7223,7 +7050,7 @@ mod agents_cmd {
   fn workspace_list_table_hides_the_agent_column_without_sessions() {
     let root = workspace_with_worktrees();
     let home = tempfile::TempDir::new().unwrap();
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(root.path())
       .env("GWM_AGENTS_HOME", home.path())
@@ -7247,15 +7074,14 @@ mod agents_cmd {
     // Recorded OUTSIDE any workspace path: only the pin can surface it.
     seed_codex(home.path(), &home.path().join("elsewhere"), "cccc-wspin");
     let alpha_wt = root.path().join("alpha-wt");
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(&alpha_wt)
       .env("GWM_AGENTS_HOME", home.path())
       .args(["agents", "attach", ".", "cccc-wspin"])
       .assert()
       .success();
 
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(root.path())
       .env("GWM_AGENTS_HOME", home.path())
@@ -7264,7 +7090,7 @@ mod agents_cmd {
       .success()
       .stdout(predicate::str::contains("cccc-wspin"));
     // Human table too: the pinned session drives the AGENT column.
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    let mut cmd = common::gwm();
     cmd
       .current_dir(root.path())
       .env("GWM_AGENTS_HOME", home.path())
@@ -7405,8 +7231,7 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
 
   let ledger = dir.path().join("trust.toml");
   let gwm = |args: &[&str]| {
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("GWM_NO_GLOBAL_CONFIG", "1")
@@ -7434,8 +7259,7 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
 
   // Resolves as GitLab. Before the fix this purged the line above and
   // the command failed with "no PR linked".
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_NO_GLOBAL_CONFIG", "1")
@@ -7472,7 +7296,7 @@ fn a_repo_cannot_authorise_its_own_host_until_it_is_trusted() {
   let ledger = dir.path().join("trust.toml");
 
   let run = |args: &[&str]| {
-    let mut c = Command::cargo_bin("gwm").unwrap();
+    let mut c = common::gwm();
     c.current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("GWM_NO_GLOBAL_CONFIG", "1")
@@ -7496,8 +7320,7 @@ fn a_repo_cannot_authorise_its_own_host_until_it_is_trusted() {
 
   // And the escape hatch the rest of the trust surface already has,
   // for CI runners with no one to answer.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_NO_GLOBAL_CONFIG", "1")
@@ -7532,7 +7355,7 @@ fn a_global_forge_kind_does_not_authorise_an_arbitrary_host() {
   let ledger = dir.path().join("trust.toml");
 
   let run = |args: &[&str]| {
-    let mut c = Command::cargo_bin("gwm").unwrap();
+    let mut c = common::gwm();
     c.current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("XDG_CONFIG_HOME", xdg.path())
@@ -7573,8 +7396,7 @@ fn a_global_config_authorises_the_hosts_it_names_with_their_kind() {
     let (dir, repo) = init_repo();
     repo.remote("origin", url).unwrap();
     let ledger = dir.path().join("trust.toml");
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("XDG_CONFIG_HOME", xdg.path())
@@ -7582,8 +7404,7 @@ fn a_global_config_authorises_the_hosts_it_names_with_their_kind() {
       .args(["link", "issue", "7"])
       .assert()
       .success();
-    Command::cargo_bin("gwm")
-      .unwrap()
+    common::gwm()
       .current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("XDG_CONFIG_HOME", xdg.path())
@@ -7636,7 +7457,7 @@ fn approving_one_repo_does_not_approve_its_neighbour_on_the_same_host() {
   let theirs = make("team/theirs");
 
   let run = |dir: &tempfile::TempDir, args: &[&str]| {
-    let mut c = Command::cargo_bin("gwm").unwrap();
+    let mut c = common::gwm();
     c.current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("GWM_NO_GLOBAL_CONFIG", "1")
@@ -7671,7 +7492,7 @@ fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
   let ledger = dir.path().join("trust.toml");
 
   let run = |args: &[&str]| {
-    let mut c = Command::cargo_bin("gwm").unwrap();
+    let mut c = common::gwm();
     c.current_dir(dir.path())
       .env("GWM_TRUST_LEDGER", &ledger)
       .env("GWM_NO_GLOBAL_CONFIG", "1")
@@ -7690,8 +7511,7 @@ fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
 
 #[test]
 fn create_name_flag_appears_in_help() {
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .args(["create", "--help"])
     .assert()
     .success()
@@ -7703,8 +7523,7 @@ fn create_name_flag_appears_in_help() {
 /// for free-form naming.
 #[test]
 fn create_rejects_a_partial_triple() {
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .args(["create", "feat", "42"])
     .assert()
     .failure()
@@ -7713,8 +7532,7 @@ fn create_rejects_a_partial_triple() {
 
 #[test]
 fn create_name_conflicts_with_the_structured_triple() {
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .args(["create", "--name", "spike-redis", "feat", "42", "x"])
     .assert()
     .failure()
@@ -7727,8 +7545,7 @@ fn create_name_makes_a_worktree_whose_branch_is_the_name() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "--name", "spike-redis"])
@@ -7753,8 +7570,7 @@ fn create_name_rejects_a_name_git_would_refuse() {
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "--name", "has space"])
@@ -7782,7 +7598,7 @@ fn commit_prefix_reads_a_branch_written_with_a_custom_pattern() {
   )
   .expect("seed .gwm.toml");
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(dir.path())
     .args(["commit-prefix", "--branch", "feat-41-foo"]);
@@ -7814,8 +7630,7 @@ fn commit_prefix_never_echoes_control_bytes_from_the_branch_pattern() {
 
   // A branch that does not match, so the "does not match this pattern" error
   // fires and quotes the pattern.
-  let assert = Command::cargo_bin("gwm")
-    .unwrap()
+  let assert = common::gwm()
     .current_dir(dir.path())
     .args(["commit-prefix", "--branch", "nothing-like-it"])
     .assert()
@@ -7828,8 +7643,7 @@ fn commit_prefix_never_echoes_control_bytes_from_the_branch_pattern() {
   );
 
   // …and the "carries no {issue}" error, which quotes it too.
-  let assert = Command::cargo_bin("gwm")
-    .unwrap()
+  let assert = common::gwm()
     .current_dir(dir.path())
     .args(["commit-prefix", "--branch", "feat/x"])
     .assert()
@@ -7859,8 +7673,7 @@ fn pr_falls_back_to_chore_when_the_pattern_carries_no_type() {
   .expect("seed .gwm.toml");
   make_feature_branch_with_commit(&repo, dir.path(), "42-tidy-up", "note.md", "x\n", "🔧 chore: tidy");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["pr", "--render"])
     .assert()
@@ -7893,8 +7706,7 @@ fn pr_falls_back_to_chore_when_the_pattern_carries_no_type() {
 fn commit_prefix_reads_the_branch_of_the_worktree_it_runs_in() {
   let (_dir, _base, wt) = repo_with_one_worktree();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(&wt)
     .args(["commit-prefix", "--unicode"])
     .assert()
@@ -7918,8 +7730,7 @@ fn pr_reads_the_branch_of_the_worktree_it_runs_in() {
   // the main checkout's branch did not parse, the type fell back to `chore`,
   // and this errored with "no pr_template configured for branch type
   // 'chore'". `{head}` then pins the branch itself, not just its type.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(&wt)
     .args(["pr", "--render"])
     .assert()
@@ -7958,8 +7769,7 @@ fn only_the_branch_comes_from_the_worktree_the_repo_name_still_comes_from_the_ma
   )
   .expect("seed .gwm.toml");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "1", "wt"])
@@ -7975,8 +7785,7 @@ fn only_the_branch_comes_from_the_worktree_the_repo_name_still_comes_from_the_ma
     "precondition: the two names differ, or the assertion below proves nothing"
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(&wt)
     .args(["commit-prefix", "--unicode"])
     .assert()
@@ -8007,8 +7816,7 @@ fn bootstrap_gives_hooks_the_branch_of_the_worktree_it_targets() {
   let expected = "GWM_PROBE branch=[feat/#1-wt] type=[feat] issue=[1]";
 
   // No argument: the worktree is the current directory.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(&wt)
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .arg("bootstrap")
@@ -8019,8 +7827,7 @@ fn bootstrap_gives_hooks_the_branch_of_the_worktree_it_targets() {
   // An argument that is already a directory, from the main checkout.
   // This one is not about where the command runs: the path was given
   // outright and its branch was simply never looked up.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .arg("bootstrap")
@@ -8031,8 +7838,7 @@ fn bootstrap_gives_hooks_the_branch_of_the_worktree_it_targets() {
 
   // The fuzzy path already worked; it is here so a future change cannot
   // fix the two above by breaking the one that was right.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["bootstrap", "feat-1"])
@@ -8060,8 +7866,7 @@ fn note_show_prints_the_note_verbatim() {
   let body = "- [ ] check ETXTBSY  \n\nthe flaky one, do not chase it\n";
   write_note_file(dir.path(), "main", body);
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["note", "show"])
     .assert()
@@ -8075,8 +7880,7 @@ fn note_show_exits_one_when_there_is_no_note() {
   // a usable presence test in a script.
   let (dir, _repo) = init_repo();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["note", "show"])
     .assert()
@@ -8093,8 +7897,7 @@ fn note_show_treats_a_blank_note_as_no_note() {
   let (dir, _repo) = init_repo();
   write_note_file(dir.path(), "main", "\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["note", "show"])
     .assert()
@@ -8116,8 +7919,7 @@ fn note_show_resolves_a_slug_to_its_branch() {
     .to_string();
   write_note_file(dir.path(), &branch, "worktree-scoped\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["note", "show", "feat-1"])
     .assert()
@@ -8128,8 +7930,7 @@ fn note_show_resolves_a_slug_to_its_branch() {
 #[test]
 fn note_show_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["note", "show"])
     .assert()
@@ -8144,8 +7945,7 @@ fn list_json_carries_the_note() {
   let (dir, _repo) = init_repo();
   write_note_file(dir.path(), "main", "- [ ] check the ETXTBSY retry\n");
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["list", "--format=json"])
     .assert()
@@ -8166,8 +7966,7 @@ fn list_json_carries_the_note() {
 fn list_json_omits_note_when_there_is_none() {
   let (dir, _repo) = init_repo();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["list", "--format=json"])
     .assert()
@@ -8205,8 +8004,7 @@ fn note_show_without_a_slug_reads_the_worktree_the_cwd_sits_in() {
   // the main repo would produce a wrong answer rather than an empty one.
   write_note_file(dir.path(), "main", "the main checkout's note\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(&wt)
     .args(["note", "show"])
     .assert()
@@ -8222,8 +8020,7 @@ fn agents_json_carries_the_note_like_the_list_does() {
   let (dir, _repo) = init_repo();
   write_note_file(dir.path(), "main", "mirrored onto the agents payload\n");
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .current_dir(dir.path())
     .args(["agents", "--format=json"])
     .assert()
@@ -8252,8 +8049,7 @@ fn note_show_resolves_the_main_checkout_by_name() {
   write_note_file(dir.path(), "main", "the main checkout's note\n");
   let main_name = dir.path().file_name().unwrap().to_string_lossy().to_string();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(&wt)
     .args(["note", "show", &main_name])
     .assert()
@@ -8282,8 +8078,7 @@ fn doctor_fix_purges_orphan_branch_config_and_spares_the_rest() {
   // nothing to do with this one (the 0/1/2 mapping is covered in
   // `doctor_tests.rs`). What is asserted is the sigil, which is this
   // check's own verdict.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .arg("doctor")
     .assert()
@@ -8299,8 +8094,7 @@ fn doctor_fix_purges_orphan_branch_config_and_spares_the_rest() {
     "a plain `gwm doctor` must never edit .git/config"
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["doctor", "--fix"])
     .assert()
@@ -8323,8 +8117,7 @@ fn doctor_fix_purges_orphan_branch_config_and_spares_the_rest() {
   assert_eq!(cfg.get_string("branch.feat/#1-live.gwm-issue").unwrap(), "1");
 
   // Second run: nothing left, and the check is green.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["doctor", "--fix"])
     .assert()

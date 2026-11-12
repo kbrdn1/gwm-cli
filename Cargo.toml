@@ -4,19 +4,33 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.11.0"
+version = "1.11.1"
 edition = "2021"
-# MSRV is the floor required by every use in the crate, not just the newest
-# one introduced here. Our own std usage sits far lower: `std::sync::LazyLock`
+# MSRV. The declared floor has to cover every use in the crate, not just the
+# newest one introduced here, and as measured for #722 it sits above what they
+# need (see below). Our own std usage sits far lower: `std::sync::LazyLock`
 # (src/naming.rs) wants 1.80, `std::iter::repeat_n` (src/tui/ui.rs's countdown
-# bar) wants 1.82. The floor comes from the dependency graph, and reading it
-# takes a build rather than `cargo metadata`: every *declared* `rust-version`
-# among the dependencies sits below it, but `libsqlite3-sys 0.38.1`, a normal
-# dependency pulled in by `rusqlite` with `bundled`, declares no `rust-version`
-# at all and its build script uses `cfg_select!`, stable only since 1.95.0.
-# Measured against the committed lockfile: `cargo +1.94 check --all-targets
-# --locked` fails with `error[E0658]`, `cargo +1.95 check --all-targets
-# --locked` passes.
+# bar) wants 1.82. What the graph needs takes a build to read, not `cargo
+# metadata`, which only sees the crates that *declare* a `rust-version`.
+#
+# 1.95 used to be the graph's floor (#491): `libsqlite3-sys 0.38.1`, a normal
+# dependency pulled in by `rusqlite` with `bundled`, declared no
+# `rust-version` and its build script used the std `cfg_select!`, stable only
+# since 1.95.0. That reason is gone: 0.38.2 (#585) already defined its own
+# `cfg_select!`, and 0.39.1, which `rusqlite 0.41.1` brought in (#720), also
+# declares 1.88.0. Re-measured for #722 against the lockfile of 8e2eed25, on
+# aarch64-apple-darwin only, with `rust-version` set to the toolchain under
+# test: `cargo +1.89 check --all-targets --locked` stops at cargo's gate with
+# `ordered-float@5.5.0 requires rustc 1.90`, `cargo +1.90` passes, with and
+# without default features. That 1.90 is a declaration and nothing more:
+# `ordered-float` comes in only through `saphyr 0.3.3`, a dev-dependency, and
+# 1.89 compiles the lib and binaries, and every target (default features)
+# once the gate is lifted with `--ignore-rust-version`.
+#
+# The declared floor stays at 1.95 (#722). Lowering it is a support promise,
+# not a cleanup: this one would rest on a test-only dependency, and the next
+# `saphyr` or `ordered-float` release raising its own floor would turn into an
+# MSRV change under the stability policy.
 #
 # Two CI jobs hold this line. The clippy job catches an accidental *std-API*
 # use above it (`clippy::incompatible_msrv` is warn-by-default, escalated to a
@@ -221,7 +235,7 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde-saphyr = "2.0.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
@@ -244,7 +258,7 @@ interprocess = "2.4.2"
 # touch and which pulls `encoding_rs < 0.8.40` into the graph: `encoding_rs_io`
 # already holds the 0.8 slot, so cargo backtracks to the 0.7 series and compiles
 # `encoding_rs 0.7.2` plus `cfg-if 0.1.10` for nothing.
-saphyr = { version = "0.2.2", default-features = false }
+saphyr = { version = "0.3.3", default-features = false }
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"

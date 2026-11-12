@@ -7,7 +7,9 @@
 //!   `~/.local/share/gwm/history.toml` fallback). Override via
 //!   `GWM_HISTORY_FILE` env var (the testability hook).
 //! - Read the most-recent-N entries.
-//! - Rotate at a cap of 100 entries — drop the oldest on append.
+//! - Rotate at a cap of 100 entries: on overflow drop one entry, the
+//!   oldest of a repo that no longer exists, else the oldest of the repo
+//!   holding the most entries (issue #713).
 //! - Per-repo filtering: each entry records the `repo_root` of the
 //!   worktree it operated on, so `gwm undo` only resurfaces the
 //!   current repo's history.
@@ -97,7 +99,11 @@ fn rotation_caps_at_one_hundred_entries() {
   // not grow unbounded.
   let tmp = TempDir::new().unwrap();
   let path = tmp.path().join("history.toml");
+  // The repo exists on disk: since #713 an entry whose repo is gone is
+  // evicted first, so a missing dir would test that branch instead of the
+  // plain oldest-first rotation a single live repo still gets.
   let repo = tmp.path().join("repo");
+  std::fs::create_dir(&repo).unwrap();
 
   let mut journal = history::Journal::default();
   // Seed 101 entries with monotonic timestamps (oldest first).
@@ -119,6 +125,187 @@ fn rotation_caps_at_one_hundred_entries() {
   );
   // The newest entry survives.
   assert!(entries.iter().any(|e| e.worktree == "feat-100-foo"));
+}
+
+/// `count` entries in `repo`, timestamped `start`, `start + 1 min`, ...,
+/// worktree names `feat-<tag>-0-foo`, `feat-<tag>-1-foo`, ...
+fn batch(repo: &Path, tag: &str, count: usize, start: chrono::DateTime<Utc>) -> Vec<OpEntry> {
+  (0..count)
+    .map(|i| {
+      let mut e = entry(&format!("{tag}-{i}"), repo);
+      e.ts = start + Duration::minutes(i as i64);
+      e
+    })
+    .collect()
+}
+
+fn has(journal: &history::Journal, worktree: &str) -> bool {
+  journal.entries().iter().any(|e| e.worktree == worktree)
+}
+
+#[test]
+fn an_overflow_evicts_an_entry_whose_repo_is_gone_before_an_older_live_one() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+  // Issue #713: a consumer's test suite ran real `gwm remove` in temporary
+  // repos and left entries that can never be undone. Oldest-first eviction
+  // let each of them push out an older, real entry. On overflow, an entry
+  // whose repo no longer exists goes first.
+  let tmp = TempDir::new().unwrap();
+  let live = tmp.path().join("live");
+  std::fs::create_dir(&live).unwrap();
+  let gone = tmp.path().join("gone");
+
+  let base = Utc::now() - Duration::days(10);
+  let mut journal = history::Journal::default();
+  for e in batch(&live, "live", 99, base) {
+    journal.append(e);
+  }
+  for e in batch(&gone, "gone", 1, base + Duration::days(1)) {
+    journal.append(e);
+  }
+  assert_eq!(journal.entries().len(), history::MAX_ENTRIES);
+
+  let mut newest = entry("newest", &live);
+  newest.ts = base + Duration::days(2);
+  journal.append(newest);
+
+  assert_eq!(journal.entries().len(), history::MAX_ENTRIES);
+  assert!(
+    !has(&journal, "feat-gone-0-foo"),
+    "the entry of the gone repo must be the one evicted"
+  );
+  assert!(
+    has(&journal, "feat-live-0-foo"),
+    "the oldest live entry must survive while a dead one can go instead"
+  );
+}
+
+#[test]
+fn an_overflow_evicts_one_gone_entry_and_keeps_the_others() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+  // A repo on an unmounted external disk is missing, not gone for good:
+  // its entries are not purged on write, only the room one append needs
+  // is taken from them, oldest first.
+  let tmp = TempDir::new().unwrap();
+  let live = tmp.path().join("live");
+  std::fs::create_dir(&live).unwrap();
+  let unmounted = tmp.path().join("unmounted");
+
+  let base = Utc::now() - Duration::days(10);
+  let mut journal = history::Journal::default();
+  // Live entries are the oldest, so oldest-first would never touch the
+  // unmounted repo's entries: the assertions below can only pass if the
+  // missing repo is what drives the choice.
+  for e in batch(&live, "live", 50, base) {
+    journal.append(e);
+  }
+  for e in batch(&unmounted, "away", 50, base + Duration::days(1)) {
+    journal.append(e);
+  }
+
+  let mut newest = entry("newest", &live);
+  newest.ts = base + Duration::days(2);
+  journal.append(newest);
+
+  assert_eq!(journal.entries_for_repo(&unmounted).count(), 49);
+  assert!(!has(&journal, "feat-away-0-foo"), "the oldest missing entry goes first");
+  assert!(has(&journal, "feat-away-1-foo"));
+  assert_eq!(journal.entries_for_repo(&live).count(), 51);
+}
+
+#[test]
+fn the_largest_repo_pays_whichever_repo_overflows_the_journal() {
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+  // Issue #713: the cap is global, so a burst of removals in one repo used
+  // to push out another repo's history, oldest first. The repo holding the
+  // most entries now pays, whichever repo the overflowing entry belongs to:
+  // the quiet repo appending below must cost the busy repo, not itself (a
+  // rule keyed on the appended entry's repo passes the first half and fails
+  // here). A single-repo journal is unaffected: its largest repo is the only
+  // one, so its oldest entry still goes.
+  let tmp = TempDir::new().unwrap();
+  let quiet = tmp.path().join("quiet");
+  let busy = tmp.path().join("busy");
+  std::fs::create_dir(&quiet).unwrap();
+  std::fs::create_dir(&busy).unwrap();
+
+  let base = Utc::now() - Duration::days(10);
+  let mut journal = history::Journal::default();
+  for e in batch(&quiet, "quiet", 1, base) {
+    journal.append(e);
+  }
+  for e in batch(&busy, "busy", 99, base + Duration::days(1)) {
+    journal.append(e);
+  }
+
+  let mut from_busy = entry("busy-new", &busy);
+  from_busy.ts = base + Duration::days(2);
+  journal.append(from_busy);
+  assert!(
+    has(&journal, "feat-quiet-0-foo"),
+    "the quiet repo's only entry must survive the busy repo's overflow"
+  );
+  assert!(
+    !has(&journal, "feat-busy-0-foo"),
+    "the busy repo's own oldest entry pays instead"
+  );
+
+  let mut from_quiet = entry("quiet-new", &quiet);
+  from_quiet.ts = base + Duration::days(3);
+  journal.append(from_quiet);
+  assert_eq!(journal.entries().len(), history::MAX_ENTRIES);
+  assert!(
+    has(&journal, "feat-quiet-0-foo") && has(&journal, "feat-quiet-new-foo"),
+    "a quiet repo's overflow must not cost the quiet repo itself"
+  );
+  assert!(
+    !has(&journal, "feat-busy-1-foo"),
+    "the busy repo, still the largest, pays for the quiet repo's overflow too"
+  );
+}
+
+/// A `repo_root` whose existence cannot be checked counts as present: only a
+/// confirmed `Ok(false)` marks an entry dead (issue #713). Unix-only because
+/// it needs a parent the test user cannot search.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_repo_root_is_not_treated_as_gone() {
+  use std::os::unix::fs::PermissionsExt;
+  let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+  let tmp = TempDir::new().unwrap();
+  let live = tmp.path().join("live");
+  std::fs::create_dir(&live).unwrap();
+  let sealed = tmp.path().join("sealed");
+  let hidden = sealed.join("repo");
+  std::fs::create_dir_all(&hidden).unwrap();
+  std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+  // Root ignores the mode bits, so the root stays checkable and the case
+  // under test never happens. Skip rather than pass or fail for the wrong
+  // reason (same convention as tests/worktree_integration.rs).
+  if hidden.try_exists().is_ok() {
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    eprintln!("skipping: this process can search a 0000 directory (running as root?)");
+    return;
+  }
+  let base = Utc::now() - Duration::days(10);
+  let mut journal = history::Journal::default();
+  for e in batch(&hidden, "sealed", 1, base + Duration::days(1)) {
+    journal.append(e);
+  }
+  for e in batch(&live, "live", 99, base) {
+    journal.append(e);
+  }
+  let mut newest = entry("newest", &live);
+  newest.ts = base + Duration::days(2);
+  journal.append(newest);
+  // Restore before asserting so a failure cannot leave an undeletable dir.
+  std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+  assert!(
+    has(&journal, "feat-sealed-0-foo"),
+    "an entry whose repo cannot be checked must not be evicted as if its repo were gone"
+  );
+  assert!(!has(&journal, "feat-live-0-foo"));
 }
 
 #[test]
