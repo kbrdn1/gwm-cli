@@ -17,7 +17,7 @@ edition = "2021"
 # dependency pulled in by `rusqlite` with `bundled`, declared no
 # `rust-version` and its build script used the std `cfg_select!`, stable only
 # since 1.95.0. That reason is gone: 0.38.2 (#585) already defined its own
-# `cfg_select!`, and 0.39.1, which `rusqlite 0.41.1` brings in (#720), also
+# `cfg_select!`, and 0.39.1, which `rusqlite 0.41.1` brought in (#720), also
 # declares 1.88.0. Re-measured for #722 against the lockfile of 8e2eed25, on
 # aarch64-apple-darwin only, with `rust-version` set to the toolchain under
 # test: `cargo +1.89 check --all-targets --locked` stops at cargo's gate with
@@ -235,7 +235,7 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde-saphyr = "2.0.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy

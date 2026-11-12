@@ -86,6 +86,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [RUSTSEC-2026-0459]: https://rustsec.org/advisories/RUSTSEC-2026-0459
 [RUSTSEC-2026-0486]: https://rustsec.org/advisories/RUSTSEC-2026-0486
 
+### Dependencies
+
+- ⬆️ Bumped `rusqlite` `0.41.1` → `0.42.0`
+  ([#733](https://github.com/kbrdn1/gwm-cli/issues/733)). The SQLite compiled
+  into gwm does not change: `libsqlite3-sys` moves to 0.40.0, whose SQLite
+  amalgamation, build script and `src/` are byte-identical to 0.39.1's
+  (SQLite 3.54.1 in both); its major bump comes from the optional SQLCipher
+  pin and bindings. The 0.42 fixes (`Session::apply`, collation and function
+  registration, `set_clientdata` on OOM, SQLCipher keys) sit behind features
+  gwm does not enable or calls it never makes: it builds `rusqlite` with
+  `bundled` and the default features, and only opens opencode's session
+  database read-only. The lock also moves `sqlite-wasm-rs` and `rsqlite-vfs`,
+  whose floor 0.42 raises; both are `wasm32-unknown-unknown` only and never
+  compile into gwm. The MSRV is unchanged: the locked graph still builds on
+  the declared 1.95 (`cargo +1.95 check --all-targets --locked`, the `msrv`
+  job's check).
+
 ### Docs
 
 - **The MSRV rationale follows the `rusqlite` 0.41 bump**
