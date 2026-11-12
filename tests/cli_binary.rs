@@ -4259,12 +4259,15 @@ fn create_with_allow_bootstrap_flag_bypasses_the_prompt() {
   // anything — the test is about the trust gate, not the bootstrap
   // step itself.
   let (dir, _repo) = init_repo();
+  // Pinned so the worktree stays out of the real home on Windows, where
+  // `$HOME` does not move `{home}` (#724).
+  let base = tempfile::TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    r#"[[bootstrap.command]]
-name = "echo"
-run  = "echo would-have-run"
-"#,
+    format!(
+      "[worktree]\nbase = \"{}\"\n\n[[bootstrap.command]]\nname = \"echo\"\nrun  = \"echo would-have-run\"\n",
+      toml_basic_string(base.path())
+    ),
   )
   .unwrap();
 
@@ -4299,12 +4302,15 @@ fn create_with_gwm_allow_bootstrap_env_bypasses_the_prompt() {
   // the CI-runner code path — scripts can't always inject extra
   // args, so the env-var path has to keep working independently.
   let (dir, _repo) = init_repo();
+  // Pinned so the worktree stays out of the real home on Windows, where
+  // `$HOME` does not move `{home}` (#724).
+  let base = tempfile::TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    r#"[[bootstrap.command]]
-name = "echo"
-run  = "echo would-have-run"
-"#,
+    format!(
+      "[worktree]\nbase = \"{}\"\n\n[[bootstrap.command]]\nname = \"echo\"\nrun  = \"echo would-have-run\"\n",
+      toml_basic_string(base.path())
+    ),
   )
   .unwrap();
 
@@ -4375,9 +4381,15 @@ fn allow_bootstrap_succeeds_even_when_ledger_is_malformed() {
   // trust.toml on the CI host must NOT make the bypass fail — the
   // Allow check has to short-circuit before the ledger is touched.
   let (dir, _repo) = init_repo();
+  // Pinned so the worktree stays out of the real home on Windows, where
+  // `$HOME` does not move `{home}` (#724).
+  let base = tempfile::TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+    format!(
+      "[worktree]\nbase = \"{}\"\n\n[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+      toml_basic_string(base.path())
+    ),
   )
   .unwrap();
 
