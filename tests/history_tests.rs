@@ -279,7 +279,14 @@ fn an_unreadable_repo_root_is_not_treated_as_gone() {
   let hidden = sealed.join("repo");
   std::fs::create_dir_all(&hidden).unwrap();
   std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
-  let probe = hidden.try_exists();
+  // Root ignores the mode bits, so the root stays checkable and the case
+  // under test never happens. Skip rather than pass or fail for the wrong
+  // reason (same convention as tests/worktree_integration.rs).
+  if hidden.try_exists().is_ok() {
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    eprintln!("skipping: this process can search a 0000 directory (running as root?)");
+    return;
+  }
   let base = Utc::now() - Duration::days(10);
   let mut journal = history::Journal::default();
   for e in batch(&hidden, "sealed", 1, base + Duration::days(1)) {
@@ -294,10 +301,6 @@ fn an_unreadable_repo_root_is_not_treated_as_gone() {
   // Restore before asserting so a failure cannot leave an undeletable dir.
   std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-  assert!(
-    probe.is_err(),
-    "precondition: the sealed root must be unverifiable, not missing, or this proves nothing (got {probe:?})"
-  );
   assert!(
     has(&journal, "feat-sealed-0-foo"),
     "an entry whose repo cannot be checked must not be evicted as if its repo were gone"
