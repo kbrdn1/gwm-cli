@@ -7,8 +7,8 @@ name = "gwm-cli"
 version = "1.11.0"
 edition = "2021"
 # MSRV. The declared floor has to cover every use in the crate, not just the
-# newest one introduced here, and since #722 it sits above what they need (see
-# below). Our own std usage sits far lower: `std::sync::LazyLock`
+# newest one introduced here, and as measured for #722 it sits above what they
+# need (see below). Our own std usage sits far lower: `std::sync::LazyLock`
 # (src/naming.rs) wants 1.80, `std::iter::repeat_n` (src/tui/ui.rs's countdown
 # bar) wants 1.82. What the graph needs takes a build to read, not `cargo
 # metadata`, which only sees the crates that *declare* a `rust-version`.
