@@ -185,9 +185,11 @@ unicode-segmentation = "1.13"
 # 0.2.3 gives the halfwidth sound marks U+FF9E / U+FF9F a cell of their own, and
 # `ratatui-core` 0.1.2 still adds one, so the pair paints `ｶﾞ` three cells wide.
 # The lockfile pins 0.2.2, but `cargo install gwm-cli` without `--locked`
-# re-resolves and skips dev-dependencies, so the cap has to sit here. Delete it,
-# with its test in tests/tui_ui_helpers_tests.rs, in the PR that takes the
-# `ratatui-core` release carrying ratatui/ratatui#2887 and `unicode-width` 0.2.3.
+# re-resolves and skips dev-dependencies, so the cap has to sit here. The fix,
+# ratatui/ratatui#2892, makes `ratatui-core` require `unicode-width >=0.2.3`:
+# under this cap cargo silently stays on `ratatui-core` 0.1.2, so nothing goes
+# red when it ships. Once a `ratatui-core` past 0.1.2 is on crates.io, delete
+# the cap, with its test in tests/tui_ui_helpers_tests.rs, and take both (#721).
 # ponytail: holds the 0.2 slot only. `ratatui-core` asks for `>=0.2.0`, so a
 # `unicode-width` 0.3 would reach it in a slot of its own; only #721 fixes that.
 unicode-width = ">=0.2.0, <0.2.3"

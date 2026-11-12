@@ -1709,41 +1709,25 @@ const UNDERCOUNTED: &[(&str, usize, usize)] = &[
 /// still adds one, so the pair paints `ｶﾞ` three cells wide (#721). A
 /// `cargo install gwm-cli` without `--locked` ignores the lockfile and
 /// resolves without dev-dependencies, so only a `[dependencies]` cap keeps
-/// 0.2.3 out of it (#725). The cap goes, with this test, in the PR that takes
-/// the fixed `ratatui-core` and `unicode-width` 0.2.3 together.
+/// 0.2.3 out of it (#725).
+///
+/// Nothing here turns red when the fix ships: ratatui/ratatui#2892 makes
+/// `ratatui-core` require `unicode-width >=0.2.3`, so under this cap cargo
+/// simply stays on 0.1.2. Lifting the hold is #721's job: delete the cap and
+/// this test in the PR that takes that release with `unicode-width` 0.2.3.
 #[test]
 fn unicode_width_is_held_below_0_2_3_until_ratatui_core_ships_the_fix() {
-  let read = |file: &str| -> toml::Table {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
-    let raw = std::fs::read_to_string(&path).expect("read repo file");
-    toml::from_str(&raw).expect("valid TOML")
-  };
-  let lock = read("Cargo.lock");
-  let locked = |name: &str| -> semver::Version {
-    let versions: Vec<&str> = lock["package"]
-      .as_array()
-      .expect("Cargo.lock has [[package]] entries")
-      .iter()
-      .filter(|p| p["name"].as_str() == Some(name))
-      .map(|p| p["version"].as_str().expect("package version is a string"))
-      .collect();
-    assert_eq!(versions.len(), 1, "expected one {name} in Cargo.lock, got {versions:?}");
-    semver::Version::parse(versions[0]).expect("semver version")
-  };
-
-  // ratatui/ratatui#2887 is merged after 0.1.2 and unreleased: any later
-  // `ratatui-core` should carry it, and the hold must not outlive it.
-  let core = locked("ratatui-core");
-  assert!(
-    core <= semver::Version::new(0, 1, 2),
-    "ratatui-core {core} is past 0.1.2: check it carries ratatui/ratatui#2887, then \
-     take unicode-width 0.2.3 with it, delete the `unicode-width` entry from \
-     [dependencies] and this test, and drop the ｶﾞ row from UNDERCOUNTED (#721)"
-  );
-
-  let manifest = read("Cargo.toml");
+  let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+  let raw = std::fs::read_to_string(&path).expect("read Cargo.toml");
+  let manifest: toml::Table = toml::from_str(&raw).expect("valid TOML");
+  // `cargo package` rewrites `name = "req"` as a `[dependencies.name]` table,
+  // and this suite also runs from the downloaded crate.
   let req = match manifest["dependencies"].get("unicode-width") {
     Some(toml::Value::String(req)) => req.as_str(),
+    Some(toml::Value::Table(t)) => t
+      .get("version")
+      .and_then(toml::Value::as_str)
+      .expect("[dependencies.unicode-width] needs a `version` requirement"),
     other => panic!(
       "[dependencies] must cap unicode-width below 0.2.3 for `cargo install` \
        (a dev-dependency is not resolved there), found {other:?}"
@@ -1752,7 +1736,7 @@ fn unicode_width_is_held_below_0_2_3_until_ratatui_core_ships_the_fix() {
   let req = semver::VersionReq::parse(req).expect("semver requirement");
   assert!(
     !req.matches(&semver::Version::new(0, 2, 3)),
-    "[dependencies] unicode-width = \"{req}\" admits 0.2.3, which ratatui-core {core} double-counts"
+    "[dependencies] unicode-width = \"{req}\" admits 0.2.3, which ratatui-core 0.1.2 double-counts"
   );
 }
 
