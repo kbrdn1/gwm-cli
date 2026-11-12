@@ -151,7 +151,7 @@ pub fn state_dir() -> std::path::PathBuf {
 /// The `gwm` binary under test, as a `std::process::Command`, for a caller
 /// that reads the command back (`get_envs`).
 ///
-/// Every user-level file gwm reads or writes points at the test's scratch
+/// The user-level files gwm reads or writes point at the test's scratch
 /// directory, the recipe the consumer docs give third-party suites
 /// (`docs/5.integrations/4.daemon-consumers.md`): the undo journal, the trust
 /// ledger, the global config and `aliases.toml`, the agent-session scan. CI

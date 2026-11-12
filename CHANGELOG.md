@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/common::gwm()`, which points the journal, the trust ledger, the global
   config, `aliases.toml`, the agent-session scan and `$HOME` at a scratch
   directory per test, and a guard fails if another test file resolves the built
-  binary, or runs `gwm` off `PATH`, itself. CI was never affected. On Windows
+  binary itself. CI was never affected. On Windows
   `$HOME` does not move `{home}`, so a test that creates worktrees there still
   pins its base. Leftovers of earlier runs are not removed:
   `~/cc-worktree/.tmp*` and `$TMPDIR/.tmp*-worktrees` can be deleted by hand.

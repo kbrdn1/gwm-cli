@@ -1,4 +1,5 @@
-//! The suite never touches the contributor's own gwm state (issue #724).
+//! Every `gwm` the suite spawns is kept off the contributor's own state
+//! (issue #724).
 //!
 //! `cargo test` used to write the real undo journal: about fifteen `gwm
 //! remove` runs in `cli_binary.rs` spawned the binary without
@@ -7,9 +8,10 @@
 //! without pinning `[worktree] base` left it under `~/cc-worktree`, or under
 //! whatever base the contributor's global config set.
 //!
-//! The fix is one builder, `common::gwm()`, that points every user-level file
-//! gwm reads or writes at a per-test scratch directory. This file pins what the
-//! builder sets, and guards that no test spawns the binary any other way.
+//! The fix is one builder, `common::gwm()`, that points gwm's user-level files
+//! and `$HOME` at a per-test scratch directory. This file pins what the
+//! builder sets, and guards that no other test file resolves the binary
+//! itself (what that guard cannot see is listed on `needles()`).
 
 mod common;
 
