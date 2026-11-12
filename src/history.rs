@@ -37,7 +37,7 @@
 use crate::error::{GwmError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -161,24 +161,32 @@ impl Journal {
   /// rather than keep the entries sorted so the file stays in insertion
   /// order on disk (easier to diff manually).
   fn eviction_index(&self) -> Option<usize> {
-    let oldest = |pick: &dyn Fn(&OpEntry) -> bool| {
-      self
-        .entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| pick(e))
-        .min_by_key(|(_, e)| e.ts)
-        .map(|(i, _)| i)
-    };
-    if let Some(i) = oldest(&|e| matches!(e.repo_root.try_exists(), Ok(false))) {
-      return Some(i);
-    }
     let mut per_repo: HashMap<&Path, usize> = HashMap::new();
     for e in &self.entries {
       *per_repo.entry(&e.repo_root).or_default() += 1;
     }
+    let oldest = |pick: &dyn Fn(&Path) -> bool| {
+      self
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| pick(&e.repo_root))
+        .min_by_key(|(_, e)| e.ts)
+        .map(|(i, _)| i)
+    };
+    // One stat per repo, not per entry: this runs inside `gwm remove`'s
+    // point of no return, where a hung mount would otherwise stall it once
+    // per journaled entry of that repo.
+    let gone: HashSet<&Path> = per_repo
+      .keys()
+      .copied()
+      .filter(|root| matches!(root.try_exists(), Ok(false)))
+      .collect();
+    if let Some(i) = oldest(&|root| gone.contains(root)) {
+      return Some(i);
+    }
     let most = per_repo.values().copied().max()?;
-    oldest(&|e| per_repo[e.repo_root.as_path()] == most)
+    oldest(&|root| per_repo[root] == most)
   }
 
   /// Persist the journal atomically (same primitive as the trust
