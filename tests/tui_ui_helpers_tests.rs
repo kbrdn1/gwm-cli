@@ -1724,10 +1724,16 @@ fn unicode_width_is_held_below_0_2_3_until_ratatui_core_ships_the_fix() {
   // and this suite also runs from the downloaded crate.
   let req = match manifest["dependencies"].get("unicode-width") {
     Some(toml::Value::String(req)) => req.as_str(),
-    Some(toml::Value::Table(t)) => t
-      .get("version")
-      .and_then(toml::Value::as_str)
-      .expect("[dependencies.unicode-width] needs a `version` requirement"),
+    Some(toml::Value::Table(t)) => {
+      assert_ne!(
+        t.get("optional"),
+        Some(&toml::Value::Boolean(true)),
+        "an optional cap is out of the graph `cargo install` resolves unless a feature enables it"
+      );
+      t.get("version")
+        .and_then(toml::Value::as_str)
+        .expect("[dependencies.unicode-width] needs a `version` requirement")
+    }
     other => panic!(
       "[dependencies] must cap unicode-width below 0.2.3 for `cargo install` \
        (a dev-dependency is not resolved there), found {other:?}"
