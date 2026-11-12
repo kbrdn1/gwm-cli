@@ -96,6 +96,9 @@ fn a_worktree_created_without_a_base_lands_under_the_scratch_home() {
 /// The variables the consumer docs tell a third-party test suite to set, read
 /// off the table under "Isolating gwm in a consumer's tests": `(name, value)`,
 /// where the value is the doc's placeholder (`<file>`, `<dir>`) or literal.
+///
+/// Every body row must read, or this panics: skipping a row it cannot parse
+/// would let a reworded row drop out of the check with the test still green.
 fn documented_isolation_vars() -> Vec<(String, String)> {
   let path = repo_root().join("docs/5.integrations/4.daemon-consumers.md");
   let text = read(&path);
@@ -103,12 +106,34 @@ fn documented_isolation_vars() -> Vec<(String, String)> {
     .split("\n## ")
     .find(|s| s.starts_with("Isolating gwm in a consumer's tests"))
     .unwrap_or_else(|| panic!("{} must keep its isolation section", path.display()));
-  section
+  // The first table of the section, past its header and separator rows.
+  let rows: Vec<&str> = section
     .lines()
-    .filter_map(|line| line.strip_prefix("| `"))
-    .filter_map(|rest| rest.split('`').next())
-    .filter_map(|cell| cell.split_once('='))
-    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .skip_while(|l| !l.starts_with('|'))
+    .take_while(|l| l.starts_with('|'))
+    .skip(2)
+    .collect();
+  assert!(
+    !rows.is_empty(),
+    "the isolation section of {} must hold its table",
+    path.display()
+  );
+  rows
+    .iter()
+    .map(|row| {
+      let cell = row.trim_start_matches('|').split('|').next().unwrap_or_default().trim();
+      let (name, value) = cell
+        .strip_prefix('`')
+        .and_then(|c| c.strip_suffix('`'))
+        .filter(|c| !c.contains('`'))
+        .and_then(|c| c.split_once('='))
+        .unwrap_or_else(|| {
+          panic!(
+            "every row of the isolation table must open on one `NAME=value` code span, so this test reads it: {row:?}"
+          )
+        });
+      (name.trim().to_string(), value.trim().to_string())
+    })
     .collect()
 }
 
