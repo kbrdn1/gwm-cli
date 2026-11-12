@@ -133,11 +133,33 @@ pub fn yaml_doc(path: &str, text: &str) -> YamlOwned {
   docs.remove(0)
 }
 
+thread_local! {
+  /// One scratch directory per test: libtest runs each test on a thread of
+  /// its own, nextest in a process of its own. Removed when that thread ends.
+  static STATE: TempDir = tempfile::Builder::new()
+    .prefix("gwm-test-state-")
+    .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+    .expect("the per-test gwm state directory is creatable");
+}
+
+/// The scratch directory the current test's `gwm` runs keep their state in.
+#[allow(dead_code)] // unused by the suites that never spawn the binary.
+pub fn state_dir() -> std::path::PathBuf {
+  STATE.with(|dir| dir.path().to_path_buf())
+}
+
+/// The `gwm` binary under test, as a `std::process::Command`, for a caller
+/// that reads the command back (`get_envs`).
+#[allow(dead_code)] // unused by the suites that never spawn the binary.
+pub fn gwm_std() -> std::process::Command {
+  std::process::Command::new(env!("CARGO_BIN_EXE_gwm"))
+}
+
 /// The `gwm` binary under test. Every test spawns it through here (issue
 /// #724).
 #[allow(dead_code)] // unused by the suites that never spawn the binary.
 pub fn gwm() -> assert_cmd::Command {
-  assert_cmd::Command::new(env!("CARGO_BIN_EXE_gwm"))
+  assert_cmd::Command::from_std(gwm_std())
 }
 
 /// Initialize a tempdir with a fresh git repo on `main` carrying one empty
