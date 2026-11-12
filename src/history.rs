@@ -150,8 +150,11 @@ impl Journal {
   ///      never be undone. Only `Ok(false)` counts, so a root that cannot
   ///      be checked (permissions) is treated as present;
   ///   2. otherwise the oldest entry of the repo holding the most entries,
-  ///      so a repo that floods the journal pays before another one loses
-  ///      anything. With a single repo, that is plain oldest-first.
+  ///      whichever repo the overflowing entry belongs to. A busy repo pays
+  ///      for its own bursts, and the journal drifts towards an even share:
+  ///      a smaller repo that overflows takes from the largest one until
+  ///      they are level, never below. With a single repo, that is plain
+  ///      oldest-first.
   ///
   /// Runs only on overflow and drops one entry: a repo on an unmounted
   /// disk keeps its entries until the room is actually needed. We scan
