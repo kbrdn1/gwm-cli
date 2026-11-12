@@ -81,9 +81,9 @@ jobs:
     # is load-bearing: cargo's `rust-version` gate fires at resolve time
     # for the crates that declare a floor, and the compile that follows
     # is the only thing that catches one declaring nothing at all (which
-    # is what `rusqlite`'s `libsqlite3-sys` does). The toolchain is read
-    # out of `Cargo.toml` rather than hardcoded so the job cannot drift
-    # from the manifest either.
+    # is what `rusqlite`'s `libsqlite3-sys` did up to 0.38). The toolchain
+    # is read out of `Cargo.toml` rather than hardcoded so the job cannot
+    # drift from the manifest either.
     env:
       # Overrides the workflow-wide `-D warnings`. A warning only an older
       # toolchain emits (or an `unknown_lints` for a lint added after it)

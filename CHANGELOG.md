@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
+- **The MSRV rationale follows the `rusqlite` 0.41 bump**
+  ([#722](https://github.com/kbrdn1/gwm-cli/issues/722)). The declared floor
+  is still 1.95, but the reason given for it was gone: `libsqlite3-sys` 0.39,
+  brought in by [#720](https://github.com/kbrdn1/gwm-cli/issues/720), declares
+  its own `rust-version` and no longer uses the std `cfg_select!`. Re-measured
+  against the lockfile, the graph now needs 1.90, set only by `ordered-float`
+  5.5.0's declaration through the test-only `saphyr`. The floor is kept at
+  1.95 rather than lowered on the strength of a test dependency; the
+  [stability policy](https://github.com/kbrdn1/gwm-cli/blob/main/docs/6.development/3.stability.md#msrv-policy)
+  now says the declared floor may sit above what the graph needs, and why.
 - `skills/SKILL.md` presents 1.11.0 as the current line and gains the 1.10.0
   line it never had; its key table follows the 1.10.0 moves (`e` / `E` for
   rename and exit, `c` / `C` for commits and CI checks) and lists the
