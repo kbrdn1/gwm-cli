@@ -131,11 +131,12 @@ bounded `--jobs`, and `--workspace` fan-out ([#324](https://github.com/kbrdn1/gw
 overlays ([#325](https://github.com/kbrdn1/gwm-cli/issues/325)). See the
 [Shipped highlights](#shipped-highlights) table for the per-issue breakdown and
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes. The
-MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys` 0.38, which
+MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys` 0.38.1, which
 declared no floor of its own, and kept there since
 [#722](https://github.com/kbrdn1/gwm-cli/issues/722) although the graph now
 needs less; MSRV bumps ride a minor per the stability policy). It is held by
-a CI job that installs the declared floor and both resolves and compiles the committed lockfile against it on all three runners
+a CI job that installs the declared floor and both resolves and compiles the
+committed lockfile against it on all three runners
 ([#491](https://github.com/kbrdn1/gwm-cli/issues/491) ✅), because the previous
 setup let `Cargo.toml` claim 1.86 for a whole release line while the graph
 needed more, silently.

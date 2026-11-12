@@ -6,12 +6,12 @@
 name = "gwm-cli"
 version = "1.11.0"
 edition = "2021"
-# MSRV. The declared floor is a promise, not a measurement: it may sit above
-# what the build needs, never below it, and nothing makes it follow the build
-# down. Our own std usage sits far lower: `std::sync::LazyLock` (src/naming.rs)
-# wants 1.80, `std::iter::repeat_n` (src/tui/ui.rs's countdown bar) wants
-# 1.82. What the graph needs takes a build to read, not `cargo metadata`,
-# which only sees the crates that *declare* a `rust-version`.
+# MSRV. The declared floor has to cover every use in the crate, not just the
+# newest one introduced here, and since #722 it sits above what they need (see
+# below). Our own std usage sits far lower: `std::sync::LazyLock`
+# (src/naming.rs) wants 1.80, `std::iter::repeat_n` (src/tui/ui.rs's countdown
+# bar) wants 1.82. What the graph needs takes a build to read, not `cargo
+# metadata`, which only sees the crates that *declare* a `rust-version`.
 #
 # 1.95 used to be the graph's floor (#491): `libsqlite3-sys 0.38.1`, a normal
 # dependency pulled in by `rusqlite` with `bundled`, declared no
@@ -30,8 +30,7 @@ edition = "2021"
 # The declared floor stays at 1.95 (#722). Lowering it is a support promise,
 # not a cleanup: this one would rest on a test-only dependency, and the next
 # `saphyr` or `ordered-float` release raising its own floor would turn into an
-# MSRV change under the stability policy. Lowering is done on purpose, with a
-# fresh measurement and a changelog entry, like a bump.
+# MSRV change under the stability policy.
 #
 # Two CI jobs hold this line. The clippy job catches an accidental *std-API*
 # use above it (`clippy::incompatible_msrv` is warn-by-default, escalated to a
