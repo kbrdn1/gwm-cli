@@ -95,11 +95,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (SQLite 3.54.1 in both); its major bump comes from the optional SQLCipher
   pin and bindings. The 0.42 fixes (`Session::apply`, collation and function
   registration, `set_clientdata` on OOM, SQLCipher keys) sit behind features
-  gwm does not enable or calls it never makes: it builds `rusqlite` with `bundled` and the
-  default features, and only opens opencode's session database read-only. The
-  lock also moves `sqlite-wasm-rs` and `rsqlite-vfs`, whose floor 0.42 raises;
-  both are `wasm32-unknown-unknown` only and never compile into gwm. The MSRV
-  is unchanged: the locked graph still builds on the declared 1.95
+  gwm does not enable or calls it never makes: it builds `rusqlite` with
+  `bundled` and the default features, and only opens opencode's session
+  database read-only. The lock also moves `sqlite-wasm-rs` and `rsqlite-vfs`,
+  whose floor 0.42 raises; both are `wasm32-unknown-unknown` only and never
+  compile into gwm. The MSRV is unchanged: the locked graph still builds on the declared 1.95
   (`cargo +1.95 check --all-targets --locked`, the `msrv` job's check).
 
 ### Docs
