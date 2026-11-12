@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one pushed out a genuine, older entry. On overflow the journal now drops the
   oldest entry whose repo no longer exists, otherwise the oldest entry of the
   repo holding the most entries, so one repo can no longer flush another's
-  history. Nothing is purged on write: a repo on an unmounted disk keeps its
+  history (at worst the repos end up with an even share). Nothing is purged on write: a repo on an unmounted disk keeps its
   entries until the room is needed. A single-repo journal rotates exactly as
   before. The variables that keep a consumer's test suite off the user's
   journal, trust ledger and config are now listed in
