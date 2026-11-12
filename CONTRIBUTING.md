@@ -113,7 +113,7 @@ All tests live under `tests/` — no inline `#[cfg(test)] mod tests` blocks insi
 
 ### Prerequisites
 
-- Rust toolchain (stable channel, 1.95+ — the MSRV declared in `Cargo.toml`, raised by `rusqlite`'s bundled `libsqlite3-sys` and verified on every PR by CI's `msrv` job).
+- Rust toolchain (stable channel, 1.95+ — the MSRV declared in `Cargo.toml`, raised by `rusqlite`'s bundled `libsqlite3-sys` 0.38 and kept there since [#722](https://github.com/kbrdn1/gwm-cli/issues/722), and verified on every PR by CI's `msrv` job).
 - A C compiler (libgit2 is vendored and built from source on first `cargo build`).
 
 ### Build & run

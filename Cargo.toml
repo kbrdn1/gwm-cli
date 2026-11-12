@@ -13,19 +13,19 @@ edition = "2021"
 # 1.82. What the graph needs takes a build to read, not `cargo metadata`,
 # which only sees the crates that *declare* a `rust-version`.
 #
-# 1.95 used to be the graph's floor (#491): `libsqlite3-sys 0.38`, a normal
+# 1.95 used to be the graph's floor (#491): `libsqlite3-sys 0.38.1`, a normal
 # dependency pulled in by `rusqlite` with `bundled`, declared no
-# `rust-version` and its build script used `cfg_select!`, stable only since
-# 1.95.0. `rusqlite 0.41.1` (#720) brings `libsqlite3-sys 0.39.1`, which
-# declares 1.88.0 and defines its own `cfg_select!`, so that reason is gone.
-# Re-measured for #722 against the lockfile of 8e2eed25, on
-# aarch64-apple-darwin, with `rust-version` set to the toolchain under test:
-# `cargo +1.89 check --all-targets --locked` stops at cargo's gate with
+# `rust-version` and its build script used the std `cfg_select!`, stable only
+# since 1.95.0. That reason is gone: 0.38.2 (#585) already defined its own
+# `cfg_select!`, and 0.39.1, which `rusqlite 0.41.1` brings in (#720), also
+# declares 1.88.0. Re-measured for #722 against the lockfile of 8e2eed25, on
+# aarch64-apple-darwin only, with `rust-version` set to the toolchain under
+# test: `cargo +1.89 check --all-targets --locked` stops at cargo's gate with
 # `ordered-float@5.5.0 requires rustc 1.90`, `cargo +1.90` passes, with and
 # without default features. That 1.90 is a declaration and nothing more:
 # `ordered-float` comes in only through `saphyr 0.3.3`, a dev-dependency, and
-# 1.89 compiles the lib and binaries, and every target once the gate is
-# lifted with `--ignore-rust-version`.
+# 1.89 compiles the lib and binaries, and every target (default features)
+# once the gate is lifted with `--ignore-rust-version`.
 #
 # The declared floor stays at 1.95 (#722). Lowering it is a support promise,
 # not a cleanup: this one would rest on a test-only dependency, and the next
