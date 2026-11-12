@@ -133,6 +133,13 @@ pub fn yaml_doc(path: &str, text: &str) -> YamlOwned {
   docs.remove(0)
 }
 
+/// The `gwm` binary under test. Every test spawns it through here (issue
+/// #724).
+#[allow(dead_code)] // unused by the suites that never spawn the binary.
+pub fn gwm() -> assert_cmd::Command {
+  assert_cmd::Command::new(env!("CARGO_BIN_EXE_gwm"))
+}
+
 /// Initialize a tempdir with a fresh git repo on `main` carrying one empty
 /// commit. Returns the tempdir (kept alive by the caller) and the repo handle.
 #[allow(dead_code)] // unused by capture_pipeline_tests; cargo compiles common per-test crate.

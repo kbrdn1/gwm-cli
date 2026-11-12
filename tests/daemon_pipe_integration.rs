@@ -125,7 +125,7 @@ fn statusline_render_shape_survives_the_pipe() {
   let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "statusline", Duration::from_millis(50));
 
-  let out = Command::new(env!("CARGO_BIN_EXE_gwm"))
+  let out = common::gwm()
     .args(["statusline", "--socket"])
     .arg(&daemon.pipe)
     .current_dir(&workdir)
