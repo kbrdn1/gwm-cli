@@ -40,8 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already allows 1.1.31, so `Cargo.lock` moves and `third-party/README.md`
   records the new provenance. The zlib notice 1.1.31 vendors is
   byte-identical, so `third-party/zlib-LICENSE` keeps its blob id.
+- ⬆️ Bumped `rusqlite` `0.40` → `0.41.1` to clear [RUSTSEC-2026-0459]
+  ([#720](https://github.com/kbrdn1/gwm-cli/issues/720)): the SQLite
+  `libsqlite3-sys` 0.38.2 bundled carries CVE-2026-119375, fixed from 0.39.0,
+  and 0.39 is only reachable through `rusqlite` 0.41. The bundled SQLite moves
+  to 3.54.1. gwm only opens opencode's session database read-only, through
+  calls 0.41 leaves unchanged.
+- ⬆️ Bumped `rustix` `1.1.4` → `1.1.6` (transitive, lock only) to clear
+  [RUSTSEC-2026-0486], an unsoundness in its xattr functions. Both advisories
+  were published at the end of October and turned the
+  `cargo audit --deny warnings` gate red on every PR; neither can go green
+  alone, so they land together.
 
 [RUSTSEC-2026-0418]: https://rustsec.org/advisories/RUSTSEC-2026-0418
+[RUSTSEC-2026-0459]: https://rustsec.org/advisories/RUSTSEC-2026-0459
+[RUSTSEC-2026-0486]: https://rustsec.org/advisories/RUSTSEC-2026-0486
 
 ### Docs
 
