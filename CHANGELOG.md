@@ -99,8 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bundled` and the default features, and only opens opencode's session
   database read-only. The lock also moves `sqlite-wasm-rs` and `rsqlite-vfs`,
   whose floor 0.42 raises; both are `wasm32-unknown-unknown` only and never
-  compile into gwm. The MSRV is unchanged: the locked graph still builds on the declared 1.95
-  (`cargo +1.95 check --all-targets --locked`, the `msrv` job's check).
+  compile into gwm. The MSRV is unchanged: the locked graph still builds on
+  the declared 1.95 (`cargo +1.95 check --all-targets --locked`, the `msrv`
+  job's check).
 
 ### Docs
 
