@@ -4,7 +4,7 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.11.0"
+version = "1.11.1"
 edition = "2021"
 # MSRV. The declared floor has to cover every use in the crate, not just the
 # newest one introduced here, and as measured for #722 it sits above what they
