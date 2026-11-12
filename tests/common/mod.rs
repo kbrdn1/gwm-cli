@@ -150,9 +150,34 @@ pub fn state_dir() -> std::path::PathBuf {
 
 /// The `gwm` binary under test, as a `std::process::Command`, for a caller
 /// that reads the command back (`get_envs`).
+///
+/// Every user-level file gwm reads or writes points at the test's scratch
+/// directory, the recipe the consumer docs give third-party suites
+/// (`docs/5.integrations/4.daemon-consumers.md`): the undo journal, the trust
+/// ledger, the global config and `aliases.toml`, the agent-session scan. CI
+/// already sets `GWM_NO_GLOBAL_CONFIG`; a contributor's machine did not, so
+/// the suite read their global config and wrote their journal (#724).
+///
+/// `HOME` moves the default `[worktree] base`, `{home}/cc-worktree/{repo}`,
+/// for a test that pins none. ponytail: `dirs::home_dir()` ignores `$HOME` on
+/// Windows, so there a test still has to pin its base; a `GWM_*` override of
+/// the base in gwm itself would close that.
+///
+/// A test sets its own value after this one to override it, or calls
+/// `env_remove` when the unset path is the subject.
 #[allow(dead_code)] // unused by the suites that never spawn the binary.
 pub fn gwm_std() -> std::process::Command {
-  std::process::Command::new(env!("CARGO_BIN_EXE_gwm"))
+  let state = state_dir();
+  let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_gwm"));
+  cmd
+    .env("GWM_HISTORY_FILE", state.join("history.toml"))
+    .env("GWM_TRUST_LEDGER", state.join("trust.toml"))
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .env("XDG_CONFIG_HOME", state.join("config"))
+    .env("XDG_DATA_HOME", state.join("data"))
+    .env("GWM_AGENTS_HOME", state.join("agents"))
+    .env("HOME", &state);
+  cmd
 }
 
 /// The `gwm` binary under test. Every test spawns it through here (issue

@@ -2106,7 +2106,10 @@ fn status_on_branch_with_no_link_reports_no_link() {
 // CLI surface of those subcommands.
 //
 // Worktree-creating tests pin `[worktree].base` to a `tempfile::TempDir`
-// so the test runner never writes under `~/cc-worktree/...`. The branch
+// so each one owns where its worktrees go. A test that does not still
+// stays out of `~/cc-worktree/...` on unix: `common::gwm()` points `$HOME`
+// at the test's scratch directory (#724), and the default base is
+// `{home}/cc-worktree/{repo}`. On Windows `$HOME` is not read, so pin. The branch
 // pattern is left at its default (`{type}/#{issue}-{desc}`) to exercise
 // the production naming pipeline.
 
