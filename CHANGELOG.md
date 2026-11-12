@@ -15,18 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`cargo test` wrote the contributor's real undo journal**
   ([#724](https://github.com/kbrdn1/gwm-cli/issues/724)). About fifteen
   `gwm remove` runs in gwm's own suite spawned the binary without
-  `GWM_HISTORY_FILE`, so every local run appended entries for temporary repos
-  to the developer's `history.toml` and, at the cap, evicted real ones. The
-  tests that created a worktree without pinning `[worktree] base` left it under
-  `~/cc-worktree`, or under the base set by the developer's global config,
-  which the suite also read. Every test now spawns `gwm` through one builder,
+  `GWM_HISTORY_FILE`, so every local run appended entries for temporary repos to
+  the developer's `history.toml` and, at the cap, evicted real ones. The tests
+  that created a worktree without pinning `[worktree] base` left it under
+  `~/cc-worktree`, or under the base set by the developer's global config, which
+  the spawned binary also read. Every test now spawns `gwm` through one builder,
   `tests/common::gwm()`, which points the journal, the trust ledger, the global
   config, `aliases.toml`, the agent-session scan and `$HOME` at a scratch
-  directory per test, and a guard fails if a test reaches the binary any other
-  way. CI was never affected. On Windows `$HOME` does not move `{home}`, so a
-  test that creates worktrees there still pins its base. Leftovers of earlier
-  runs are not removed: `~/cc-worktree/.tmp*` and `$TMPDIR/.tmp*-worktrees`
-  can be deleted by hand.
+  directory per test, and a guard fails if another test file resolves the built
+  binary, or runs `gwm` off `PATH`, itself. CI was never affected. On Windows
+  `$HOME` does not move `{home}`, so a test that creates worktrees there still
+  pins its base. Leftovers of earlier runs are not removed:
+  `~/cc-worktree/.tmp*` and `$TMPDIR/.tmp*-worktrees` can be deleted by hand.
 
 - **The undo journal evicted real entries before dead ones**
   ([#713](https://github.com/kbrdn1/gwm-cli/issues/713)). `history.toml` is
