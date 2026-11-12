@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries until the room is needed. A single-repo journal rotates exactly as
   before. The variables that keep a consumer's test suite off the user's
   journal, trust ledger and config are now listed in
-  [Daemon consumers](docs/5.integrations/4.daemon-consumers.md#isolating-gwm-in-a-consumers-tests).
+  [Daemon consumers](https://github.com/kbrdn1/gwm-cli/blob/main/docs/5.integrations/4.daemon-consumers.md#isolating-gwm-in-a-consumers-tests).
 
 - **The capture preflight passed a vhs that writes nothing**
   ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)). vhs 0.12.0 runs a
