@@ -120,7 +120,6 @@ fn a_second_daemon_on_the_same_pipe_is_refused() {
 fn statusline_render_shape_survives_the_pipe() {
   // End-to-end through the public binary surface: `gwm statusline` against
   // the pipe daemon must print a non-empty segment line for the repo cwd.
-  use std::process::Command;
   let (dir, _repo) = init_repo();
   let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "statusline", Duration::from_millis(50));
