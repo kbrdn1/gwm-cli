@@ -8,7 +8,8 @@ ignore = [
   # vulnerability, and no fixed version exists, so no bump can clear it.
   # chrono is a direct dependency (timestamps, serde). Replacing it is a
   # migration of its own (to `time` or `jiff`), not something to fold into
-  # the fix that turned the gate green again (#741). Revisit at the next
-  # minor release, or at once if a vulnerability is filed against it.
+  # the fix that turned the gate green again (#741). The migration is #743,
+  # due by the next minor release; drop this entry when chrono leaves
+  # Cargo.lock, or at once if a vulnerability is filed against it.
   "RUSTSEC-2026-0543",
 ]
