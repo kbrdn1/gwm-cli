@@ -10,47 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Security
 
-- **The capture preflight passed a vhs that writes nothing**
-  ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)). vhs 0.12.0 runs a
-  tape to the end, prints `Creating ….gif`, exits 0 and never starts the
-  encoder ([charmbracelet/vhs#787](https://github.com/charmbracelet/vhs/issues/787)).
-  It was installed on the release machine on 2026-09-10 and nobody saw it until
-  the v1.11.0 cut. The per-tape freshness check in `generate.sh` did fire, and
-  the run did exit 1, but only after each tape it reached had failed twice,
-  every failure reported as the write race the retry exists for, until the
-  theme gallery's own check stopped it. The preflight, the half
-  `tests/capture_pipeline_tests.rs` drives, checked vhs through
-  `version-stamp.tape`, whose stamp is written by a shell redirection inside
-  the tape and so lands whether vhs can write or not. The preflight now also
-  requires the tape's own gif, the one file only vhs writes, and stops before
-  any tape when it is missing. Measured against the real vhs both ways: 0.12.1
-  wrote the gif 10 runs out of 10, and a no-op `ffmpeg` first on `PATH`, which
-  reproduces 0.12.0's signature, stops the preflight. The floor, vhs 0.12.1 or
-  later, is in CONTRIBUTING.md § Releases and `docs/_capture/README.md`.
+- ⬆️ Bumped `libz-sys` `1.1.31` → `1.1.33` to clear
+  [RUSTSEC-2026-0544](https://rustsec.org/advisories/RUSTSEC-2026-0544)
+  (heap buffer overflow), which was failing the `cargo audit --deny warnings`
+  CI gate. `libz-sys` is a runtime dependency, direct and through `git2`
+  ([#736](https://github.com/kbrdn1/gwm-cli/pull/736),
+  [#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
+- 🔒 Accepted [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543)
+  (`chrono` unmaintained, no fixed version) in `.cargo/audit.toml`, with its
+  reason: a warning rather than a vulnerability, and leaving `chrono` is a
+  migration of its own. To be revisited at the next minor release
+  ([#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
 
 ### Docs
 
-- `skills/SKILL.md` presents 1.11.0 as the current line and gains the 1.10.0
-  line it never had; its key table follows the 1.10.0 moves (`e` / `E` for
-  rename and exit, `c` / `C` for commits and CI checks) and lists the
-  list-view keys 1.10.0 and 1.11.0 added, plus `o` on the agents overlay; its
-  CLI references gain `gwm herdr`, `gwm create --issue` and
-  `gwm doctor --fix`. CONTRIBUTING.md links the docs site at `gwm.kbrdn.dev`,
-  the address it is served at, instead of a `gwm-docs` subdomain that does
-  not resolve ([#700](https://github.com/kbrdn1/gwm-cli/issues/700)).
-- **The README banner takes the kbrdn.dev design**: a pixel field, a rounded
-  panel, rounded chips and install box, a dashed rule over the footer. Same
-  content as the v1.11.0 banner. Its generator config now lives beside it as
-  `docs/_assets/promo.config.json`
-  ([#704](https://github.com/kbrdn1/gwm-cli/issues/704)).
+- The doc captures are regenerated at 1.11.1, so the TUI captures paint the
+  version the manifest declares and the `docs_assets_tests` guard on
+  `captured-version.txt` passes again. `github-linking.png` is the exception:
+  `generate.sh` skips it while the trunk checkout is dirty, so it still shows
+  1.11.0 until the next release run
+  ([#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
+- **The logo sits on a dithered tile**: a rounded square whose ground is a
+  ramp dithered in 4 tones, `#505050` to `#262626` in the dark logo and
+  `#f5f5f5` to `#c4c4c4` in the light one, the mark scaled to 0.75 on it.
+  The README heading and the banner pick it up from the same files; the
+  banner is redrawn with it and moves nowhere else
+  ([#739](https://github.com/kbrdn1/gwm-cli/issues/739)).
 
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.11.1`](changelogs/1.11.1.md), 2026-11-12
 - [`1.11.0`](changelogs/1.11.0.md), 2026-10-26
 - [`1.10.0`](changelogs/1.10.0.md), 2026-09-01
 - [`1.9.0`](changelogs/1.9.0.md), 2026-08-16

@@ -527,7 +527,7 @@ fn gwm_undo_restores_what_the_tui_deleted() {
   assert!(!doomed.exists(), "the worktree is gone (status: {})", app.status);
 
   // `gwm undo` from the main checkout, reading the same journal.
-  let undo = std::process::Command::new(env!("CARGO_BIN_EXE_gwm"))
+  let undo = common::gwm()
     .current_dir(dir.path())
     .env("GWM_HISTORY_FILE", &journal_path)
     .arg("undo")

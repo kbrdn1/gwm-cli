@@ -20,10 +20,12 @@
 //! ## Cap + rotation
 //!
 //! Hard-cap at [`MAX_ENTRIES`] (currently 100). On [`Journal::append`]
-//! we drop the OLDEST entry by timestamp when we'd overflow. Keeping
-//! the cap global (not per-repo) means a power user juggling 30 repos
-//! still has a bounded ledger; the per-repo separation is enforced at
-//! READ time via [`Journal::entries_for_repo`], not at write time.
+//! we drop one entry when we'd overflow: the oldest whose repo no longer
+//! exists, else the oldest of the repo holding the most entries (issue
+//! #713). Keeping the cap global (not per-repo) means a power user
+//! juggling 30 repos still has a bounded ledger; the per-repo separation
+//! is enforced at READ time via [`Journal::entries_for_repo`], and at
+//! eviction time only through the "largest repo pays" rule.
 //!
 //! ## Per-repo separation
 //!
@@ -35,14 +37,15 @@
 use crate::error::{GwmError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::Builder;
 
 /// Maximum number of entries kept across the whole journal. Append
-/// past this cap drops the oldest entry — keeps the file bounded over
-/// the lifetime of a heavy gwm user without per-repo bookkeeping.
+/// past this cap drops one entry (see [`Journal::append`]), which keeps
+/// the file bounded over the lifetime of a heavy gwm user.
 pub const MAX_ENTRIES: usize = 100;
 
 /// Discriminator for the kind of operation recorded. Today only
@@ -130,24 +133,60 @@ impl Journal {
   }
 
   /// Append `entry` to the journal, enforcing the [`MAX_ENTRIES`] cap.
-  /// When the cap is exceeded, the OLDEST entry (by timestamp) is
-  /// dropped — the rotation policy.
+  /// When the cap is exceeded, one entry is dropped, chosen by
+  /// [`Self::eviction_index`] (the rotation policy, issue #713).
   pub fn append(&mut self, entry: OpEntry) {
     self.entries.push(entry);
     if self.entries.len() > MAX_ENTRIES {
-      // Drop the entry with the smallest timestamp. We scan rather
-      // than maintain sorted order on push so the file remains in
-      // insertion order on disk (easier to diff manually).
-      let oldest_idx = self
-        .entries
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, e)| e.ts)
-        .map(|(i, _)| i);
-      if let Some(i) = oldest_idx {
+      if let Some(i) = self.eviction_index() {
         self.entries.remove(i);
       }
     }
+  }
+
+  /// The entry an overflow drops (issue #713), first match wins:
+  ///
+  ///   1. the oldest entry whose `repo_root` is confirmed missing: it can
+  ///      never be undone. Only `Ok(false)` counts, so a root that cannot
+  ///      be checked (permissions) is treated as present;
+  ///   2. otherwise the oldest entry of the repo holding the most entries,
+  ///      whichever repo the overflowing entry belongs to. A busy repo pays
+  ///      for its own bursts, and the journal drifts towards an even share:
+  ///      a smaller repo that overflows takes from the largest one until
+  ///      they are level (within one entry on a tie). With a single repo, that is plain
+  ///      oldest-first.
+  ///
+  /// Runs only on overflow and drops one entry: a repo on an unmounted
+  /// disk keeps its entries until the room is actually needed. We scan
+  /// rather than keep the entries sorted so the file stays in insertion
+  /// order on disk (easier to diff manually).
+  fn eviction_index(&self) -> Option<usize> {
+    let mut per_repo: HashMap<&Path, usize> = HashMap::new();
+    for e in &self.entries {
+      *per_repo.entry(&e.repo_root).or_default() += 1;
+    }
+    let oldest = |pick: &dyn Fn(&Path) -> bool| {
+      self
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| pick(&e.repo_root))
+        .min_by_key(|(_, e)| e.ts)
+        .map(|(i, _)| i)
+    };
+    // One stat per repo, not per entry: this runs inside `gwm remove`'s
+    // point of no return, where a hung mount would otherwise stall it once
+    // per journaled entry of that repo.
+    let gone: HashSet<&Path> = per_repo
+      .keys()
+      .copied()
+      .filter(|root| matches!(root.try_exists(), Ok(false)))
+      .collect();
+    if let Some(i) = oldest(&|root| gone.contains(root)) {
+      return Some(i);
+    }
+    let most = per_repo.values().copied().max()?;
+    oldest(&|root| per_repo[root] == most)
   }
 
   /// Persist the journal atomically (same primitive as the trust

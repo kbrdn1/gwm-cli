@@ -81,7 +81,7 @@ fn toml_escaped(s: &str) -> String {
 }
 
 fn gwm_in(dir: &Path) -> Command {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.current_dir(dir);
   // Pin the layer under test to the repo file: a real user-level config on
   // the developer's machine would otherwise add rows this test did not write.
@@ -354,8 +354,7 @@ fn trust_show_neutralises_a_bidi_override_in_the_ledger() {
   )
   .unwrap();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .args(["trust", "show"])
     .env("GWM_TRUST_LEDGER", &ledger)
     .output()
@@ -390,8 +389,7 @@ fn trust_show_neutralises_control_bytes_in_the_ledger() {
   )
   .unwrap();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .args(["trust", "show"])
     .env("GWM_TRUST_LEDGER", &ledger)
     .output()
@@ -471,8 +469,7 @@ fn trust_list_neutralises_a_decoded_origin() {
   let ledger = dir.path().join("trust.toml");
   fs::write(&ledger, HOSTILE_LEDGER).unwrap();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .args(["trust", "list"])
     .env("GWM_TRUST_LEDGER", &ledger)
     .output()
@@ -761,8 +758,7 @@ fn a_crlf_line_ending_is_not_treated_as_an_escape() {
   )
   .unwrap();
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .args(["trust", "show"])
     .env("GWM_TRUST_LEDGER", &ledger)
     .output()
