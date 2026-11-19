@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- **The logo sits on a dithered tile**: a rounded square whose ground is a
+  ramp dithered in 4 tones, `#505050` to `#262626` in the dark logo and
+  `#f5f5f5` to `#c4c4c4` in the light one, the mark scaled to 0.75 on it.
+  The README heading and the banner pick it up from the same files; the
+  banner is redrawn with it and moves nowhere else
+  ([#739](https://github.com/kbrdn1/gwm-cli/issues/739)).
+
 
 ## Past releases
 
