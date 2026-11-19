@@ -1,0 +1,15 @@
+# Advisories accepted on purpose by the `cargo audit --deny warnings` gate in
+# .github/workflows/ci.yml (issue #340). Each entry is a decision, written down
+# with its reason and with what would make it go away.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2026-0543: chrono is unmaintained (2026-09-14). A warning, not a
+  # vulnerability, and no fixed version exists, so no bump can clear it.
+  # chrono is a direct dependency (timestamps, serde). Replacing it is a
+  # migration of its own (to `time` or `jiff`), not something to fold into
+  # the fix that turned the gate green again (#741). The migration is #743,
+  # due by the next minor release; drop this entry when chrono leaves
+  # Cargo.lock, or at once if a vulnerability is filed against it.
+  "RUSTSEC-2026-0543",
+]
