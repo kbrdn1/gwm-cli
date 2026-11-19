@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- ⬆️ Bumped `libz-sys` `1.1.31` → `1.1.33` to clear
+  [RUSTSEC-2026-0544](https://rustsec.org/advisories/RUSTSEC-2026-0544)
+  (heap buffer overflow), which was failing the `cargo audit --deny warnings`
+  CI gate. `libz-sys` is a runtime dependency, direct and through `git2`
+  ([#736](https://github.com/kbrdn1/gwm-cli/pull/736),
+  [#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
+- 🔒 Accepted [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543)
+  (`chrono` unmaintained, no fixed version) in `.cargo/audit.toml`, with its
+  reason: a warning rather than a vulnerability, and leaving `chrono` is a
+  migration of its own. To be revisited at the next minor release
+  ([#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
+
+### Docs
+
+- The doc captures are regenerated at 1.11.1, so the TUI captures paint the
+  version the manifest declares and the `docs_assets_tests` guard on
+  `captured-version.txt` passes again. `github-linking.png` is the exception:
+  `generate.sh` skips it while the trunk checkout is dirty, so it still shows
+  1.11.0 until the next release run
+  ([#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
+
 
 ## Past releases
 
