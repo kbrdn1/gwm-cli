@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read and `{repo_path}` points to it, while `{repo}` stays the project's
   name. `discover_repo` now finds the main repo of a worktree through git's
   common dir instead of counting parent directories, which also fixes
-  worktrees of a plain `project.git`
+  worktrees of a plain `project.git`. `gwm hooks install` puts the hook in
+  the bare repo's own `hooks/`, where git loads it for every worktree
   ([#744](https://github.com/kbrdn1/gwm-cli/issues/744)).
 
 ### Docs

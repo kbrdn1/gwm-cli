@@ -4,8 +4,9 @@
 //! across ~half a dozen subcommands; these tests lock its two observable
 //! branches so the dedupe stays behaviour-preserving:
 //!
-//! - Outside a git repository (or in a bare repo with no workdir) the
-//!   prelude must surface `GwmError::NotInGitRepo`.
+//! - Outside a git repository the prelude must surface
+//!   `GwmError::NotInGitRepo`. A bare repo is a repository (#744), see
+//!   the last test.
 //! - Inside a real working tree the repo, workdir, and config must all
 //!   resolve, with `workdir` pointing at the discovered tree.
 //!

@@ -283,6 +283,26 @@ fn hooks_install_commit_msg_creates_executable_hook() {
   }
 }
 
+/// Issue #744: in a bare repo with linked worktrees, the hook goes to the
+/// bare repo's own `hooks/`, the only place git loads hooks from for every
+/// worktree, and not into the admin dir of the default branch's worktree.
+#[test]
+fn hooks_install_commit_msg_in_bare_gitlink_layout_uses_the_common_hooks_dir() {
+  let (_tmp, project, main) = common::init_bare_gitlink_layout();
+  for dir in [&project, &main] {
+    common::gwm()
+      .current_dir(dir)
+      .args(["hooks", "install", "commit-msg", "--force"])
+      .assert()
+      .success();
+    let hook = project.join(".bare").join("hooks").join("commit-msg");
+    assert!(hook.exists(), "from {dir:?}: expected the hook at {hook:?}");
+    std::fs::remove_file(&hook).unwrap();
+    let misplaced = project.join(".bare").join("worktrees").join("main").join("hooks");
+    assert!(!misplaced.exists(), "from {dir:?}: no hook may land in {misplaced:?}");
+  }
+}
+
 #[test]
 fn hooks_install_commit_msg_refuses_existing_hook_without_force() {
   // Idempotent-safe contract: a pre-existing `commit-msg` (husky,
@@ -811,8 +831,9 @@ description = "Database migration"
 
 #[test]
 fn types_inside_bare_repo_falls_back_to_built_in_defaults() {
-  // Bare repos have no `workdir()`, so there's no place to look for a
-  // `.gwm.toml`. Regression: previously `cmd_types` would propagate a
+  // A bare repo without worktrees has no `.gwm.toml` to read: its config
+  // dir is the bare repo itself (#744), which holds none. Regression:
+  // previously `cmd_types` would propagate a
   // misleading `NotInGitRepo` error here even though `discover_repo`
   // succeeded. The fallback is identical to the "outside any repo"
   // branch — the built-in defaults with a `(source: built-in

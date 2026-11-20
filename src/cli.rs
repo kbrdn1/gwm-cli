@@ -2762,8 +2762,9 @@ pub struct RepoContext {
 /// the current directory (the behaviour every CLI call site relies
 /// on), `Some(path)` discovers from an explicit root (used by tests).
 ///
-/// Surfaces [`GwmError::NotInGitRepo`] outside a repo or in a bare
-/// repo (no workdir), and propagates any `.gwm.toml` parse error from
+/// Surfaces [`GwmError::NotInGitRepo`] outside a repo (a bare repo
+/// resolves through [`worktree::repo_path`], #744), and propagates any
+/// `.gwm.toml` parse error from
 /// [`Config::load_for_repo`].
 /// Stack size for the thread the CLI actually runs on.
 ///
@@ -4169,10 +4170,13 @@ fn cmd_hooks(action: HooksAction) -> Result<()> {
 
 fn cmd_hooks_install(hook: HookKind, force: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = worktree::repo_path(&repo);
+  // The main repo's git dir, not `repo_path`: git loads hooks from the
+  // common dir for every worktree, and in a bare repo `repo_path` is a
+  // linked worktree, whose own admin dir git never reads hooks from (#744).
+  // For a normal repo this discovers the same repo as its workdir did.
   match hook {
     HookKind::CommitMsg => {
-      let path = hooks::install_commit_msg(&workdir, force)?;
+      let path = hooks::install_commit_msg(repo.commondir(), force)?;
       println!("✓ installed {}", path.display());
       println!("  (auto-prepends gitmoji+type prefix when missing)");
     }

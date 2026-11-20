@@ -2765,7 +2765,7 @@ fn repo_path_of_a_normal_repo_is_its_workdir() {
 
 /// Point the bare repo's HEAD at a branch no worktree has checked out, so
 /// there is no default-branch worktree to stand in for the main checkout.
-fn detach_default_branch(repo: &git2::Repository) {
+fn point_head_at_unchecked_out_branch(repo: &git2::Repository) {
   repo.set_head("refs/heads/not-checked-out").unwrap();
 }
 
@@ -2790,10 +2790,46 @@ fn repo_path_of_bare_repo_is_the_default_branch_worktree() {
 }
 
 #[test]
+fn repo_path_from_a_sibling_worktree_is_the_default_branch_worktree() {
+  // The usual place to run gwm from: a feature worktree next to `main/`.
+  let (_tmp, project, main) = common::init_bare_gitlink_layout();
+  let bare = git2::Repository::open(project.join(".bare")).unwrap();
+  let feat = project.join("feat");
+  bare.worktree("feat", &feat, None).unwrap();
+
+  let repo = worktree::discover_repo(Some(&feat)).unwrap();
+  assert!(repo.is_bare(), "expected the bare main repo, got {:?}", repo.path());
+  let path = worktree::repo_path(&repo);
+  assert!(paths_equal(&path, &main), "expected {main:?}, got {path:?}");
+  assert_eq!(worktree::repo_name(&repo), "project");
+}
+
+#[test]
+fn repo_path_falls_back_when_the_default_branch_worktree_is_gone() {
+  // A deleted (prunable) default-branch worktree must not be returned.
+  let (_tmp, project, main) = common::init_bare_gitlink_layout();
+  std::fs::remove_dir_all(&main).unwrap();
+  let repo = worktree::discover_repo(Some(&project)).unwrap();
+  let path = worktree::repo_path(&repo);
+  assert!(paths_equal(&path, &project), "expected {project:?}, got {path:?}");
+}
+
+#[test]
+fn repo_path_with_a_detached_bare_head_is_the_project_dir() {
+  // A HEAD naming a commit rather than a branch has no default branch.
+  let (_tmp, project, _main) = common::init_bare_gitlink_layout();
+  let repo = worktree::discover_repo(Some(&project)).unwrap();
+  let commit = repo.head().unwrap().peel_to_commit().unwrap().id();
+  repo.set_head_detached(commit).unwrap();
+  let path = worktree::repo_path(&repo);
+  assert!(paths_equal(&path, &project), "expected {project:?}, got {path:?}");
+}
+
+#[test]
 fn repo_path_of_bare_gitlink_layout_without_default_worktree_is_the_project_dir() {
   let (_tmp, project, _main) = common::init_bare_gitlink_layout();
   let repo = worktree::discover_repo(Some(&project)).unwrap();
-  detach_default_branch(&repo);
+  point_head_at_unchecked_out_branch(&repo);
   let path = worktree::repo_path(&repo);
   assert!(paths_equal(&path, &project), "expected {project:?}, got {path:?}");
 }
@@ -2805,7 +2841,7 @@ fn repo_path_of_plain_bare_repo_without_default_worktree_is_its_git_dir() {
   // must not end up there.
   let (_tmp, git_dir, main) = common::init_plain_bare_repo();
   let repo = worktree::discover_repo(Some(&main)).unwrap();
-  detach_default_branch(&repo);
+  point_head_at_unchecked_out_branch(&repo);
   let path = worktree::repo_path(&repo);
   assert!(paths_equal(&path, &git_dir), "expected {git_dir:?}, got {path:?}");
 }
@@ -2817,7 +2853,7 @@ fn repo_path_ignores_a_gitlink_that_points_elsewhere() {
   let (tmp, git_dir, main) = common::init_plain_bare_repo();
   std::fs::write(tmp.path().join(".git"), "gitdir: ./elsewhere\n").unwrap();
   let repo = worktree::discover_repo(Some(&main)).unwrap();
-  detach_default_branch(&repo);
+  point_head_at_unchecked_out_branch(&repo);
   assert!(paths_equal(&worktree::repo_path(&repo), &git_dir));
 }
 

@@ -1777,10 +1777,10 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
 /// A missing section yields `T::default()`. A TOML *syntax* error (an
 /// unreadable file) still surfaces — there is no section to read.
 ///
-/// `repo_root` is `None` for a **bare** repo (no workdir, hence no repo
-/// `.gwm.toml`): the repo layer is skipped, but the user-level GLOBAL config
-/// is still read, so a global `[exec] jobs = N` applies even there (#324
-/// review).
+/// With `repo_root` `None` the repo layer is skipped, but the user-level
+/// GLOBAL config is still read, so a global `[exec] jobs = N` applies even
+/// there (#324 review). The CLI always passes a root since bare repos
+/// resolve one through [`crate::worktree::repo_path`] (#744).
 fn load_config_section<T>(repo_root: Option<&Path>, key: &str) -> Result<T>
 where
   T: serde::de::DeserializeOwned + Default,
@@ -2130,8 +2130,8 @@ impl Config {
   /// profile — so a sibling profile's *semantic* issue must not block it. A
   /// shape error in `[exec]` (unknown field, wrong type) still surfaces.
   ///
-  /// `repo_root` is `None` for a bare repo (no workdir): the repo `.gwm.toml`
-  /// is skipped but the GLOBAL `[exec] jobs` still applies.
+  /// With `repo_root` `None` the repo `.gwm.toml` is skipped but the GLOBAL
+  /// `[exec] jobs` still applies.
   pub fn load_exec_jobs_default(repo_root: Option<&Path>) -> Result<Option<u32>> {
     let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
     Ok(cfg.jobs)
@@ -2156,8 +2156,8 @@ impl Config {
   /// validated — a sibling profile that escapes the worktree can't slip
   /// through `gwm clean --profile good` while `gwm config validate` rejects it.
   ///
-  /// `repo_root` is `None` for a bare repo (no workdir): the repo `.gwm.toml`
-  /// is skipped but the GLOBAL `[clean]` section still applies (the built-ins
+  /// With `repo_root` `None` the repo `.gwm.toml` is skipped but the GLOBAL
+  /// `[clean]` section still applies (the built-ins
   /// are used when no `default` profile is defined).
   pub fn load_clean_config(repo_root: Option<&Path>) -> Result<CleanConfig> {
     let cfg: CleanConfig = load_config_section(repo_root, "clean")?;
