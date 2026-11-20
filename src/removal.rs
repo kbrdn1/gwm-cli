@@ -180,10 +180,8 @@ fn journal_entry(repo: &Repository, found: &WorktreeInfo, head: &worktree::HeadB
       .and_then(|br| br.into_reference().target())
       .map(|o| o.to_string())
   });
-  let repo_root = repo
-    .workdir()
-    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-    .unwrap_or_default();
+  let repo_root = worktree::repo_path(repo);
+  let repo_root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
   OpEntry {
     ts: chrono::Utc::now(),
     kind: OpKind::Remove,

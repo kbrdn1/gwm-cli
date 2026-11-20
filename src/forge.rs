@@ -1070,7 +1070,7 @@ fn authorised_kind(repo: &Repository, config: &Config, parsed: &RemoteRef) -> Re
       parsed.host, parsed.host
     )));
   };
-  let workdir = repo.workdir().unwrap_or_else(|| repo.path());
+  let workdir = &crate::worktree::repo_path(repo);
   // The full `origin` URL, not `parsed.web_origin`: the ledger key has to
   // identify the repo, and scheme+host identifies only the host (#463).
   let origin_key = crate::trust::origin_key_for_repo(repo, workdir);

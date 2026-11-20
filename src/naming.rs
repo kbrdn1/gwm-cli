@@ -887,10 +887,7 @@ impl BranchParser {
   /// cannot read is a `.gwm.toml` gwm could not have created a worktree from
   /// either, and it has its own diagnostic in `gwm doctor`.
   pub fn for_repo(repo: &git2::Repository) -> Self {
-    let config = repo
-      .workdir()
-      .and_then(|wd| crate::config::Config::load_for_repo(wd).ok())
-      .unwrap_or_default();
+    let config = crate::config::Config::load_for_repo(&crate::worktree::repo_path(repo)).unwrap_or_default();
     Self::from_config(&config, &crate::worktree::repo_name(repo))
   }
 

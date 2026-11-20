@@ -1436,16 +1436,15 @@ fn open_workspace_repos(root: &Path) -> Result<Vec<(String, Repository)>> {
 fn exec_plan(repo: &Repository, profile: Option<&str>, jobs: Option<u32>, command: &[String]) -> Result<ExecPlan> {
   // Read `[exec]` only as strictly as the invocation needs (issue #324):
   //   - `--profile` → full `load_exec_config` (resolve + validate every
-  //     profile); needs a workdir to locate `.gwm.toml`.
-  //   - inline + no `--jobs` → only the `[exec] jobs` default; a bare repo (no
-  //     workdir) skips the repo file but still honours the GLOBAL default.
+  //     profile).
+  //   - inline + no `--jobs` → only the `[exec] jobs` default, layered over
+  //     the GLOBAL one.
   //   - inline + `--jobs` → the flag wins and the command is inline → no config.
   let exec_cfg = if profile.is_some() {
-    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-    Config::load_exec_config(workdir)?
+    Config::load_exec_config(&worktree::repo_path(repo))?
   } else if jobs.is_none() {
     crate::config::ExecConfig {
-      jobs: Config::load_exec_jobs_default(repo.workdir())?,
+      jobs: Config::load_exec_jobs_default(Some(&worktree::repo_path(repo)))?,
       ..Default::default()
     }
   } else {
@@ -1721,9 +1720,9 @@ fn clean_scan_repo(
   tag: Option<&str>,
 ) -> Result<CleanScan> {
   // Load ONLY `[clean]` (tolerant of unrelated config errors, strict on
-  // `[clean]` itself — issue #324); `None` workdir (bare repo) reads the global
-  // section and falls back to the built-in set.
-  let clean_cfg = Config::load_clean_config(repo.workdir())?;
+  // `[clean]` itself — issue #324), layered over the global section and
+  // falling back to the built-in set.
+  let clean_cfg = Config::load_clean_config(Some(&worktree::repo_path(repo)))?;
   let patterns = clean::resolve_clean_dirs(profile, &clean_cfg)?;
 
   let display = |name: &str| match tag {
@@ -1924,20 +1923,15 @@ fn cmd_tui_keys() -> Result<()> {
   use crate::tui::keymap::{Keymap, Source};
   use crate::tui::modal_keymap::{KeyContext, ModalKeymap};
 
-  // Build the resolved keymaps. Outside a repo, OR inside a bare
-  // repo (no workdir to read `.gwm.toml` from), fall back to
-  // defaults so the command stays useful for new users discovering
-  // the binary. Same fallback path either way — surfacing
-  // `NotInGitRepo` on a bare repo would be misleading because the
-  // command itself is repo-agnostic.
+  // Build the resolved keymaps. Outside a repo, fall back to defaults
+  // so the command stays useful for new users discovering the binary —
+  // surfacing `NotInGitRepo` would be misleading because the command
+  // itself is repo-agnostic.
   let (keymap, modal) = match worktree::discover_repo(None) {
-    Ok(repo) => match repo.workdir() {
-      Some(workdir) => {
-        let cfg = Config::load_for_repo(workdir)?;
-        (cfg.tui.keys.resolved_keymap()?, cfg.tui.keys.resolved_modal_keymap()?)
-      }
-      None => (Keymap::defaults(), ModalKeymap::defaults()),
-    },
+    Ok(repo) => {
+      let cfg = Config::load_for_repo(&worktree::repo_path(&repo))?;
+      (cfg.tui.keys.resolved_keymap()?, cfg.tui.keys.resolved_modal_keymap()?)
+    }
     Err(_) => (Keymap::defaults(), ModalKeymap::defaults()),
   };
 
@@ -2060,8 +2054,7 @@ fn cmd_init(preset: Option<String>, list_presets: bool, show: bool) -> Result<()
   }
 
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-  let path = Config::write_preset(workdir, resolved.body)?;
+  let path = Config::write_preset(&worktree::repo_path(&repo), resolved.body)?;
   println!("wrote {} (preset: {})", path.display(), resolved.name);
   Ok(())
 }
@@ -2312,7 +2305,7 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     // back to host inference would drop a `forge = "gitlab"` a self-hosted
     // instance depends on, and detection could then persist a number read
     // from an entirely different repo.
-    let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
+    let config = Config::load_for_repo(&worktree::repo_path(&repo))?;
     match forge::resolve(&repo, &config).ok() {
       None => vec![None; trees.len()],
       Some(forge) => trees
@@ -2769,8 +2762,9 @@ pub struct RepoContext {
 /// the current directory (the behaviour every CLI call site relies
 /// on), `Some(path)` discovers from an explicit root (used by tests).
 ///
-/// Surfaces [`GwmError::NotInGitRepo`] outside a repo or in a bare
-/// repo (no workdir), and propagates any `.gwm.toml` parse error from
+/// Surfaces [`GwmError::NotInGitRepo`] outside a repo (a bare repo
+/// resolves through [`worktree::repo_path`], #744), and propagates any
+/// `.gwm.toml` parse error from
 /// [`Config::load_for_repo`].
 /// Stack size for the thread the CLI actually runs on.
 ///
@@ -2812,7 +2806,7 @@ pub fn on_own_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -
 
 pub fn repo_context(start: Option<&Path>) -> Result<RepoContext> {
   let repo = worktree::discover_repo(start)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = worktree::repo_path(&repo);
   let config = Config::load_for_repo(&workdir)?;
   Ok(RepoContext { repo, workdir, config })
 }
@@ -2824,7 +2818,7 @@ pub fn repo_context(start: Option<&Path>) -> Result<RepoContext> {
 /// about to diagnose is broken.
 pub fn repo_context_lenient(start: Option<&Path>) -> Result<RepoContext> {
   let repo = worktree::discover_repo(start)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = worktree::repo_path(&repo);
   let config = Config::load_for_repo(&workdir).unwrap_or_default();
   Ok(RepoContext { repo, workdir, config })
 }
@@ -3458,7 +3452,7 @@ fn cmd_remove(
   trust_mode: TrustMode,
 ) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = worktree::repo_path(&repo);
 
   // Issue #484: resolve the whole batch first. A typo in the middle of a
   // cleanup must not leave the first half removed and the rest untouched,
@@ -3853,7 +3847,7 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   use std::sync::Arc;
 
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = worktree::repo_path(&repo);
   // A user `--socket` is taken verbatim (we never touch its parent dir); the
   // default resolution may nest the socket in a private `gwm-<uid>/` dir on a
   // shared base, in which case `serve` owns and secures that dir (issue #341).
@@ -3979,15 +3973,14 @@ fn print_doctor_report(report: &doctor::DoctorReport) {
 
 fn cmd_types(gitmoji_flag: bool) -> Result<()> {
   // Resolve the active branch-type list. When invoked inside a repo
-  // with a workdir we honour any `[[branch_types]]` override in
-  // `.gwm.toml`; outside of one — or inside a bare repo where
-  // `repo.workdir()` is `None` and there's no place to look for
-  // `.gwm.toml` — we silently fall back to the built-in defaults so
+  // (bare ones included, issue #744) we honour any `[[branch_types]]`
+  // override in `.gwm.toml`; outside of one we silently fall back to
+  // the built-in defaults so
   // `gwm types` remains useful as a discovery command (used by `gwm`
   // newcomers before they've initialised a config, and from CI inspect
   // commands that point at bare clones).
   let workdir = match worktree::discover_repo(None) {
-    Ok(repo) => repo.workdir().map(|w| w.to_path_buf()),
+    Ok(repo) => Some(worktree::repo_path(&repo)),
     Err(_) => None,
   };
   let resolved = match &workdir {
@@ -4080,12 +4073,12 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
       // must not fail here. Inside a repo we want the workdir so
       // `.gwm.toml` overrides apply.
       let repo = worktree::discover_repo(None).ok();
-      let workdir = repo.as_ref().and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+      let workdir = repo.as_ref().map(worktree::repo_path);
       (workdir, repo.as_ref().map(worktree::repo_name), name)
     }
     None => {
       let repo = worktree::discover_repo(None)?;
-      let wd = repo.workdir().map(|w| w.to_path_buf());
+      let wd = Some(worktree::repo_path(&repo));
       // Issue #477: the workdir and the repo name come from the main
       // checkout, because that is where `.gwm.toml` lives and what `{repo}`
       // expands to. The branch does not: the bundled `commit-msg` hook runs
@@ -4177,10 +4170,13 @@ fn cmd_hooks(action: HooksAction) -> Result<()> {
 
 fn cmd_hooks_install(hook: HookKind, force: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  // The main repo's git dir, not `repo_path`: git loads hooks from the
+  // common dir for every worktree, and in a bare repo `repo_path` is a
+  // linked worktree, whose own admin dir git never reads hooks from (#744).
+  // For a normal repo this discovers the same repo as its workdir did.
   match hook {
     HookKind::CommitMsg => {
-      let path = hooks::install_commit_msg(&workdir, force)?;
+      let path = hooks::install_commit_msg(repo.commondir(), force)?;
       println!("✓ installed {}", path.display());
       println!("  (auto-prepends gitmoji+type prefix when missing)");
     }
@@ -4278,7 +4274,7 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool, direction: Op
     // Only a bare `--split` reads the config, so a malformed `.gwm.toml`
     // cannot break the two forms that never needed a direction.
     (true, None) => {
-      let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+      let workdir = worktree::repo_path(&repo);
       SpawnMode::Split(Config::load_for_repo(&workdir)?.tui.mux_pane_direction)
     }
     (false, None) => SpawnMode::Window,
@@ -4406,7 +4402,7 @@ fn cmd_link(target: LinkTarget, number: u64, worktree: Option<String>) -> Result
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
   // Write under the backend marker that will later be checked against
   // this line, or the next command that resolves a forge deletes it.
-  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
+  let config = Config::load_for_repo(&worktree::repo_path(&repo))?;
   forge::reconcile_links(&repo, &config);
   match target {
     LinkTarget::Issue => {
@@ -4442,7 +4438,7 @@ fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Re
   // against the backend about to read them, and `gwm open` is exactly
   // the command that would otherwise send the user to the stale
   // number's page one last time.
-  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
+  let config = Config::load_for_repo(&worktree::repo_path(&repo))?;
   let forge = forge::resolve(&repo, &config)?;
   let link = github::read_link(&repo, &branch)?;
 
@@ -4497,7 +4493,7 @@ fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
 
   // Forge + fetched status are best-effort: if there's no remote or the
   // forge CLI isn't installed, we still print the local link.
-  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
+  let config = Config::load_for_repo(&worktree::repo_path(&repo))?;
   let forge = forge::resolve(&repo, &config).ok();
   let slug = forge.as_ref().map(|f| f.slug().to_string());
   // When a remote is present, auto-detect the branch's PR if none is
@@ -5066,7 +5062,7 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
 fn cmd_trust_add() -> Result<()> {
   let cwd = std::env::current_dir()?;
   let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
-  let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+  let workdir = worktree::repo_path(&repo);
   // Same key every other gate uses — see `trust::origin_key_for_repo`.
   let key = trust::origin_key_for_repo(&repo, &workdir);
   match trust::record_config(&workdir, &key, &trust::current_actor())? {
@@ -5333,7 +5329,7 @@ fn cmd_aliases_list() -> Result<()> {
   // file without cd'ing first.
   let repo_workdir: Option<PathBuf> = crate::worktree::discover_repo(None)
     .ok()
-    .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+    .map(|r| crate::worktree::repo_path(&r));
 
   let resolved = crate::aliases::load(repo_workdir.as_deref(), None)?;
 
@@ -5515,7 +5511,7 @@ fn print_lifecycle_report(report: &bootstrap::BootstrapReport) {
 /// different symlink chains.
 fn current_repo_root() -> Result<PathBuf> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = worktree::repo_path(&repo);
   Ok(std::fs::canonicalize(&workdir).unwrap_or(workdir))
 }
 
@@ -5592,7 +5588,7 @@ fn cmd_undo(run_bootstrap: bool, trust_mode: TrustMode) -> Result<()> {
   //     non-zero. Honours --allow-bootstrap / GWM_ALLOW_BOOTSTRAP /
   //     --deny-bootstrap.
   if run_bootstrap {
-    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+    let workdir = worktree::repo_path(&repo);
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
 
@@ -5662,7 +5658,7 @@ fn cmd_undo(run_bootstrap: bool, trust_mode: TrustMode) -> Result<()> {
   // (4) Optionally re-run bootstrap. Trust was already gated at step
   //     (0) before any resurrection, so by here we're cleared to run.
   if run_bootstrap {
-    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+    let workdir = worktree::repo_path(&repo);
     let config = Config::load_for_repo(&workdir)?;
     let ctx = BootstrapCtx {
       main_repo: &workdir,

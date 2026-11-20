@@ -921,8 +921,15 @@ fn check_orphan_branch_config(ctx: &DoctorCtx<'_>) -> Check {
 fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
   let name = "base directory writable";
   let repo_name = worktree::repo_name(ctx.repo);
-  let repo_path = ctx.repo.workdir();
-  let base_expanded = match expand_placeholders(&ctx.config.worktree.base, &repo_name, None, None, None, repo_path) {
+  let repo_path = worktree::repo_path(ctx.repo);
+  let base_expanded = match expand_placeholders(
+    &ctx.config.worktree.base,
+    &repo_name,
+    None,
+    None,
+    None,
+    Some(&repo_path),
+  ) {
     Ok(s) => s,
     Err(e) => return Check::failed(name, format!("could not expand base placeholders: {}", e)),
   };

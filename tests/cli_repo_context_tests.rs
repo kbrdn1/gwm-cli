@@ -4,8 +4,9 @@
 //! across ~half a dozen subcommands; these tests lock its two observable
 //! branches so the dedupe stays behaviour-preserving:
 //!
-//! - Outside a git repository (or in a bare repo with no workdir) the
-//!   prelude must surface `GwmError::NotInGitRepo`.
+//! - Outside a git repository the prelude must surface
+//!   `GwmError::NotInGitRepo`. A bare repo is a repository (#744), see
+//!   the last test.
 //! - Inside a real working tree the repo, workdir, and config must all
 //!   resolve, with `workdir` pointing at the discovered tree.
 //!
@@ -94,4 +95,45 @@ description = "Throwaway exploration"
     vec!["spike"],
     "config must come from the repo's .gwm.toml, not a silent default"
   );
+}
+
+/// Issue #744: in a bare repo with linked worktrees, the context resolves
+/// from the project directory and from inside a worktree alike, and the
+/// config is the one committed to the default branch: the `.gwm.toml` of
+/// the worktree that has it checked out, as in a normal clone's main
+/// checkout.
+#[test]
+fn repo_context_in_bare_gitlink_layout_loads_the_default_branch_config() {
+  let (_tmp, project, main) = common::init_bare_gitlink_layout();
+  std::fs::write(
+    main.join(".gwm.toml"),
+    r#"
+[[branch_types]]
+name = "spike"
+description = "Throwaway exploration"
+"#,
+  )
+  .unwrap();
+
+  for start in [&project, &main] {
+    let RepoContext { workdir, config, .. } = match repo_context(Some(start)) {
+      Ok(ctx) => ctx,
+      Err(e) => panic!("from {start:?}: expected a repo context, got {e:?}"),
+    };
+    assert!(
+      common::paths_equal(&workdir, &main),
+      "from {start:?}: expected {main:?}, got {workdir:?}"
+    );
+    let names: Vec<String> = config
+      .resolved_branch_types()
+      .types
+      .into_iter()
+      .map(|t| t.name)
+      .collect();
+    assert_eq!(
+      names,
+      vec!["spike"],
+      "from {start:?}: config must come from the default branch's .gwm.toml"
+    );
+  }
 }

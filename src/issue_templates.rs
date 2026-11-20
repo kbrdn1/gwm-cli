@@ -16,7 +16,7 @@ pub struct IssueDraft {
 }
 
 pub fn render_issue_draft(repo: &Repository, config: &Config, branch_type: &str, desc: &str) -> Result<IssueDraft> {
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+  let workdir = &worktree::repo_path(repo);
   let type_config = config.issue_template.by_type.get(branch_type);
   let template_name = template_name(config, branch_type).ok_or_else(|| {
     GwmError::Config(format!(
@@ -91,10 +91,8 @@ fn title_prefix(type_config: Option<&IssueTemplateTypeConfig>, form_title: Optio
 /// right trade for a repo whose `[issue_template]` points at a file that has
 /// since moved.
 pub fn title_prefix_for(repo: &Repository, config: &Config, branch_type: &str) -> String {
-  let form_title = repo
-    .workdir()
-    .zip(template_name(config, branch_type))
-    .and_then(|(workdir, name)| resolve_template_path(workdir, name).ok())
+  let form_title = template_name(config, branch_type)
+    .and_then(|name| resolve_template_path(&worktree::repo_path(repo), name).ok())
     .and_then(|path| std::fs::read_to_string(path).ok())
     .and_then(|raw| templating::issue_form_metadata(&raw).ok())
     .and_then(|meta| meta.title);

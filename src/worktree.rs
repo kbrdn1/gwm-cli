@@ -173,29 +173,98 @@ pub fn discover_repo(start: Option<&Path>) -> Result<Repository> {
     None => std::env::current_dir()?,
   };
   let repo = Repository::discover(&from).map_err(|_| GwmError::NotInGitRepo)?;
-  // If we're inside a linked worktree, walk back to the main repo working dir.
-  // `repo.path()` for a linked worktree returns `<main>/.git/worktrees/<name>/`.
-  // Two parents up = `<main>/.git`, three up = `<main>` (the main workdir).
+  // If we're inside a linked worktree, switch to the main repository. Its git
+  // dir is the worktree's common dir: `<main>/.git` for a normal repo, the
+  // repository itself for a bare one (issue #744). Counting parents up from
+  // the worktree's admin dir only works for the former.
   if repo.is_worktree() {
-    let wt_admin = repo.path().to_path_buf();
-    if let Some(git_dir) = wt_admin.parent().and_then(|p| p.parent()) {
-      if let Some(main_workdir) = git_dir.parent() {
-        if let Ok(main) = Repository::open(main_workdir) {
-          return Ok(main);
-        }
-      }
+    if let Ok(main) = Repository::open(repo.commondir()) {
+      return Ok(main);
     }
   }
   Ok(repo)
 }
 
-/// Name of the repo derived from the working dir path.
+/// The directory that holds the repo's `.gwm.toml` and that `{repo_path}`
+/// expands to.
+///
+/// For a repo with a working directory, that is the working directory (the
+/// main checkout). A bare repo has none (issue #744), so the linked worktree
+/// that has the bare repo's HEAD branch checked out takes its place: like a
+/// main checkout, it holds the `.gwm.toml` committed to the default branch.
+/// Without such a worktree, it is the [`bare_project_dir`].
+pub fn repo_path(repo: &Repository) -> PathBuf {
+  if let Some(workdir) = repo.workdir() {
+    return workdir.to_path_buf();
+  }
+  default_branch_worktree(repo).unwrap_or_else(|| bare_project_dir(repo))
+}
+
+/// The linked worktree of a bare repo that has the repo's HEAD branch (its
+/// default branch) checked out, if any.
+///
+/// Each worktree's `HEAD` is read from its admin directory on disk, as in
+/// [`branch_is_checked_out_anywhere`], and the worktree is then looked up by
+/// name, so an entry whose checkout is gone does not qualify.
+fn default_branch_worktree(repo: &Repository) -> Option<PathBuf> {
+  let common = repo.commondir();
+  let want = std::fs::read_to_string(common.join("HEAD")).ok()?;
+  let want = want.trim();
+  if !want.starts_with("ref: refs/heads/") {
+    return None;
+  }
+  let entries = std::fs::read_dir(common.join("worktrees")).ok()?;
+  entries.flatten().find_map(|entry| {
+    let head = std::fs::read_to_string(entry.path().join("HEAD")).ok()?;
+    if head.trim() != want {
+      return None;
+    }
+    let wt = repo.find_worktree(entry.file_name().to_str()?).ok()?;
+    let path = wt.path();
+    path.is_dir().then(|| path.to_path_buf())
+  })
+}
+
+/// The directory a bare repo belongs to: the one holding a `.git` file that
+/// points to it (as in `project/.bare` next to `project/.git`), and
+/// otherwise the bare repo itself. Without such a file, the parent is just
+/// some directory, possibly shared by many repos.
+fn bare_project_dir(repo: &Repository) -> PathBuf {
+  let git_dir = repo.path();
+  if let Some(parent) = git_dir.parent() {
+    let points_here = Repository::open(parent).is_ok_and(|linked| same_dir(linked.path(), git_dir));
+    if points_here {
+      return parent.to_path_buf();
+    }
+  }
+  git_dir.to_path_buf()
+}
+
+/// Whether two paths name the same directory, ignoring symlinks and
+/// trailing separators.
+fn same_dir(a: &Path, b: &Path) -> bool {
+  match (a.canonicalize(), b.canonicalize()) {
+    (Ok(a), Ok(b)) => a == b,
+    _ => false,
+  }
+}
+
+/// Name of the repo: the last component of its working directory, or for a
+/// bare repo of its [`bare_project_dir`] (not of the worktree standing in
+/// for the main checkout, typically `main`), without the `.git` suffix of a
+/// bare repo such as `project.git`.
 pub fn repo_name(repo: &Repository) -> String {
-  repo
-    .workdir()
-    .and_then(|p| p.file_name())
-    .map(|n| n.to_string_lossy().to_string())
-    .unwrap_or_else(|| "repo".into())
+  let dir = match repo.workdir() {
+    Some(workdir) => workdir.to_path_buf(),
+    None => bare_project_dir(repo),
+  };
+  let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+    return "repo".into();
+  };
+  match name.strip_suffix(".git") {
+    Some(stem) if repo.is_bare() && !stem.is_empty() => stem.to_string(),
+    _ => name,
+  }
 }
 
 /// What the main repo knows about a linked worktree before anything is

@@ -3,7 +3,7 @@
 
 use git2::{Repository, Signature};
 use saphyr::{LoadableYamlNode, MappingOwned, SafelyIndex, ScalarOwned, YamlOwned};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
@@ -205,6 +205,59 @@ pub fn init_repo() -> (TempDir, Repository) {
 
   let reopened = Repository::open(dir.path()).unwrap();
   (dir, reopened)
+}
+
+/// The bare-repo layout of issue #744: the bare repository in
+/// `<project>/.bare`, a `<project>/.git` file pointing git at it, and the
+/// default branch checked out as the linked worktree `<project>/main`.
+/// Returns the tempdir (kept alive by the caller), the project directory,
+/// and the `main` worktree.
+#[allow(dead_code)] // used only by the bare-repo tests; cargo compiles common per-test crate.
+pub fn init_bare_gitlink_layout() -> (TempDir, PathBuf, PathBuf) {
+  let tmp = TempDir::new().unwrap();
+  let project = tmp.path().join("project");
+  std::fs::create_dir(&project).unwrap();
+  let bare = init_bare_repo_at(&project.join(".bare"));
+  std::fs::write(project.join(".git"), "gitdir: ./.bare\n").unwrap();
+  let main = project.join("main");
+  add_main_worktree(&bare, &main);
+  (tmp, project, main)
+}
+
+/// A plain bare repository `<tmp>/project.git`, with no `.git` file next
+/// to it, and the default branch checked out as the linked worktree
+/// `<tmp>/main`. Returns the tempdir, the bare git dir, and the worktree.
+#[allow(dead_code)] // used only by the bare-repo tests; cargo compiles common per-test crate.
+pub fn init_plain_bare_repo() -> (TempDir, PathBuf, PathBuf) {
+  let tmp = TempDir::new().unwrap();
+  let git_dir = tmp.path().join("project.git");
+  let bare = init_bare_repo_at(&git_dir);
+  let main = tmp.path().join("main");
+  add_main_worktree(&bare, &main);
+  (tmp, git_dir, main)
+}
+
+/// A bare repository at `git_dir` with one empty commit on `main`.
+#[allow(dead_code)] // used only by the bare-repo helpers above.
+fn init_bare_repo_at(git_dir: &Path) -> Repository {
+  let repo = Repository::init_bare(git_dir).unwrap();
+  repo.set_head("refs/heads/main").unwrap();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+  drop(tree);
+  repo
+}
+
+/// Check the existing `main` branch of `bare` out as the linked worktree
+/// `path`, named `main`.
+#[allow(dead_code)] // used only by the bare-repo helpers above.
+fn add_main_worktree(bare: &Repository, path: &Path) {
+  let branch = bare.find_branch("main", git2::BranchType::Local).unwrap();
+  let mut opts = git2::WorktreeAddOptions::new();
+  opts.reference(Some(branch.get()));
+  bare.worktree("main", path, Some(&opts)).unwrap();
 }
 
 /// Canonicalize two paths and compare them. On macOS `/var/...` and
