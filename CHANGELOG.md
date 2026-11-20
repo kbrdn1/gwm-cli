@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration of its own. To be revisited at the next minor release
   ([#741](https://github.com/kbrdn1/gwm-cli/issues/741)).
 
+### Fixed
+
+- 🐛 **Bare repos with linked worktrees work**: the TUI, `gwm doctor`,
+  `gwm config` and the other commands that read `.gwm.toml` no longer fail
+  with `not inside a git repository` in a bare repo (such as `project/.bare`
+  with a `project/.git` file pointing to it), neither from the project
+  directory nor from inside a worktree. The worktree that has the default
+  branch checked out takes the place of the main checkout: its `.gwm.toml` is
+  read and `{repo_path}` points to it, while `{repo}` stays the project's
+  name. `discover_repo` now finds the main repo of a worktree through git's
+  common dir instead of counting parent directories, which also fixes
+  worktrees of a plain `project.git`
+  ([#744](https://github.com/kbrdn1/gwm-cli/issues/744)).
+
 ### Docs
 
 - The doc captures are regenerated at 1.11.1, so the TUI captures paint the

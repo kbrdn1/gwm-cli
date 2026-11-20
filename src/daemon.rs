@@ -91,10 +91,7 @@ fn run_doctor(workdir: &Path) -> Result<JsonDoctorReport> {
   // load and the real global layer, so the daemon's doctor matches
   // `gwm doctor --format json` byte-for-byte.
   let repo = open_repo(workdir)?;
-  let repo_workdir = repo
-    .workdir()
-    .ok_or(crate::error::GwmError::NotInGitRepo)?
-    .to_path_buf();
+  let repo_workdir = worktree::repo_path(&repo);
   let config = Config::load_for_repo(&repo_workdir).unwrap_or_default();
   let global = crate::config::global_config_path();
   let ctx = doctor::DoctorCtx {

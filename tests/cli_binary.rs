@@ -696,6 +696,22 @@ fn doctor_outside_git_repo_fails() {
     .stderr(predicate::str::contains("not inside a git repository"));
 }
 
+/// Issue #744: a bare repo with linked worktrees is a repository. `doctor`
+/// runs both from the project directory and from inside a worktree, with
+/// the same 0/1 bound as `doctor_on_fresh_repo_prints_checks`.
+#[test]
+fn doctor_runs_in_bare_gitlink_layout() {
+  let (_tmp, project, main) = common::init_bare_gitlink_layout();
+  for dir in [&project, &main] {
+    common::gwm()
+      .current_dir(dir)
+      .arg("doctor")
+      .assert()
+      .code(predicate::in_iter([0_i32, 1]))
+      .stdout(predicate::str::contains("base directory writable"));
+  }
+}
+
 #[test]
 fn doctor_exits_one_when_review_binary_missing() {
   // Issue #75: configuring [review] with a binary that's not on $PATH

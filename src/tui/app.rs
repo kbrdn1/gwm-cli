@@ -726,7 +726,7 @@ impl App {
   /// `global_config_path()`, so runtime behaviour is unchanged.
   pub fn new_at_layered(start: Option<&Path>, global_path: Option<&Path>) -> Result<Self> {
     let repo = worktree::discover_repo(start)?;
-    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+    let workdir = worktree::repo_path(&repo);
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_layered(&workdir, global_path)?;
     let branch_types = config.resolved_branch_types().types;

@@ -166,7 +166,7 @@ pub fn validate() -> Result<()> {
   // a supported `branch_pattern` token and the verdict depends on it), and
   // `repo_root` drops the handle it opened.
   let repo = worktree::discover_repo(None)?;
-  let root = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let root = worktree::repo_path(&repo);
   let path = config_path(&root);
   let cfg = validate_file(&path)?;
   println!("{} is valid", path.display());
@@ -222,8 +222,7 @@ pub fn edit() -> Result<()> {
 
 fn repo_root() -> Result<PathBuf> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-  Ok(workdir.to_path_buf())
+  Ok(worktree::repo_path(&repo))
 }
 
 fn config_path(root: &Path) -> PathBuf {

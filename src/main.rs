@@ -87,7 +87,7 @@ fn clean_error(e: &gwm::error::GwmError) -> String {
 fn expand_aliases(argv: Vec<OsString>) -> Result<Vec<OsString>, gwm::error::GwmError> {
   let repo_workdir = gwm::worktree::discover_repo(None)
     .ok()
-    .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+    .map(|r| gwm::worktree::repo_path(&r));
   let resolved = aliases::load(repo_workdir.as_deref(), None)?;
   Ok(aliases::expand_argv_os(argv, &resolved))
 }
