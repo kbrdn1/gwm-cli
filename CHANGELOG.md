@@ -26,10 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and path, so `https`, `ssh` and `git@` spellings agree and a lookalike host
   does not, nor an `http`, `git` or `file` origin; `*` stays inside one path
   segment, and a wildcard host or owner is refused. The ledger still comes
-  first, `--deny-bootstrap` still refuses, and `gwm trust revoke` wins: it
-  removes a rule, or takes one repo out of the rule that covers it
-  (`[trust] revoked`). A changed file is still shown: one line on stderr
-  names the settings that changed since the last run.
+  first, `--deny-bootstrap` still refuses, and `gwm trust revoke` removes a
+  rule or fails naming the one that still covers the origin. A changed file
+  is still shown: one line on stderr names the settings that changed since
+  the last run.
 
 ### Security
 

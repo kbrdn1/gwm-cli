@@ -139,10 +139,6 @@ pub struct TrustConfig {
   /// parsed host and path, so `https`, `ssh` and `git@` spellings agree.
   #[serde(default)]
   pub origins: Vec<String>,
-  /// Origins `gwm trust revoke` took out of those rules: an explicit revoke
-  /// wins over a rule, whose other repos stay trusted.
-  #[serde(default)]
-  pub revoked: Vec<String>,
 }
 
 /// `[exec]` — named command profiles for `gwm exec` (issue #324).
@@ -2133,9 +2129,8 @@ impl Config {
   /// `[trust]` from the user-level config file at `global_path` alone
   /// (issue #751), for the reason [`Self::global_forge_host`] gives: the
   /// merged config lets the repo's `.gwm.toml` win, and a repo must not be
-  /// able to trust itself. Read as one table, so a malformed `revoked` can
-  /// never leave `origins` standing: unreadable or malformed is no rule,
-  /// which fails closed.
+  /// able to trust itself. Read as one table: unreadable or malformed, or
+  /// carrying a key gwm does not know, is no rule, which fails closed.
   pub fn trust_in(global_path: &Path) -> TrustConfig {
     read_config_value(global_path)
       .ok()

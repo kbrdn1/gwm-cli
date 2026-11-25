@@ -7714,31 +7714,16 @@ fn trust_add_origin_refuses_a_pattern_that_names_no_owner() {
 }
 
 #[test]
-fn revoking_a_repo_covered_by_an_origin_pattern_takes_it_out_of_the_rule() {
-  // An explicit revoke wins (#751): the repo leaves the rule, whichever
-  // spelling of its origin was revoked, and only the ledger is left.
-  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
-  fx.trust_origins(KBRDN1).publish();
-  fx.gwm(&["bootstrap"]).success();
-
+fn revoking_a_repo_still_covered_by_an_origin_pattern_says_which_one() {
+  // Revoke has to win or say why it cannot: printing success while a rule
+  // still trusts the repo is the one outcome that is never acceptable.
+  // Taking one repo out of a rule is not offered (decision on PR #752).
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add"]).success();
+  fx.trust_origins(KBRDN1);
   fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/demo.git"])
-    .success()
-    .stdout(predicate::str::contains(
-      "✓ revoked https://github.com/kbrdn1/demo.git from origin pattern https://github.com/kbrdn1/* (user config)",
-    ));
-  fx.gwm(&["bootstrap"])
     .failure()
-    .stderr(predicate::str::contains("not in the trust ledger"));
-  fx.gwm(&["trust", "list"])
-    .success()
-    .stdout(predicate::str::contains("revoked from those rules"))
-    .stdout(predicate::str::contains("this repo is trusted by origin pattern").not());
-
-  // Naming the repo as a rule of its own takes it back.
-  fx.gwm(&["trust", "add", "--origin", "https://github.com/kbrdn1/demo.git"])
-    .success();
-  fx.gwm(&["bootstrap"]).success();
-  assert!(!fx.ledger.exists(), "the rule, not the ledger, cleared the gate");
+    .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
 }
 
 #[test]

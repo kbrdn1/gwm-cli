@@ -5024,16 +5024,10 @@ fn cmd_trust_list() -> Result<()> {
   let clean = crate::naming::sanitise_for_terminal;
   if let Some(config) = crate::config::global_config_path() {
     let t = Config::trust_in(&config);
-    if !t.origins.is_empty() || !t.revoked.is_empty() {
+    if !t.origins.is_empty() {
       println!("trusted origins: {}", config.display());
       for o in &t.origins {
         println!("  {}", clean(o));
-      }
-      if !t.revoked.is_empty() {
-        println!("revoked from those rules:");
-        for r in &t.revoked {
-          println!("  {}", clean(r));
-        }
       }
       // The checkout the gates read, which is the main one even from a
       // linked worktree.
@@ -5127,19 +5121,14 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
       println!("✓ revoked origin pattern {} (user config)", shown);
       rule_removed = true;
     }
-    // A rule still covering the repo: take the repo out of it, so the revoke
-    // wins and the rule's other repos stay trusted.
     if let Some(rule) = trust::matching_origin_pattern(&t.origins, &origin) {
-      if trust::matching_origin_pattern(&t.revoked, &origin).is_none() {
-        t.revoked.push(origin.clone());
-        crate::config_cli::set_array_at(&config, "trust.revoked", &t.revoked)?;
-      }
-      println!(
-        "✓ revoked {} from origin pattern {} (user config)",
+      return Err(GwmError::Other(format!(
+        "{} is still trusted by origin pattern {} in {}: run `gwm trust revoke '{}'` to remove that rule",
         shown,
+        crate::naming::sanitise_for_terminal(rule),
+        config.display(),
         crate::naming::sanitise_for_terminal(rule)
-      );
-      rule_removed = true;
+      )));
     }
   }
   if removed == 0 && !rule_removed {
@@ -5161,12 +5150,6 @@ fn cmd_trust_add_origin(pattern: String) -> Result<()> {
   if !t.origins.contains(&pattern) {
     t.origins.push(pattern.clone());
     crate::config_cli::set_array_at(&config, "trust.origins", &t.origins)?;
-  }
-  // Naming a revoked repo as a rule of its own takes it back.
-  let before = t.revoked.len();
-  t.revoked.retain(|r| *r != pattern);
-  if t.revoked.len() != before {
-    crate::config_cli::set_array_at(&config, "trust.revoked", &t.revoked)?;
   }
   println!(
     "✓ trusted origin pattern {} (user config)",

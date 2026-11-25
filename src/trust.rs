@@ -232,15 +232,10 @@ fn plain_origin(origin: &str) -> bool {
   charset && scheme && origin.matches('@').count() <= 1
 }
 
-/// The user's rule that covers `origin`, unless `gwm trust revoke` took the
-/// repo out of it (issue #751).
+/// The user's rule that covers `origin`, if any (issue #751).
 pub fn user_origin_rule(origin: &str) -> Option<String> {
   let path = crate::config::global_config_path()?;
-  let trust = Config::trust_in(&path);
-  if matching_origin_pattern(&trust.revoked, origin).is_some() {
-    return None;
-  }
-  matching_origin_pattern(&trust.origins, origin).map(String::from)
+  matching_origin_pattern(&Config::trust_in(&path).origins, origin).map(String::from)
 }
 
 /// The rule in the user's own config that trusts `origin` to have published
