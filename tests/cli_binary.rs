@@ -7837,6 +7837,43 @@ fn a_rule_clears_what_origin_publishes_and_names_what_it_runs() {
 
 #[cfg(unix)]
 #[test]
+fn the_ask_to_origin_ignores_the_checkouts_own_git_config() {
+  // A repo-local `core.sshCommand` or `credential.helper`, from a file the
+  // repo tracks and an `include.path` pulls in, must not choose how origin
+  // is asked: only the user's own git config does.
+  use std::os::unix::fs::PermissionsExt;
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let origin = StandIn::serve(&fx);
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .config()
+    .unwrap()
+    .set_str("core.sshCommand", origin.dir.path().join("ssh").to_str().unwrap())
+    .unwrap();
+  let user = tempfile::TempDir::new().unwrap();
+  let refuse = user.path().join("ssh");
+  fs::write(&refuse, "#!/bin/sh\nexit 1\n").unwrap();
+  fs::set_permissions(&refuse, fs::Permissions::from_mode(0o755)).unwrap();
+  let gitconfig = user.path().join("gitconfig");
+  fs::write(&gitconfig, format!("[core]\n\tsshCommand = {}\n", refuse.display())).unwrap();
+
+  fx.cmd()
+    .env("GIT_CONFIG_GLOBAL", &gitconfig)
+    .env_remove("GIT_SSH_COMMAND")
+    .write_stdin("")
+    .arg("bootstrap")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(
+    !origin.asked(),
+    "origin was asked through the checkout's own ssh command"
+  );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_repo_cannot_trust_its_own_origin() {
   // The repo's own file is the one place a trusted origin must never be
   // read from: it ships with the clone. Origin here does publish that file,

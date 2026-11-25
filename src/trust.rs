@@ -313,7 +313,7 @@ pub fn published_on_origin(workdir: &Path, origin: &str, bytes: &[u8]) -> bool {
   let Ok(repo) = git2::Repository::open(workdir) else {
     return false;
   };
-  announced_trunks(&repo, workdir, origin).is_some_and(|oids| publishes(&repo, &oids, bytes))
+  announced_trunks(origin).is_some_and(|oids| publishes(&repo, &oids, bytes))
 }
 
 /// The decision alone: whether one of `announced`, the commits origin says
@@ -369,19 +369,21 @@ pub fn announced_in(stdout: &str) -> Vec<git2::Oid> {
 /// background pane, and a credential or passphrase question left unanswered
 /// would hang it. Credential helpers still run, they are how a private repo
 /// answers over https.
-fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Option<Vec<git2::Oid>> {
+fn announced_trunks(origin: &str) -> Option<Vec<git2::Oid>> {
   use std::io::Read;
   use std::process::{Command, Stdio};
   use std::time::{Duration, Instant};
 
-  // The user's ssh command, kept, made unable to ask.
+  // The user's ssh command, kept, made unable to ask. Never the checkout's
+  // own git config, which an `include.path` to a file the repo tracks can
+  // fill: git runs outside the repo, and only the user's config is read.
   let ssh = std::env::var("GIT_SSH_COMMAND")
     .ok()
-    .or_else(|| repo.config().ok()?.get_string("core.sshCommand").ok())
+    .or_else(|| git2::Config::open_default().ok()?.get_string("core.sshCommand").ok())
     .unwrap_or_else(|| "ssh".into());
   let mut cmd = Command::new("git");
   cmd
-    .current_dir(workdir)
+    .current_dir(std::env::temp_dir())
     .args(["-c", "core.askPass=", "ls-remote", "--"])
     .arg(origin)
     .args(asked_refs())
