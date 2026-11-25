@@ -5121,7 +5121,11 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
       println!("✓ revoked origin pattern {} (user config)", shown);
       rule_removed = true;
     }
-    if let Some(rule) = trust::matching_origin_pattern(&t.origins, &origin) {
+    // A repo, or every repo a revoked pattern named, still covered by a rule
+    // left in place: another spelling or a wider pattern.
+    if let Some(rule) = trust::matching_origin_pattern(&t.origins, &origin)
+      .or_else(|| trust::covering_origin_pattern(&t.origins, &origin))
+    {
       return Err(GwmError::Other(format!(
         "{} is still trusted by origin pattern {} in {}: run `gwm trust revoke '{}'` to remove that rule",
         shown,

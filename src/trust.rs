@@ -203,11 +203,24 @@ pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Opti
   if segments.iter().any(|s| s.is_empty() || s == "." || s == "..") {
     return None;
   }
+  first_covering(patterns, &host, &segments)
+}
+
+/// The first pattern in `patterns` that covers every repo `pattern` covers:
+/// another spelling of it or a wider one, the `*` of `pattern` read as a
+/// literal. `gwm trust revoke '<pattern>'` must not report success while one
+/// remains.
+pub fn covering_origin_pattern<'a>(patterns: &'a [String], pattern: &str) -> Option<&'a str> {
+  let (host, segments) = pattern_parts(pattern).ok()?;
+  first_covering(patterns, &host, &segments)
+}
+
+fn first_covering<'a>(patterns: &'a [String], host: &str, segments: &[String]) -> Option<&'a str> {
   patterns
     .iter()
     .find(|p| {
       pattern_parts(p).is_ok_and(|(ph, ps)| {
-        ph == host && ps.len() == segments.len() && ps.iter().zip(&segments).all(|(p, s)| glob_segment(p, s))
+        ph == host && ps.len() == segments.len() && ps.iter().zip(segments).all(|(p, s)| glob_segment(p, s))
       })
     })
     .map(String::as_str)
@@ -351,12 +364,12 @@ struct SeenConfigs {
 /// seen by a caller that has nowhere to show it.
 pub fn origin_change_notice(origin: &str, pattern: &str, body: &[u8]) -> Result<Option<String>> {
   let path = default_ledger_path()?.with_file_name("trust-seen.toml");
-  // A display cache, not a trust decision: unreadable means start over.
-  let mut seen: SeenConfigs = match fs::read_to_string(&path) {
-    Ok(raw) => toml::from_str(&raw).unwrap_or_default(),
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => SeenConfigs::default(),
-    Err(e) => return Err(e.into()),
-  };
+  // A display cache, not a trust decision: unreadable means start over, and
+  // unwritable means the line repeats next run. Either way it is printed.
+  let mut seen: SeenConfigs = fs::read_to_string(&path)
+    .ok()
+    .and_then(|raw| toml::from_str(&raw).ok())
+    .unwrap_or_default();
   let now = String::from_utf8_lossy(body).into_owned();
   let notice = match seen.seen.get(origin) {
     Some(before) if *before == now => return Ok(None),
@@ -365,10 +378,17 @@ pub fn origin_change_notice(origin: &str, pattern: &str, body: &[u8]) -> Result<
       pattern,
       describe_changes(before, &now)
     ),
-    None => format!(".gwm.toml trusted by origin {}: first run from {}", pattern, origin),
+    // Nothing to diff against, often a repo the ledger approved until now:
+    // name everything the rule lets run.
+    None => format!(
+      ".gwm.toml trusted by origin {}: first run from {}: {}",
+      pattern,
+      origin,
+      describe_changes("", &now)
+    ),
   };
   seen.seen.insert(origin.to_string(), now);
-  write_atomic(&path, &toml::to_string_pretty(&seen)?)?;
+  let _ = write_atomic(&path, &toml::to_string_pretty(&seen)?);
   Ok(Some(notice))
 }
 
