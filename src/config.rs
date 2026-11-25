@@ -48,11 +48,11 @@ pub struct Config {
   pub forge_hosts: BTreeMap<String, crate::forge::ForgeKind>,
   /// `[trust]`: repos the user trusts whatever their `.gwm.toml` hash, as
   /// long as origin publishes that file (issue #751). Accepted here, in any
-  /// shape, and never read: [`Config::trust_in`] reads it from the
+  /// shape, and left empty: [`Config::trust_in`] reads it from the
   /// **user-level** file alone, so a repo's own table is ignored rather than
   /// failing the load.
-  #[serde(default, skip_serializing)]
-  pub trust: serde::de::IgnoredAny,
+  #[serde(default, deserialize_with = "ignored_trust")]
+  pub trust: TrustConfig,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]
@@ -141,6 +141,11 @@ pub struct TrustConfig {
   /// parsed host and path, so `https`, `ssh` and `git@` spellings agree.
   #[serde(default)]
   pub origins: Vec<String>,
+}
+
+/// [`Config::trust`] from a merged config: whatever the table holds, empty.
+fn ignored_trust<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<TrustConfig, D::Error> {
+  serde::de::IgnoredAny::deserialize(d).map(|_| TrustConfig::default())
 }
 
 /// `[exec]` — named command profiles for `gwm exec` (issue #324).
