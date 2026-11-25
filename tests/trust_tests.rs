@@ -686,7 +686,8 @@ fn a_notice_cache_that_cannot_be_read_or_written_still_names_the_run() {
 /// as `git@github.com:kbrdn1/demo.git` through a stand-in `ssh` that serves
 /// it, the way git's own suite fakes a remote. gwm runs git with the user's
 /// ssh command, so this is the shipped path, no switch in gwm. A clone with
-/// that file checked out, and a user config that trusts `kbrdn1/*`.
+/// that file checked out, and a user config that trusts `kbrdn1/*`. The
+/// stand-in answers only when gwm told ssh it may not ask anything.
 #[cfg(unix)]
 struct SshOrigin {
   dir: TempDir,
@@ -715,7 +716,10 @@ impl SshOrigin {
     std::fs::create_dir_all(ssh.parent().unwrap()).unwrap();
     std::fs::write(
       &ssh,
-      format!("#!/bin/sh\nexec git upload-pack '{}'\n", bare_path.display()),
+      format!(
+        "#!/bin/sh\ncase \"$*\" in *BatchMode=yes*) ;; *) exit 1 ;; esac\nexec git upload-pack '{}'\n",
+        bare_path.display()
+      ),
     )
     .unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
