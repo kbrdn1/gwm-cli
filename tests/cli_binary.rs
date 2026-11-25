@@ -7769,6 +7769,26 @@ fn a_trusted_origin_does_not_cover_a_fork_head_fetched_under_origin() {
 }
 
 #[test]
+fn a_trusted_origin_does_not_cover_a_branch_that_tracks_another_remote() {
+  // Even one whose refspec writes under origin's tracking refs, where the
+  // published file sits: the remote is not the one the ledger key names.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let repo = git2::Repository::open(fx.dir.path()).unwrap();
+  repo
+    .remote_with_fetch(
+      "fork",
+      "https://github.com/stranger/demo.git",
+      "+refs/heads/*:refs/remotes/origin/*",
+    )
+    .unwrap();
+  repo.config().unwrap().set_str("branch.main.remote", "fork").unwrap();
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
 fn a_trusted_origin_does_not_cover_a_local_edit_and_trust_list_says_so() {
   let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
   fx.trust_origins(KBRDN1).publish();
