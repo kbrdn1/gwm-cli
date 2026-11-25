@@ -404,7 +404,11 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
   // below reaches `git-remote-https` or `ssh` too.
   #[cfg(unix)]
   std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+  #[cfg(unix)]
+  let signals = DialSignals::install();
   let mut child = cmd.spawn().ok()?;
+  #[cfg(unix)]
+  DIAL_GROUP.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
 
   // Read on a thread: a helper still holding the pipe must not hold gwm.
   let mut stdout = child.stdout.take()?;
@@ -423,6 +427,8 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
       _ => break None,
     }
   };
+  #[cfg(unix)]
+  drop(signals);
   match status {
     Some(status) if status.success() => out.map(|out| announced_in(&out)),
     Some(_) => None,
@@ -433,11 +439,77 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
       unsafe {
         libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL)
       };
-      // ponytail: on Windows only git dies; an ssh child outlives it until
-      // its connection does. A job object would take the tree down.
+      // Killing git alone leaves `git-remote-https` holding gwm's own output
+      // handles, inherited, until curl gives up minutes later.
+      #[cfg(windows)]
+      let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &child.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
       let _ = child.kill();
       let _ = child.wait();
       None
+    }
+  }
+}
+
+/// The group [`announced_trunks`] is waiting on, 0 when none.
+#[cfg(unix)]
+static DIAL_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// A Ctrl-C, a closed pane or a `kill` reaches gwm, not the group git runs
+/// in: take that group down, then die of the signal as gwm would have.
+#[cfg(unix)]
+extern "C" fn end_dial_then_die(sig: libc::c_int) {
+  let group = DIAL_GROUP.load(std::sync::atomic::Ordering::SeqCst);
+  // SAFETY: `kill` and `raise` are async-signal-safe, and `SA_RESETHAND` put
+  // the default action back, so the raise ends gwm once this returns.
+  unsafe {
+    if group > 0 {
+      libc::kill(-group, libc::SIGKILL);
+    }
+    libc::raise(sig);
+  }
+}
+
+/// [`end_dial_then_die`] on the signals that end a CLI run, for as long as
+/// this lives. A signal already ignored (`nohup`) stays ignored: the dial
+/// ends within its timeout anyway.
+#[cfg(unix)]
+struct DialSignals(Vec<(libc::c_int, libc::sigaction)>);
+
+#[cfg(unix)]
+impl DialSignals {
+  fn install() -> Self {
+    let mut saved = Vec::new();
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+      // SAFETY: `sigaction` on zeroed structs, read before it is replaced.
+      unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(sig, std::ptr::null(), &mut old) != 0 || old.sa_sigaction == libc::SIG_IGN {
+          continue;
+        }
+        let mut new: libc::sigaction = std::mem::zeroed();
+        new.sa_sigaction = end_dial_then_die as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        new.sa_flags = libc::SA_RESETHAND;
+        libc::sigemptyset(&mut new.sa_mask);
+        if libc::sigaction(sig, &new, std::ptr::null_mut()) == 0 {
+          saved.push((sig, old));
+        }
+      }
+    }
+    DialSignals(saved)
+  }
+}
+
+#[cfg(unix)]
+impl Drop for DialSignals {
+  fn drop(&mut self) {
+    DIAL_GROUP.store(0, std::sync::atomic::Ordering::SeqCst);
+    for (sig, old) in &self.0 {
+      // SAFETY: puts back what `install` read.
+      unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
     }
   }
 }

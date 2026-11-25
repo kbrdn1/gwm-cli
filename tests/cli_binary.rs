@@ -7567,7 +7567,12 @@ impl OriginFixture {
   }
 
   fn cmd(&self) -> Command {
-    let mut cmd = common::gwm();
+    Command::from_std(self.std_cmd())
+  }
+
+  /// [`Self::cmd`] for a test that has to hold the child, to signal it.
+  fn std_cmd(&self) -> std::process::Command {
+    let mut cmd = common::gwm_std();
     cmd
       .current_dir(self.dir.path())
       .env("GWM_TRUST_LEDGER", &self.ledger)
@@ -7651,6 +7656,59 @@ fn a_trusted_origin_that_never_answers_is_refused_within_the_timeout() {
   assert!(
     took >= limit && took < limit + std::time::Duration::from_secs(10),
     "refused after {took:?}, the timeout is {limit:?}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_signal_that_ends_gwm_while_it_asks_origin_ends_the_ask_too() {
+  // git runs in a group of its own, out of reach of the Ctrl-C or hangup the
+  // terminal sends gwm's: gwm has to take it down on the way out, or the
+  // connection outlives the timeout with nobody left to enforce it.
+  use std::io::Read;
+  use std::time::{Duration, Instant};
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let fx = OriginFixture::new(&format!("https://127.0.0.1:{port}/kbrdn1/demo.git"), ONE_COMMAND);
+  fx.trust_origins(LOCAL_RULE).publish();
+  let mut gwm = fx
+    .std_cmd()
+    .arg("bootstrap")
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn()
+    .unwrap();
+
+  listener.set_nonblocking(true).unwrap();
+  let deadline = Instant::now() + Duration::from_secs(10);
+  let mut asked = loop {
+    match listener.accept() {
+      Ok((stream, _)) => break stream,
+      Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+      Err(e) => {
+        let _ = gwm.kill();
+        panic!("origin was never asked: {e}");
+      }
+    }
+  };
+  // SAFETY: a plain syscall on a child this test spawned and has not reaped.
+  unsafe { libc::kill(gwm.id() as libc::pid_t, libc::SIGTERM) };
+  gwm.wait().unwrap();
+
+  asked.set_nonblocking(false).unwrap();
+  asked.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+  let mut buf = [0u8; 4096];
+  let closed = loop {
+    match asked.read(&mut buf) {
+      Ok(0) => break true,
+      Ok(_) => continue,
+      Err(e) => break e.kind() == std::io::ErrorKind::ConnectionReset,
+    }
+  };
+  assert!(
+    closed,
+    "the connection to origin is still open 2 s after gwm died: its git outlived it"
   );
 }
 
