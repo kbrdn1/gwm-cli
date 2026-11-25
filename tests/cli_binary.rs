@@ -7714,15 +7714,41 @@ fn trust_add_origin_refuses_a_pattern_that_names_no_owner() {
 }
 
 #[test]
-fn revoking_a_repo_still_covered_by_an_origin_pattern_says_which_one() {
-  // Revoke has to win or say why it cannot: printing success while a rule
-  // still trusts the repo is the one outcome that is never acceptable.
-  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
-  fx.gwm(&["trust", "add"]).success();
-  fx.trust_origins(KBRDN1);
+fn revoking_a_repo_covered_by_an_origin_pattern_takes_it_out_of_the_rule() {
+  // An explicit revoke wins (#751): the repo leaves the rule, whichever
+  // spelling of its origin was revoked, and only the ledger is left.
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  fx.gwm(&["bootstrap"]).success();
+
   fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/demo.git"])
+    .success()
+    .stdout(predicate::str::contains(
+      "✓ revoked https://github.com/kbrdn1/demo.git from origin pattern https://github.com/kbrdn1/* (user config)",
+    ));
+  fx.gwm(&["bootstrap"])
     .failure()
-    .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  fx.gwm(&["trust", "list"])
+    .success()
+    .stdout(predicate::str::contains("revoked from those rules"))
+    .stdout(predicate::str::contains("this repo is trusted by origin pattern").not());
+
+  // Naming the repo as a rule of its own takes it back.
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/kbrdn1/demo.git"])
+    .success();
+  fx.gwm(&["bootstrap"]).success();
+  assert!(!fx.ledger.exists(), "the rule, not the ledger, cleared the gate");
+}
+
+#[test]
+fn trust_list_names_no_rule_for_a_repo_without_a_gwm_toml() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+  fs::remove_file(fx.dir.path().join(".gwm.toml")).unwrap();
+  fx.gwm(&["trust", "list"])
+    .success()
+    .stdout(predicate::str::contains("this repo is trusted by origin pattern").not());
 }
 
 // A rule vouches for what origin's writers publish, not for whatever the
@@ -7769,23 +7795,93 @@ fn a_trusted_origin_does_not_cover_a_fork_head_fetched_under_origin() {
 }
 
 #[test]
-fn a_trusted_origin_does_not_cover_a_branch_that_tracks_another_remote() {
-  // Even one whose refspec writes under origin's tracking refs, where the
-  // published file sits: the remote is not the one the ledger key names.
+fn a_trusted_origin_does_not_cover_a_trunk_another_remote_writes() {
+  // `git fetch --all` would overwrite `origin/main` with the fork's branch.
   let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
   fx.trust_origins(KBRDN1).publish();
-  let repo = git2::Repository::open(fx.dir.path()).unwrap();
-  repo
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
     .remote_with_fetch(
       "fork",
       "https://github.com/stranger/demo.git",
       "+refs/heads/*:refs/remotes/origin/*",
     )
     .unwrap();
-  repo.config().unwrap().set_str("branch.main.remote", "fork").unwrap();
   fx.gwm(&["bootstrap"])
     .failure()
     .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn a_trusted_origin_does_not_cover_a_pr_head_fetched_with_a_one_off_refspec() {
+  // `git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*'` typed
+  // once leaves no refspec in the config, then `git checkout pr/7` records
+  // the upstream as origin's `refs/heads/pr/7`.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  fs::write(fx.dir.path().join(".gwm.toml"), TWO_COMMANDS).unwrap();
+  fx.commit_as("pr/7", "refs/heads/pr/7", "refs/remotes/origin/pr/7");
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn a_trusted_origin_does_not_cover_a_checkout_under_a_mirror_refspec() {
+  // `+refs/*:refs/*` copies the remote's own `refs/remotes/origin/main`, not
+  // its `main` branch: nothing says origin published that.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .config()
+    .unwrap()
+    .set_str("remote.origin.fetch", "+refs/*:refs/*")
+    .unwrap();
+  fx.publish();
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn a_trusted_origin_does_not_cover_a_trunk_no_origin_refspec_writes() {
+  // origin fetches `main` only, so `origin/dev` holds whatever a one-off
+  // fetch put there.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .config()
+    .unwrap()
+    .set_str("remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+    .unwrap();
+  fx.commit_as("dev", "refs/heads/dev", "refs/remotes/origin/dev");
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn a_trusted_origin_covers_the_default_branch_origin_head_names() {
+  // Not `dev` nor `main`: the trunk is the one origin's HEAD points at.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1)
+    .commit_as("trunk", "refs/heads/trunk", "refs/remotes/origin/trunk");
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .reference_symbolic(
+      "refs/remotes/origin/HEAD",
+      "refs/remotes/origin/trunk",
+      true,
+      "set-head",
+    )
+    .unwrap();
+  fx.gwm(&["bootstrap"]).success();
 }
 
 #[test]
@@ -7800,7 +7896,7 @@ fn a_trusted_origin_does_not_cover_a_local_edit_and_trust_list_says_so() {
     .success()
     .stdout(predicate::str::contains("this repo is trusted by origin pattern").not())
     .stdout(predicate::str::contains(
-      "origin pattern https://github.com/kbrdn1/* matches this repo, but its .gwm.toml is not the one on the origin branch it tracks",
+      "origin pattern https://github.com/kbrdn1/* matches this repo, but its .gwm.toml is not the one on origin's dev, main or default branch",
     ));
 }
 

@@ -366,6 +366,45 @@ fn an_origin_pattern_does_not_cover_a_lookalike_host() {
 }
 
 #[test]
+fn an_origin_pattern_does_not_cover_an_origin_a_client_reads_elsewhere() {
+  // gwm takes the host after the last `@`; curl closes the authority at the
+  // first `?` or `#`, so these are fetched from evil.example.
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "https://evil.example#@github.com/kbrdn1/demo.git",
+    "https://evil.example?@github.com/kbrdn1/demo.git",
+    "https://a@evil.example@github.com/kbrdn1/demo.git",
+    "https://evil.example\\@github.com/kbrdn1/demo.git",
+    "https://evil.example @github.com/kbrdn1/demo.git",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+}
+
+#[test]
+fn an_origin_pattern_covers_only_https_ssh_and_scp_origins() {
+  // `http` and `git` are unauthenticated: anyone on the path serves the file.
+  // `file` is a local path, which no rule may cover.
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "http://github.com/kbrdn1/demo.git",
+    "git://github.com/kbrdn1/demo.git",
+    "file://github.com/kbrdn1/demo.git",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+  for origin in [
+    "https://github.com/kbrdn1/demo.git",
+    "ssh://git@github.com/kbrdn1/demo.git",
+    "git@github.com:kbrdn1/demo.git",
+  ] {
+    assert!(matching_origin_pattern(&pats, origin).is_some(), "{origin} must match");
+  }
+}
+
+#[test]
 fn an_origin_pattern_does_not_cover_another_owner_or_a_deeper_path() {
   use gwm::trust::matching_origin_pattern;
   let pats = patterns(&["https://github.com/kbrdn1/*"]);
