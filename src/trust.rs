@@ -384,6 +384,10 @@ fn announced_trunks(origin: &str) -> Option<Vec<git2::Oid>> {
   let mut cmd = Command::new("git");
   cmd
     .current_dir(std::env::temp_dir())
+    // Set for the hooks git runs: they would point git back at the checkout.
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_COMMON_DIR")
     .args(["-c", "core.askPass=", "ls-remote", "--"])
     .arg(origin)
     .args(asked_refs())
@@ -419,11 +423,17 @@ fn announced_trunks(origin: &str) -> Option<Vec<git2::Oid>> {
   });
   let deadline = Instant::now() + ASK_ORIGIN_TIMEOUT;
   let out = rx.recv_timeout(ASK_ORIGIN_TIMEOUT).ok();
-  let status = loop {
-    match child.try_wait() {
-      Ok(Some(status)) => break Some(status),
-      Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-      _ => break None,
+  // No answer in time is the timeout, even if git itself has exited: a
+  // descendant still holds the pipe, and the group has to go.
+  let status = if out.is_none() {
+    None
+  } else {
+    loop {
+      match child.try_wait() {
+        Ok(Some(status)) => break Some(status),
+        Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+        _ => break None,
+      }
     }
   };
   match status {

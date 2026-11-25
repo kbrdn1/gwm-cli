@@ -7872,6 +7872,51 @@ fn the_ask_to_origin_ignores_the_checkouts_own_git_config() {
   );
 }
 
+#[test]
+fn the_ask_to_origin_ignores_the_checkouts_git_config_under_git_dir() {
+  // git sets GIT_DIR for the hooks it runs: a gwm started from one must still
+  // not read the repo's own git config, here a proxy it would send origin's
+  // answer through.
+  let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  proxy.set_nonblocking(true).unwrap();
+  let fx = OriginFixture::new(
+    &format!("https://127.0.0.1:{}/kbrdn1/demo.git", closed_port()),
+    ONE_COMMAND,
+  );
+  fx.trust_origins(LOCAL_RULE).publish();
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .config()
+    .unwrap()
+    .set_str(
+      "http.proxy",
+      &format!("http://127.0.0.1:{}", proxy.local_addr().unwrap().port()),
+    )
+    .unwrap();
+  let mut cmd = fx.cmd();
+  for var in [
+    "NO_PROXY",
+    "no_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+  ] {
+    cmd.env_remove(var);
+  }
+  cmd
+    .env("GIT_DIR", fx.dir.path().join(".git"))
+    .write_stdin("")
+    .arg("bootstrap")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(
+    proxy.accept().is_err(),
+    "origin was asked through the checkout's own proxy"
+  );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_repo_cannot_trust_its_own_origin() {
