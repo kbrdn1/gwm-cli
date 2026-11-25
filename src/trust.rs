@@ -473,10 +473,11 @@ extern "C" fn end_dial_then_die(sig: libc::c_int) {
     Err(waiting) if waiting < 0 => return,
     Err(group) => group,
   };
-  // SAFETY: `kill` and `raise` are async-signal-safe, and `SA_RESETHAND` put
-  // the default action back, so the raise ends gwm once this returns.
+  // SAFETY: `kill`, `signal` and `raise` are async-signal-safe; with the
+  // default action back, the raise ends gwm once this returns.
   unsafe {
     libc::kill(-group, libc::SIGKILL);
+    libc::signal(sig, libc::SIG_DFL);
     libc::raise(sig);
   }
 }
@@ -500,7 +501,8 @@ impl DialSignals {
         }
         let mut new: libc::sigaction = std::mem::zeroed();
         new.sa_sigaction = end_dial_then_die as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        new.sa_flags = libc::SA_RESETHAND;
+        // Not `SA_RESETHAND`: a repeat of a signal left pending for `arm`
+        // must come back here, not end gwm with git still running.
         libc::sigemptyset(&mut new.sa_mask);
         if libc::sigaction(sig, &new, std::ptr::null_mut()) == 0 {
           saved.push((sig, old));
@@ -515,10 +517,10 @@ impl DialSignals {
   fn arm(&self, group: u32) {
     let pending = DIAL_GROUP.swap(group as i32, std::sync::atomic::Ordering::SeqCst);
     if pending < 0 {
-      // SAFETY: as in the handler, whose `SA_RESETHAND` already put the
-      // default action back for that signal.
+      // SAFETY: as in the handler.
       unsafe {
         libc::kill(-(group as libc::pid_t), libc::SIGKILL);
+        libc::signal(-pending, libc::SIG_DFL);
         libc::raise(-pending);
       }
     }
