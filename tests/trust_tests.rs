@@ -20,7 +20,7 @@
 //! `tests/cli_binary.rs::trust_*` for the end-to-end coverage.
 
 use gwm::trust::{hash_config, TrustLedger};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
 /// Process-global lock guarding every test that mutates `std::env`.
@@ -517,10 +517,12 @@ const ONE: &[u8] = b"[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n";
 const TWO: &[u8] =
   b"[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n\n[[bootstrap.command]]\nname = \"again\"\nrun = \"true\"\n";
 
-/// Run `f` with `vars` set, `None` removing one, under [`env_lock`], and put
-/// them back after, panic or not.
-fn with_env<T>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: impl FnOnce() -> T) -> T {
-  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+/// Run `f` under [`env_lock`] with `vars` set, `None` removing one, and put
+/// them back after, panic or not. `f` gets the guard: calling this takes the
+/// lock, which is how `env_guard_invariant_tests` reads it (`MutexGuard` in
+/// the signature), so the calls `f` makes count as locked.
+fn with_env<T>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: impl FnOnce(&MutexGuard<'_, ()>) -> T) -> T {
+  let guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let set = |k: &str, v: Option<&std::ffi::OsStr>| {
     // SAFETY: every env access in this file holds `env_lock`.
     unsafe {
@@ -534,7 +536,7 @@ fn with_env<T>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: impl FnOnce() -> T)
   for (k, v) in vars {
     set(k, *v);
   }
-  let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+  let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&guard)));
   for (k, v) in &prior {
     set(k, v.as_deref());
   }
@@ -631,9 +633,8 @@ fn a_rule_cleared_run_names_what_it_runs_first_then_what_changed() {
   let ledger = dir.path().join("trust.toml");
   let origin = "git@github.com:kbrdn1/demo.git";
   let pat = "https://github.com/kbrdn1/*";
-  let say = |body: &[u8]| origin_change_notice(origin, pat, body).unwrap();
-
-  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], || {
+  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], |_| {
+    let say = |body: &[u8]| origin_change_notice(origin, pat, body).unwrap();
     let first = say(ONE).expect("a first run names what it runs");
     assert!(
       first.contains("trusted by origin https://github.com/kbrdn1/*: first run from git@github.com:kbrdn1/demo.git")
@@ -674,7 +675,7 @@ fn a_notice_cache_that_cannot_be_read_or_written_still_names_the_run() {
   let dir = TempDir::new().unwrap();
   let ledger = dir.path().join("trust.toml");
   std::fs::create_dir_all(dir.path().join("trust-seen.toml")).unwrap();
-  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], || {
+  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], |_| {
     for _ in 0..2 {
       let line = origin_change_notice("git@github.com:kbrdn1/demo.git", "https://github.com/kbrdn1/*", ONE).unwrap();
       assert!(line.is_some_and(|l| l.contains("trusted by origin https://github.com/kbrdn1/*")));
@@ -732,8 +733,8 @@ impl SshOrigin {
   }
 
   /// `f` with git going through the stand-in, none of the user's own git or
-  /// gwm config, and an empty ledger.
-  fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+  /// gwm config, and an empty ledger, under [`env_lock`] as [`with_env`] is.
+  fn serve<T>(&self, f: impl FnOnce(&MutexGuard<'_, ()>) -> T) -> T {
     let p = |rel: &str| self.dir.path().join(rel).into_os_string();
     let (ssh, gitconfig, xdg, ledger) = (p("bin/ssh"), p("empty.gitconfig"), p("xdg"), p("trust.toml"));
     with_env(
@@ -755,7 +756,7 @@ impl SshOrigin {
 fn origin_asked_over_its_own_transport_vouches_for_its_trunks_only() {
   use gwm::trust::published_on_origin;
   let o = SshOrigin::new();
-  o.run(|| {
+  o.serve(|_| {
     assert!(
       published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
       "the file origin's main holds, fetched, is published"
@@ -765,7 +766,7 @@ fn origin_asked_over_its_own_transport_vouches_for_its_trunks_only() {
 
   // A push on origin the checkout has not fetched yet.
   commit_config(&o.bare, TWO, "refs/heads/main");
-  o.run(|| {
+  o.serve(|_| {
     assert!(
       !published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
       "a checkout behind origin's tip holds what origin no longer publishes"
@@ -784,7 +785,7 @@ fn a_caller_that_cannot_dial_refuses_a_file_only_an_origin_rule_covers() {
   };
   let o = SshOrigin::new();
   let cfg = o.checkout.join(".gwm.toml");
-  o.run(|| {
+  o.serve(|_| {
     assert!(
       published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
       "the CLI would clear it"
