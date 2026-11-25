@@ -7977,6 +7977,24 @@ fn revoking_a_pattern_another_spelling_still_covers_says_which_one() {
 }
 
 #[test]
+fn trust_add_from_a_linked_worktree_approves_the_file_the_gate_reads() {
+  // Every gate, the TUI's too, reads the main checkout's `.gwm.toml`, and the
+  // refusal hint sends the user to `gwm trust add`: it has to approve that
+  // file wherever it runs, not the one on the branch it was typed on.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.publish();
+  let side = tempfile::TempDir::new().unwrap();
+  let linked = side.path().join("linked");
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .worktree("linked", &linked, None)
+    .unwrap();
+  fs::write(linked.join(".gwm.toml"), format!("{ONE_COMMAND}# edited on a branch\n")).unwrap();
+  fx.cmd().current_dir(&linked).args(["trust", "add"]).assert().success();
+  fx.gwm(&["bootstrap"]).success();
+}
+
+#[test]
 fn revoking_an_http_spelled_rule_another_rule_still_covers_says_which_one() {
   // A rule is matched on host and path: its scheme narrows nothing.
   let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);

@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unpushed commit or an unreachable origin still meets the ledger and its
   prompt. The call never prompts and gives origin 5 seconds. The TUI and the
   forge host gate do not ask origin and keep to the ledger; the TUI's refusal
-  now names `gwm trust add` first, the command that clears it. Read from the
+  now names `gwm trust add` first, the command that clears it, and
+  `gwm trust add` run from a linked worktree now approves the main checkout's
+  `.gwm.toml`, the file every gate reads. Read from the
   user config only, never from a repo's own file; matched on the parsed host
   and path, so `https`, `ssh` and `git@` spellings agree and a lookalike host
   does not, nor an `http`, `git` or `file` origin; `*` stays inside one path

@@ -5166,8 +5166,9 @@ fn cmd_trust_add_origin(pattern: String) -> Result<()> {
 }
 
 fn cmd_trust_add() -> Result<()> {
-  let cwd = std::env::current_dir()?;
-  let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
+  // The main checkout's file, from a linked worktree too: it is the one every
+  // gate reads (issue #751, where the TUI's refusal names this command first).
+  let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
   // Same key every other gate uses — see `trust::origin_key_for_repo`.
   let key = trust::origin_key_for_repo(&repo, &workdir);
