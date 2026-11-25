@@ -7893,28 +7893,52 @@ fn the_ask_to_origin_ignores_the_checkouts_git_config_under_git_dir() {
       &format!("http://127.0.0.1:{}", proxy.local_addr().unwrap().port()),
     )
     .unwrap();
-  let mut cmd = fx.cmd();
-  for var in [
-    "NO_PROXY",
-    "no_proxy",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-  ] {
-    cmd.env_remove(var);
+  let bootstrap = |var: &str, value: &Path| {
+    let mut cmd = fx.cmd();
+    for proxy_var in [
+      "NO_PROXY",
+      "no_proxy",
+      "HTTPS_PROXY",
+      "https_proxy",
+      "ALL_PROXY",
+      "all_proxy",
+    ] {
+      cmd.env_remove(proxy_var);
+    }
+    cmd
+      .env(var, value)
+      .write_stdin("")
+      .arg("bootstrap")
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("not in the trust ledger"));
+    assert!(
+      proxy.accept().is_err(),
+      "{var}: origin was asked through the checkout's own proxy"
+    );
+  };
+  bootstrap("GIT_DIR", &fx.dir.path().join(".git"));
+  // A temp directory inside the checkout would lead git back into it too.
+  #[cfg(unix)]
+  {
+    let inside = fx.dir.path().join("tmp");
+    fs::create_dir_all(&inside).unwrap();
+    bootstrap("TMPDIR", &inside);
   }
-  cmd
-    .env("GIT_DIR", fx.dir.path().join(".git"))
-    .write_stdin("")
-    .arg("bootstrap")
-    .assert()
+}
+
+#[test]
+fn a_repo_trust_table_of_any_shape_is_ignored() {
+  // `[trust]` is read from the user config alone; in a repo's own file it
+  // is ignored, whatever it holds, rather than failing every command.
+  let fx = OriginFixture::new(
+    "https://github.com/kbrdn1/demo.git",
+    &format!("[trust]\norigins = \"not a list\"\n\n{ONE_COMMAND}"),
+  );
+  // Gets as far as the ledger, which a config that failed to load would not.
+  fx.gwm(&["bootstrap"])
     .failure()
     .stderr(predicate::str::contains("not in the trust ledger"));
-  assert!(
-    proxy.accept().is_err(),
-    "origin was asked through the checkout's own proxy"
-  );
 }
 
 #[cfg(unix)]

@@ -47,11 +47,12 @@ pub struct Config {
   #[serde(default)]
   pub forge_hosts: BTreeMap<String, crate::forge::ForgeKind>,
   /// `[trust]`: repos the user trusts whatever their `.gwm.toml` hash, as
-  /// long as origin publishes that file (issue #751). Only read from the
-  /// **user-level** config, like
-  /// `[forge_hosts]`; see [`Config::trust_in`].
-  #[serde(default)]
-  pub trust: TrustConfig,
+  /// long as origin publishes that file (issue #751). Accepted here, in any
+  /// shape, and never read: [`Config::trust_in`] reads it from the
+  /// **user-level** file alone, so a repo's own table is ignored rather than
+  /// failing the load.
+  #[serde(default, skip_serializing)]
+  pub trust: serde::de::IgnoredAny,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]

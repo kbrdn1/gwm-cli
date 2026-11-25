@@ -381,9 +381,13 @@ fn announced_trunks(origin: &str) -> Option<Vec<git2::Oid>> {
     .ok()
     .or_else(|| git2::Config::open_default().ok()?.get_string("core.sshCommand").ok())
     .unwrap_or_else(|| "ssh".into());
+  // The root of the temp directory's filesystem: no checkout sits above it,
+  // wherever TMPDIR points.
+  let temp = std::env::temp_dir();
+  let outside = temp.ancestors().last().unwrap_or(&temp);
   let mut cmd = Command::new("git");
   cmd
-    .current_dir(std::env::temp_dir())
+    .current_dir(outside)
     // Set for the hooks git runs: they would point git back at the checkout.
     .env_remove("GIT_DIR")
     .env_remove("GIT_WORK_TREE")
