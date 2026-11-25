@@ -131,9 +131,10 @@ pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
 // `.gwm.toml` revokes it. Right for a clone of someone else's repo; a chore
 // for your own, where a reviewed PR touching the file stalls the next
 // unattended `gwm create`. `[trust] origins` in the user's own config names
-// repos trusted whatever the file's hash, as long as the file is the one
-// origin publishes on the branch the checkout tracks. Never read from a
-// repo's `.gwm.toml`: a repo cannot vouch for itself.
+// repos trusted whatever the file's hash, as long as origin, asked by a CLI
+// run after a ledger miss, publishes that file on its default branch, `dev`
+// or `main`. Never read from a repo's `.gwm.toml`: a repo cannot vouch for
+// itself.
 
 /// `(host, path segments)` of a remote URL, parsed the way the forge gate
 /// parses `origin` (#463): host lower-cased with the documented SSH aliases
@@ -744,8 +745,8 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
 /// between, so a config could be approved as harmless and executed as
 /// something else. `None` is "no `.gwm.toml`", which is nothing to execute.
 ///
-/// `cfg_path` names the file in the prompt and the refusal; the file itself
-/// is never read again.
+/// `cfg_path` is carried only to name the file in the prompt and the refusal;
+/// nothing reads it.
 pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode: TrustMode) -> Result<TrustOutcome> {
   let Some(bytes) = bytes else {
     return Ok(TrustOutcome::Proceed);

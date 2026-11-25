@@ -1040,8 +1040,11 @@ pub enum TrustAction {
   /// changes its hash and revokes the approval.
   ///
   /// With `--origin <pattern>`, trust every repo whose `origin` matches
-  /// instead, whatever its `.gwm.toml` says: the pattern goes to
-  /// `[trust] origins` in your user config, never to a repo's file.
+  /// instead, whatever the hash of its `.gwm.toml`, as long as origin,
+  /// asked with `git ls-remote` by a CLI run, publishes that file on its
+  /// default branch, `dev` or `main`. The TUI does not ask origin and keeps
+  /// to the ledger. The pattern goes to `[trust] origins` in your user
+  /// config, never to a repo's file.
   Add {
     /// Remote URL pattern to trust, `*` matching inside one path segment,
     /// e.g. `https://github.com/<you>/*`. The host and owner must be
