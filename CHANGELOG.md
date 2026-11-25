@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.gwm.toml` stalled the next unattended `gwm create` until someone ran
   `gwm trust add` again. `[trust] origins` in `~/.config/gwm/config.toml`, or
   `gwm trust add --origin 'https://github.com/<you>/*'`, now trusts those repos
-  whatever the hash, for the bootstrap gate and the forge host gate alike. Read
+  whatever the hash, for the bootstrap gate and the forge host gate alike, as
+  long as the `.gwm.toml` is the one origin publishes on the branch the
+  checkout tracks: a stranger's PR checked out in the main checkout, a local
+  edit or an unpushed commit still meets the ledger and its prompt. Read
   from the user config only, never from a repo's own file; matched on the
   parsed host and path, so `https`, `ssh` and `git@` spellings agree and a
   lookalike host does not; `*` stays inside one path segment, and a wildcard
