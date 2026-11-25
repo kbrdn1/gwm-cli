@@ -19,16 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gwm trust add` again. `[trust] origins` in `~/.config/gwm/config.toml`, or
   `gwm trust add --origin 'https://github.com/<you>/*'`, now trusts those repos
   whatever the hash, for the bootstrap gate and the forge host gate alike, as
-  long as the `.gwm.toml` is the one origin publishes on the branch the
-  checkout tracks: a stranger's PR checked out in the main checkout, a local
-  edit or an unpushed commit still meets the ledger and its prompt. Read
-  from the user config only, never from a repo's own file; matched on the
-  parsed host and path, so `https`, `ssh` and `git@` spellings agree and a
-  lookalike host does not; `*` stays inside one path segment, and a wildcard
-  host or owner is refused. The ledger still comes first, `--deny-bootstrap`
-  still refuses, and `gwm trust revoke` removes a rule or fails naming the one
-  that still covers the origin. A changed file is still shown: one line on
-  stderr names the settings that changed since the last run.
+  long as the `.gwm.toml` is the one on origin's `dev`, `main` or default
+  branch: a stranger's PR checked out in the main checkout, a local edit or
+  an unpushed commit still meets the ledger and its prompt. Read from the
+  user config only, never from a repo's own file; matched on the parsed host
+  and path, so `https`, `ssh` and `git@` spellings agree and a lookalike host
+  does not, nor an `http`, `git` or `file` origin; `*` stays inside one path
+  segment, and a wildcard host or owner is refused. The ledger still comes
+  first, `--deny-bootstrap` still refuses, and `gwm trust revoke` wins: it
+  removes a rule, or takes one repo out of the rule that covers it
+  (`[trust] revoked`). A changed file is still shown: one line on stderr
+  names the settings that changed since the last run.
 
 ### Security
 
