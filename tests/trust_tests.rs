@@ -314,6 +314,132 @@ fn an_empty_surface_in_the_handed_bytes_proceeds_whatever_the_file_says() {
   );
 }
 
+// ---- Trusted origin patterns (issue #751) -------------------------------
+
+fn patterns(p: &[&str]) -> Vec<String> {
+  p.iter().map(|s| s.to_string()).collect()
+}
+
+/// The `https`, `ssh` and scp-like spellings of one repo are one repo: the
+/// pattern is compared on the same `host` + `path` the forge gate parses
+/// (#463), so the form a clone happened to use does not matter.
+#[test]
+fn an_origin_pattern_covers_every_spelling_of_the_same_repo() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "https://github.com/kbrdn1/gwm-cli.git",
+    "https://github.com/kbrdn1/gwm-cli",
+    "ssh://git@github.com/kbrdn1/gwm-cli.git",
+    "git@github.com:kbrdn1/gwm-cli.git",
+    // The documented port-443 SSH endpoint is the same instance.
+    "ssh://git@ssh.github.com:443/kbrdn1/gwm-cli.git",
+    // DNS is case-insensitive.
+    "https://GitHub.COM/kbrdn1/gwm-cli",
+  ] {
+    assert_eq!(
+      matching_origin_pattern(&pats, origin),
+      Some("https://github.com/kbrdn1/*"),
+      "{origin} is kbrdn1/gwm-cli on github.com"
+    );
+  }
+}
+
+/// A host that merely contains, ends with or starts with the trusted one is
+/// someone else's server.
+#[test]
+fn an_origin_pattern_does_not_cover_a_lookalike_host() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*", "git@github.com:kbrdn1/*"]);
+  for origin in [
+    "https://github.com.evil.io/kbrdn1/gwm-cli.git",
+    "https://evilgithub.com/kbrdn1/gwm-cli.git",
+    "https://github.co/kbrdn1/gwm-cli.git",
+    // Userinfo is not the host: this one is evil.io.
+    "https://github.com@evil.io/kbrdn1/gwm-cli.git",
+    "git@evil.io:github.com/kbrdn1/gwm-cli.git",
+    // A trailing dot is a different spelling; fail closed.
+    "https://github.com./kbrdn1/gwm-cli.git",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+}
+
+#[test]
+fn an_origin_pattern_does_not_cover_another_owner_or_a_deeper_path() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "https://github.com/kbrdn1-evil/gwm-cli.git",
+    "https://github.com/attacker/kbrdn1.git",
+    // `*` stays inside one path segment.
+    "https://github.com/kbrdn1/group/proj.git",
+    // Dot segments resolve elsewhere once a client normalises the URL.
+    "https://github.com/kbrdn1/..",
+    "https://github.com/kbrdn1/../attacker",
+    // An encoded separator is not a repo name.
+    "https://github.com/kbrdn1/..%2Fattacker",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+}
+
+/// A repo with no `origin` is keyed on its workdir path, and a path is not a
+/// remote any pattern can name.
+#[test]
+fn an_origin_pattern_never_covers_a_local_path_key() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in ["/Users/kbrdn1/Projects/gwm-cli", "C:\\Users\\kbrdn1\\gwm-cli", ""] {
+    assert_eq!(
+      matching_origin_pattern(&pats, origin),
+      None,
+      "{origin:?} must not match"
+    );
+  }
+}
+
+#[test]
+fn an_exact_origin_pattern_covers_that_repo_only() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["git@github.com:kbrdn1/gwm-cli.git"]);
+  assert!(matching_origin_pattern(&pats, "https://github.com/kbrdn1/gwm-cli").is_some());
+  assert!(matching_origin_pattern(&pats, "https://github.com/kbrdn1/gwm-cli2").is_none());
+}
+
+/// A wildcard in the host is how a lookalike would get in, and a wildcard
+/// owner trusts a whole forge, which is `GWM_ALLOW_BOOTSTRAP` by another
+/// name: both are refused at write time and never match at read time.
+#[test]
+fn an_origin_pattern_must_name_its_host_and_owner() {
+  use gwm::trust::{matching_origin_pattern, validate_origin_pattern};
+  for bad in [
+    "https://*.github.com/kbrdn1/*",
+    "https://github.*/kbrdn1/*",
+    "https://github.com/*/*",
+    "https://github.com/kbr*/*",
+    "https://github.com/",
+    "not a url",
+    "",
+  ] {
+    assert!(validate_origin_pattern(bad).is_err(), "{bad:?} must be refused");
+    let pats = patterns(&[bad]);
+    assert_eq!(
+      matching_origin_pattern(&pats, "https://github.com/kbrdn1/gwm-cli.git"),
+      None,
+      "{bad:?} must never match"
+    );
+  }
+  for good in [
+    "https://github.com/kbrdn1/*",
+    "git@github.com:kbrdn1/*",
+    "https://gitlab.acme.com/team/sub/*",
+    "https://github.com/kbrdn1/gwm-cli",
+  ] {
+    assert!(validate_origin_pattern(good).is_ok(), "{good:?} is a valid pattern");
+  }
+}
+
 /// `None` is "there is no `.gwm.toml`", and it must stay that answer even
 /// when one appeared on disk after the caller looked.
 #[test]

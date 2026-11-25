@@ -7507,6 +7507,183 @@ fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
   run(&["bootstrap"]).success();
 }
 
+// --- trusted origins in the user config (issue #751) ----------------------
+
+/// A repo with `origin`, a `.gwm.toml` carrying one bootstrap command, an
+/// empty ledger, and a user config dir that is empty until a test writes it.
+struct OriginFixture {
+  dir: tempfile::TempDir,
+  xdg: tempfile::TempDir,
+  ledger: PathBuf,
+}
+
+impl OriginFixture {
+  fn new(origin: &str, gwm_toml: &str) -> Self {
+    let (dir, repo) = init_repo();
+    repo.remote("origin", origin).unwrap();
+    fs::write(dir.path().join(".gwm.toml"), gwm_toml).unwrap();
+    let xdg = tempfile::TempDir::new().unwrap();
+    let ledger = xdg.path().join("trust.toml");
+    OriginFixture { dir, xdg, ledger }
+  }
+
+  fn user_config(&self) -> PathBuf {
+    self.xdg.path().join("gwm").join("config.toml")
+  }
+
+  fn trust_origins(&self, body: &str) -> &Self {
+    fs::create_dir_all(self.xdg.path().join("gwm")).unwrap();
+    fs::write(self.user_config(), body).unwrap();
+    self
+  }
+
+  fn gwm(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+    common::gwm()
+      .current_dir(self.dir.path())
+      .env("GWM_TRUST_LEDGER", &self.ledger)
+      .env("XDG_CONFIG_HOME", self.xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .env_remove("GWM_ALLOW_BOOTSTRAP")
+      .args(args)
+      .assert()
+  }
+}
+
+const ONE_COMMAND: &str = "[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n";
+const TWO_COMMANDS: &str =
+  "[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n\n[[bootstrap.command]]\nname = \"again\"\nrun = \"true\"\n";
+const KBRDN1: &str = "[trust]\norigins = [\"https://github.com/kbrdn1/*\"]\n";
+
+#[test]
+fn a_trusted_origin_clears_the_bootstrap_gate_without_a_prompt() {
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  // Red without the user's word: the ledger is empty and stdin is not a tty.
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["bootstrap"]).success();
+  // An origin rule is not a ledger entry: removing the rule must take the
+  // repo's trust with it, so nothing may have been recorded on the side.
+  assert!(!fx.ledger.exists(), "an origin-trusted run must not write the ledger");
+}
+
+#[test]
+fn a_trusted_origin_survives_a_gwm_toml_edit_and_names_what_changed() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+
+  fx.gwm(&["bootstrap"]).success().stderr(predicate::str::contains(
+    "trusted by origin https://github.com/kbrdn1/*",
+  ));
+
+  fs::write(fx.dir.path().join(".gwm.toml"), TWO_COMMANDS).unwrap();
+  fx.gwm(&["bootstrap"]).success().stderr(predicate::str::contains(
+    ".gwm.toml changed since last run (trusted by origin https://github.com/kbrdn1/*): bootstrap.command[1] added",
+  ));
+
+  // Seen once, said once.
+  fx.gwm(&["bootstrap"])
+    .success()
+    .stderr(predicate::str::contains("changed since last run").not());
+}
+
+#[test]
+fn a_repo_cannot_trust_its_own_origin() {
+  // The repo's own file is the one place a trusted origin must never be
+  // read from: it ships with the clone.
+  let fx = OriginFixture::new(
+    "https://github.com/kbrdn1/demo.git",
+    &format!("{KBRDN1}\n{ONE_COMMAND}"),
+  );
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn deny_bootstrap_wins_over_a_trusted_origin() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["--deny-bootstrap", "bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("--deny-bootstrap"));
+}
+
+#[test]
+fn a_trusted_origin_does_not_cover_a_lookalike_host() {
+  let fx = OriginFixture::new("https://github.com.evil.io/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn a_trusted_origin_satisfies_the_forge_host_gate() {
+  // Same decision about the same file as the bootstrap gate (#463), so the
+  // same rule answers it.
+  let fx = OriginFixture::new("https://code.acme.internal/team/proj.git", "forge = \"gitlab\"\n");
+  fx.gwm(&["link", "issue", "7"]).success();
+  fx.gwm(&["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("trust ledger"));
+
+  fx.trust_origins("[trust]\norigins = [\"https://code.acme.internal/team/*\"]\n");
+  fx.gwm(&["open", "issue", "--print-url"]).success();
+}
+
+#[test]
+fn trust_add_origin_writes_the_user_config_and_revoke_takes_it_back() {
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/kbrdn1/*"])
+    .success()
+    .stdout(predicate::str::contains(
+      "✓ trusted origin pattern https://github.com/kbrdn1/* (user config)",
+    ));
+  let written = fs::read_to_string(fx.user_config()).unwrap();
+  assert!(written.contains("https://github.com/kbrdn1/*"), "got: {written}");
+
+  fx.gwm(&["bootstrap"]).success();
+  fx.gwm(&["trust", "list"])
+    .success()
+    .stdout(predicate::str::contains("trusted origins"))
+    .stdout(predicate::str::contains("https://github.com/kbrdn1/*"))
+    .stdout(predicate::str::contains(
+      "this repo is trusted by origin pattern https://github.com/kbrdn1/*",
+    ));
+
+  fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/*"])
+    .success()
+    .stdout(predicate::str::contains("revoked origin pattern"));
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[test]
+fn trust_add_origin_refuses_a_pattern_that_names_no_owner() {
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/*/*"])
+    .failure()
+    .stderr(predicate::str::contains("owner"));
+  assert!(!fx.user_config().exists(), "a refused pattern must not be written");
+}
+
+#[test]
+fn revoking_a_repo_still_covered_by_an_origin_pattern_says_which_one() {
+  // Revoke has to win or say why it cannot: printing success while a rule
+  // still trusts the repo is the one outcome that is never acceptable.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add"]).success();
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/demo.git"])
+    .failure()
+    .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
+}
+
 // --- create --name (issue #416) -----------------------------------------
 
 #[test]
