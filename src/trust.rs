@@ -286,89 +286,154 @@ pub fn user_origin_rule(origin: &str) -> Option<String> {
   matching_origin_pattern(&Config::trust_in(&path).origins, origin).map(String::from)
 }
 
-/// The rule in the user's own config that trusts `origin` to have published
-/// `bytes`, the `.gwm.toml` of the checkout at `workdir`, if any.
-fn trusted_by_user_origin(workdir: &Path, origin: &str, bytes: &[u8]) -> Option<String> {
-  let rule = user_origin_rule(origin)?;
-  published_on_origin(workdir, bytes).then_some(rule)
-}
+/// How long origin gets to answer before a rule stops applying (issue #751):
+/// past it, the run meets the prompt the hash gives it.
+pub const ASK_ORIGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Whether `bytes` is, up to line endings, the `.gwm.toml` of one of origin's
-/// trunks as the checkout at `workdir` last fetched them.
+/// Whether origin, asked now, publishes `bytes`, up to line endings, as the
+/// `.gwm.toml` of its default branch, `dev` or `main` (issue #751).
 ///
-/// The invariant: a rule covers only bytes equal to the `.gwm.toml` of an
-/// origin trunk named in advance, `dev`, `main` or the branch
-/// `refs/remotes/origin/HEAD` points at, whose tracking ref no configured
-/// fetch refspec writes from anything but origin's branch.
-///
-/// Named in advance, never taken from the checkout: on a public repo, a
-/// stranger's PR checked out in the main checkout keeps the same origin URL,
-/// and any fetch given a refspec on the command line can put a PR head under
-/// another `refs/remotes/origin/` name. So the branch checked out does not
-/// matter; the content does. Not the repo's `doctor.trunks` either: that list
-/// lives in the very file being judged. A local edit, a local merge or a
-/// commit not pushed yet falls back to the ledger.
-pub fn published_on_origin(workdir: &Path, bytes: &[u8]) -> bool {
+/// The invariant: a rule covers only bytes origin itself announces, through
+/// the host it was matched on. Nothing local proves that: any fetch writes
+/// any `refs/remotes/origin/*` name, from a refspec typed once or from a
+/// branch a fork's author named `remotes/origin/dev`. So origin is asked over
+/// the network which commits those branches point at, and the bytes must be
+/// the `.gwm.toml` of one of them, held locally: an object is named by its
+/// content, so holding it is holding what origin published. Named in advance,
+/// not the repo's `doctor.trunks`: that list lives in the file being judged.
+/// A local edit, a commit not pushed yet or a checkout behind origin falls
+/// back to the ledger. CLI only: the TUI does not dial.
+pub fn published_on_origin(workdir: &Path, origin: &str, bytes: &[u8]) -> bool {
+  if !plain_origin(origin) {
+    return false;
+  }
   let Ok(repo) = git2::Repository::open(workdir) else {
     return false;
   };
-  let mut trunks: Vec<String> = crate::config::default_trunks()
-    .iter()
-    .map(|b| format!("refs/remotes/origin/{b}"))
-    .collect();
-  if let Some(head) = repo
-    .find_reference("refs/remotes/origin/HEAD")
-    .ok()
-    .and_then(|r| r.symbolic_target().ok().flatten().map(String::from))
-  {
-    trunks.push(head);
-  }
-  let want = without_crlf(bytes);
-  trunks
-    .iter()
-    .filter(|t| written_by_origin_branch(&repo, t))
-    .any(|t| trunk_config(&repo, t).is_some_and(|blob| without_crlf(&blob) == want))
+  announced_trunks(&repo, workdir, origin).is_some_and(|oids| publishes(&repo, &oids, bytes))
 }
 
-/// At least one configured fetch refspec writes `tracking`, and every one
-/// that does, on any remote, is origin's and reads it from a branch. Another
-/// remote writing under `refs/remotes/origin/*` (`git fetch --all`) or a
-/// mirror refspec would otherwise put what origin never published there.
-fn written_by_origin_branch(repo: &git2::Repository, tracking: &str) -> bool {
-  let Ok(names) = repo.remotes() else {
-    return false;
+/// The decision alone: whether one of `announced`, the commits origin says
+/// its trunks point at, is a commit `repo` holds whose `.gwm.toml` is
+/// `bytes`, up to line endings. Refs play no part.
+pub fn publishes(repo: &git2::Repository, announced: &[git2::Oid], bytes: &[u8]) -> bool {
+  let want = without_crlf(bytes);
+  announced
+    .iter()
+    .any(|oid| config_at(repo, *oid).is_some_and(|blob| without_crlf(&blob) == want))
+}
+
+fn config_at(repo: &git2::Repository, oid: git2::Oid) -> Option<Vec<u8>> {
+  let tree = repo.find_commit(oid).ok()?.tree().ok()?;
+  let entry = tree.get_path(Path::new(CONFIG_FILE)).ok()?;
+  Some(repo.find_blob(entry.id()).ok()?.content().to_vec())
+}
+
+/// What origin is asked about: its default branch and the built-in trunks.
+fn asked_refs() -> Vec<String> {
+  std::iter::once("HEAD".to_string())
+    .chain(
+      crate::config::default_trunks()
+        .iter()
+        .map(|b| format!("refs/heads/{b}")),
+    )
+    .collect()
+}
+
+/// The commits a `git ls-remote` answer names for exactly the refs asked
+/// about. ls-remote matches a pattern on the tail of a name, so
+/// `refs/heads/x/refs/heads/dev` comes back too; only an exact name and a
+/// full hex id count.
+pub fn announced_in(stdout: &str) -> Vec<git2::Oid> {
+  let asked = asked_refs();
+  stdout
+    .lines()
+    .filter_map(|line| {
+      let (oid, name) = line.split_once('\t')?;
+      let full = oid.len() == 40 && oid.bytes().all(|b| b.is_ascii_hexdigit());
+      (full && asked.iter().any(|a| a == name))
+        .then(|| git2::Oid::from_str(oid).ok())
+        .flatten()
+    })
+    .collect()
+}
+
+/// Ask origin, with git so the user's own git config applies, which commits
+/// [`asked_refs`] point at. `None` unless git answers, successfully, within
+/// [`ASK_ORIGIN_TIMEOUT`].
+///
+/// Never a prompt: a rule is for runs nobody watches, an agent in a
+/// background pane, and a credential or passphrase question left unanswered
+/// would hang it. Credential helpers still run, they are how a private repo
+/// answers over https.
+fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Option<Vec<git2::Oid>> {
+  use std::io::Read;
+  use std::process::{Command, Stdio};
+  use std::time::{Duration, Instant};
+
+  // The user's ssh command, kept, made unable to ask.
+  let ssh = std::env::var("GIT_SSH_COMMAND")
+    .ok()
+    .or_else(|| repo.config().ok()?.get_string("core.sshCommand").ok())
+    .unwrap_or_else(|| "ssh".into());
+  let mut cmd = Command::new("git");
+  cmd
+    .current_dir(workdir)
+    .args(["-c", "core.askPass=", "ls-remote", "--"])
+    .arg(origin)
+    .args(asked_refs())
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env_remove("GIT_ASKPASS")
+    .env_remove("SSH_ASKPASS")
+    .env("SSH_ASKPASS_REQUIRE", "never")
+    .env("GCM_INTERACTIVE", "never")
+    .env("GIT_SSH_COMMAND", format!("{ssh} -o BatchMode=yes"))
+    // A rewrite in the user's git config to `file::`, `ext::` or plain
+    // `http` reaches something other than the host compared: fail on it.
+    .env("GIT_ALLOW_PROTOCOL", "https:ssh")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+  // Its own group, so a tty read stops it rather than asking, and the kill
+  // below reaches `git-remote-https` or `ssh` too.
+  #[cfg(unix)]
+  std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+  let mut child = cmd.spawn().ok()?;
+
+  // Read on a thread: a helper still holding the pipe must not hold gwm.
+  let mut stdout = child.stdout.take()?;
+  let (tx, rx) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let mut out = String::new();
+    let _ = stdout.read_to_string(&mut out);
+    let _ = tx.send(out);
+  });
+  let deadline = Instant::now() + ASK_ORIGIN_TIMEOUT;
+  let out = rx.recv_timeout(ASK_ORIGIN_TIMEOUT).ok();
+  let status = loop {
+    match child.try_wait() {
+      Ok(Some(status)) => break Some(status),
+      Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+      _ => break None,
+    }
   };
-  let mut from_origin = false;
-  for name in names.iter() {
-    // A remote whose name is not UTF-8 cannot be checked: fail closed.
-    let Ok(Some(name)) = name else {
-      return false;
-    };
-    let Ok(remote) = repo.find_remote(name) else {
-      return false;
-    };
-    for spec in remote
-      .refspecs()
-      .filter(|s| s.direction() == git2::Direction::Fetch && s.dst_matches(tracking))
-    {
-      let from_branch = spec
-        .rtransform(tracking)
-        .ok()
-        .is_some_and(|src| src.as_str().is_ok_and(|n| n.starts_with("refs/heads/")));
-      if name != "origin" || !from_branch {
-        return false;
-      }
-      from_origin = true;
+  match status {
+    Some(status) if status.success() => out.map(|out| announced_in(&out)),
+    Some(_) => None,
+    None => {
+      // SAFETY: a plain syscall on the group `process_group(0)` made, whose
+      // leader is not reaped yet, so the id is still ours.
+      #[cfg(unix)]
+      unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL)
+      };
+      // ponytail: on Windows only git dies; an ssh child outlives it until
+      // its connection does. A job object would take the tree down.
+      let _ = child.kill();
+      let _ = child.wait();
+      None
     }
   }
-  from_origin
-}
-
-fn trunk_config(repo: &git2::Repository, tracking: &str) -> Option<Vec<u8>> {
-  let tree = repo.find_reference(tracking).ok()?.peel_to_tree().ok()?;
-  let entry = tree.get_path(Path::new(CONFIG_FILE)).ok()?;
-  let blob = repo.find_blob(entry.id()).ok()?;
-  Some(blob.content().to_vec())
 }
 
 /// `core.autocrlf`, the Git for Windows default, checks a LF blob out as
@@ -474,10 +539,6 @@ pub enum TrustOutcome {
   /// Cleared to invoke `bootstrap::run`: trusted entry hit, empty
   /// surface, no `.gwm.toml`, or `TrustMode::Allow`.
   Proceed,
-  /// Cleared by a `[trust] origins` rule in the user's config rather than
-  /// the ledger (issue #751). `pattern` is the rule; `body` the bytes it
-  /// cleared, for [`origin_change_notice`].
-  ProceedByOrigin { pattern: String, body: Vec<u8> },
   /// Refuse outright. `message` is the user-facing reason; render it
   /// verbatim in stderr (CLI) or status bar (TUI). Used for `Deny`
   /// mode by `evaluate`; the TUI also synthesises a `Refuse` from a
@@ -487,11 +548,18 @@ pub enum TrustOutcome {
   /// caller records into `ledger`, then saves to `ledger_path`. The
   /// `body` and `sha` are passed back so the prompt can display a
   /// summary without re-reading the file.
+  ///
+  /// `rule` is the `[trust] origins` pattern in the user's config that
+  /// covers `origin` (issue #751). It clears the run only once origin, asked
+  /// over the network, is seen publishing `body` ([`published_on_origin`]),
+  /// which only the CLI does; a caller that cannot dial refuses as for any
+  /// other prompt.
   Prompt {
     cfg_path: PathBuf,
     body: Vec<u8>,
     sha: String,
     origin: String,
+    rule: Option<String>,
     ledger: TrustLedger,
     ledger_path: PathBuf,
   },
@@ -509,11 +577,11 @@ pub enum TrustOutcome {
 ///
 /// Same ledger, same `(origin, sha256)` key, same `GWM_ALLOW_BOOTSTRAP`
 /// escape hatch: approving a repo approves the whole file, and editing
-/// the file revokes that approval. Same `[trust] origins` rules too, which
-/// approve whatever the hash a file origin publishes (issue #751), so a
-/// fork's file cannot pick the host gwm sends a token to. Non-interactive by construction —
+/// the file revokes that approval. Non-interactive by construction —
 /// [`crate::forge::resolve`] runs on the TUI's selection path, which
-/// cannot host a prompt. `gwm trust add` is how a user answers it.
+/// cannot host a prompt. `gwm trust add` is how a user answers it. Not the
+/// `[trust] origins` rules (issue #751): one clears a file only once origin,
+/// asked over the network, publishes it, and that path does not dial.
 ///
 /// No `.gwm.toml` at all is `false`, and the distinction matters.
 ///
@@ -539,10 +607,7 @@ pub fn config_is_trusted(workdir: &Path, origin: &str, mode: TrustMode) -> Resul
     TrustMode::Prompt => {}
   }
   let ledger_path = default_ledger_path()?;
-  Ok(
-    TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes))
-      || trusted_by_user_origin(workdir, origin, &bytes).is_some(),
-  )
+  Ok(TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes)))
 }
 
 /// Record the current repo's `.gwm.toml` as trusted. Backs `gwm trust
@@ -575,12 +640,11 @@ pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option
 ///   4. `TrustMode::Allow` → `Proceed` BEFORE touching the ledger
 ///      (malformed ledger must not break the CI bypass).
 ///   5. Ledger hit on `(origin, sha)` → `Proceed`.
-///   6. `origin` covered by a `[trust] origins` rule in the user's own
-///      config, and the file the one origin publishes on the tracked branch
-///      ([`published_on_origin`]) → `ProceedByOrigin`, whatever the hash
-///      (issue #751).
-///   7. Otherwise → `Prompt` (caller decides whether to actually
-///      prompt or refuse).
+///   6. Otherwise → `Prompt` (caller decides whether to actually
+///      prompt or refuse), naming the `[trust] origins` rule in the user's
+///      own config that covers `origin`, if any (issue #751). Only the CLI
+///      acts on it, and only after this ledger miss: it asks origin
+///      ([`published_on_origin`]), the one network call the gate makes.
 ///
 /// This is the single source of truth shared by `cli::trust_or_prompt`
 /// and the TUI gate — keeps the security policy in one place.
@@ -602,9 +666,8 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
 /// between, so a config could be approved as harmless and executed as
 /// something else. `None` is "no `.gwm.toml`", which is nothing to execute.
 ///
-/// `cfg_path` names the file in the prompt and the refusal, and its directory
-/// is the checkout an origin rule asks git about; the file itself is never
-/// read again.
+/// `cfg_path` names the file in the prompt and the refusal; the file itself
+/// is never read again.
 pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode: TrustMode) -> Result<TrustOutcome> {
   let Some(bytes) = bytes else {
     return Ok(TrustOutcome::Proceed);
@@ -651,19 +714,12 @@ pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode:
     return Ok(TrustOutcome::Proceed);
   }
 
-  let workdir = cfg_path.parent().unwrap_or(Path::new(""));
-  if let Some(pattern) = trusted_by_user_origin(workdir, origin, bytes) {
-    return Ok(TrustOutcome::ProceedByOrigin {
-      pattern,
-      body: bytes.to_vec(),
-    });
-  }
-
   Ok(TrustOutcome::Prompt {
     cfg_path,
     body: bytes.to_vec(),
     sha,
     origin: origin.to_string(),
+    rule: user_origin_rule(origin),
     ledger,
     ledger_path,
   })
@@ -705,8 +761,9 @@ pub fn evaluate_silent_bytes(
 /// Turn an outcome into what a caller that cannot prompt shows the user.
 fn refusal_for(outcome: TrustOutcome, approve_hint: &str) -> Option<String> {
   match outcome {
-    TrustOutcome::Proceed | TrustOutcome::ProceedByOrigin { .. } => None,
+    TrustOutcome::Proceed => None,
     TrustOutcome::Refuse { message } => Some(message),
+    // An origin rule's `rule` too: clearing it means dialing origin.
     TrustOutcome::Prompt { cfg_path, sha, .. } => {
       let short_sha: String = sha.chars().take(12).collect();
       Some(format!(

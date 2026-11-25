@@ -510,3 +510,289 @@ fn no_handed_bytes_means_no_config_whatever_the_file_says() {
     "no config means nothing to execute, got {outcome:?}"
   );
 }
+
+// ---- What origin publishes (issue #751) ---------------------------------
+
+const ONE: &[u8] = b"[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n";
+const TWO: &[u8] =
+  b"[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n\n[[bootstrap.command]]\nname = \"again\"\nrun = \"true\"\n";
+
+/// Run `f` with `vars` set, `None` removing one, under [`env_lock`], and put
+/// them back after, panic or not.
+fn with_env<T>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: impl FnOnce() -> T) -> T {
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let set = |k: &str, v: Option<&std::ffi::OsStr>| {
+    // SAFETY: every env access in this file holds `env_lock`.
+    unsafe {
+      match v {
+        Some(v) => std::env::set_var(k, v),
+        None => std::env::remove_var(k),
+      }
+    }
+  };
+  let prior: Vec<_> = vars.iter().map(|(k, _)| (*k, std::env::var_os(k))).collect();
+  for (k, v) in vars {
+    set(k, *v);
+  }
+  let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+  for (k, v) in &prior {
+    set(k, v.as_deref());
+  }
+  out.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// A parentless commit whose tree holds `.gwm.toml` = `body`, stored at
+/// `refname`.
+fn commit_config(repo: &git2::Repository, body: &[u8], refname: &str) -> git2::Oid {
+  let blob = repo.blob(body).unwrap();
+  let mut tree = repo.treebuilder(None).unwrap();
+  tree.insert(".gwm.toml", blob, 0o100644).unwrap();
+  let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let oid = repo.commit(None, &sig, &sig, "config", &tree, &[]).unwrap();
+  repo.reference(refname, oid, true, "test").unwrap();
+  oid
+}
+
+#[test]
+fn a_file_origin_announces_is_published_up_to_line_endings() {
+  use gwm::trust::publishes;
+  let dir = TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  let main = commit_config(&repo, ONE, "refs/heads/main");
+
+  assert!(publishes(&repo, &[main], ONE));
+  // `core.autocrlf`, the Git for Windows default, checks it out as CRLF.
+  let crlf = String::from_utf8(ONE.to_vec()).unwrap().replace('\n', "\r\n");
+  assert!(publishes(&repo, &[main], crlf.as_bytes()));
+  // A local edit is not what origin published.
+  assert!(!publishes(&repo, &[main], TWO));
+}
+
+#[test]
+fn a_fork_head_fetched_under_an_origin_trunk_name_is_not_published() {
+  // `gh pr checkout` of a fork whose branch is named `remotes/origin/dev`
+  // fetches the PR head into `refs/remotes/origin/dev` (PR #752, pass 4).
+  // Only what origin announces counts, so that ref plays no part.
+  use gwm::trust::publishes;
+  let dir = TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  let main = commit_config(&repo, ONE, "refs/heads/main");
+  commit_config(&repo, TWO, "refs/remotes/origin/dev");
+  commit_config(&repo, TWO, "refs/remotes/origin/main");
+
+  assert!(!publishes(&repo, &[main], TWO));
+}
+
+#[test]
+fn a_commit_origin_announces_that_the_checkout_lacks_publishes_nothing() {
+  // A checkout behind origin's tip: the file it holds was origin's once,
+  // and nothing says it still is.
+  use gwm::trust::publishes;
+  let dir = TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  commit_config(&repo, ONE, "refs/heads/main");
+  let ahead = git2::Oid::from_str("0123456789abcdef0123456789abcdef01234567").unwrap();
+
+  assert!(!publishes(&repo, &[ahead], ONE));
+  assert!(!publishes(&repo, &[], ONE));
+}
+
+#[test]
+fn only_the_refs_asked_about_count_as_announced_and_only_by_full_id() {
+  use gwm::trust::announced_in;
+  let id = |c: char| c.to_string().repeat(40);
+  let answer = [
+    "ref: refs/heads/main\tHEAD".to_string(),
+    format!("{}\tHEAD", id('1')),
+    format!("{}\trefs/heads/dev", id('2')),
+    format!("{}\trefs/heads/main", id('3')),
+    // ls-remote matches its patterns on the tail of a name.
+    format!("{}\trefs/heads/x/refs/heads/dev", id('4')),
+    format!("{}\trefs/heads/feature/HEAD", id('5')),
+    format!("{}\trefs/pull/7/head", id('6')),
+    "abc\trefs/heads/main".to_string(),
+    format!("{}\trefs/heads/main", "g".repeat(40)),
+  ]
+  .join("\n");
+
+  let want: Vec<git2::Oid> = ['1', '2', '3']
+    .iter()
+    .map(|c| git2::Oid::from_str(&id(*c)).unwrap())
+    .collect();
+  assert_eq!(announced_in(&answer), want);
+}
+
+/// What a change notice says, run after run, for one origin.
+#[test]
+fn a_rule_cleared_run_names_what_it_runs_first_then_what_changed() {
+  use gwm::trust::origin_change_notice;
+  let dir = TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  let origin = "git@github.com:kbrdn1/demo.git";
+  let pat = "https://github.com/kbrdn1/*";
+  let say = |body: &[u8]| origin_change_notice(origin, pat, body).unwrap();
+
+  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], || {
+    let first = say(ONE).expect("a first run names what it runs");
+    assert!(
+      first.contains("trusted by origin https://github.com/kbrdn1/*: first run from git@github.com:kbrdn1/demo.git")
+        && first.contains("bootstrap.command[0] added"),
+      "got: {first}"
+    );
+    assert_eq!(say(ONE), None, "seen once, said once");
+
+    let changed = say(TWO).expect("a changed file is named");
+    assert!(
+      changed.contains(
+        ".gwm.toml changed since last run (trusted by origin https://github.com/kbrdn1/*): bootstrap.command[1] added"
+      ),
+      "got: {changed}"
+    );
+    let one = String::from_utf8(ONE.to_vec()).unwrap();
+    let edited = one.replace("\"true\"", "\"true \"");
+    for (body, said) in [
+      (one.clone(), "bootstrap.command[1] removed"),
+      (edited.clone(), "bootstrap.command[0] changed"),
+      (
+        format!("# reviewed\n{edited}"),
+        "no setting changed, comments or formatting only",
+      ),
+    ] {
+      let line = say(body.as_bytes()).expect("each edit is named");
+      assert!(line.contains(said), "want {said:?}, got: {line}");
+    }
+    // Nothing recorded in the ledger: removing the rule takes the trust.
+    assert!(!ledger.exists(), "a notice must not write the ledger");
+  });
+}
+
+#[test]
+fn a_notice_cache_that_cannot_be_read_or_written_still_names_the_run() {
+  // `trust-seen.toml` only decides what the line says.
+  use gwm::trust::origin_change_notice;
+  let dir = TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  std::fs::create_dir_all(dir.path().join("trust-seen.toml")).unwrap();
+  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], || {
+    for _ in 0..2 {
+      let line = origin_change_notice("git@github.com:kbrdn1/demo.git", "https://github.com/kbrdn1/*", ONE).unwrap();
+      assert!(line.is_some_and(|l| l.contains("trusted by origin https://github.com/kbrdn1/*")));
+    }
+  });
+}
+
+/// origin as a bare repo whose `main` holds `.gwm.toml` = [`ONE`], reached
+/// as `git@github.com:kbrdn1/demo.git` through a stand-in `ssh` that serves
+/// it, the way git's own suite fakes a remote. gwm runs git with the user's
+/// ssh command, so this is the shipped path, no switch in gwm. A clone with
+/// that file checked out, and a user config that trusts `kbrdn1/*`.
+#[cfg(unix)]
+struct SshOrigin {
+  dir: TempDir,
+  bare: git2::Repository,
+  checkout: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+const SSH_ORIGIN: &str = "git@github.com:kbrdn1/demo.git";
+
+#[cfg(unix)]
+impl SshOrigin {
+  fn new() -> Self {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let bare_path = dir.path().join("origin.git");
+    let bare = git2::Repository::init_bare(&bare_path).unwrap();
+    commit_config(&bare, ONE, "refs/heads/main");
+    bare.set_head("refs/heads/main").unwrap();
+
+    let checkout = dir.path().join("checkout");
+    let clone = git2::Repository::clone(bare_path.to_str().unwrap(), &checkout).unwrap();
+    clone.remote_set_url("origin", SSH_ORIGIN).unwrap();
+
+    let ssh = dir.path().join("bin").join("ssh");
+    std::fs::create_dir_all(ssh.parent().unwrap()).unwrap();
+    std::fs::write(
+      &ssh,
+      format!("#!/bin/sh\nexec git upload-pack '{}'\n", bare_path.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config = dir.path().join("xdg").join("gwm").join("config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[trust]\norigins = [\"https://github.com/kbrdn1/*\"]\n").unwrap();
+    std::fs::write(dir.path().join("empty.gitconfig"), "").unwrap();
+    SshOrigin { dir, bare, checkout }
+  }
+
+  /// `f` with git going through the stand-in, none of the user's own git or
+  /// gwm config, and an empty ledger.
+  fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+    let p = |rel: &str| self.dir.path().join(rel).into_os_string();
+    let (ssh, gitconfig, xdg, ledger) = (p("bin/ssh"), p("empty.gitconfig"), p("xdg"), p("trust.toml"));
+    with_env(
+      &[
+        ("GIT_SSH_COMMAND", Some(&ssh)),
+        ("GIT_CONFIG_GLOBAL", Some(&gitconfig)),
+        ("GIT_CONFIG_NOSYSTEM", Some(std::ffi::OsStr::new("1"))),
+        ("XDG_CONFIG_HOME", Some(&xdg)),
+        ("GWM_TRUST_LEDGER", Some(&ledger)),
+        ("GWM_NO_GLOBAL_CONFIG", None),
+      ],
+      f,
+    )
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn origin_asked_over_its_own_transport_vouches_for_its_trunks_only() {
+  use gwm::trust::published_on_origin;
+  let o = SshOrigin::new();
+  o.run(|| {
+    assert!(
+      published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
+      "the file origin's main holds, fetched, is published"
+    );
+    assert!(!published_on_origin(&o.checkout, SSH_ORIGIN, TWO));
+  });
+
+  // A push on origin the checkout has not fetched yet.
+  commit_config(&o.bare, TWO, "refs/heads/main");
+  o.run(|| {
+    assert!(
+      !published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
+      "a checkout behind origin's tip holds what origin no longer publishes"
+    );
+  });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_caller_that_cannot_dial_refuses_a_file_only_an_origin_rule_covers() {
+  // The TUI asks the ledger only: an origin rule needs origin asked, so a
+  // file the ledger has not approved is refused there with the usual hint,
+  // even one origin publishes and the CLI would clear.
+  use gwm::trust::{
+    evaluate_bytes, evaluate_silent_bytes, published_on_origin, TrustMode, TrustOutcome, APPROVE_VIA_BOOTSTRAP,
+  };
+  let o = SshOrigin::new();
+  let cfg = o.checkout.join(".gwm.toml");
+  o.run(|| {
+    assert!(
+      published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
+      "the CLI would clear it"
+    );
+    let refusal = evaluate_silent_bytes(&cfg, Some(ONE), SSH_ORIGIN, TrustMode::Prompt, APPROVE_VIA_BOOTSTRAP).unwrap();
+    assert!(
+      refusal.as_deref().is_some_and(|m| m.contains(APPROVE_VIA_BOOTSTRAP)),
+      "got {refusal:?}"
+    );
+    match evaluate_bytes(&cfg, Some(ONE), SSH_ORIGIN, TrustMode::Prompt).unwrap() {
+      TrustOutcome::Prompt { rule, .. } => assert_eq!(rule.as_deref(), Some("https://github.com/kbrdn1/*")),
+      other => panic!("a ledger miss is a prompt naming the rule, got {other:?}"),
+    }
+  });
+}

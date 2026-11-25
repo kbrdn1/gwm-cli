@@ -5034,20 +5034,15 @@ fn cmd_trust_list() -> Result<()> {
       if let Ok(repo) = worktree::discover_repo(None) {
         let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
         let key = trust::origin_key_for_repo(&repo, &workdir);
-        // No `.gwm.toml` is nothing a rule approves, so no line.
-        if let (Some(rule), Ok(bytes)) = (
-          trust::user_origin_rule(&key),
-          std::fs::read(workdir.join(crate::config::CONFIG_FILE)),
-        ) {
-          if trust::published_on_origin(&workdir, &bytes) {
-            println!("this repo is trusted by origin pattern {}", clean(&rule));
-          } else {
-            println!(
-              "origin pattern {} matches this repo, but its .gwm.toml is not the one on origin's dev, main or \
-               default branch: the ledger decides",
-              clean(&rule)
-            );
-          }
+        // No `.gwm.toml` is nothing a rule approves, so no line. Origin is
+        // not asked from a listing: its answer holds for one run only.
+        if let Some(rule) = trust::user_origin_rule(&key).filter(|_| workdir.join(crate::config::CONFIG_FILE).exists())
+        {
+          println!(
+            "origin pattern {} matches this repo: a CLI run skips the prompt when origin, asked then, publishes \
+             its .gwm.toml on the default branch, dev or main",
+            clean(&rule)
+          );
         }
       }
     }
@@ -5233,22 +5228,27 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 
   match trust::evaluate(workdir, &origin_key, mode)? {
     TrustOutcome::Proceed => Ok(()),
-    // Issue #751: no prompt, but a changed file is still shown once.
-    TrustOutcome::ProceedByOrigin { pattern, body } => {
-      if let Some(line) = trust::origin_change_notice(&origin_key, &pattern, &body)? {
-        eprintln!("  {}", crate::naming::sanitise_for_terminal(&line));
-      }
-      Ok(())
-    }
     TrustOutcome::Refuse { message } => Err(GwmError::Other(message)),
     TrustOutcome::Prompt {
       cfg_path,
       body,
       sha,
       origin,
+      rule,
       mut ledger,
       ledger_path,
     } => {
+      // Issue #751: a rule in the user's config covers this origin, and the
+      // ledger did not approve the file. Origin, asked now, decides; no
+      // prompt then, but a changed file is still shown once.
+      if let Some(pattern) = rule {
+        if trust::published_on_origin(workdir, &origin, &body) {
+          if let Some(line) = trust::origin_change_notice(&origin, &pattern, &body)? {
+            eprintln!("  {}", crate::naming::sanitise_for_terminal(&line));
+          }
+          return Ok(());
+        }
+      }
       // Refuse cleanly if stdin isn't a tty rather than hanging on a
       // read that will never see input — this is the case that makes
       // `--allow-bootstrap` actually load-bearing in CI.
