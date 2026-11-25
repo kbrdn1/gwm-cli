@@ -294,7 +294,9 @@ pub const ASK_ORIGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// `.gwm.toml` of its default branch, `dev` or `main` (issue #751).
 ///
 /// The invariant: a rule covers only bytes origin itself announces, through
-/// the host it was matched on. Nothing local proves that: any fetch writes
+/// the host it was matched on, or wherever the user's own git config
+/// (`insteadOf`) sends that URL, which no clone can change. Nothing local
+/// proves that: any fetch writes
 /// any `refs/remotes/origin/*` name, from a refspec typed once or from a
 /// branch a fork's author named `remotes/origin/dev`. So origin is asked over
 /// the network which commits those branches point at, and the bytes must be
