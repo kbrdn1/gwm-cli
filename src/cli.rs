@@ -5023,25 +5023,36 @@ fn cmd_trust_list() -> Result<()> {
   // that approves the repo we stand in.
   let clean = crate::naming::sanitise_for_terminal;
   if let Some(config) = crate::config::global_config_path() {
-    let origins = Config::trusted_origins_in(&config);
-    if !origins.is_empty() {
+    let t = Config::trust_in(&config);
+    if !t.origins.is_empty() || !t.revoked.is_empty() {
       println!("trusted origins: {}", config.display());
-      for o in &origins {
+      for o in &t.origins {
         println!("  {}", clean(o));
+      }
+      if !t.revoked.is_empty() {
+        println!("revoked from those rules:");
+        for r in &t.revoked {
+          println!("  {}", clean(r));
+        }
       }
       // The checkout the gates read, which is the main one even from a
       // linked worktree.
       if let Ok(repo) = worktree::discover_repo(None) {
         let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
         let key = trust::origin_key_for_repo(&repo, &workdir);
-        if let Some(rule) = trust::matching_origin_pattern(&origins, &key) {
-          match std::fs::read(workdir.join(crate::config::CONFIG_FILE)) {
-            Ok(bytes) if !trust::published_on_origin(&workdir, &bytes) => println!(
-              "origin pattern {} matches this repo, but its .gwm.toml is not the one on the origin branch it tracks: \
-               the ledger decides",
-              clean(rule)
-            ),
-            _ => println!("this repo is trusted by origin pattern {}", clean(rule)),
+        // No `.gwm.toml` is nothing a rule approves, so no line.
+        if let (Some(rule), Ok(bytes)) = (
+          trust::user_origin_rule(&key),
+          std::fs::read(workdir.join(crate::config::CONFIG_FILE)),
+        ) {
+          if trust::published_on_origin(&workdir, &bytes) {
+            println!("this repo is trusted by origin pattern {}", clean(&rule));
+          } else {
+            println!(
+              "origin pattern {} matches this repo, but its .gwm.toml is not the one on origin's dev, main or \
+               default branch: the ledger decides",
+              clean(&rule)
+            );
           }
         }
       }
@@ -5108,22 +5119,27 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
   // reports success while a rule still trusts what it named.
   let mut rule_removed = false;
   if let Some(config) = crate::config::global_config_path() {
-    let mut origins = Config::trusted_origins_in(&config);
-    let before = origins.len();
-    origins.retain(|o| *o != origin);
-    if origins.len() != before {
-      crate::config_cli::set_array_at(&config, "trust.origins", &origins)?;
+    let mut t = Config::trust_in(&config);
+    let before = t.origins.len();
+    t.origins.retain(|o| *o != origin);
+    if t.origins.len() != before {
+      crate::config_cli::set_array_at(&config, "trust.origins", &t.origins)?;
       println!("✓ revoked origin pattern {} (user config)", shown);
       rule_removed = true;
     }
-    if let Some(rule) = trust::matching_origin_pattern(&origins, &origin) {
-      return Err(GwmError::Other(format!(
-        "{} is still trusted by origin pattern {} in {}: run `gwm trust revoke '{}'` to remove that rule",
+    // A rule still covering the repo: take the repo out of it, so the revoke
+    // wins and the rule's other repos stay trusted.
+    if let Some(rule) = trust::matching_origin_pattern(&t.origins, &origin) {
+      if trust::matching_origin_pattern(&t.revoked, &origin).is_none() {
+        t.revoked.push(origin.clone());
+        crate::config_cli::set_array_at(&config, "trust.revoked", &t.revoked)?;
+      }
+      println!(
+        "✓ revoked {} from origin pattern {} (user config)",
         shown,
-        crate::naming::sanitise_for_terminal(rule),
-        config.display(),
         crate::naming::sanitise_for_terminal(rule)
-      )));
+      );
+      rule_removed = true;
     }
   }
   if removed == 0 && !rule_removed {
@@ -5141,10 +5157,16 @@ fn cmd_trust_add_origin(pattern: String) -> Result<()> {
       "no user config to write the rule to (GWM_NO_GLOBAL_CONFIG is set, or no config dir resolves)".into(),
     )
   })?;
-  let mut origins = Config::trusted_origins_in(&config);
-  if !origins.contains(&pattern) {
-    origins.push(pattern.clone());
-    crate::config_cli::set_array_at(&config, "trust.origins", &origins)?;
+  let mut t = Config::trust_in(&config);
+  if !t.origins.contains(&pattern) {
+    t.origins.push(pattern.clone());
+    crate::config_cli::set_array_at(&config, "trust.origins", &t.origins)?;
+  }
+  // Naming a revoked repo as a rule of its own takes it back.
+  let before = t.revoked.len();
+  t.revoked.retain(|r| *r != pattern);
+  if t.revoked.len() != before {
+    crate::config_cli::set_array_at(&config, "trust.revoked", &t.revoked)?;
   }
   println!(
     "✓ trusted origin pattern {} (user config)",

@@ -193,14 +193,14 @@ fn glob_segment(pattern: &str, segment: &str) -> bool {
 ///
 /// Host compared whole, so `github.com.evil.io` is not `github.com`; path
 /// compared segment by segment, same count, so `owner/*` covers neither a
-/// sibling owner nor a deeper path. An origin path with a dot segment, a
-/// `%` or a `\` matches nothing: a client may resolve it somewhere else.
+/// sibling owner nor a deeper path. An origin path with a dot segment
+/// matches nothing, and neither does an origin [`plain_origin`] refuses.
 pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Option<&'a str> {
+  if !plain_origin(origin) {
+    return None;
+  }
   let (host, segments) = origin_parts(origin)?;
-  if segments
-    .iter()
-    .any(|s| s.is_empty() || s == "." || s == ".." || s.contains(['%', '\\']))
-  {
+  if segments.iter().any(|s| s.is_empty() || s == "." || s == "..") {
     return None;
   }
   patterns
@@ -213,60 +213,115 @@ pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Opti
     .map(String::as_str)
 }
 
+/// Only the spellings the forges hand out, `https://`, `ssh://` and the
+/// scp-like `user@host:path`, in characters every client reads alike.
+///
+/// gwm takes the host after the last `@`; curl closes the authority at the
+/// first `?` or `#`, so `https://evil.example#@github.com/…` is fetched from
+/// evil.example. `%`, `\`, a space or a second `@` open the same gap. `http`
+/// and `git` are unauthenticated, so anyone on the path serves the file, and
+/// `file` is a local path.
+fn plain_origin(origin: &str) -> bool {
+  let charset = origin
+    .chars()
+    .all(|c| c.is_ascii_alphanumeric() || "-._~:/@".contains(c));
+  let scheme = match origin.split_once("://") {
+    Some((s, _)) => s.eq_ignore_ascii_case("https") || s.eq_ignore_ascii_case("ssh"),
+    None => true,
+  };
+  charset && scheme && origin.matches('@').count() <= 1
+}
+
+/// The user's rule that covers `origin`, unless `gwm trust revoke` took the
+/// repo out of it (issue #751).
+pub fn user_origin_rule(origin: &str) -> Option<String> {
+  let path = crate::config::global_config_path()?;
+  let trust = Config::trust_in(&path);
+  if matching_origin_pattern(&trust.revoked, origin).is_some() {
+    return None;
+  }
+  matching_origin_pattern(&trust.origins, origin).map(String::from)
+}
+
 /// The rule in the user's own config that trusts `origin` to have published
 /// `bytes`, the `.gwm.toml` of the checkout at `workdir`, if any.
 fn trusted_by_user_origin(workdir: &Path, origin: &str, bytes: &[u8]) -> Option<String> {
-  let path = crate::config::global_config_path()?;
-  let patterns = Config::trusted_origins_in(&path);
-  let rule = matching_origin_pattern(&patterns, origin)?;
-  published_on_origin(workdir, bytes).then(|| rule.to_string())
+  let rule = user_origin_rule(origin)?;
+  published_on_origin(workdir, bytes).then_some(rule)
 }
 
-/// Whether `bytes` is the `.gwm.toml` that origin publishes on the branch the
-/// checkout at `workdir` tracks.
+/// Whether `bytes` is, up to line endings, the `.gwm.toml` of one of origin's
+/// trunks as the checkout at `workdir` last fetched them.
 ///
-/// A rule vouches for what origin's writers published, not for whatever the
-/// checkout holds: on a public repo, a stranger's PR checked out in the main
-/// checkout keeps the same origin URL, and only the hash stopped it before
-/// issue #751. Anything else falls back to the ledger: a detached HEAD, a
-/// branch tracking nothing, a fork's remote or a PR head ref
-/// (`gh pr checkout`), a local edit, a commit not yet pushed.
+/// The invariant: a rule covers only bytes equal to the `.gwm.toml` of an
+/// origin trunk named in advance, `dev`, `main` or the branch
+/// `refs/remotes/origin/HEAD` points at, whose tracking ref no configured
+/// fetch refspec writes from anything but origin's branch.
+///
+/// Named in advance, never taken from the checkout: on a public repo, a
+/// stranger's PR checked out in the main checkout keeps the same origin URL,
+/// and any fetch given a refspec on the command line can put a PR head under
+/// another `refs/remotes/origin/` name. So the branch checked out does not
+/// matter; the content does. Not the repo's `doctor.trunks` either: that list
+/// lives in the very file being judged. A local edit, a local merge or a
+/// commit not pushed yet falls back to the ledger.
 pub fn published_on_origin(workdir: &Path, bytes: &[u8]) -> bool {
-  published_config(workdir).is_some_and(|blob| without_crlf(&blob) == without_crlf(bytes))
+  let Ok(repo) = git2::Repository::open(workdir) else {
+    return false;
+  };
+  let mut trunks: Vec<String> = crate::config::default_trunks()
+    .iter()
+    .map(|b| format!("refs/remotes/origin/{b}"))
+    .collect();
+  if let Some(head) = repo
+    .find_reference("refs/remotes/origin/HEAD")
+    .ok()
+    .and_then(|r| r.symbolic_target().ok().flatten().map(String::from))
+  {
+    trunks.push(head);
+  }
+  let want = without_crlf(bytes);
+  trunks
+    .iter()
+    .filter(|t| written_by_origin_branch(&repo, t))
+    .any(|t| trunk_config(&repo, t).is_some_and(|blob| without_crlf(&blob) == want))
 }
 
-fn published_config(workdir: &Path) -> Option<Vec<u8>> {
-  let repo = git2::Repository::open(workdir).ok()?;
-  let head = repo.head().ok()?;
-  if !head.is_branch() {
-    return None;
+/// At least one configured fetch refspec writes `tracking`, and every one
+/// that does, on any remote, is origin's and reads it from a branch. Another
+/// remote writing under `refs/remotes/origin/*` (`git fetch --all`) or a
+/// mirror refspec would otherwise put what origin never published there.
+fn written_by_origin_branch(repo: &git2::Repository, tracking: &str) -> bool {
+  let Ok(names) = repo.remotes() else {
+    return false;
+  };
+  let mut from_origin = false;
+  for name in names.iter() {
+    // A remote whose name is not UTF-8 cannot be checked: fail closed.
+    let Ok(Some(name)) = name else {
+      return false;
+    };
+    let Ok(remote) = repo.find_remote(name) else {
+      return false;
+    };
+    for spec in remote
+      .refspecs()
+      .filter(|s| s.direction() == git2::Direction::Fetch && s.dst_matches(tracking))
+    {
+      let from_branch = spec
+        .rtransform(tracking)
+        .ok()
+        .is_some_and(|src| src.as_str().is_ok_and(|n| n.starts_with("refs/heads/")));
+      if name != "origin" || !from_branch {
+        return false;
+      }
+      from_origin = true;
+    }
   }
-  let branch = head.name().ok()?;
-  // The remote's name, as the ledger key is read from it: a URL there is a
-  // remote the key does not name.
-  if repo.branch_upstream_remote(branch).ok()?.as_str().ok()? != "origin" {
-    return None;
-  }
-  let tracking = repo.branch_upstream_name(branch).ok()?;
-  let tracking = tracking.as_str().ok()?;
-  // Every fetch refspec that writes the tracking ref must read it from a
-  // branch. With GitHub's `+refs/pull/*/head:refs/remotes/origin/pr/*` added
-  // after the default one, `git checkout pr/1` records the upstream as
-  // `refs/heads/pr/1` while the ref holds a fork's head.
-  // Never vacuous: origin is the upstream remote, so one of its refspecs is
-  // what named the tracking ref.
-  let remote = repo.find_remote("origin").ok()?;
-  let mut writers = remote
-    .refspecs()
-    .filter(|s| s.direction() == git2::Direction::Fetch && s.dst_matches(tracking));
-  let from_branches = writers.all(|s| {
-    s.rtransform(tracking)
-      .ok()
-      .is_some_and(|src| src.as_str().is_ok_and(|n| n.starts_with("refs/heads/")))
-  });
-  if !from_branches {
-    return None;
-  }
+  from_origin
+}
+
+fn trunk_config(repo: &git2::Repository, tracking: &str) -> Option<Vec<u8>> {
   let tree = repo.find_reference(tracking).ok()?.peel_to_tree().ok()?;
   let entry = tree.get_path(Path::new(CONFIG_FILE)).ok()?;
   let blob = repo.find_blob(entry.id()).ok()?;

@@ -48,7 +48,7 @@ pub struct Config {
   pub forge_hosts: BTreeMap<String, crate::forge::ForgeKind>,
   /// `[trust]`: repos the user trusts whatever their `.gwm.toml` says
   /// (issue #751). Only read from the **user-level** config, like
-  /// `[forge_hosts]`; see [`Config::trusted_origins_in`].
+  /// `[forge_hosts]`; see [`Config::trust_in`].
   #[serde(default)]
   pub trust: TrustConfig,
   #[serde(default)]
@@ -139,6 +139,10 @@ pub struct TrustConfig {
   /// parsed host and path, so `https`, `ssh` and `git@` spellings agree.
   #[serde(default)]
   pub origins: Vec<String>,
+  /// Origins `gwm trust revoke` took out of those rules: an explicit revoke
+  /// wins over a rule, whose other repos stay trusted.
+  #[serde(default)]
+  pub revoked: Vec<String>,
 }
 
 /// `[exec]` — named command profiles for `gwm exec` (issue #324).
@@ -610,7 +614,9 @@ impl Default for DoctorConfig {
   }
 }
 
-fn default_trunks() -> Vec<String> {
+/// Also the trunks an origin rule reads `.gwm.toml` from (issue #751), as
+/// built in: the repo's own `doctor.trunks` lives in the file being judged.
+pub(crate) fn default_trunks() -> Vec<String> {
   vec!["dev".into(), "main".into()]
 }
 
@@ -2124,15 +2130,16 @@ impl Config {
       .and_then(|(_, v)| v.clone().try_into().ok())
   }
 
-  /// `[trust] origins` from the user-level config file at `global_path`
-  /// alone (issue #751), for the reason [`Self::global_forge_host`] gives:
-  /// the merged config lets the repo's `.gwm.toml` win, and a repo must
-  /// not be able to trust itself. Tolerant the same way: unreadable or
-  /// malformed is no rule, which fails closed.
-  pub fn trusted_origins_in(global_path: &Path) -> Vec<String> {
+  /// `[trust]` from the user-level config file at `global_path` alone
+  /// (issue #751), for the reason [`Self::global_forge_host`] gives: the
+  /// merged config lets the repo's `.gwm.toml` win, and a repo must not be
+  /// able to trust itself. Read as one table, so a malformed `revoked` can
+  /// never leave `origins` standing: unreadable or malformed is no rule,
+  /// which fails closed.
+  pub fn trust_in(global_path: &Path) -> TrustConfig {
     read_config_value(global_path)
       .ok()
-      .and_then(|v| v.get("trust")?.get("origins")?.clone().try_into().ok())
+      .and_then(|v| v.get("trust")?.clone().try_into().ok())
       .unwrap_or_default()
   }
 
