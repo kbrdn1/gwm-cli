@@ -7762,6 +7762,27 @@ fn trust_add_origin_writes_the_user_config_and_revoke_takes_it_back() {
 }
 
 #[test]
+fn trust_add_origin_refuses_to_rewrite_a_trust_table_it_cannot_read() {
+  // Rewriting would drop the user's own line without a word.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  let mine = "[trust]\norigins = \"https://github.com/alice/*\"\n";
+  fx.trust_origins(mine);
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/bob/*"])
+    .failure()
+    .stderr(predicate::str::contains("[trust]"));
+  assert_eq!(fs::read_to_string(fx.user_config()).unwrap(), mine);
+}
+
+#[test]
+fn trust_add_origin_points_a_prefix_at_the_glob() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/kbrdn1/"])
+    .failure()
+    .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
+  assert!(!fx.user_config().exists(), "a refused pattern must not be written");
+}
+
+#[test]
 fn trust_add_origin_refuses_a_pattern_that_names_no_owner() {
   let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
   fx.gwm(&["trust", "add", "--origin", "https://github.com/*/*"])

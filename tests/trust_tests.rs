@@ -377,6 +377,12 @@ fn an_origin_pattern_does_not_cover_an_origin_a_client_reads_elsewhere() {
     "https://a@evil.example@github.com/kbrdn1/demo.git",
     "https://evil.example\\@github.com/kbrdn1/demo.git",
     "https://evil.example @github.com/kbrdn1/demo.git",
+    // git reads scp syntax up to the first `:`: these dial evil.example.
+    "evil.example:x@github.com:kbrdn1/demo",
+    "ssh://evil.example:x@github.com/kbrdn1/demo.git",
+    // A `/` before the first `:` makes it a local path to git.
+    "/tmp/x@github.com:kbrdn1/demo",
+    "./x@github.com:kbrdn1/demo",
   ] {
     assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
   }
@@ -397,8 +403,11 @@ fn an_origin_pattern_covers_only_https_ssh_and_scp_origins() {
   }
   for origin in [
     "https://github.com/kbrdn1/demo.git",
+    "https://kbrdn1@github.com/kbrdn1/demo.git",
     "ssh://git@github.com/kbrdn1/demo.git",
+    "ssh://git@ssh.github.com:443/kbrdn1/demo.git",
     "git@github.com:kbrdn1/demo.git",
+    "github.com:kbrdn1/demo.git",
   ] {
     assert!(matching_origin_pattern(&pats, origin).is_some(), "{origin} must match");
   }
@@ -458,6 +467,10 @@ fn an_origin_pattern_must_name_its_host_and_owner() {
     "https://github.com/*/*",
     "https://github.com/kbr*/*",
     "https://github.com/",
+    // A prefix names no repo: the issue's "prefix" is spelled `owner/*`.
+    "https://github.com/kbrdn1/",
+    "https://github.com/kbrdn1",
+    "git@github.com:kbrdn1",
     "not a url",
     "",
   ] {
