@@ -714,8 +714,9 @@ pub enum Command {
   /// (override via `$GWM_TRUST_LEDGER`) records the `(origin URL,
   /// sha256 of .gwm.toml)` tuples the user has approved, so
   /// subsequent runs skip the prompt. Hash drift (any byte changes
-  /// in `.gwm.toml`) re-prompts; see the module-level comment in
-  /// `src/trust.rs` for the threat model.
+  /// in `.gwm.toml`) re-prompts, unless a `[trust] origins` rule in your
+  /// user config covers the repo and origin publishes that file; see the
+  /// module-level comment in `src/trust.rs` for the threat model.
   Trust {
     #[command(subcommand)]
     action: TrustAction,
@@ -1052,7 +1053,8 @@ pub enum TrustAction {
     #[arg(long, value_name = "PATTERN")]
     origin: Option<String>,
   },
-  /// List every recorded `(origin, hash)` pair in the active ledger.
+  /// List every recorded `(origin, hash)` pair in the active ledger, then
+  /// the `[trust] origins` rules of your user config.
   ///
   /// Empty ledger prints a single line and exits 0, the no-op fast
   /// path for fresh installs. The `trusted_at` timestamp is the
