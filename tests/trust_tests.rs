@@ -803,6 +803,9 @@ fn a_caller_that_cannot_dial_refuses_a_file_only_an_origin_rule_covers() {
       add.is_some() && boot.is_some() && add < boot,
       "`gwm trust add` named before `gwm bootstrap`, got {hint}"
     );
+    // The TUI judges the main checkout's file; `gwm trust add` approves the
+    // file of the checkout it runs in.
+    assert!(hint.contains("in the repo's main checkout"), "got {hint}");
     match evaluate_bytes(&cfg, Some(ONE), SSH_ORIGIN, TrustMode::Prompt).unwrap() {
       TrustOutcome::Prompt { rule, .. } => assert_eq!(rule.as_deref(), Some("https://github.com/kbrdn1/*")),
       other => panic!("a ledger miss is a prompt naming the rule, got {other:?}"),

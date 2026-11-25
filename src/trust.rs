@@ -836,9 +836,11 @@ pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode:
 
 /// How a caller that cannot prompt tells the user to grant trust. Both name
 /// `gwm trust add` first: it is what clears the TUI next time, while a
-/// `gwm bootstrap` that an origin rule clears writes no ledger entry.
-pub const APPROVE_VIA_BOOTSTRAP: &str = "run `gwm trust add` from a CLI in another terminal to approve, \
-   or `gwm bootstrap` there, or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
+/// `gwm bootstrap` that an origin rule clears writes no ledger entry. The TUI
+/// judges the main checkout's `.gwm.toml`, and `gwm trust add` approves the
+/// file of the checkout it runs in, so the hint says which one.
+pub const APPROVE_VIA_BOOTSTRAP: &str = "run `gwm trust add` in the repo's main checkout, from a CLI in another \
+   terminal, to approve, or `gwm bootstrap` there, or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
 pub const APPROVE_VIA_TRUST_ADD: &str = "run `gwm trust add` from a CLI in another terminal to approve, \
    or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
 
