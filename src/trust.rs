@@ -125,6 +125,175 @@ pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
     .to_string()
 }
 
+// ---- Trusted origins (issue #751) ----------------------------------------
+//
+// The ledger approves one `(origin, hash)` pair, so every edit to a repo's
+// `.gwm.toml` revokes it. Right for a clone of someone else's repo; a chore
+// for your own, where a reviewed PR touching the file stalls the next
+// unattended `gwm create`. `[trust] origins` in the user's own config names
+// repos trusted whatever the file's hash. Never read from a repo's
+// `.gwm.toml`: a repo cannot vouch for itself.
+
+/// `(host, path segments)` of a remote URL, parsed the way the forge gate
+/// parses `origin` (#463): host lower-cased with the documented SSH aliases
+/// folded, path without `.git`. So `https`, `ssh` and scp-like spellings of
+/// one repo agree, and a workdir key or a malformed URL is `None`.
+fn origin_parts(url: &str) -> Option<(String, Vec<String>)> {
+  let r = crate::forge::parse_remote_url(url).ok()?;
+  Some((r.host, r.path.split('/').map(String::from).collect()))
+}
+
+fn pattern_parts(pattern: &str) -> Result<(String, Vec<String>)> {
+  let bad = |why: &str| GwmError::Other(format!("origin pattern '{}' {}", pattern, why));
+  let (host, segments) = origin_parts(pattern).ok_or_else(|| bad("is not a git remote URL"))?;
+  if host.contains('*') {
+    return Err(bad(
+      "has a wildcard in its host: spell the host out, a wildcard there is how a lookalike gets in",
+    ));
+  }
+  if segments.iter().any(|s| s.is_empty() || s == "." || s == "..") {
+    return Err(bad("has an empty or dot path segment"));
+  }
+  if segments[0].contains('*') {
+    return Err(bad(
+      "must name its owner: a wildcard owner trusts every repo on the host",
+    ));
+  }
+  Ok((host, segments))
+}
+
+/// Refuse a pattern that could never match safely. `gwm trust add --origin`
+/// checks before writing; [`matching_origin_pattern`] skips what fails, in
+/// case the file was edited by hand.
+pub fn validate_origin_pattern(pattern: &str) -> Result<()> {
+  pattern_parts(pattern).map(|_| ())
+}
+
+/// `*` matches any run of characters inside one path segment, never a `/`.
+fn glob_segment(pattern: &str, segment: &str) -> bool {
+  let mut parts = pattern.split('*');
+  let Some(mut rest) = segment.strip_prefix(parts.next().unwrap_or("")) else {
+    return false;
+  };
+  let parts: Vec<&str> = parts.collect();
+  let Some((last, middle)) = parts.split_last() else {
+    return rest.is_empty();
+  };
+  for part in middle {
+    match rest.find(part) {
+      Some(i) => rest = &rest[i + part.len()..],
+      None => return false,
+    }
+  }
+  rest.ends_with(last)
+}
+
+/// The first pattern in `patterns` that covers `origin`, if any.
+///
+/// Host compared whole, so `github.com.evil.io` is not `github.com`; path
+/// compared segment by segment, same count, so `owner/*` covers neither a
+/// sibling owner nor a deeper path. An origin path with a dot segment, a
+/// `%` or a `\` matches nothing: a client may resolve it somewhere else.
+pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Option<&'a str> {
+  let (host, segments) = origin_parts(origin)?;
+  if segments
+    .iter()
+    .any(|s| s.is_empty() || s == "." || s == ".." || s.contains(['%', '\\']))
+  {
+    return None;
+  }
+  patterns
+    .iter()
+    .find(|p| {
+      pattern_parts(p).is_ok_and(|(ph, ps)| {
+        ph == host && ps.len() == segments.len() && ps.iter().zip(&segments).all(|(p, s)| glob_segment(p, s))
+      })
+    })
+    .map(String::as_str)
+}
+
+/// The rule in the user's own config that trusts `origin`, if any.
+fn trusted_by_user_origin(origin: &str) -> Option<String> {
+  let path = crate::config::global_config_path()?;
+  let patterns = Config::trusted_origins_in(&path);
+  matching_origin_pattern(&patterns, origin).map(String::from)
+}
+
+/// What the user last saw run under an origin rule, keyed by origin, so the
+/// next run can say what changed. Beside the ledger, never in it: a ledger
+/// entry would keep the repo trusted after the rule is removed.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SeenConfigs {
+  #[serde(default)]
+  seen: std::collections::BTreeMap<String, String>,
+}
+
+/// The one line `gwm create` prints when an origin rule, not the ledger,
+/// cleared `body`: on the first run from `origin`, and whenever the file
+/// differs from the last run, naming what changed. `None` when nothing did.
+/// Records `body` as seen. Only the CLI calls it, so a change is not marked
+/// seen by a caller that has nowhere to show it.
+pub fn origin_change_notice(origin: &str, pattern: &str, body: &[u8]) -> Result<Option<String>> {
+  let path = default_ledger_path()?.with_file_name("trust-seen.toml");
+  // A display cache, not a trust decision: unreadable means start over.
+  let mut seen: SeenConfigs = match fs::read_to_string(&path) {
+    Ok(raw) => toml::from_str(&raw).unwrap_or_default(),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => SeenConfigs::default(),
+    Err(e) => return Err(e.into()),
+  };
+  let now = String::from_utf8_lossy(body).into_owned();
+  let notice = match seen.seen.get(origin) {
+    Some(before) if *before == now => return Ok(None),
+    Some(before) => format!(
+      ".gwm.toml changed since last run (trusted by origin {}): {}",
+      pattern,
+      describe_changes(before, &now)
+    ),
+    None => format!(".gwm.toml trusted by origin {}: first run from {}", pattern, origin),
+  };
+  seen.seen.insert(origin.to_string(), now);
+  write_atomic(&path, &toml::to_string_pretty(&seen)?)?;
+  Ok(Some(notice))
+}
+
+/// `bootstrap.command[2] added, hooks.post_create[0] changed`: the settings
+/// that differ, one entry per array item rather than per field.
+fn describe_changes(before: &str, after: &str) -> String {
+  let rows = |s: &str| -> Option<std::collections::BTreeMap<String, String>> {
+    let value: toml::Value = toml::from_str(s).ok()?;
+    let mut rows = Vec::new();
+    crate::config::flatten_value("", &value, &mut rows);
+    Some(rows.into_iter().collect())
+  };
+  let (Some(old), Some(new)) = (rows(before), rows(after)) else {
+    return "the file does not parse, no per-setting diff".into();
+  };
+  let item = |k: &str| k.find(']').map_or(k, |i| &k[..=i]).to_string();
+  let has_item = |rows: &std::collections::BTreeMap<String, String>, it: &str| rows.keys().any(|k| item(k) == it);
+  let mut changes = std::collections::BTreeMap::new();
+  for key in old.keys().chain(new.keys()) {
+    if old.get(key) != new.get(key) {
+      let it = item(key);
+      let what = if !has_item(&old, &it) {
+        "added"
+      } else if !has_item(&new, &it) {
+        "removed"
+      } else {
+        "changed"
+      };
+      changes.insert(it, what);
+    }
+  }
+  if changes.is_empty() {
+    return "no setting changed, comments or formatting only".into();
+  }
+  changes
+    .iter()
+    .map(|(it, what)| format!("{} {}", it, what))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
 /// Outcome of a trust gate evaluation. The caller (CLI or TUI) decides
 /// what to do with each variant — CLI prompts on `Prompt`, TUI refuses
 /// with a helpful message because the alternate-screen mode can't host
@@ -134,6 +303,10 @@ pub enum TrustOutcome {
   /// Cleared to invoke `bootstrap::run`: trusted entry hit, empty
   /// surface, no `.gwm.toml`, or `TrustMode::Allow`.
   Proceed,
+  /// Cleared by a `[trust] origins` rule in the user's config rather than
+  /// the ledger (issue #751). `pattern` is the rule; `body` the bytes it
+  /// cleared, for [`origin_change_notice`].
+  ProceedByOrigin { pattern: String, body: Vec<u8> },
   /// Refuse outright. `message` is the user-facing reason; render it
   /// verbatim in stderr (CLI) or status bar (TUI). Used for `Deny`
   /// mode by `evaluate`; the TUI also synthesises a `Refuse` from a
@@ -165,7 +338,8 @@ pub enum TrustOutcome {
 ///
 /// Same ledger, same `(origin, sha256)` key, same `GWM_ALLOW_BOOTSTRAP`
 /// escape hatch: approving a repo approves the whole file, and editing
-/// the file revokes that approval. Non-interactive by construction —
+/// the file revokes that approval. Same `[trust] origins` rules too, which
+/// approve whatever the hash (issue #751). Non-interactive by construction —
 /// [`crate::forge::resolve`] runs on the TUI's selection path, which
 /// cannot host a prompt. `gwm trust add` is how a user answers it.
 ///
@@ -193,7 +367,7 @@ pub fn config_is_trusted(workdir: &Path, origin: &str, mode: TrustMode) -> Resul
     TrustMode::Prompt => {}
   }
   let ledger_path = default_ledger_path()?;
-  Ok(TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes)))
+  Ok(TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes)) || trusted_by_user_origin(origin).is_some())
 }
 
 /// Record the current repo's `.gwm.toml` as trusted. Backs `gwm trust
@@ -226,7 +400,9 @@ pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option
 ///   4. `TrustMode::Allow` → `Proceed` BEFORE touching the ledger
 ///      (malformed ledger must not break the CI bypass).
 ///   5. Ledger hit on `(origin, sha)` → `Proceed`.
-///   6. Otherwise → `Prompt` (caller decides whether to actually
+///   6. `origin` covered by a `[trust] origins` rule in the user's own
+///      config → `ProceedByOrigin`, whatever the hash (issue #751).
+///   7. Otherwise → `Prompt` (caller decides whether to actually
 ///      prompt or refuse).
 ///
 /// This is the single source of truth shared by `cli::trust_or_prompt`
@@ -297,6 +473,13 @@ pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode:
     return Ok(TrustOutcome::Proceed);
   }
 
+  if let Some(pattern) = trusted_by_user_origin(origin) {
+    return Ok(TrustOutcome::ProceedByOrigin {
+      pattern,
+      body: bytes.to_vec(),
+    });
+  }
+
   Ok(TrustOutcome::Prompt {
     cfg_path,
     body: bytes.to_vec(),
@@ -343,7 +526,7 @@ pub fn evaluate_silent_bytes(
 /// Turn an outcome into what a caller that cannot prompt shows the user.
 fn refusal_for(outcome: TrustOutcome, approve_hint: &str) -> Option<String> {
   match outcome {
-    TrustOutcome::Proceed => None,
+    TrustOutcome::Proceed | TrustOutcome::ProceedByOrigin { .. } => None,
     TrustOutcome::Refuse { message } => Some(message),
     TrustOutcome::Prompt { cfg_path, sha, .. } => {
       let short_sha: String = sha.chars().take(12).collect();
@@ -421,26 +604,7 @@ impl TrustLedger {
   /// first ever write on a fresh machine succeeds without the user
   /// having to create `~/.config/gwm/` manually.
   pub fn save(&self, path: &Path) -> Result<()> {
-    let parent = match path.parent() {
-      Some(p) if !p.as_os_str().is_empty() => {
-        fs::create_dir_all(p)?;
-        p.to_path_buf()
-      }
-      // No parent (e.g. relative `trust.toml` in CWD) or empty
-      // parent → write the tmp file in `.`.
-      _ => PathBuf::from("."),
-    };
-    let body = toml::to_string_pretty(self)?;
-    let mut tmp = Builder::new()
-      .prefix("gwm-trust-")
-      .suffix(".tmp")
-      .tempfile_in(&parent)?;
-    tmp.write_all(body.as_bytes())?;
-    // `persist` does the atomic rename and consumes the handle so
-    // the tempfile crate's drop-cleanup is short-circuited — no
-    // sidecar `.tmp` survives a successful save.
-    tmp.persist(path).map_err(|e| GwmError::Io(e.error))?;
-    Ok(())
+    write_atomic(path, &toml::to_string_pretty(self)?)
   }
 
   /// Returns true iff there is an entry with both `origin` AND
@@ -489,6 +653,30 @@ impl TrustLedger {
     self.entries.retain(|e| e.origin != origin);
     before - self.entries.len()
   }
+}
+
+/// The write behind [`TrustLedger::save`], shared with the origin-rule
+/// snapshots in [`origin_change_notice`].
+fn write_atomic(path: &Path, body: &str) -> Result<()> {
+  let parent = match path.parent() {
+    Some(p) if !p.as_os_str().is_empty() => {
+      fs::create_dir_all(p)?;
+      p.to_path_buf()
+    }
+    // No parent (e.g. relative `trust.toml` in CWD) or empty
+    // parent → write the tmp file in `.`.
+    _ => PathBuf::from("."),
+  };
+  let mut tmp = Builder::new()
+    .prefix("gwm-trust-")
+    .suffix(".tmp")
+    .tempfile_in(&parent)?;
+  tmp.write_all(body.as_bytes())?;
+  // `persist` does the atomic rename and consumes the handle so
+  // the tempfile crate's drop-cleanup is short-circuited — no
+  // sidecar `.tmp` survives a successful save.
+  tmp.persist(path).map_err(|e| GwmError::Io(e.error))?;
+  Ok(())
 }
 
 /// SHA-256 of the raw bytes of `.gwm.toml`, lowercase hex. Whitespace-

@@ -46,6 +46,11 @@ pub struct Config {
   /// ```
   #[serde(default)]
   pub forge_hosts: BTreeMap<String, crate::forge::ForgeKind>,
+  /// `[trust]`: repos the user trusts whatever their `.gwm.toml` says
+  /// (issue #751). Only read from the **user-level** config, like
+  /// `[forge_hosts]`; see [`Config::trusted_origins_in`].
+  #[serde(default)]
+  pub trust: TrustConfig,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]
@@ -118,6 +123,22 @@ pub struct Config {
   /// replaces the built-ins, never adds to them.
   #[serde(default)]
   pub clean: CleanConfig,
+}
+
+/// `[trust]`: origin rules that satisfy the trust gate whatever the hash
+/// of a repo's `.gwm.toml` (issue #751).
+///
+/// ```toml
+/// [trust]
+/// origins = ["https://github.com/kbrdn1/*"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustConfig {
+  /// Remote URLs, `*` matching inside one path segment. Matched on the
+  /// parsed host and path, so `https`, `ssh` and `git@` spellings agree.
+  #[serde(default)]
+  pub origins: Vec<String>,
 }
 
 /// `[exec]` — named command profiles for `gwm exec` (issue #324).
@@ -2101,6 +2122,18 @@ impl Config {
       .iter()
       .find(|(k, _)| k.eq_ignore_ascii_case(host))
       .and_then(|(_, v)| v.clone().try_into().ok())
+  }
+
+  /// `[trust] origins` from the user-level config file at `global_path`
+  /// alone (issue #751), for the reason [`Self::global_forge_host`] gives:
+  /// the merged config lets the repo's `.gwm.toml` win, and a repo must
+  /// not be able to trust itself. Tolerant the same way: unreadable or
+  /// malformed is no rule, which fails closed.
+  pub fn trusted_origins_in(global_path: &Path) -> Vec<String> {
+    read_config_value(global_path)
+      .ok()
+      .and_then(|v| v.get("trust")?.get("origins")?.clone().try_into().ok())
+      .unwrap_or_default()
   }
 
   pub fn load_for_repo(repo_root: &Path) -> Result<Self> {

@@ -1038,7 +1038,17 @@ pub enum TrustAction {
   ///
   /// Approving covers the whole file as it is now: editing `.gwm.toml`
   /// changes its hash and revokes the approval.
-  Add,
+  ///
+  /// With `--origin <pattern>`, trust every repo whose `origin` matches
+  /// instead, whatever its `.gwm.toml` says: the pattern goes to
+  /// `[trust] origins` in your user config, never to a repo's file.
+  Add {
+    /// Remote URL pattern to trust, `*` matching inside one path segment,
+    /// e.g. `https://github.com/<you>/*`. The host and owner must be
+    /// spelled out.
+    #[arg(long, value_name = "PATTERN")]
+    origin: Option<String>,
+  },
   /// List every recorded `(origin, hash)` pair in the active ledger.
   ///
   /// Empty ledger prints a single line and exits 0, the no-op fast
@@ -1050,6 +1060,9 @@ pub enum TrustAction {
   /// the next `gwm create` / `gwm bootstrap` against that repo
   /// re-prompts; use this when you change machines, rotate
   /// credentials, or no longer trust a previously approved repo.
+  ///
+  /// Also removes a `[trust] origins` pattern written exactly so, and
+  /// fails, naming the rule, when one still covers the origin.
   Revoke {
     /// Origin URL to revoke (must match the recorded form verbatim;
     /// SSH and HTTPS flavours of the same GitHub repo are recorded as
@@ -4990,7 +5003,8 @@ pub fn milestones_diff_lines(slug: &str, declared: &[milestones::MilestoneSpec],
 
 fn cmd_trust(action: TrustAction) -> Result<()> {
   match action {
-    TrustAction::Add => cmd_trust_add(),
+    TrustAction::Add { origin: None } => cmd_trust_add(),
+    TrustAction::Add { origin: Some(pattern) } => cmd_trust_add_origin(pattern),
     TrustAction::List => cmd_trust_list(),
     TrustAction::Revoke { origin } => cmd_trust_revoke(origin),
     TrustAction::Show => cmd_trust_show(),
@@ -5002,8 +5016,32 @@ fn cmd_trust_list() -> Result<()> {
   let ledger = TrustLedger::load(&path)?;
   if ledger.entries.is_empty() {
     println!("0 entries in trust ledger ({}).", path.display());
-    return Ok(());
+  } else {
+    print_ledger_entries(&path, &ledger);
   }
+  // Issue #751: the user's origin rules, apart from the ledger, and the one
+  // that approves the repo we stand in.
+  let clean = crate::naming::sanitise_for_terminal;
+  if let Some(config) = crate::config::global_config_path() {
+    let origins = Config::trusted_origins_in(&config);
+    if !origins.is_empty() {
+      println!("trusted origins: {}", config.display());
+      for o in &origins {
+        println!("  {}", clean(o));
+      }
+      if let Ok(repo) = Repository::discover(std::env::current_dir()?) {
+        let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+        let key = trust::origin_key_for_repo(&repo, &workdir);
+        if let Some(rule) = trust::matching_origin_pattern(&origins, &key) {
+          println!("this repo is trusted by origin pattern {}", clean(rule));
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+fn print_ledger_entries(path: &Path, ledger: &TrustLedger) {
   println!("trust ledger: {}", path.display());
   println!(
     "  {} entr{} recorded:",
@@ -5039,7 +5077,6 @@ fn cmd_trust_list() -> Result<()> {
       ow = origin_w,
     );
   }
-  Ok(())
 }
 
 fn cmd_trust_revoke(origin: String) -> Result<()> {
@@ -5049,16 +5086,60 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
   // Echoed back rather than read from the ledger, but it lands in the same
   // terminal and costs one call (issue #473).
   let shown = crate::naming::sanitise_for_terminal(&origin);
-  if removed == 0 {
-    println!("0 entries matched origin {} (nothing to revoke).", shown);
-    return Ok(());
+  if removed > 0 {
+    ledger.save(&path)?;
+    println!(
+      "✓ revoked {} entr{} for {}",
+      removed,
+      if removed == 1 { "y" } else { "ies" },
+      shown
+    );
   }
-  ledger.save(&path)?;
+  // Issue #751: the same word takes back an origin rule, and a revoke never
+  // reports success while a rule still trusts what it named.
+  let mut rule_removed = false;
+  if let Some(config) = crate::config::global_config_path() {
+    let mut origins = Config::trusted_origins_in(&config);
+    let before = origins.len();
+    origins.retain(|o| *o != origin);
+    if origins.len() != before {
+      crate::config_cli::set_array_at(&config, "trust.origins", &origins)?;
+      println!("✓ revoked origin pattern {} (user config)", shown);
+      rule_removed = true;
+    }
+    if let Some(rule) = trust::matching_origin_pattern(&origins, &origin) {
+      return Err(GwmError::Other(format!(
+        "{} is still trusted by origin pattern {} in {}: run `gwm trust revoke '{}'` to remove that rule",
+        shown,
+        crate::naming::sanitise_for_terminal(rule),
+        config.display(),
+        crate::naming::sanitise_for_terminal(rule)
+      )));
+    }
+  }
+  if removed == 0 && !rule_removed {
+    println!("0 entries matched origin {} (nothing to revoke).", shown);
+  }
+  Ok(())
+}
+
+/// `gwm trust add --origin <pattern>` (issue #751): write the rule to the
+/// user config, the one file no clone can write to.
+fn cmd_trust_add_origin(pattern: String) -> Result<()> {
+  trust::validate_origin_pattern(&pattern)?;
+  let config = crate::config::global_config_path().ok_or_else(|| {
+    GwmError::Other(
+      "no user config to write the rule to (GWM_NO_GLOBAL_CONFIG is set, or no config dir resolves)".into(),
+    )
+  })?;
+  let mut origins = Config::trusted_origins_in(&config);
+  if !origins.contains(&pattern) {
+    origins.push(pattern.clone());
+    crate::config_cli::set_array_at(&config, "trust.origins", &origins)?;
+  }
   println!(
-    "✓ revoked {} entr{} for {}",
-    removed,
-    if removed == 1 { "y" } else { "ies" },
-    shown
+    "✓ trusted origin pattern {} (user config)",
+    crate::naming::sanitise_for_terminal(&pattern)
   );
   Ok(())
 }
@@ -5134,6 +5215,13 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 
   match trust::evaluate(workdir, &origin_key, mode)? {
     TrustOutcome::Proceed => Ok(()),
+    // Issue #751: no prompt, but a changed file is still shown once.
+    TrustOutcome::ProceedByOrigin { pattern, body } => {
+      if let Some(line) = trust::origin_change_notice(&origin_key, &pattern, &body)? {
+        eprintln!("  {}", crate::naming::sanitise_for_terminal(&line));
+      }
+      Ok(())
+    }
     TrustOutcome::Refuse { message } => Err(GwmError::Other(message)),
     TrustOutcome::Prompt {
       cfg_path,

@@ -71,6 +71,10 @@ pub const CONFIG_SECTIONS: &[&str] = &[
   // only (issue #419). Also additive; an absent table authorises nothing,
   // which is the safe default rather than a permissive one.
   "forge_hosts",
+  // `[trust] origins`: repos trusted whatever their `.gwm.toml` hash, read
+  // from the user-level config only (issue #751). Additive; absent trusts
+  // nothing beyond the ledger.
+  "trust",
   // Scalar, not a section: `merge_method = "merge" | "squash" | "rebase"`
   // (issue #551). Additive and optional, and its default is the least
   // destructive of the three, so a config written before it keeps behaving
