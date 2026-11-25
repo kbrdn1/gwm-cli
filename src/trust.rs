@@ -406,7 +406,7 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
   #[cfg(unix)]
   std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
   #[cfg(unix)]
-  let mut signals = DialSignals::install();
+  let signals = DialSignals::install();
   let mut child = cmd.spawn().ok()?;
   #[cfg(unix)]
   signals.arm(child.id());
@@ -458,21 +458,29 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
   }
 }
 
-/// The group [`announced_trunks`] is waiting on, 0 when none.
+/// The group [`announced_trunks`] is waiting on when positive; a signal that
+/// came before the group was known, negated, when negative; 0 otherwise. One
+/// atomic, so the handler and [`DialSignals::arm`] cannot both miss it.
 #[cfg(unix)]
 static DIAL_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// A Ctrl-C, a Ctrl-\, a closed pane or a `kill` reaches gwm, not the group git runs
-/// in: take that group down, then die of the signal as gwm would have.
+/// in: take that group down, then die of the signal as gwm would have. Before
+/// the spawn has returned there is no group yet: the signal is left for
+/// [`DialSignals::arm`], which does the same once it knows it.
 #[cfg(unix)]
 extern "C" fn end_dial_then_die(sig: libc::c_int) {
-  let group = DIAL_GROUP.load(std::sync::atomic::Ordering::SeqCst);
+  use std::sync::atomic::Ordering::SeqCst;
+  let group = match DIAL_GROUP.compare_exchange(0, -sig, SeqCst, SeqCst) {
+    Ok(_) => return,
+    // One already waits for `arm`, which ends gwm with it.
+    Err(waiting) if waiting < 0 => return,
+    Err(group) => group,
+  };
   // SAFETY: `kill` and `raise` are async-signal-safe, and `SA_RESETHAND` put
   // the default action back, so the raise ends gwm once this returns.
   unsafe {
-    if group > 0 {
-      libc::kill(-group, libc::SIGKILL);
-    }
+    libc::kill(-group, libc::SIGKILL);
     libc::raise(sig);
   }
 }
@@ -481,20 +489,13 @@ extern "C" fn end_dial_then_die(sig: libc::c_int) {
 /// this lives. A signal already ignored (`nohup`) stays ignored: the dial
 /// ends within its timeout anyway.
 #[cfg(unix)]
-struct DialSignals {
-  saved: Vec<(libc::c_int, libc::sigaction)>,
-  /// This thread's mask from before [`DialSignals::install`], while the
-  /// signals wait for [`DialSignals::arm`].
-  held: Option<libc::sigset_t>,
-}
+struct DialSignals(Vec<(libc::c_int, libc::sigaction)>);
 
 #[cfg(unix)]
 impl DialSignals {
-  const ENDING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
-
   fn install() -> Self {
     let mut saved = Vec::new();
-    for sig in Self::ENDING {
+    for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP] {
       // SAFETY: `sigaction` on zeroed structs, read before it is replaced.
       unsafe {
         let mut old: libc::sigaction = std::mem::zeroed();
@@ -510,33 +511,20 @@ impl DialSignals {
         }
       }
     }
-    // Held until `arm` records the group: one landing in between would find
-    // no group to take down. ponytail: this thread's mask only; a signal sent
-    // to the process can still land on another thread, if gwm ever runs one
-    // while it asks origin.
-    // SAFETY: mask calls on zeroed sets, the old mask read before it changes.
-    let held = unsafe {
-      let mut set: libc::sigset_t = std::mem::zeroed();
-      let mut old: libc::sigset_t = std::mem::zeroed();
-      libc::sigemptyset(&mut set);
-      for sig in Self::ENDING {
-        libc::sigaddset(&mut set, sig);
+    DialSignals(saved)
+  }
+
+  /// Record the group git runs in. A signal the handler left pending, while
+  /// the spawn had not returned, is acted on now: the group goes, then gwm.
+  fn arm(&self, group: u32) {
+    let pending = DIAL_GROUP.swap(group as i32, std::sync::atomic::Ordering::SeqCst);
+    if pending < 0 {
+      // SAFETY: as in the handler, whose `SA_RESETHAND` already put the
+      // default action back for that signal.
+      unsafe {
+        libc::kill(-(group as libc::pid_t), libc::SIGKILL);
+        libc::raise(-pending);
       }
-      (libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old) == 0).then_some(old)
-    };
-    DialSignals { saved, held }
-  }
-
-  /// Record the group git runs in, then let through what `install` held.
-  fn arm(&mut self, group: u32) {
-    DIAL_GROUP.store(group as i32, std::sync::atomic::Ordering::SeqCst);
-    self.release();
-  }
-
-  fn release(&mut self) {
-    if let Some(old) = self.held.take() {
-      // SAFETY: puts back the mask `install` read.
-      unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
     }
   }
 }
@@ -544,13 +532,18 @@ impl DialSignals {
 #[cfg(unix)]
 impl Drop for DialSignals {
   fn drop(&mut self) {
-    DIAL_GROUP.store(0, std::sync::atomic::Ordering::SeqCst);
-    for (sig, old) in &self.saved {
+    // Handlers first: cleared before them, the group would let the handler
+    // take a signal as pending, and nothing would act on it.
+    for (sig, old) in &self.0 {
       // SAFETY: puts back what `install` read.
       unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
     }
-    // Spawn failed: what was held now meets gwm's own handlers.
-    self.release();
+    let pending = DIAL_GROUP.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if pending < 0 {
+      // The spawn failed after a signal came: it meets gwm's own handling.
+      // SAFETY: a plain raise of a signal gwm already received.
+      unsafe { libc::raise(-pending) };
+    }
   }
 }
 
