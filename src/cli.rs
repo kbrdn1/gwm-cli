@@ -5029,11 +5029,20 @@ fn cmd_trust_list() -> Result<()> {
       for o in &origins {
         println!("  {}", clean(o));
       }
-      if let Ok(repo) = Repository::discover(std::env::current_dir()?) {
+      // The checkout the gates read, which is the main one even from a
+      // linked worktree.
+      if let Ok(repo) = worktree::discover_repo(None) {
         let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
         let key = trust::origin_key_for_repo(&repo, &workdir);
         if let Some(rule) = trust::matching_origin_pattern(&origins, &key) {
-          println!("this repo is trusted by origin pattern {}", clean(rule));
+          match std::fs::read(workdir.join(crate::config::CONFIG_FILE)) {
+            Ok(bytes) if !trust::published_on_origin(&workdir, &bytes) => println!(
+              "origin pattern {} matches this repo, but its .gwm.toml is not the one on the origin branch it tracks: \
+               the ledger decides",
+              clean(rule)
+            ),
+            _ => println!("this repo is trusted by origin pattern {}", clean(rule)),
+          }
         }
       }
     }

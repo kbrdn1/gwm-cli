@@ -131,8 +131,9 @@ pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
 // `.gwm.toml` revokes it. Right for a clone of someone else's repo; a chore
 // for your own, where a reviewed PR touching the file stalls the next
 // unattended `gwm create`. `[trust] origins` in the user's own config names
-// repos trusted whatever the file's hash. Never read from a repo's
-// `.gwm.toml`: a repo cannot vouch for itself.
+// repos trusted whatever the file's hash, as long as the file is the one
+// origin publishes on the branch the checkout tracks. Never read from a
+// repo's `.gwm.toml`: a repo cannot vouch for itself.
 
 /// `(host, path segments)` of a remote URL, parsed the way the forge gate
 /// parses `origin` (#463): host lower-cased with the documented SSH aliases
@@ -212,11 +213,76 @@ pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Opti
     .map(String::as_str)
 }
 
-/// The rule in the user's own config that trusts `origin`, if any.
-fn trusted_by_user_origin(origin: &str) -> Option<String> {
+/// The rule in the user's own config that trusts `origin` to have published
+/// `bytes`, the `.gwm.toml` of the checkout at `workdir`, if any.
+fn trusted_by_user_origin(workdir: &Path, origin: &str, bytes: &[u8]) -> Option<String> {
   let path = crate::config::global_config_path()?;
   let patterns = Config::trusted_origins_in(&path);
-  matching_origin_pattern(&patterns, origin).map(String::from)
+  let rule = matching_origin_pattern(&patterns, origin)?;
+  published_on_origin(workdir, bytes).then(|| rule.to_string())
+}
+
+/// Whether `bytes` is the `.gwm.toml` that origin publishes on the branch the
+/// checkout at `workdir` tracks.
+///
+/// A rule vouches for what origin's writers published, not for whatever the
+/// checkout holds: on a public repo, a stranger's PR checked out in the main
+/// checkout keeps the same origin URL, and only the hash stopped it before
+/// issue #751. Anything else falls back to the ledger: a detached HEAD, a
+/// branch tracking nothing, a fork's remote or a PR head ref
+/// (`gh pr checkout`), a local edit, a commit not yet pushed.
+pub fn published_on_origin(workdir: &Path, bytes: &[u8]) -> bool {
+  published_config(workdir).is_some_and(|blob| without_crlf(&blob) == without_crlf(bytes))
+}
+
+fn published_config(workdir: &Path) -> Option<Vec<u8>> {
+  let repo = git2::Repository::open(workdir).ok()?;
+  let head = repo.head().ok()?;
+  if !head.is_branch() {
+    return None;
+  }
+  let branch = head.name().ok()?;
+  // The remote's name, as the ledger key is read from it: a URL there is a
+  // remote the key does not name.
+  if repo.branch_upstream_remote(branch).ok()?.as_str().ok()? != "origin" {
+    return None;
+  }
+  let tracking = repo.branch_upstream_name(branch).ok()?;
+  let tracking = tracking.as_str().ok()?;
+  // Every fetch refspec that writes the tracking ref must read it from a
+  // branch. With GitHub's `+refs/pull/*/head:refs/remotes/origin/pr/*` added
+  // after the default one, `git checkout pr/1` records the upstream as
+  // `refs/heads/pr/1` while the ref holds a fork's head.
+  let remote = repo.find_remote("origin").ok()?;
+  let mut writers = remote
+    .refspecs()
+    .filter(|s| s.direction() == git2::Direction::Fetch && s.dst_matches(tracking))
+    .peekable();
+  writers.peek()?;
+  let from_branches = writers.all(|s| {
+    s.rtransform(tracking)
+      .ok()
+      .is_some_and(|src| src.as_str().is_ok_and(|n| n.starts_with("refs/heads/")))
+  });
+  if !from_branches {
+    return None;
+  }
+  let tree = repo.find_reference(tracking).ok()?.peel_to_tree().ok()?;
+  let entry = tree.get_path(Path::new(CONFIG_FILE)).ok()?;
+  let blob = repo.find_blob(entry.id()).ok()?;
+  Some(blob.content().to_vec())
+}
+
+/// `core.autocrlf`, the Git for Windows default, checks a LF blob out as
+/// CRLF: the same file.
+fn without_crlf(bytes: &[u8]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(bytes.len());
+  for (i, &b) in bytes.iter().enumerate() {
+    if !(b == b'\r' && bytes.get(i + 1) == Some(&b'\n')) {
+      out.push(b);
+    }
+  }
+  out
 }
 
 /// What the user last saw run under an origin rule, keyed by origin, so the
@@ -339,7 +405,8 @@ pub enum TrustOutcome {
 /// Same ledger, same `(origin, sha256)` key, same `GWM_ALLOW_BOOTSTRAP`
 /// escape hatch: approving a repo approves the whole file, and editing
 /// the file revokes that approval. Same `[trust] origins` rules too, which
-/// approve whatever the hash (issue #751). Non-interactive by construction —
+/// approve whatever the hash a file origin publishes (issue #751), so a
+/// fork's file cannot pick the host gwm sends a token to. Non-interactive by construction —
 /// [`crate::forge::resolve`] runs on the TUI's selection path, which
 /// cannot host a prompt. `gwm trust add` is how a user answers it.
 ///
@@ -367,7 +434,10 @@ pub fn config_is_trusted(workdir: &Path, origin: &str, mode: TrustMode) -> Resul
     TrustMode::Prompt => {}
   }
   let ledger_path = default_ledger_path()?;
-  Ok(TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes)) || trusted_by_user_origin(origin).is_some())
+  Ok(
+    TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes))
+      || trusted_by_user_origin(workdir, origin, &bytes).is_some(),
+  )
 }
 
 /// Record the current repo's `.gwm.toml` as trusted. Backs `gwm trust
@@ -401,7 +471,9 @@ pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option
 ///      (malformed ledger must not break the CI bypass).
 ///   5. Ledger hit on `(origin, sha)` → `Proceed`.
 ///   6. `origin` covered by a `[trust] origins` rule in the user's own
-///      config → `ProceedByOrigin`, whatever the hash (issue #751).
+///      config, and the file the one origin publishes on the tracked branch
+///      ([`published_on_origin`]) → `ProceedByOrigin`, whatever the hash
+///      (issue #751).
 ///   7. Otherwise → `Prompt` (caller decides whether to actually
 ///      prompt or refuse).
 ///
@@ -425,8 +497,9 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
 /// between, so a config could be approved as harmless and executed as
 /// something else. `None` is "no `.gwm.toml`", which is nothing to execute.
 ///
-/// `cfg_path` is carried only to name the file in the prompt and the refusal;
-/// nothing reads it.
+/// `cfg_path` names the file in the prompt and the refusal, and its directory
+/// is the checkout an origin rule asks git about; the file itself is never
+/// read again.
 pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode: TrustMode) -> Result<TrustOutcome> {
   let Some(bytes) = bytes else {
     return Ok(TrustOutcome::Proceed);
@@ -473,7 +546,8 @@ pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode:
     return Ok(TrustOutcome::Proceed);
   }
 
-  if let Some(pattern) = trusted_by_user_origin(origin) {
+  let workdir = cfg_path.parent().unwrap_or(Path::new(""));
+  if let Some(pattern) = trusted_by_user_origin(workdir, origin, bytes) {
     return Ok(TrustOutcome::ProceedByOrigin {
       pattern,
       body: bytes.to_vec(),
