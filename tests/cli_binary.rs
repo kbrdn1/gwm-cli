@@ -7662,10 +7662,20 @@ fn a_trusted_origin_that_never_answers_is_refused_within_the_timeout() {
 #[cfg(unix)]
 #[test]
 fn a_signal_that_ends_gwm_while_it_asks_origin_ends_the_ask_too() {
-  // git runs in a group of its own, out of reach of the Ctrl-C or hangup the
-  // terminal sends gwm's: gwm has to take it down on the way out, or the
-  // connection outlives the timeout with nobody left to enforce it.
+  // git runs in a group of its own, out of reach of the Ctrl-C, Ctrl-\ or
+  // hangup the terminal sends gwm's: gwm has to take it down on the way out,
+  // or the connection outlives the timeout with nobody left to enforce it.
+  // SIGINT is left out: a shell starts background jobs with it ignored, and
+  // an ignored signal stays ignored.
+  for sig in [libc::SIGTERM, libc::SIGQUIT] {
+    ends_the_ask_to_origin(sig);
+  }
+}
+
+#[cfg(unix)]
+fn ends_the_ask_to_origin(sig: libc::c_int) {
   use std::io::Read;
+  use std::os::unix::process::ExitStatusExt;
   use std::time::{Duration, Instant};
   let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
   let port = listener.local_addr().unwrap().port();
@@ -7693,8 +7703,10 @@ fn a_signal_that_ends_gwm_while_it_asks_origin_ends_the_ask_too() {
     }
   };
   // SAFETY: a plain syscall on a child this test spawned and has not reaped.
-  unsafe { libc::kill(gwm.id() as libc::pid_t, libc::SIGTERM) };
-  gwm.wait().unwrap();
+  unsafe { libc::kill(gwm.id() as libc::pid_t, sig) };
+  // Died of it, so the signal landed while gwm was still asking, not after
+  // its own timeout had already taken git down.
+  assert_eq!(gwm.wait().unwrap().signal(), Some(sig), "signal {sig}");
 
   asked.set_nonblocking(false).unwrap();
   asked.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -7708,7 +7720,7 @@ fn a_signal_that_ends_gwm_while_it_asks_origin_ends_the_ask_too() {
   };
   assert!(
     closed,
-    "the connection to origin is still open 2 s after gwm died: its git outlived it"
+    "signal {sig}: the connection to origin is still open 2 s after gwm died, its git outlived it"
   );
 }
 
@@ -7735,18 +7747,42 @@ fn a_trusted_origin_is_not_asked_through_a_git_rewrite_to_a_local_repo() {
     .stderr(predicate::str::contains("not in the trust ledger"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_repo_cannot_trust_its_own_origin() {
   // The repo's own file is the one place a trusted origin must never be
-  // read from: it ships with the clone.
-  let fx = OriginFixture::new(
-    "https://github.com/kbrdn1/demo.git",
-    &format!("{KBRDN1}\n{ONE_COMMAND}"),
-  );
+  // read from: it ships with the clone. Origin here does publish that file,
+  // through a stand-in ssh (a git variable, not a gwm one), so a rule read
+  // from it would be asked and would clear the run.
+  use std::os::unix::fs::PermissionsExt;
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", &format!("{KBRDN1}\n{ONE_COMMAND}"));
   fx.publish();
-  fx.gwm(&["bootstrap"])
+  let served = tempfile::TempDir::new().unwrap();
+  let bare = served.path().join("origin.git");
+  git2::build::RepoBuilder::new()
+    .bare(true)
+    .clone(fx.dir.path().to_str().unwrap(), &bare)
+    .unwrap();
+  let asked = served.path().join("asked");
+  let ssh = served.path().join("ssh");
+  fs::write(
+    &ssh,
+    format!(
+      "#!/bin/sh\ntouch '{}'\nexec git upload-pack '{}'\n",
+      asked.display(),
+      bare.display()
+    ),
+  )
+  .unwrap();
+  fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+
+  fx.cmd()
+    .env("GIT_SSH_COMMAND", &ssh)
+    .arg("bootstrap")
+    .assert()
     .failure()
     .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(!asked.exists(), "origin was asked on a rule the repo wrote itself");
 }
 
 #[test]

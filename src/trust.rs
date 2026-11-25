@@ -428,11 +428,14 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
       _ => break None,
     }
   };
-  #[cfg(unix)]
-  drop(signals);
   match status {
-    Some(status) if status.success() => out.map(|out| announced_in(&out)),
-    Some(_) => None,
+    Some(status) => {
+      // Reaped: the group id is no longer ours to kill.
+      #[cfg(unix)]
+      drop(signals);
+      status.success().then_some(out).flatten().map(|out| announced_in(&out))
+    }
+    // The handlers stay until the group is down, below.
     None => {
       // SAFETY: a plain syscall on the group `process_group(0)` made, whose
       // leader is not reaped yet, so the id is still ours.
@@ -459,7 +462,7 @@ fn announced_trunks(repo: &git2::Repository, workdir: &Path, origin: &str) -> Op
 #[cfg(unix)]
 static DIAL_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-/// A Ctrl-C, a closed pane or a `kill` reaches gwm, not the group git runs
+/// A Ctrl-C, a Ctrl-\, a closed pane or a `kill` reaches gwm, not the group git runs
 /// in: take that group down, then die of the signal as gwm would have.
 #[cfg(unix)]
 extern "C" fn end_dial_then_die(sig: libc::c_int) {
@@ -484,7 +487,7 @@ struct DialSignals(Vec<(libc::c_int, libc::sigaction)>);
 impl DialSignals {
   fn install() -> Self {
     let mut saved = Vec::new();
-    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+    for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP] {
       // SAFETY: `sigaction` on zeroed structs, read before it is replaced.
       unsafe {
         let mut old: libc::sigaction = std::mem::zeroed();
