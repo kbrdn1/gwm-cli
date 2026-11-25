@@ -7977,6 +7977,29 @@ fn revoking_a_pattern_another_spelling_still_covers_says_which_one() {
 }
 
 #[test]
+fn revoking_an_http_spelled_rule_another_rule_still_covers_says_which_one() {
+  // A rule is matched on host and path: its scheme narrows nothing.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins("[trust]\norigins = [\"http://github.com/kbrdn1/*\", \"https://github.com/kbrdn1/*\"]\n");
+  fx.gwm(&["trust", "revoke", "http://github.com/kbrdn1/*"])
+    .failure()
+    .stderr(predicate::str::contains(
+      "still trusted by origin pattern https://github.com/kbrdn1/*",
+    ));
+}
+
+#[test]
+fn revoking_an_origin_no_rule_could_clear_succeeds() {
+  // The gate never asks about an `http` origin, so no rule still trusts it.
+  let fx = OriginFixture::new("http://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add"]).success();
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["trust", "revoke", "http://github.com/kbrdn1/demo.git"])
+    .success()
+    .stdout(predicate::str::contains("revoked 1 entry"));
+}
+
+#[test]
 fn trust_list_names_no_rule_for_a_repo_without_a_gwm_toml() {
   let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
   fx.trust_origins(KBRDN1);

@@ -5120,10 +5120,15 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
       rule_removed = true;
     }
     // A repo, or every repo a revoked pattern named, still covered by a rule
-    // left in place: another spelling or a wider pattern.
-    if let Some(rule) = trust::matching_origin_pattern(&t.origins, &origin)
-      .or_else(|| trust::covering_origin_pattern(&t.origins, &origin))
-    {
+    // left in place: another spelling or a wider pattern. A repo is covered
+    // only as the gate covers it, so an origin it never asks about is not;
+    // a pattern is matched on host and path, whatever its scheme.
+    let pattern = rule_removed || origin.contains('*');
+    if let Some(rule) = trust::matching_origin_pattern(&t.origins, &origin).or_else(|| {
+      pattern
+        .then(|| trust::covering_origin_pattern(&t.origins, &origin))
+        .flatten()
+    }) {
       return Err(GwmError::Other(format!(
         "{} is still trusted by origin pattern {} in {}: run `gwm trust revoke '{}'` to remove that rule",
         shown,

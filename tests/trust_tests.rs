@@ -492,34 +492,6 @@ fn an_origin_pattern_must_name_its_host_and_owner() {
   }
 }
 
-/// `gwm trust revoke` fails while a rule still covers what it named, so
-/// "covered" has to mean what the gate clears: an origin the gate refuses
-/// whatever the rules say is covered by none of them.
-#[test]
-fn only_an_origin_the_gate_would_ask_about_is_covered_by_a_rule() {
-  use gwm::trust::covering_origin_pattern;
-  let rules = patterns(&["https://github.com/kbrdn1/*"]);
-  for covered in [
-    "git@github.com:kbrdn1/demo.git",
-    "https://github.com/kbrdn1/demo",
-    "git@github.com:kbrdn1/*",
-  ] {
-    assert_eq!(
-      covering_origin_pattern(&rules, covered),
-      Some(rules[0].as_str()),
-      "{covered}"
-    );
-  }
-  for refused in [
-    "http://github.com/kbrdn1/demo.git",
-    "git://github.com/kbrdn1/demo.git",
-    "https://evil.example#@github.com/kbrdn1/demo.git",
-    "http://github.com/kbrdn1/*",
-  ] {
-    assert_eq!(covering_origin_pattern(&rules, refused), None, "{refused}");
-  }
-}
-
 /// `None` is "there is no `.gwm.toml`", and it must stay that answer even
 /// when one appeared on disk after the caller looked.
 #[test]

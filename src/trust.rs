@@ -219,12 +219,8 @@ pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Opti
 /// The first pattern in `patterns` that covers every repo `pattern` covers:
 /// another spelling of it or a wider one, the `*` of `pattern` read as a
 /// literal. `gwm trust revoke '<pattern>'` must not report success while one
-/// remains. Nothing covers what the gate never asks about: a `*` stands for
-/// one segment, so `x` in its place names one of the repos `pattern` does.
+/// remains.
 pub fn covering_origin_pattern<'a>(patterns: &'a [String], pattern: &str) -> Option<&'a str> {
-  if !plain_origin(&pattern.replace('*', "x")) {
-    return None;
-  }
   let (host, segments) = pattern_parts(pattern).ok()?;
   first_covering(patterns, &host, &segments)
 }
