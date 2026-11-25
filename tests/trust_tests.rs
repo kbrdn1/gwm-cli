@@ -794,6 +794,14 @@ fn a_caller_that_cannot_dial_refuses_a_file_only_an_origin_rule_covers() {
       refusal.as_deref().is_some_and(|m| m.contains(APPROVE_VIA_BOOTSTRAP)),
       "got {refusal:?}"
     );
+    // `gwm bootstrap` clears the CLI run through the rule and writes no ledger
+    // entry, so only `gwm trust add` stops the next TUI refusal: it goes first.
+    let hint = refusal.unwrap();
+    let (add, boot) = (hint.find("`gwm trust add`"), hint.find("`gwm bootstrap`"));
+    assert!(
+      add.is_some() && boot.is_some() && add < boot,
+      "`gwm trust add` named before `gwm bootstrap`, got {hint}"
+    );
     match evaluate_bytes(&cfg, Some(ONE), SSH_ORIGIN, TrustMode::Prompt).unwrap() {
       TrustOutcome::Prompt { rule, .. } => assert_eq!(rule.as_deref(), Some("https://github.com/kbrdn1/*")),
       other => panic!("a ledger miss is a prompt naming the rule, got {other:?}"),
