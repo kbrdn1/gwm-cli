@@ -7622,6 +7622,63 @@ fn a_trusted_origin_survives_a_gwm_toml_edit_and_names_what_changed() {
 }
 
 #[test]
+fn a_trusted_origin_names_the_commands_on_its_first_run_after_the_ledger() {
+  // The issue's own sequence: a repo approved in the ledger, a rule added,
+  // then a reviewed change merged. The rule's first run has no last-seen
+  // copy to diff against, and must still name what it runs.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.publish();
+  fx.gwm(&["trust", "add"]).success();
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["bootstrap"]).success();
+
+  fs::write(fx.dir.path().join(".gwm.toml"), TWO_COMMANDS).unwrap();
+  fx.publish();
+  fx.gwm(&["bootstrap"])
+    .success()
+    .stderr(predicate::str::contains(
+      "first run from https://github.com/kbrdn1/demo.git",
+    ))
+    .stderr(predicate::str::contains("bootstrap.command[1] added"));
+}
+
+#[test]
+fn a_trusted_origin_names_removed_changed_and_cosmetic_edits() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", TWO_COMMANDS);
+  fx.trust_origins(KBRDN1).publish();
+  fx.gwm(&["bootstrap"]).success();
+
+  let edits = [
+    (ONE_COMMAND.to_string(), "bootstrap.command[1] removed"),
+    (
+      ONE_COMMAND.replace("\"true\"", "\"true \""),
+      "bootstrap.command[0] changed",
+    ),
+    (
+      format!("# reviewed\n{}", ONE_COMMAND.replace("\"true\"", "\"true \"")),
+      "no setting changed, comments or formatting only",
+    ),
+  ];
+  for (body, said) in edits {
+    fs::write(fx.dir.path().join(".gwm.toml"), body).unwrap();
+    fx.publish();
+    fx.gwm(&["bootstrap"]).success().stderr(predicate::str::contains(said));
+  }
+}
+
+#[test]
+fn a_display_cache_that_cannot_be_read_or_written_does_not_stop_a_cleared_run() {
+  // `trust-seen.toml` only decides what the change line says: the line is
+  // printed either way, and a run the rule cleared goes ahead.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  fs::create_dir_all(fx.ledger.with_file_name("trust-seen.toml")).unwrap();
+  fx.gwm(&["bootstrap"]).success().stderr(predicate::str::contains(
+    "trusted by origin https://github.com/kbrdn1/*",
+  ));
+}
+
+#[test]
 fn a_repo_cannot_trust_its_own_origin() {
   // The repo's own file is the one place a trusted origin must never be
   // read from: it ships with the clone.
@@ -7724,6 +7781,18 @@ fn revoking_a_repo_still_covered_by_an_origin_pattern_says_which_one() {
   fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/demo.git"])
     .failure()
     .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
+}
+
+#[test]
+fn revoking_a_pattern_another_spelling_still_covers_says_which_one() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins("[trust]\norigins = [\"https://github.com/kbrdn1/*\", \"git@github.com:kbrdn1/*\"]\n")
+    .publish();
+  fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/*"])
+    .failure()
+    .stderr(predicate::str::contains(
+      "still trusted by origin pattern git@github.com:kbrdn1/*",
+    ));
 }
 
 #[test]
