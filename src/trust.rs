@@ -253,12 +253,12 @@ fn published_config(workdir: &Path) -> Option<Vec<u8>> {
   // branch. With GitHub's `+refs/pull/*/head:refs/remotes/origin/pr/*` added
   // after the default one, `git checkout pr/1` records the upstream as
   // `refs/heads/pr/1` while the ref holds a fork's head.
+  // Never vacuous: origin is the upstream remote, so one of its refspecs is
+  // what named the tracking ref.
   let remote = repo.find_remote("origin").ok()?;
   let mut writers = remote
     .refspecs()
-    .filter(|s| s.direction() == git2::Direction::Fetch && s.dst_matches(tracking))
-    .peekable();
-  writers.peek()?;
+    .filter(|s| s.direction() == git2::Direction::Fetch && s.dst_matches(tracking));
   let from_branches = writers.all(|s| {
     s.rtransform(tracking)
       .ok()
