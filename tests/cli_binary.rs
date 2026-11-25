@@ -7916,9 +7916,10 @@ fn trust_add_origin_writes_the_user_config_and_revoke_takes_it_back() {
   fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/*"])
     .success()
     .stdout(predicate::str::contains("revoked origin pattern"));
-  fx.gwm(&["bootstrap"])
-    .failure()
-    .stderr(predicate::str::contains("not in the trust ledger"));
+  // Read back, not tried: a bootstrap here would refuse with the rule in
+  // place too, since this origin never answers.
+  let left = fs::read_to_string(fx.user_config()).unwrap();
+  assert!(!left.contains("kbrdn1/*"), "the rule is still there: {left}");
 }
 
 #[test]
