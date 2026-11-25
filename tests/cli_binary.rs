@@ -7747,42 +7747,108 @@ fn a_trusted_origin_is_not_asked_through_a_git_rewrite_to_a_local_repo() {
     .stderr(predicate::str::contains("not in the trust ledger"));
 }
 
+/// Origin served from a bare clone of the fixture's commits through a
+/// stand-in ssh, set with `GIT_SSH_COMMAND`: a git variable, not a gwm one,
+/// so the binary under test has no switch for it. The one origin here that
+/// answers, so a test can tell "refused" from "could not ask". It notes every
+/// time it is asked.
+#[cfg(unix)]
+struct StandIn {
+  dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl StandIn {
+  fn serve(fx: &OriginFixture) -> Self {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::TempDir::new().unwrap();
+    let bare = dir.path().join("origin.git");
+    git2::build::RepoBuilder::new()
+      .bare(true)
+      .clone(fx.dir.path().to_str().unwrap(), &bare)
+      .unwrap();
+    let ssh = dir.path().join("ssh");
+    let script = format!(
+      "#!/bin/sh\ntouch '{}'\nexec git upload-pack '{}'\n",
+      dir.path().join("asked").display(),
+      bare.display()
+    );
+    fs::write(&ssh, script).unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    StandIn { dir }
+  }
+
+  /// What a merge on origin does: origin's `main` moves to the fixture's.
+  fn take(&self, fx: &OriginFixture) {
+    let main = git2::Repository::open(fx.dir.path())
+      .unwrap()
+      .refname_to_id("refs/heads/main")
+      .unwrap();
+    let bare = git2::Repository::open(self.dir.path().join("origin.git")).unwrap();
+    let mut remote = bare.remote_anonymous(fx.dir.path().to_str().unwrap()).unwrap();
+    remote.fetch(&["+refs/heads/main:refs/heads/main"], None, None).unwrap();
+    assert_eq!(bare.refname_to_id("refs/heads/main").unwrap(), main);
+  }
+
+  fn asked(&self) -> bool {
+    self.dir.path().join("asked").exists()
+  }
+
+  fn gwm(&self, fx: &OriginFixture, args: &[&str]) -> assert_cmd::assert::Assert {
+    fx.cmd()
+      .env("GIT_SSH_COMMAND", self.dir.path().join("ssh"))
+      .write_stdin("")
+      .args(args)
+      .assert()
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rule_clears_what_origin_publishes_and_names_what_it_runs() {
+  // The cleared path, end to end and once: no prompt with stdin closed,
+  // nothing written to the ledger, and the line naming what runs.
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let origin = StandIn::serve(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
+    .success()
+    .stderr(predicate::str::contains(
+      "trusted by origin https://github.com/kbrdn1/*: first run from git@github.com:kbrdn1/demo.git",
+    ));
+  assert!(origin.asked());
+  assert!(!fx.ledger.exists(), "a rule writes nothing to the ledger");
+
+  // A reviewed change merged on origin and pulled: cleared, and shown.
+  fs::write(
+    fx.dir.path().join(".gwm.toml"),
+    format!("{ONE_COMMAND}\n[[bootstrap.command]]\nname = \"again\"\nrun = \"true\"\n"),
+  )
+  .unwrap();
+  fx.publish();
+  origin.take(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
+    .success()
+    .stderr(predicate::str::contains(".gwm.toml changed since last run"))
+    .stderr(predicate::str::contains("bootstrap.command[1] added"));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_repo_cannot_trust_its_own_origin() {
   // The repo's own file is the one place a trusted origin must never be
   // read from: it ships with the clone. Origin here does publish that file,
-  // through a stand-in ssh (a git variable, not a gwm one), so a rule read
-  // from it would be asked and would clear the run.
-  use std::os::unix::fs::PermissionsExt;
+  // so a rule read from it would be asked and would clear the run.
   let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", &format!("{KBRDN1}\n{ONE_COMMAND}"));
   fx.publish();
-  let served = tempfile::TempDir::new().unwrap();
-  let bare = served.path().join("origin.git");
-  git2::build::RepoBuilder::new()
-    .bare(true)
-    .clone(fx.dir.path().to_str().unwrap(), &bare)
-    .unwrap();
-  let asked = served.path().join("asked");
-  let ssh = served.path().join("ssh");
-  fs::write(
-    &ssh,
-    format!(
-      "#!/bin/sh\ntouch '{}'\nexec git upload-pack '{}'\n",
-      asked.display(),
-      bare.display()
-    ),
-  )
-  .unwrap();
-  fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
-
-  fx.cmd()
-    .env("GIT_SSH_COMMAND", &ssh)
-    .arg("bootstrap")
-    .assert()
+  let origin = StandIn::serve(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
     .failure()
     .stderr(predicate::str::contains("not in the trust ledger"));
-  assert!(!asked.exists(), "origin was asked on a rule the repo wrote itself");
+  assert!(!origin.asked(), "origin was asked on a rule the repo wrote itself");
 }
 
 #[test]
@@ -7794,13 +7860,18 @@ fn deny_bootstrap_wins_over_a_trusted_origin() {
     .stderr(predicate::str::contains("--deny-bootstrap"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_trusted_origin_does_not_cover_a_lookalike_host() {
-  let fx = OriginFixture::new("https://github.com.evil.io/kbrdn1/demo.git", ONE_COMMAND);
+  // Served, so a rule that matched it would be asked and would clear it.
+  let fx = OriginFixture::new("git@github.com.evil.io:kbrdn1/demo.git", ONE_COMMAND);
   fx.trust_origins(KBRDN1).publish();
-  fx.gwm(&["bootstrap"])
+  let origin = StandIn::serve(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
     .failure()
     .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(!origin.asked(), "a lookalike host was asked under the rule");
 }
 
 #[test]
