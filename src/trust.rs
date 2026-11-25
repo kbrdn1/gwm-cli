@@ -155,6 +155,15 @@ fn pattern_parts(pattern: &str) -> Result<(String, Vec<String>)> {
   if segments.iter().any(|s| s.is_empty() || s == "." || s == "..") {
     return Err(bad("has an empty or dot path segment"));
   }
+  // A pattern matches a whole path, so an owner alone names no repo: the
+  // prefix the issue asked for is spelled `owner/*`.
+  if segments.len() < 2 {
+    return Err(GwmError::Other(format!(
+      "origin pattern '{}' names no repo: write '{}/*' to trust the repos under it",
+      pattern,
+      pattern.trim_end_matches('/')
+    )));
+  }
   if segments[0].contains('*') {
     return Err(bad(
       "must name its owner: a wildcard owner trusts every repo on the host",
@@ -226,23 +235,49 @@ fn first_covering<'a>(patterns: &'a [String], host: &str, segments: &[String]) -
     .map(String::as_str)
 }
 
-/// Only the spellings the forges hand out, `https://`, `ssh://` and the
-/// scp-like `user@host:path`, in characters every client reads alike.
+/// The invariant: an origin is covered only when the host git connects to is
+/// the host gwm compared against the rule.
 ///
-/// gwm takes the host after the last `@`; curl closes the authority at the
-/// first `?` or `#`, so `https://evil.example#@github.com/…` is fetched from
-/// evil.example. `%`, `\`, a space or a second `@` open the same gap. `http`
-/// and `git` are unauthenticated, so anyone on the path serves the file, and
-/// `file` is a local path.
+/// So only the spellings the forges hand out, `https://`, `ssh://` and the
+/// scp-like `[user@]host:path`, in characters every client reads alike, with
+/// the host read the way git reads it ([`dialed_host`]) and folded the way
+/// gwm folds it. Each gap this closes was a working lookalike:
+/// `https://evil.example#@github.com/…` (curl stops at `#`),
+/// `evil.example:x@github.com:o/r` (git's scp syntax stops at the first `:`),
+/// `/tmp/x@github.com:o/r` (a `/` first makes it a local path). `http` and
+/// `git` are unauthenticated, so anyone on the path serves the file.
 fn plain_origin(origin: &str) -> bool {
   let charset = origin
     .chars()
     .all(|c| c.is_ascii_alphanumeric() || "-._~:/@".contains(c));
-  let scheme = match origin.split_once("://") {
-    Some((s, _)) => s.eq_ignore_ascii_case("https") || s.eq_ignore_ascii_case("ssh"),
-    None => true,
+  let host_of = |url: &str| origin_parts(url).map(|(host, _)| host);
+  charset
+    && origin.matches('@').count() <= 1
+    && dialed_host(origin).is_some_and(|host| host_of(&format!("https://{host}/x")) == host_of(origin))
+}
+
+/// The host git connects to for `origin`, by git's own rules, for the three
+/// shapes a rule covers; `None` for any other. The authority runs to the
+/// first `/` after `https://` or `ssh://`, and to the first `:` in scp syntax,
+/// which git only reads as such with no `/` before that `:`. A `:` in the
+/// user part or a port that is not a number is refused, not interpreted.
+fn dialed_host(origin: &str) -> Option<&str> {
+  let authority = match origin.split_once("://") {
+    Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("ssh") => {
+      rest.split_once('/')?.0
+    }
+    Some(_) => return None,
+    None => {
+      let (authority, _) = origin.split_once(':')?;
+      if authority.contains('/') {
+        return None;
+      }
+      authority
+    }
   };
-  charset && scheme && origin.matches('@').count() <= 1
+  let (user, host_port) = authority.split_once('@').unwrap_or(("", authority));
+  let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
+  (!host.is_empty() && !user.contains(':') && port.chars().all(|c| c.is_ascii_digit())).then_some(host)
 }
 
 /// The user's rule that covers `origin`, if any (issue #751).

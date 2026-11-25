@@ -5113,7 +5113,7 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
   // reports success while a rule still trusts what it named.
   let mut rule_removed = false;
   if let Some(config) = crate::config::global_config_path() {
-    let mut t = Config::trust_in(&config);
+    let mut t = Config::trust_to_edit(&config)?;
     let before = t.origins.len();
     t.origins.retain(|o| *o != origin);
     if t.origins.len() != before {
@@ -5150,7 +5150,7 @@ fn cmd_trust_add_origin(pattern: String) -> Result<()> {
       "no user config to write the rule to (GWM_NO_GLOBAL_CONFIG is set, or no config dir resolves)".into(),
     )
   })?;
-  let mut t = Config::trust_in(&config);
+  let mut t = Config::trust_to_edit(&config)?;
   if !t.origins.contains(&pattern) {
     t.origins.push(pattern.clone());
     crate::config_cli::set_array_at(&config, "trust.origins", &t.origins)?;

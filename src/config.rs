@@ -2138,6 +2138,25 @@ impl Config {
       .unwrap_or_default()
   }
 
+  /// [`Self::trust_in`] for a command about to write the table back: one
+  /// that is there but does not parse is an error rather than empty, or the
+  /// write would drop the user's own lines without a word.
+  pub fn trust_to_edit(global_path: &Path) -> Result<TrustConfig> {
+    if !global_path.exists() {
+      return Ok(TrustConfig::default());
+    }
+    match read_config_value(global_path)?.get("trust") {
+      None => Ok(TrustConfig::default()),
+      Some(table) => table.clone().try_into().map_err(|e| {
+        GwmError::Config(format!(
+          "[trust] in {} does not parse ({}): fix it by hand, gwm will not rewrite it",
+          global_path.display(),
+          e
+        ))
+      }),
+    }
+  }
+
   pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
     Self::load_layered(repo_root, global_config_path().as_deref())
   }
