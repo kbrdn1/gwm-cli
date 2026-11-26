@@ -7507,6 +7507,615 @@ fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
   run(&["bootstrap"]).success();
 }
 
+// --- trusted origins in the user config (issue #751) ----------------------
+
+/// A repo with `origin`, a `.gwm.toml` carrying one bootstrap command, an
+/// empty ledger, and a user config dir that is empty until a test writes it.
+struct OriginFixture {
+  dir: tempfile::TempDir,
+  xdg: tempfile::TempDir,
+  ledger: PathBuf,
+}
+
+impl OriginFixture {
+  fn new(origin: &str, gwm_toml: &str) -> Self {
+    let (dir, repo) = init_repo();
+    repo.remote("origin", origin).unwrap();
+    fs::write(dir.path().join(".gwm.toml"), gwm_toml).unwrap();
+    let xdg = tempfile::TempDir::new().unwrap();
+    let ledger = xdg.path().join("trust.toml");
+    OriginFixture { dir, xdg, ledger }
+  }
+
+  /// What a merge on origin followed by a pull leaves behind, without a
+  /// network: `.gwm.toml` committed on `main`, which tracks `origin/main`.
+  fn publish(&self) -> &Self {
+    self.commit_as("main", "refs/heads/main", "refs/remotes/origin/main")
+  }
+
+  /// Commit the working `.gwm.toml` on `branch`, check it out, store the
+  /// commit at `tracking` as a fetch would, and set the branch's upstream to
+  /// `merge` on origin.
+  fn commit_as(&self, branch: &str, merge: &str, tracking: &str) -> &Self {
+    let repo = git2::Repository::open(self.dir.path()).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new(".gwm.toml")).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    let refname = format!("refs/heads/{branch}");
+    let oid = repo
+      .commit(Some(&refname), &sig, &sig, "publish", &tree, &[&parent])
+      .unwrap();
+    repo.set_head(&refname).unwrap();
+    repo.reference(tracking, oid, true, "fetch").unwrap();
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str(&format!("branch.{branch}.remote"), "origin").unwrap();
+    cfg.set_str(&format!("branch.{branch}.merge"), merge).unwrap();
+    self
+  }
+
+  fn user_config(&self) -> PathBuf {
+    self.xdg.path().join("gwm").join("config.toml")
+  }
+
+  fn trust_origins(&self, body: &str) -> &Self {
+    fs::create_dir_all(self.xdg.path().join("gwm")).unwrap();
+    fs::write(self.user_config(), body).unwrap();
+    self
+  }
+
+  fn cmd(&self) -> Command {
+    Command::from_std(self.std_cmd())
+  }
+
+  /// [`Self::cmd`] for a test that has to hold the child, to signal it.
+  fn std_cmd(&self) -> std::process::Command {
+    let mut cmd = common::gwm_std();
+    cmd
+      .current_dir(self.dir.path())
+      .env("GWM_TRUST_LEDGER", &self.ledger)
+      .env("XDG_CONFIG_HOME", self.xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .env_remove("GWM_ALLOW_BOOTSTRAP");
+    cmd
+  }
+
+  fn gwm(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+    self.cmd().args(args).assert()
+  }
+}
+
+const ONE_COMMAND: &str = "[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n";
+const KBRDN1: &str = "[trust]\norigins = [\"https://github.com/kbrdn1/*\"]\n";
+
+// A rule vouches for what origin, asked over the network, publishes: never
+// for what the checkout holds, which any fetch can write. A run whose origin
+// is not there to answer meets the prompt the hash gave it before #751. The
+// cleared path, and what a rule-cleared run prints, are pinned in
+// `tests/trust_tests.rs` (`publishes`, `announced_in`, `origin_change_notice`,
+// and origin asked through a stand-in ssh). Every origin a rule covers here
+// is on 127.0.0.1, so no test reaches the network.
+
+/// A rule for repos served from this machine, the only origins these tests
+/// let gwm ask.
+const LOCAL_RULE: &str = "[trust]\norigins = [\"https://127.0.0.1/kbrdn1/*\"]\n";
+
+/// A port nothing listens on: a connection to it is refused at once.
+fn closed_port() -> u16 {
+  std::net::TcpListener::bind("127.0.0.1:0")
+    .unwrap()
+    .local_addr()
+    .unwrap()
+    .port()
+}
+
+#[test]
+fn a_trusted_origin_that_cannot_be_reached_meets_the_prompt() {
+  // The file is the one the checkout last fetched from origin's main, all a
+  // local check could see. Origin is not there to say it still publishes it.
+  let origin = format!("https://127.0.0.1:{}/kbrdn1/demo.git", closed_port());
+  let fx = OriginFixture::new(&origin, ONE_COMMAND);
+  fx.trust_origins(LOCAL_RULE).publish();
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(!fx.ledger.exists(), "a refused run must not write the ledger");
+}
+
+#[test]
+fn a_trusted_origin_that_never_answers_is_refused_within_the_timeout() {
+  // A server that takes the connection and says nothing: git alone would
+  // wait minutes, and an unattended run must not.
+  use std::sync::atomic::{AtomicBool, Ordering};
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let asked = std::sync::Arc::new(AtomicBool::new(false));
+  let seen = asked.clone();
+  std::thread::spawn(move || {
+    let mut held = Vec::new();
+    for stream in listener.incoming().flatten() {
+      seen.store(true, Ordering::SeqCst);
+      held.push(stream);
+    }
+  });
+  let fx = OriginFixture::new(&format!("https://127.0.0.1:{port}/kbrdn1/demo.git"), ONE_COMMAND);
+  fx.trust_origins(LOCAL_RULE).publish();
+
+  let started = std::time::Instant::now();
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  let took = started.elapsed();
+  assert!(
+    asked.load(Ordering::SeqCst),
+    "origin was never asked, so the refusal says nothing about the timeout"
+  );
+  let limit = gwm::trust::ASK_ORIGIN_TIMEOUT;
+  assert!(
+    took >= limit && took < limit + std::time::Duration::from_secs(10),
+    "refused after {took:?}, the timeout is {limit:?}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_signal_that_ends_gwm_while_it_asks_origin_ends_the_ask_too() {
+  // git runs in a group of its own, out of reach of the Ctrl-C, Ctrl-\ or
+  // hangup the terminal sends gwm's: gwm has to take it down on the way out,
+  // or the connection outlives the timeout with nobody left to enforce it.
+  // SIGINT is left out: a shell starts background jobs with it ignored, and
+  // an ignored signal stays ignored.
+  for sig in [libc::SIGTERM, libc::SIGQUIT] {
+    ends_the_ask_to_origin(sig);
+  }
+}
+
+#[cfg(unix)]
+fn ends_the_ask_to_origin(sig: libc::c_int) {
+  use std::io::Read;
+  use std::os::unix::process::ExitStatusExt;
+  use std::time::{Duration, Instant};
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let fx = OriginFixture::new(&format!("https://127.0.0.1:{port}/kbrdn1/demo.git"), ONE_COMMAND);
+  fx.trust_origins(LOCAL_RULE).publish();
+  let mut gwm = fx
+    .std_cmd()
+    .arg("bootstrap")
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn()
+    .unwrap();
+
+  listener.set_nonblocking(true).unwrap();
+  let deadline = Instant::now() + Duration::from_secs(10);
+  let mut asked = loop {
+    match listener.accept() {
+      Ok((stream, _)) => break stream,
+      Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+      Err(e) => {
+        let _ = gwm.kill();
+        panic!("origin was never asked: {e}");
+      }
+    }
+  };
+  // SAFETY: a plain syscall on a child this test spawned and has not reaped.
+  unsafe { libc::kill(gwm.id() as libc::pid_t, sig) };
+  // Died of it, so the signal landed while gwm was still asking, not after
+  // its own timeout had already taken git down.
+  assert_eq!(gwm.wait().unwrap().signal(), Some(sig), "signal {sig}");
+
+  asked.set_nonblocking(false).unwrap();
+  asked.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+  let mut buf = [0u8; 4096];
+  let closed = loop {
+    match asked.read(&mut buf) {
+      Ok(0) => break true,
+      Ok(_) => continue,
+      Err(e) => break e.kind() == std::io::ErrorKind::ConnectionReset,
+    }
+  };
+  assert!(
+    closed,
+    "signal {sig}: the connection to origin is still open 2 s after gwm died, its git outlived it"
+  );
+}
+
+#[test]
+fn a_trusted_origin_is_not_asked_through_a_git_rewrite_to_a_local_repo() {
+  // `url.<base>.insteadOf` sends git somewhere other than the host the rule
+  // was matched on. A local repo that does publish the file is still not
+  // origin answering.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let stand_in = tempfile::TempDir::new().unwrap();
+  git2::build::RepoBuilder::new()
+    .bare(true)
+    .clone(fx.dir.path().to_str().unwrap(), stand_in.path())
+    .unwrap();
+  let target = stand_in.path().to_str().unwrap().replace('\\', "/");
+  fx.cmd()
+    .env("GIT_CONFIG_COUNT", "1")
+    .env("GIT_CONFIG_KEY_0", format!("url.{target}.insteadOf"))
+    .env("GIT_CONFIG_VALUE_0", "https://github.com/kbrdn1/demo.git")
+    .arg("bootstrap")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+/// Origin served from a bare clone of the fixture's commits through a
+/// stand-in ssh, set with `GIT_SSH_COMMAND`: a git variable, not a gwm one,
+/// so the binary under test has no switch for it. The one origin here that
+/// answers, so a test can tell "refused" from "could not ask". It notes every
+/// time it is asked.
+#[cfg(unix)]
+struct StandIn {
+  dir: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl StandIn {
+  fn serve(fx: &OriginFixture) -> Self {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::TempDir::new().unwrap();
+    let bare = dir.path().join("origin.git");
+    git2::build::RepoBuilder::new()
+      .bare(true)
+      .clone(fx.dir.path().to_str().unwrap(), &bare)
+      .unwrap();
+    let ssh = dir.path().join("ssh");
+    let script = format!(
+      "#!/bin/sh\ntouch '{}'\nexec git upload-pack '{}'\n",
+      dir.path().join("asked").display(),
+      bare.display()
+    );
+    fs::write(&ssh, script).unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    StandIn { dir }
+  }
+
+  /// What a merge on origin does: origin's `main` moves to the fixture's.
+  fn take(&self, fx: &OriginFixture) {
+    let main = git2::Repository::open(fx.dir.path())
+      .unwrap()
+      .refname_to_id("refs/heads/main")
+      .unwrap();
+    let bare = git2::Repository::open(self.dir.path().join("origin.git")).unwrap();
+    let mut remote = bare.remote_anonymous(fx.dir.path().to_str().unwrap()).unwrap();
+    remote.fetch(&["+refs/heads/main:refs/heads/main"], None, None).unwrap();
+    assert_eq!(bare.refname_to_id("refs/heads/main").unwrap(), main);
+  }
+
+  fn asked(&self) -> bool {
+    self.dir.path().join("asked").exists()
+  }
+
+  fn gwm(&self, fx: &OriginFixture, args: &[&str]) -> assert_cmd::assert::Assert {
+    fx.cmd()
+      .env("GIT_SSH_COMMAND", self.dir.path().join("ssh"))
+      .write_stdin("")
+      .args(args)
+      .assert()
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rule_clears_what_origin_publishes_and_names_what_it_runs() {
+  // The cleared path, end to end and once: no prompt with stdin closed,
+  // nothing written to the ledger, and the line naming what runs.
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let origin = StandIn::serve(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
+    .success()
+    .stderr(predicate::str::contains(
+      "trusted by origin https://github.com/kbrdn1/*: first run from git@github.com:kbrdn1/demo.git",
+    ));
+  assert!(origin.asked());
+  assert!(!fx.ledger.exists(), "a rule writes nothing to the ledger");
+
+  // A reviewed change merged on origin and pulled: cleared, and shown.
+  fs::write(
+    fx.dir.path().join(".gwm.toml"),
+    format!("{ONE_COMMAND}\n[[bootstrap.command]]\nname = \"again\"\nrun = \"true\"\n"),
+  )
+  .unwrap();
+  fx.publish();
+  origin.take(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
+    .success()
+    .stderr(predicate::str::contains(".gwm.toml changed since last run"))
+    .stderr(predicate::str::contains("bootstrap.command[1] added"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_ask_to_origin_ignores_the_checkouts_own_git_config() {
+  // A repo-local `core.sshCommand` or `credential.helper`, from a file the
+  // repo tracks and an `include.path` pulls in, must not choose how origin
+  // is asked: only the user's own git config does.
+  use std::os::unix::fs::PermissionsExt;
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let origin = StandIn::serve(&fx);
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .config()
+    .unwrap()
+    .set_str("core.sshCommand", origin.dir.path().join("ssh").to_str().unwrap())
+    .unwrap();
+  let user = tempfile::TempDir::new().unwrap();
+  let refuse = user.path().join("ssh");
+  fs::write(&refuse, "#!/bin/sh\nexit 1\n").unwrap();
+  fs::set_permissions(&refuse, fs::Permissions::from_mode(0o755)).unwrap();
+  let gitconfig = user.path().join("gitconfig");
+  fs::write(&gitconfig, format!("[core]\n\tsshCommand = {}\n", refuse.display())).unwrap();
+
+  fx.cmd()
+    .env("GIT_CONFIG_GLOBAL", &gitconfig)
+    .env_remove("GIT_SSH_COMMAND")
+    .write_stdin("")
+    .arg("bootstrap")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(
+    !origin.asked(),
+    "origin was asked through the checkout's own ssh command"
+  );
+}
+
+#[test]
+fn the_ask_to_origin_ignores_the_checkouts_git_config_under_git_dir() {
+  // git sets GIT_DIR for the hooks it runs: a gwm started from one must still
+  // not read the repo's own git config, here a proxy it would send origin's
+  // answer through.
+  let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  proxy.set_nonblocking(true).unwrap();
+  let fx = OriginFixture::new(
+    &format!("https://127.0.0.1:{}/kbrdn1/demo.git", closed_port()),
+    ONE_COMMAND,
+  );
+  fx.trust_origins(LOCAL_RULE).publish();
+  git2::Repository::open(fx.dir.path())
+    .unwrap()
+    .config()
+    .unwrap()
+    .set_str(
+      "http.proxy",
+      &format!("http://127.0.0.1:{}", proxy.local_addr().unwrap().port()),
+    )
+    .unwrap();
+  let bootstrap = |var: &str, value: &Path| {
+    let mut cmd = fx.cmd();
+    for proxy_var in [
+      "NO_PROXY",
+      "no_proxy",
+      "HTTPS_PROXY",
+      "https_proxy",
+      "ALL_PROXY",
+      "all_proxy",
+    ] {
+      cmd.env_remove(proxy_var);
+    }
+    cmd
+      .env(var, value)
+      .write_stdin("")
+      .arg("bootstrap")
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("not in the trust ledger"));
+    assert!(
+      proxy.accept().is_err(),
+      "{var}: origin was asked through the checkout's own proxy"
+    );
+  };
+  bootstrap("GIT_DIR", &fx.dir.path().join(".git"));
+  // A temp directory inside the checkout would lead git back into it too.
+  #[cfg(unix)]
+  {
+    let inside = fx.dir.path().join("tmp");
+    fs::create_dir_all(&inside).unwrap();
+    bootstrap("TMPDIR", &inside);
+  }
+}
+
+#[test]
+fn a_repo_trust_table_of_any_shape_is_ignored() {
+  // `[trust]` is read from the user config alone; in a repo's own file it
+  // is ignored, whatever it holds, rather than failing every command.
+  let fx = OriginFixture::new(
+    "https://github.com/kbrdn1/demo.git",
+    &format!("[trust]\norigins = \"not a list\"\n\n{ONE_COMMAND}"),
+  );
+  // Gets as far as the ledger, which a config that failed to load would not.
+  fx.gwm(&["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_repo_cannot_trust_its_own_origin() {
+  // The repo's own file is the one place a trusted origin must never be
+  // read from: it ships with the clone. Origin here does publish that file,
+  // so a rule read from it would be asked and would clear the run.
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", &format!("{KBRDN1}\n{ONE_COMMAND}"));
+  fx.publish();
+  let origin = StandIn::serve(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(!origin.asked(), "origin was asked on a rule the repo wrote itself");
+}
+
+#[test]
+fn deny_bootstrap_wins_over_a_trusted_origin() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  fx.gwm(&["--deny-bootstrap", "bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("--deny-bootstrap"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_trusted_origin_does_not_cover_a_lookalike_host() {
+  // Served, so a rule that matched it would be asked and would clear it.
+  let fx = OriginFixture::new("git@github.com.evil.io:kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1).publish();
+  let origin = StandIn::serve(&fx);
+  origin
+    .gwm(&fx, &["bootstrap"])
+    .failure()
+    .stderr(predicate::str::contains("not in the trust ledger"));
+  assert!(!origin.asked(), "a lookalike host was asked under the rule");
+}
+
+#[test]
+fn a_trusted_origin_does_not_satisfy_the_forge_host_gate() {
+  // That gate runs on the TUI's selection path, which does not ask origin:
+  // the ledger alone answers it, so a rule never lets a repo's file pick the
+  // host gwm sends a token to.
+  let fx = OriginFixture::new("https://code.acme.internal/team/proj.git", "forge = \"gitlab\"\n");
+  fx.gwm(&["link", "issue", "7"]).success();
+  fx.trust_origins("[trust]\norigins = [\"https://code.acme.internal/team/*\"]\n")
+    .publish();
+  fx.gwm(&["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("trust ledger"));
+
+  fx.gwm(&["trust", "add"]).success();
+  fx.gwm(&["open", "issue", "--print-url"]).success();
+}
+
+#[test]
+fn trust_add_origin_writes_the_user_config_and_revoke_takes_it_back() {
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.publish();
+
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/kbrdn1/*"])
+    .success()
+    .stdout(predicate::str::contains(
+      "✓ trusted origin pattern https://github.com/kbrdn1/* (user config)",
+    ));
+  let written = fs::read_to_string(fx.user_config()).unwrap();
+  assert!(written.contains("https://github.com/kbrdn1/*"), "got: {written}");
+
+  // A listing does not ask origin: it names the rule and what it waits for.
+  fx.gwm(&["trust", "list"])
+    .success()
+    .stdout(predicate::str::contains("trusted origins"))
+    .stdout(predicate::str::contains(
+      "origin pattern https://github.com/kbrdn1/* matches this repo: a CLI run skips the prompt when origin, asked \
+       then, publishes its .gwm.toml on the default branch, dev or main",
+    ));
+
+  fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/*"])
+    .success()
+    .stdout(predicate::str::contains("revoked origin pattern"));
+  // Read back, not tried: a bootstrap here would refuse with the rule in
+  // place too, since this origin never answers.
+  let left = fs::read_to_string(fx.user_config()).unwrap();
+  assert!(!left.contains("kbrdn1/*"), "the rule is still there: {left}");
+}
+
+#[test]
+fn trust_add_origin_refuses_to_rewrite_a_trust_table_it_cannot_read() {
+  // Rewriting would drop the user's own line without a word.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  let mine = "[trust]\norigins = \"https://github.com/alice/*\"\n";
+  fx.trust_origins(mine);
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/bob/*"])
+    .failure()
+    .stderr(predicate::str::contains("[trust]"));
+  assert_eq!(fs::read_to_string(fx.user_config()).unwrap(), mine);
+}
+
+#[test]
+fn trust_add_origin_points_a_prefix_at_the_glob() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/kbrdn1/"])
+    .failure()
+    .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
+  assert!(!fx.user_config().exists(), "a refused pattern must not be written");
+}
+
+#[test]
+fn trust_add_origin_refuses_a_pattern_that_names_no_owner() {
+  let fx = OriginFixture::new("git@github.com:kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add", "--origin", "https://github.com/*/*"])
+    .failure()
+    .stderr(predicate::str::contains("owner"));
+  assert!(!fx.user_config().exists(), "a refused pattern must not be written");
+}
+
+#[test]
+fn revoking_a_repo_still_covered_by_an_origin_pattern_says_which_one() {
+  // Revoke has to win or say why it cannot: printing success while a rule
+  // still trusts the repo is the one outcome that is never acceptable.
+  // Taking one repo out of a rule is not offered (decision on PR #752).
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add"]).success();
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/demo.git"])
+    .failure()
+    .stderr(predicate::str::contains("https://github.com/kbrdn1/*"));
+}
+
+#[test]
+fn revoking_a_pattern_another_spelling_still_covers_says_which_one() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins("[trust]\norigins = [\"https://github.com/kbrdn1/*\", \"git@github.com:kbrdn1/*\"]\n")
+    .publish();
+  fx.gwm(&["trust", "revoke", "https://github.com/kbrdn1/*"])
+    .failure()
+    .stderr(predicate::str::contains(
+      "still trusted by origin pattern git@github.com:kbrdn1/*",
+    ));
+}
+
+#[test]
+fn revoking_an_http_spelled_rule_another_rule_still_covers_says_which_one() {
+  // A rule is matched on host and path: its scheme narrows nothing.
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins("[trust]\norigins = [\"http://github.com/kbrdn1/*\", \"https://github.com/kbrdn1/*\"]\n");
+  fx.gwm(&["trust", "revoke", "http://github.com/kbrdn1/*"])
+    .failure()
+    .stderr(predicate::str::contains(
+      "still trusted by origin pattern https://github.com/kbrdn1/*",
+    ));
+}
+
+#[test]
+fn revoking_an_origin_no_rule_could_clear_succeeds() {
+  // The gate never asks about an `http` origin, so no rule still trusts it.
+  let fx = OriginFixture::new("http://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.gwm(&["trust", "add"]).success();
+  fx.trust_origins(KBRDN1);
+  fx.gwm(&["trust", "revoke", "http://github.com/kbrdn1/demo.git"])
+    .success()
+    .stdout(predicate::str::contains("revoked 1 entry"));
+}
+
+#[test]
+fn trust_list_names_no_rule_for_a_repo_without_a_gwm_toml() {
+  let fx = OriginFixture::new("https://github.com/kbrdn1/demo.git", ONE_COMMAND);
+  fx.trust_origins(KBRDN1);
+  fs::remove_file(fx.dir.path().join(".gwm.toml")).unwrap();
+  fx.gwm(&["trust", "list"])
+    .success()
+    .stdout(predicate::str::contains("matches this repo").not());
+}
+
 // --- create --name (issue #416) -----------------------------------------
 
 #[test]

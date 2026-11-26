@@ -125,6 +125,536 @@ pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
     .to_string()
 }
 
+// ---- Trusted origins (issue #751) ----------------------------------------
+//
+// The ledger approves one `(origin, hash)` pair, so every edit to a repo's
+// `.gwm.toml` revokes it. Right for a clone of someone else's repo; a chore
+// for your own, where a reviewed PR touching the file stalls the next
+// unattended `gwm create`. `[trust] origins` in the user's own config names
+// repos trusted whatever the file's hash, as long as origin, asked by a CLI
+// run after a ledger miss, publishes that file on its default branch, `dev`
+// or `main`. Never read from a repo's `.gwm.toml`: a repo cannot vouch for
+// itself.
+
+/// `(host, path segments)` of a remote URL, parsed the way the forge gate
+/// parses `origin` (#463): host lower-cased with the documented SSH aliases
+/// folded, path without `.git`. So `https`, `ssh` and scp-like spellings of
+/// one repo agree, and a workdir key or a malformed URL is `None`.
+fn origin_parts(url: &str) -> Option<(String, Vec<String>)> {
+  let r = crate::forge::parse_remote_url(url).ok()?;
+  Some((r.host, r.path.split('/').map(String::from).collect()))
+}
+
+fn pattern_parts(pattern: &str) -> Result<(String, Vec<String>)> {
+  let bad = |why: &str| GwmError::Other(format!("origin pattern '{}' {}", pattern, why));
+  let (host, segments) = origin_parts(pattern).ok_or_else(|| bad("is not a git remote URL"))?;
+  if host.contains('*') {
+    return Err(bad(
+      "has a wildcard in its host: spell the host out, a wildcard there is how a lookalike gets in",
+    ));
+  }
+  if segments.iter().any(|s| s.is_empty() || s == "." || s == "..") {
+    return Err(bad("has an empty or dot path segment"));
+  }
+  // A pattern matches a whole path, so an owner alone names no repo: the
+  // prefix the issue asked for is spelled `owner/*`.
+  if segments.len() < 2 {
+    return Err(GwmError::Other(format!(
+      "origin pattern '{}' names no repo: write '{}/*' to trust the repos under it",
+      pattern,
+      pattern.trim_end_matches('/')
+    )));
+  }
+  if segments[0].contains('*') {
+    return Err(bad(
+      "must name its owner: a wildcard owner trusts every repo on the host",
+    ));
+  }
+  Ok((host, segments))
+}
+
+/// Refuse a pattern that could never match safely. `gwm trust add --origin`
+/// checks before writing; [`matching_origin_pattern`] skips what fails, in
+/// case the file was edited by hand.
+pub fn validate_origin_pattern(pattern: &str) -> Result<()> {
+  pattern_parts(pattern).map(|_| ())
+}
+
+/// `*` matches any run of characters inside one path segment, never a `/`.
+fn glob_segment(pattern: &str, segment: &str) -> bool {
+  let mut parts = pattern.split('*');
+  let Some(mut rest) = segment.strip_prefix(parts.next().unwrap_or("")) else {
+    return false;
+  };
+  let parts: Vec<&str> = parts.collect();
+  let Some((last, middle)) = parts.split_last() else {
+    return rest.is_empty();
+  };
+  for part in middle {
+    match rest.find(part) {
+      Some(i) => rest = &rest[i + part.len()..],
+      None => return false,
+    }
+  }
+  rest.ends_with(last)
+}
+
+/// The first pattern in `patterns` that covers `origin`, if any.
+///
+/// Host compared whole, so `github.com.evil.io` is not `github.com`; path
+/// compared segment by segment, same count, so `owner/*` covers neither a
+/// sibling owner nor a deeper path. An origin path with a dot segment
+/// matches nothing, and neither does an origin [`plain_origin`] refuses.
+pub fn matching_origin_pattern<'a>(patterns: &'a [String], origin: &str) -> Option<&'a str> {
+  if !plain_origin(origin) {
+    return None;
+  }
+  let (host, segments) = origin_parts(origin)?;
+  if segments.iter().any(|s| s.is_empty() || s == "." || s == "..") {
+    return None;
+  }
+  first_covering(patterns, &host, &segments)
+}
+
+/// The first pattern in `patterns` that covers every repo `pattern` covers:
+/// another spelling of it or a wider one, the `*` of `pattern` read as a
+/// literal. `gwm trust revoke '<pattern>'` must not report success while one
+/// remains.
+pub fn covering_origin_pattern<'a>(patterns: &'a [String], pattern: &str) -> Option<&'a str> {
+  let (host, segments) = pattern_parts(pattern).ok()?;
+  first_covering(patterns, &host, &segments)
+}
+
+fn first_covering<'a>(patterns: &'a [String], host: &str, segments: &[String]) -> Option<&'a str> {
+  patterns
+    .iter()
+    .find(|p| {
+      pattern_parts(p).is_ok_and(|(ph, ps)| {
+        ph == host && ps.len() == segments.len() && ps.iter().zip(segments).all(|(p, s)| glob_segment(p, s))
+      })
+    })
+    .map(String::as_str)
+}
+
+/// The invariant: an origin is covered only when the host git connects to is
+/// the host gwm compared against the rule.
+///
+/// So only the spellings the forges hand out, `https://`, `ssh://` and the
+/// scp-like `[user@]host:path`, in characters every client reads alike, with
+/// the host read the way git reads it ([`dialed_host`]) and folded the way
+/// gwm folds it. Each gap this closes was a working lookalike:
+/// `https://evil.example#@github.com/…` (curl stops at `#`),
+/// `evil.example:x@github.com:o/r` (git's scp syntax stops at the first `:`),
+/// `/tmp/x@github.com:o/r` (a `/` first makes it a local path). `http` and
+/// `git` are unauthenticated, so anyone on the path serves the file.
+fn plain_origin(origin: &str) -> bool {
+  let charset = origin
+    .chars()
+    .all(|c| c.is_ascii_alphanumeric() || "-._~:/@".contains(c));
+  let host_of = |url: &str| origin_parts(url).map(|(host, _)| host);
+  charset
+    && origin.matches('@').count() <= 1
+    && dialed_host(origin).is_some_and(|host| host_of(&format!("https://{host}/x")) == host_of(origin))
+}
+
+/// The host git connects to for `origin`, by git's own rules, for the three
+/// shapes a rule covers; `None` for any other. The authority runs to the
+/// first `/` after `https://` or `ssh://`, and to the first `:` in scp syntax,
+/// which git only reads as such with no `/` before that `:`. A `:` in the
+/// user part or a port that is not a number is refused, not interpreted.
+fn dialed_host(origin: &str) -> Option<&str> {
+  let authority = match origin.split_once("://") {
+    Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("ssh") => {
+      rest.split_once('/')?.0
+    }
+    Some(_) => return None,
+    None => {
+      let (authority, _) = origin.split_once(':')?;
+      if authority.contains('/') {
+        return None;
+      }
+      authority
+    }
+  };
+  let (user, host_port) = authority.split_once('@').unwrap_or(("", authority));
+  let (host, port) = host_port.split_once(':').unwrap_or((host_port, ""));
+  (!host.is_empty() && !user.contains(':') && port.chars().all(|c| c.is_ascii_digit())).then_some(host)
+}
+
+/// The user's rule that covers `origin`, if any (issue #751).
+pub fn user_origin_rule(origin: &str) -> Option<String> {
+  let path = crate::config::global_config_path()?;
+  matching_origin_pattern(&Config::trust_in(&path).origins, origin).map(String::from)
+}
+
+/// How long origin gets to answer before a rule stops applying (issue #751):
+/// past it, the run meets the prompt the hash gives it.
+pub const ASK_ORIGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether origin, asked now, publishes `bytes`, up to line endings, as the
+/// `.gwm.toml` of its default branch, `dev` or `main` (issue #751).
+///
+/// The invariant: a rule covers only bytes origin itself announces, through
+/// the host it was matched on, or wherever the user's own git config
+/// (`insteadOf`) sends that URL, which no clone can change. Nothing local
+/// proves that: any fetch writes
+/// any `refs/remotes/origin/*` name, from a refspec typed once or from a
+/// branch a fork's author named `remotes/origin/dev`. So origin is asked over
+/// the network which commits those branches point at, and the bytes must be
+/// the `.gwm.toml` of one of them, held locally: an object is named by its
+/// content, so holding it is holding what origin published. Named in advance,
+/// not the repo's `doctor.trunks`: that list lives in the file being judged.
+/// A local edit, a commit not pushed yet or a checkout behind origin falls
+/// back to the ledger. CLI only: the TUI does not dial.
+pub fn published_on_origin(workdir: &Path, origin: &str, bytes: &[u8]) -> bool {
+  if !plain_origin(origin) {
+    return false;
+  }
+  let Ok(repo) = git2::Repository::open(workdir) else {
+    return false;
+  };
+  announced_trunks(origin).is_some_and(|oids| publishes(&repo, &oids, bytes))
+}
+
+/// The decision alone: whether one of `announced`, the commits origin says
+/// its trunks point at, is a commit `repo` holds whose `.gwm.toml` is
+/// `bytes`, up to line endings. Refs play no part.
+pub fn publishes(repo: &git2::Repository, announced: &[git2::Oid], bytes: &[u8]) -> bool {
+  let want = without_crlf(bytes);
+  announced
+    .iter()
+    .any(|oid| config_at(repo, *oid).is_some_and(|blob| without_crlf(&blob) == want))
+}
+
+fn config_at(repo: &git2::Repository, oid: git2::Oid) -> Option<Vec<u8>> {
+  let tree = repo.find_commit(oid).ok()?.tree().ok()?;
+  let entry = tree.get_path(Path::new(CONFIG_FILE)).ok()?;
+  Some(repo.find_blob(entry.id()).ok()?.content().to_vec())
+}
+
+/// What origin is asked about: its default branch and the built-in trunks.
+fn asked_refs() -> Vec<String> {
+  std::iter::once("HEAD".to_string())
+    .chain(
+      crate::config::default_trunks()
+        .iter()
+        .map(|b| format!("refs/heads/{b}")),
+    )
+    .collect()
+}
+
+/// The commits a `git ls-remote` answer names for exactly the refs asked
+/// about. ls-remote matches a pattern on the tail of a name, so
+/// `refs/heads/x/refs/heads/dev` comes back too; only an exact name and a
+/// full hex id count.
+pub fn announced_in(stdout: &str) -> Vec<git2::Oid> {
+  let asked = asked_refs();
+  stdout
+    .lines()
+    .filter_map(|line| {
+      let (oid, name) = line.split_once('\t')?;
+      let full = oid.len() == 40 && oid.bytes().all(|b| b.is_ascii_hexdigit());
+      (full && asked.iter().any(|a| a == name))
+        .then(|| git2::Oid::from_str(oid).ok())
+        .flatten()
+    })
+    .collect()
+}
+
+/// Ask origin, with git so the user's own git config applies, which commits
+/// [`asked_refs`] point at. `None` unless git answers, successfully, within
+/// [`ASK_ORIGIN_TIMEOUT`].
+///
+/// Never a prompt: a rule is for runs nobody watches, an agent in a
+/// background pane, and a credential or passphrase question left unanswered
+/// would hang it. Credential helpers still run, they are how a private repo
+/// answers over https.
+fn announced_trunks(origin: &str) -> Option<Vec<git2::Oid>> {
+  use std::io::Read;
+  use std::process::{Command, Stdio};
+  use std::time::{Duration, Instant};
+
+  // The user's ssh command, kept, made unable to ask. Never the checkout's
+  // own git config, which an `include.path` to a file the repo tracks can
+  // fill: git runs outside the repo, and only the user's config is read.
+  let ssh = std::env::var("GIT_SSH_COMMAND")
+    .ok()
+    .or_else(|| git2::Config::open_default().ok()?.get_string("core.sshCommand").ok())
+    .unwrap_or_else(|| "ssh".into());
+  // The root of the temp directory's filesystem: no checkout sits above it,
+  // wherever TMPDIR points.
+  let temp = std::env::temp_dir();
+  let outside = temp.ancestors().last().unwrap_or(&temp);
+  let mut cmd = Command::new("git");
+  cmd
+    .current_dir(outside)
+    // Set for the hooks git runs: they would point git back at the checkout.
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_COMMON_DIR")
+    .args(["-c", "core.askPass=", "ls-remote", "--"])
+    .arg(origin)
+    .args(asked_refs())
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env_remove("GIT_ASKPASS")
+    .env_remove("SSH_ASKPASS")
+    .env("SSH_ASKPASS_REQUIRE", "never")
+    .env("GCM_INTERACTIVE", "never")
+    .env("GIT_SSH_COMMAND", format!("{ssh} -o BatchMode=yes"))
+    // A rewrite in the user's git config to `file::`, `ext::` or plain
+    // `http` reaches something other than the host compared: fail on it.
+    .env("GIT_ALLOW_PROTOCOL", "https:ssh")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+  // Its own group, so a tty read stops it rather than asking, and the kill
+  // below reaches `git-remote-https` or `ssh` too.
+  #[cfg(unix)]
+  std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+  #[cfg(unix)]
+  let signals = DialSignals::install();
+  let mut child = cmd.spawn().ok()?;
+  #[cfg(unix)]
+  signals.arm(child.id());
+
+  // Read on a thread: a helper still holding the pipe must not hold gwm.
+  let mut stdout = child.stdout.take()?;
+  let (tx, rx) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let mut out = String::new();
+    let _ = stdout.read_to_string(&mut out);
+    let _ = tx.send(out);
+  });
+  let deadline = Instant::now() + ASK_ORIGIN_TIMEOUT;
+  let out = rx.recv_timeout(ASK_ORIGIN_TIMEOUT).ok();
+  // No answer in time is the timeout, even if git itself has exited: a
+  // descendant still holds the pipe, and the group has to go.
+  let status = if out.is_none() {
+    None
+  } else {
+    loop {
+      match child.try_wait() {
+        Ok(Some(status)) => break Some(status),
+        Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+        _ => break None,
+      }
+    }
+  };
+  match status {
+    Some(status) => {
+      // Reaped: the group id is no longer ours to kill.
+      #[cfg(unix)]
+      drop(signals);
+      status.success().then_some(out).flatten().map(|out| announced_in(&out))
+    }
+    // The handlers stay until the group is down, below.
+    None => {
+      // SAFETY: a plain syscall on the group `process_group(0)` made, whose
+      // leader is not reaped yet, so the id is still ours.
+      #[cfg(unix)]
+      unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL)
+      };
+      // Killing git alone leaves `git-remote-https` holding gwm's own output
+      // handles, inherited, until curl gives up minutes later.
+      #[cfg(windows)]
+      let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &child.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+      let _ = child.kill();
+      let _ = child.wait();
+      None
+    }
+  }
+}
+
+/// The group [`announced_trunks`] is waiting on when positive; a signal that
+/// came before the group was known, negated, when negative; 0 otherwise. One
+/// atomic, so the handler and [`DialSignals::arm`] cannot both miss it.
+#[cfg(unix)]
+static DIAL_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// A Ctrl-C, a Ctrl-\, a closed pane or a `kill` reaches gwm, not the group git runs
+/// in: take that group down, then die of the signal as gwm would have. Before
+/// the spawn has returned there is no group yet: the signal is left for
+/// [`DialSignals::arm`], which does the same once it knows it.
+#[cfg(unix)]
+extern "C" fn end_dial_then_die(sig: libc::c_int) {
+  use std::sync::atomic::Ordering::SeqCst;
+  let group = match DIAL_GROUP.compare_exchange(0, -sig, SeqCst, SeqCst) {
+    Ok(_) => return,
+    // One already waits for `arm`, which ends gwm with it.
+    Err(waiting) if waiting < 0 => return,
+    Err(group) => group,
+  };
+  // SAFETY: `kill`, `signal` and `raise` are async-signal-safe; with the
+  // default action back, the raise ends gwm once this returns.
+  unsafe {
+    libc::kill(-group, libc::SIGKILL);
+    libc::signal(sig, libc::SIG_DFL);
+    libc::raise(sig);
+  }
+}
+
+/// [`end_dial_then_die`] on the signals that end a CLI run, for as long as
+/// this lives. A signal already ignored (`nohup`) stays ignored: the dial
+/// ends within its timeout anyway.
+#[cfg(unix)]
+struct DialSignals(Vec<(libc::c_int, libc::sigaction)>);
+
+#[cfg(unix)]
+impl DialSignals {
+  fn install() -> Self {
+    let mut saved = Vec::new();
+    for sig in [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP] {
+      // SAFETY: `sigaction` on zeroed structs, read before it is replaced.
+      unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(sig, std::ptr::null(), &mut old) != 0 || old.sa_sigaction == libc::SIG_IGN {
+          continue;
+        }
+        let mut new: libc::sigaction = std::mem::zeroed();
+        new.sa_sigaction = end_dial_then_die as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        // Not `SA_RESETHAND`: a repeat of a signal left pending for `arm`
+        // must come back here, not end gwm with git still running.
+        libc::sigemptyset(&mut new.sa_mask);
+        if libc::sigaction(sig, &new, std::ptr::null_mut()) == 0 {
+          saved.push((sig, old));
+        }
+      }
+    }
+    DialSignals(saved)
+  }
+
+  /// Record the group git runs in. A signal the handler left pending, while
+  /// the spawn had not returned, is acted on now: the group goes, then gwm.
+  fn arm(&self, group: u32) {
+    let pending = DIAL_GROUP.swap(group as i32, std::sync::atomic::Ordering::SeqCst);
+    if pending < 0 {
+      // SAFETY: as in the handler.
+      unsafe {
+        libc::kill(-(group as libc::pid_t), libc::SIGKILL);
+        libc::signal(-pending, libc::SIG_DFL);
+        libc::raise(-pending);
+      }
+    }
+  }
+}
+
+#[cfg(unix)]
+impl Drop for DialSignals {
+  fn drop(&mut self) {
+    // Handlers first: cleared before them, the group would let the handler
+    // take a signal as pending, and nothing would act on it.
+    for (sig, old) in &self.0 {
+      // SAFETY: puts back what `install` read.
+      unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
+    }
+    let pending = DIAL_GROUP.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if pending < 0 {
+      // The spawn failed after a signal came: it meets gwm's own handling.
+      // SAFETY: a plain raise of a signal gwm already received.
+      unsafe { libc::raise(-pending) };
+    }
+  }
+}
+
+/// `core.autocrlf`, the Git for Windows default, checks a LF blob out as
+/// CRLF: the same file.
+fn without_crlf(bytes: &[u8]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(bytes.len());
+  for (i, &b) in bytes.iter().enumerate() {
+    if !(b == b'\r' && bytes.get(i + 1) == Some(&b'\n')) {
+      out.push(b);
+    }
+  }
+  out
+}
+
+/// What the user last saw run under an origin rule, keyed by origin, so the
+/// next run can say what changed. Beside the ledger, never in it: a ledger
+/// entry would keep the repo trusted after the rule is removed.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SeenConfigs {
+  #[serde(default)]
+  seen: std::collections::BTreeMap<String, String>,
+}
+
+/// The one line `gwm create` prints when an origin rule, not the ledger,
+/// cleared `body`: on the first run from `origin`, and whenever the file
+/// differs from the last run, naming what changed. `None` when nothing did.
+/// Records `body` as seen. Only the CLI calls it, so a change is not marked
+/// seen by a caller that has nowhere to show it.
+pub fn origin_change_notice(origin: &str, pattern: &str, body: &[u8]) -> Result<Option<String>> {
+  let path = default_ledger_path()?.with_file_name("trust-seen.toml");
+  // A display cache, not a trust decision: unreadable means start over, and
+  // unwritable means the line repeats next run. Either way it is printed.
+  let mut seen: SeenConfigs = fs::read_to_string(&path)
+    .ok()
+    .and_then(|raw| toml::from_str(&raw).ok())
+    .unwrap_or_default();
+  let now = String::from_utf8_lossy(body).into_owned();
+  let notice = match seen.seen.get(origin) {
+    Some(before) if *before == now => return Ok(None),
+    Some(before) => format!(
+      ".gwm.toml changed since last run (trusted by origin {}): {}",
+      pattern,
+      describe_changes(before, &now)
+    ),
+    // Nothing to diff against, often a repo the ledger approved until now:
+    // name everything the rule lets run.
+    None => format!(
+      ".gwm.toml trusted by origin {}: first run from {}: {}",
+      pattern,
+      origin,
+      describe_changes("", &now)
+    ),
+  };
+  seen.seen.insert(origin.to_string(), now);
+  let _ = write_atomic(&path, &toml::to_string_pretty(&seen)?);
+  Ok(Some(notice))
+}
+
+/// `bootstrap.command[2] added, hooks.post_create[0] changed`: the settings
+/// that differ, one entry per array item rather than per field.
+fn describe_changes(before: &str, after: &str) -> String {
+  let rows = |s: &str| -> Option<std::collections::BTreeMap<String, String>> {
+    let value: toml::Value = toml::from_str(s).ok()?;
+    let mut rows = Vec::new();
+    crate::config::flatten_value("", &value, &mut rows);
+    Some(rows.into_iter().collect())
+  };
+  let (Some(old), Some(new)) = (rows(before), rows(after)) else {
+    return "the file does not parse, no per-setting diff".into();
+  };
+  let item = |k: &str| k.find(']').map_or(k, |i| &k[..=i]).to_string();
+  let has_item = |rows: &std::collections::BTreeMap<String, String>, it: &str| rows.keys().any(|k| item(k) == it);
+  let mut changes = std::collections::BTreeMap::new();
+  for key in old.keys().chain(new.keys()) {
+    if old.get(key) != new.get(key) {
+      let it = item(key);
+      let what = if !has_item(&old, &it) {
+        "added"
+      } else if !has_item(&new, &it) {
+        "removed"
+      } else {
+        "changed"
+      };
+      changes.insert(it, what);
+    }
+  }
+  if changes.is_empty() {
+    return "no setting changed, comments or formatting only".into();
+  }
+  changes
+    .iter()
+    .map(|(it, what)| format!("{} {}", it, what))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
 /// Outcome of a trust gate evaluation. The caller (CLI or TUI) decides
 /// what to do with each variant — CLI prompts on `Prompt`, TUI refuses
 /// with a helpful message because the alternate-screen mode can't host
@@ -143,11 +673,18 @@ pub enum TrustOutcome {
   /// caller records into `ledger`, then saves to `ledger_path`. The
   /// `body` and `sha` are passed back so the prompt can display a
   /// summary without re-reading the file.
+  ///
+  /// `rule` is the `[trust] origins` pattern in the user's config that
+  /// covers `origin` (issue #751). It clears the run only once origin, asked
+  /// over the network, is seen publishing `body` ([`published_on_origin`]),
+  /// which only the CLI does; a caller that cannot dial refuses as for any
+  /// other prompt.
   Prompt {
     cfg_path: PathBuf,
     body: Vec<u8>,
     sha: String,
     origin: String,
+    rule: Option<String>,
     ledger: TrustLedger,
     ledger_path: PathBuf,
   },
@@ -167,7 +704,9 @@ pub enum TrustOutcome {
 /// escape hatch: approving a repo approves the whole file, and editing
 /// the file revokes that approval. Non-interactive by construction —
 /// [`crate::forge::resolve`] runs on the TUI's selection path, which
-/// cannot host a prompt. `gwm trust add` is how a user answers it.
+/// cannot host a prompt. `gwm trust add` is how a user answers it. Not the
+/// `[trust] origins` rules (issue #751): one clears a file only once origin,
+/// asked over the network, publishes it, and that path does not dial.
 ///
 /// No `.gwm.toml` at all is `false`, and the distinction matters.
 ///
@@ -227,7 +766,10 @@ pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option
 ///      (malformed ledger must not break the CI bypass).
 ///   5. Ledger hit on `(origin, sha)` → `Proceed`.
 ///   6. Otherwise → `Prompt` (caller decides whether to actually
-///      prompt or refuse).
+///      prompt or refuse), naming the `[trust] origins` rule in the user's
+///      own config that covers `origin`, if any (issue #751). Only the CLI
+///      acts on it, and only after this ledger miss: it asks origin
+///      ([`published_on_origin`]), the one network call the gate makes.
 ///
 /// This is the single source of truth shared by `cli::trust_or_prompt`
 /// and the TUI gate — keeps the security policy in one place.
@@ -302,16 +844,19 @@ pub fn evaluate_bytes(cfg_path: &Path, bytes: Option<&[u8]>, origin: &str, mode:
     body: bytes.to_vec(),
     sha,
     origin: origin.to_string(),
+    rule: user_origin_rule(origin),
     ledger,
     ledger_path,
   })
 }
 
-/// How a caller that cannot prompt tells the user to grant trust. The two
-/// variants differ only in which command re-runs the operation through the
-/// CLI gate.
-pub const APPROVE_VIA_BOOTSTRAP: &str = "run `gwm bootstrap` from a CLI in another terminal to approve, \
-   or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
+/// How a caller that cannot prompt tells the user to grant trust. Both name
+/// `gwm trust add` first: it is what clears the TUI next time, while a
+/// `gwm bootstrap` that an origin rule clears writes no ledger entry. The TUI
+/// judges the main checkout's `.gwm.toml`, and `gwm trust add` approves the
+/// file of the checkout it runs in, so the hint says which one.
+pub const APPROVE_VIA_BOOTSTRAP: &str = "run `gwm trust add` in the repo's main checkout, from a CLI in another \
+   terminal, to approve, or `gwm bootstrap` there, or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
 pub const APPROVE_VIA_TRUST_ADD: &str = "run `gwm trust add` from a CLI in another terminal to approve, \
    or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap";
 
@@ -345,6 +890,7 @@ fn refusal_for(outcome: TrustOutcome, approve_hint: &str) -> Option<String> {
   match outcome {
     TrustOutcome::Proceed => None,
     TrustOutcome::Refuse { message } => Some(message),
+    // An origin rule's `rule` too: clearing it means dialing origin.
     TrustOutcome::Prompt { cfg_path, sha, .. } => {
       let short_sha: String = sha.chars().take(12).collect();
       Some(format!(
@@ -421,26 +967,7 @@ impl TrustLedger {
   /// first ever write on a fresh machine succeeds without the user
   /// having to create `~/.config/gwm/` manually.
   pub fn save(&self, path: &Path) -> Result<()> {
-    let parent = match path.parent() {
-      Some(p) if !p.as_os_str().is_empty() => {
-        fs::create_dir_all(p)?;
-        p.to_path_buf()
-      }
-      // No parent (e.g. relative `trust.toml` in CWD) or empty
-      // parent → write the tmp file in `.`.
-      _ => PathBuf::from("."),
-    };
-    let body = toml::to_string_pretty(self)?;
-    let mut tmp = Builder::new()
-      .prefix("gwm-trust-")
-      .suffix(".tmp")
-      .tempfile_in(&parent)?;
-    tmp.write_all(body.as_bytes())?;
-    // `persist` does the atomic rename and consumes the handle so
-    // the tempfile crate's drop-cleanup is short-circuited — no
-    // sidecar `.tmp` survives a successful save.
-    tmp.persist(path).map_err(|e| GwmError::Io(e.error))?;
-    Ok(())
+    write_atomic(path, &toml::to_string_pretty(self)?)
   }
 
   /// Returns true iff there is an entry with both `origin` AND
@@ -489,6 +1016,30 @@ impl TrustLedger {
     self.entries.retain(|e| e.origin != origin);
     before - self.entries.len()
   }
+}
+
+/// The write behind [`TrustLedger::save`], shared with the origin-rule
+/// snapshots in [`origin_change_notice`].
+fn write_atomic(path: &Path, body: &str) -> Result<()> {
+  let parent = match path.parent() {
+    Some(p) if !p.as_os_str().is_empty() => {
+      fs::create_dir_all(p)?;
+      p.to_path_buf()
+    }
+    // No parent (e.g. relative `trust.toml` in CWD) or empty
+    // parent → write the tmp file in `.`.
+    _ => PathBuf::from("."),
+  };
+  let mut tmp = Builder::new()
+    .prefix("gwm-trust-")
+    .suffix(".tmp")
+    .tempfile_in(&parent)?;
+  tmp.write_all(body.as_bytes())?;
+  // `persist` does the atomic rename and consumes the handle so
+  // the tempfile crate's drop-cleanup is short-circuited — no
+  // sidecar `.tmp` survives a successful save.
+  tmp.persist(path).map_err(|e| GwmError::Io(e.error))?;
+  Ok(())
 }
 
 /// SHA-256 of the raw bytes of `.gwm.toml`, lowercase hex. Whitespace-

@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 🔐 **Trusted origins in the user config**
+  ([#751](https://github.com/kbrdn1/gwm-cli/issues/751)). The ledger approves
+  one `(origin, hash)` pair, so a reviewed PR touching your own repo's
+  `.gwm.toml` stalled the next unattended `gwm create` until someone ran
+  `gwm trust add` again. `[trust] origins` in `~/.config/gwm/config.toml`, or
+  `gwm trust add --origin 'https://github.com/<you>/*'`, now trusts those repos
+  whatever the hash, as long as origin, asked by the CLI with
+  `git ls-remote` after a ledger miss, publishes that `.gwm.toml` on its
+  default branch, `dev` or `main`: a stranger's PR checked out in the main
+  checkout, a fork head fetched under an `origin/` name, a local edit, an
+  unpushed commit or an unreachable origin still meets the ledger and its
+  prompt. The call never prompts and gives origin 5 seconds. The TUI and the
+  forge host gate do not ask origin and keep to the ledger; the TUI's refusal
+  now names `gwm trust add` first, the command that clears it. Read from the
+  user config only, never from a repo's own file; matched on the parsed host
+  and path, so `https`, `ssh` and `git@` spellings agree and a lookalike host
+  does not, nor an `http`, `git` or `file` origin; `*` stays inside one path
+  segment, and a wildcard host or owner is refused. The ledger still comes
+  first, `--deny-bootstrap` still refuses, and `gwm trust revoke` removes a
+  rule or fails naming the one that still covers the origin. A changed file
+  is still shown: one line on stderr names the settings that changed since
+  the last run.
+
 ### Security
 
 - ⬆️ Bumped `libz-sys` `1.1.31` → `1.1.33` to clear

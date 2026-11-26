@@ -46,6 +46,13 @@ pub struct Config {
   /// ```
   #[serde(default)]
   pub forge_hosts: BTreeMap<String, crate::forge::ForgeKind>,
+  /// `[trust]`: repos the user trusts whatever their `.gwm.toml` hash, as
+  /// long as origin publishes that file (issue #751). Accepted here, in any
+  /// shape, and left empty: [`Config::trust_in`] reads it from the
+  /// **user-level** file alone, so a repo's own table is ignored rather than
+  /// failing the load.
+  #[serde(default, deserialize_with = "ignored_trust")]
+  pub trust: TrustConfig,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]
@@ -118,6 +125,27 @@ pub struct Config {
   /// replaces the built-ins, never adds to them.
   #[serde(default)]
   pub clean: CleanConfig,
+}
+
+/// `[trust]`: origin rules that satisfy the trust gate whatever the hash
+/// of a repo's `.gwm.toml` (issue #751).
+///
+/// ```toml
+/// [trust]
+/// origins = ["https://github.com/kbrdn1/*"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustConfig {
+  /// Remote URLs, `*` matching inside one path segment. Matched on the
+  /// parsed host and path, so `https`, `ssh` and `git@` spellings agree.
+  #[serde(default)]
+  pub origins: Vec<String>,
+}
+
+/// [`Config::trust`] from a merged config: whatever the table holds, empty.
+fn ignored_trust<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<TrustConfig, D::Error> {
+  serde::de::IgnoredAny::deserialize(d).map(|_| TrustConfig::default())
 }
 
 /// `[exec]` — named command profiles for `gwm exec` (issue #324).
@@ -589,7 +617,9 @@ impl Default for DoctorConfig {
   }
 }
 
-fn default_trunks() -> Vec<String> {
+/// Also the trunks an origin rule reads `.gwm.toml` from (issue #751), as
+/// built in: the repo's own `doctor.trunks` lives in the file being judged.
+pub(crate) fn default_trunks() -> Vec<String> {
   vec!["dev".into(), "main".into()]
 }
 
@@ -2101,6 +2131,37 @@ impl Config {
       .iter()
       .find(|(k, _)| k.eq_ignore_ascii_case(host))
       .and_then(|(_, v)| v.clone().try_into().ok())
+  }
+
+  /// `[trust]` from the user-level config file at `global_path` alone
+  /// (issue #751), for the reason [`Self::global_forge_host`] gives: the
+  /// merged config lets the repo's `.gwm.toml` win, and a repo must not be
+  /// able to trust itself. Read as one table: unreadable or malformed, or
+  /// carrying a key gwm does not know, is no rule, which fails closed.
+  pub fn trust_in(global_path: &Path) -> TrustConfig {
+    read_config_value(global_path)
+      .ok()
+      .and_then(|v| v.get("trust")?.clone().try_into().ok())
+      .unwrap_or_default()
+  }
+
+  /// [`Self::trust_in`] for a command about to write the table back: one
+  /// that is there but does not parse is an error rather than empty, or the
+  /// write would drop the user's own lines without a word.
+  pub fn trust_to_edit(global_path: &Path) -> Result<TrustConfig> {
+    if !global_path.exists() {
+      return Ok(TrustConfig::default());
+    }
+    match read_config_value(global_path)?.get("trust") {
+      None => Ok(TrustConfig::default()),
+      Some(table) => table.clone().try_into().map_err(|e| {
+        GwmError::Config(format!(
+          "[trust] in {} does not parse ({}): fix it by hand, gwm will not rewrite it",
+          global_path.display(),
+          e
+        ))
+      }),
+    }
   }
 
   pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
