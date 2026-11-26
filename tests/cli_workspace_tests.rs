@@ -1,7 +1,8 @@
 //! End-to-end tests for workspace mode on the CLI (issue #36): the
 //! `--workspace <dir>` global flag and the merged `gwm list` table.
 
-use assert_cmd::Command;
+mod common;
+
 use git2::{Repository, Signature};
 use predicates::prelude::*;
 use std::fs;
@@ -34,7 +35,7 @@ fn workspace_root() -> TempDir {
 #[test]
 fn list_workspace_prints_repo_column_and_every_repo() {
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .args(["list", "--workspace"])
     .arg(root.path())
@@ -56,7 +57,7 @@ fn workspace_flag_is_global_before_the_subcommand() {
   // `gwm --workspace <root> list` parses identically to `gwm list
   // --workspace <root>` because the flag is `global = true`.
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .arg("--workspace")
     .arg(root.path())
@@ -71,7 +72,7 @@ fn workspace_flag_is_global_before_the_subcommand() {
 fn list_workspace_missing_root_fails() {
   let root = TempDir::new().unwrap();
   let missing = root.path().join("nope");
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(["list", "--workspace"]).arg(&missing).assert().failure();
 }
 
@@ -79,7 +80,7 @@ fn list_workspace_missing_root_fails() {
 fn list_workspace_empty_root_reports_no_repos() {
   let root = TempDir::new().unwrap();
   fs::create_dir_all(root.path().join("plain")).unwrap();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .args(["list", "--workspace"])
     .arg(root.path())
@@ -101,7 +102,7 @@ fn write_min_config(repo_root: &Path, base: &Path) {
 #[test]
 fn create_in_workspace_without_repo_flag_fails() {
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .arg("--workspace")
     .arg(root.path())
@@ -117,7 +118,7 @@ fn create_in_workspace_targets_the_named_repo() {
   let base = TempDir::new().unwrap();
   write_min_config(&root.path().join("alpha"), base.path());
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .arg("--workspace")
     .arg(root.path())
@@ -216,8 +217,7 @@ fn create_from_issue_in_workspace_targets_the_named_repo() {
     r#"{"number":594,"title":"[Feature]: modal layout","state":"OPEN","url":"https://github.com/kbrdn1/gwm-cli/issues/594","labels":[{"name":"feature"}],"updatedAt":"2026-08-29T00:00:00Z"}"#,
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .arg("--workspace")
     .arg(root.path())
     .env("GWM_GH", &fake_gh)
@@ -246,7 +246,7 @@ fn create_from_issue_in_workspace_targets_the_named_repo() {
 #[test]
 fn create_in_workspace_with_unknown_repo_lists_available() {
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .arg("--workspace")
     .arg(root.path())
@@ -263,7 +263,7 @@ fn workspace_flag_rejected_on_unsupported_subcommand() {
   // implements it for `list`/`create`/TUI. It must be rejected rather than
   // silently acting on the current repo — a wrong-target footgun (#303 P2).
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .arg("--workspace")
     .arg(root.path())
@@ -280,7 +280,7 @@ fn bare_gwm_in_workspace_root_declines_autodetect_without_a_tty() {
   // NotInGitRepo because the workspace root is not itself a repo. This proves
   // bare `gwm` never blocks on an unanswerable prompt in a pipe / CI.
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .current_dir(root.path())
     .assert()
@@ -293,7 +293,7 @@ fn list_workspace_names_format_lists_worktrees_per_repo() {
   // `--format names` in workspace mode qualifies each worktree with its repo
   // (`<repo>/<name>`) so a shell-completion candidate is unambiguous.
   let root = workspace_root();
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd
     .args(["list", "--workspace"])
     .arg(root.path())
@@ -318,8 +318,7 @@ fn workspace_json_reads_each_note_from_its_own_repo(/* issue #515 */) {
     fs::write(notes.join("main.md"), body).unwrap();
   }
 
-  let out = Command::cargo_bin("gwm")
-    .unwrap()
+  let out = common::gwm()
     .args(["list", "--format=json", "--workspace"])
     .arg(root.path())
     .assert()
@@ -369,7 +368,7 @@ fn exec_workspace_mounts_each_repos_own_gitdir() {
       .unwrap();
   }
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   let out = cmd
     .args(["exec", "--workspace"])
     .arg(root.path())
@@ -417,7 +416,7 @@ fn exec_refuses_an_unmountable_worktree_before_running_any_other() {
   repo.worktree("aaa", &worktrees.path().join("aaa"), None).unwrap();
   repo.worktree("zzz", &worktrees.path().join("zz:z"), None).unwrap();
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   let out = cmd
     .current_dir(&repo_path)
     .args(["exec", "--profile", "ci"])
@@ -456,7 +455,7 @@ fn exec_workspace_refuses_an_unmountable_worktree_before_any_repo_runs() {
     repo.worktree(&format!("{name}-wt"), &dir, None).unwrap();
   }
 
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   let out = cmd
     .args(["exec", "--workspace"])
     .arg(root.path())

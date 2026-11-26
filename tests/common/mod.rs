@@ -133,6 +133,60 @@ pub fn yaml_doc(path: &str, text: &str) -> YamlOwned {
   docs.remove(0)
 }
 
+thread_local! {
+  /// One scratch directory per test: libtest runs each test on a thread of
+  /// its own, nextest in a process of its own. Removed when that thread ends.
+  static STATE: TempDir = tempfile::Builder::new()
+    .prefix("gwm-test-state-")
+    .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+    .expect("the per-test gwm state directory is creatable");
+}
+
+/// The scratch directory the current test's `gwm` runs keep their state in.
+#[allow(dead_code)] // unused by the suites that never spawn the binary.
+pub fn state_dir() -> std::path::PathBuf {
+  STATE.with(|dir| dir.path().to_path_buf())
+}
+
+/// The `gwm` binary under test, as a `std::process::Command`, for a caller
+/// that reads the command back (`get_envs`).
+///
+/// The user-level files gwm reads or writes point at the test's scratch
+/// directory, the recipe the consumer docs give third-party suites
+/// (`docs/5.integrations/4.daemon-consumers.md`): the undo journal, the trust
+/// ledger, the global config and `aliases.toml`, the agent-session scan. CI
+/// already sets `GWM_NO_GLOBAL_CONFIG`; a contributor's machine did not, so
+/// the suite read their global config and wrote their journal (#724).
+///
+/// `HOME` moves the default `[worktree] base`, `{home}/cc-worktree/{repo}`,
+/// for a test that pins none. ponytail: `dirs::home_dir()` ignores `$HOME` on
+/// Windows, so there a test still has to pin its base; a `GWM_*` override of
+/// the base in gwm itself would close that.
+///
+/// A test sets its own value after this one to override it, or calls
+/// `env_remove` when the unset path is the subject.
+#[allow(dead_code)] // unused by the suites that never spawn the binary.
+pub fn gwm_std() -> std::process::Command {
+  let state = state_dir();
+  let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_gwm"));
+  cmd
+    .env("GWM_HISTORY_FILE", state.join("history.toml"))
+    .env("GWM_TRUST_LEDGER", state.join("trust.toml"))
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .env("XDG_CONFIG_HOME", state.join("config"))
+    .env("XDG_DATA_HOME", state.join("data"))
+    .env("GWM_AGENTS_HOME", state.join("agents"))
+    .env("HOME", &state);
+  cmd
+}
+
+/// The `gwm` binary under test. Every test spawns it through here (issue
+/// #724).
+#[allow(dead_code)] // unused by the suites that never spawn the binary.
+pub fn gwm() -> assert_cmd::Command {
+  assert_cmd::Command::from_std(gwm_std())
+}
+
 /// Initialize a tempdir with a fresh git repo on `main` carrying one empty
 /// commit. Returns the tempdir (kept alive by the caller) and the repo handle.
 #[allow(dead_code)] // unused by capture_pipeline_tests; cargo compiles common per-test crate.

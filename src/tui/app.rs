@@ -1266,7 +1266,7 @@ impl App {
   ///   configs and `TrustMode::Deny` both land here — the TUI
   ///   alternate-screen can't host a stdin prompt today, so we
   ///   refuse with a hint pointing the user at the CLI gate
-  ///   (`gwm bootstrap` from another terminal).
+  ///   (`gwm trust add` from another terminal, `gwm bootstrap` second).
   /// * `Err(e)` — ledger I/O / config read error propagated verbatim.
   pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
     let origin = crate::trust::origin_key_for_repo(&self.repo, &self.workdir);

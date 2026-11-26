@@ -4,9 +4,19 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there. This file is the map, not the spec.
 
-## Current state: v1.11.0 stable
+## Current state: v1.11.1 stable
 
-The current **stable** line is **v1.11.0** (2026-10-26), a design line from
+The current **stable** line is **v1.11.1** (2026-11-12), a fix and security
+patch on top of the v1.11.0 line below, with no new feature, key or setting.
+The undo journal no longer evicts a real entry while entries for repos that no
+longer exist remain, and one repo can no longer flush another's history
+([#713](https://github.com/kbrdn1/gwm-cli/issues/713)). Three RustSec advisories
+published at the end of October are cleared by `libz-sys` 1.1.31, `rusqlite`
+0.41.1 ([#720](https://github.com/kbrdn1/gwm-cli/issues/720), bundled SQLite 3.54.1) and
+`rustix` 1.1.6, and gwm's own test suite stops writing the contributor's real
+undo journal ([#724](https://github.com/kbrdn1/gwm-cli/issues/724)).
+
+**v1.11.0** (2026-10-26) is a design line from
 daily use and an audit of the guards themselves. In `--workspace` mode each
 repo is now an accordion headed by its main worktree, folded with `Left` and
 unfolded with `Right`. The Working Tree listing reads as columns, the Settings
@@ -131,10 +141,12 @@ bounded `--jobs`, and `--workspace` fan-out ([#324](https://github.com/kbrdn1/gw
 overlays ([#325](https://github.com/kbrdn1/gwm-cli/issues/325)). See the
 [Shipped highlights](#shipped-highlights) table for the per-issue breakdown and
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes. The
-MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys`, which
-declares no floor of its own; MSRV bumps ride a minor per the stability
-policy). It is held by a CI job that installs the declared floor and both
-resolves and compiles the committed lockfile against it on all three runners
+MSRV is **1.95** (raised by `rusqlite`'s bundled `libsqlite3-sys` 0.38.1, which
+declared no floor of its own, and kept there since
+[#722](https://github.com/kbrdn1/gwm-cli/issues/722) although the graph, as
+measured on macOS, needs less; MSRV bumps ride a minor per the stability policy). It is held by
+a CI job that installs the declared floor and both resolves and compiles the
+committed lockfile against it on all three runners
 ([#491](https://github.com/kbrdn1/gwm-cli/issues/491) ✅), because the previous
 setup let `Cargo.toml` claim 1.86 for a whole release line while the graph
 needed more, silently.

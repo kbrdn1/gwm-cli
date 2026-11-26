@@ -20,7 +20,7 @@
 //! `tests/cli_binary.rs::trust_*` for the end-to-end coverage.
 
 use gwm::trust::{hash_config, TrustLedger};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
 /// Process-global lock guarding every test that mutates `std::env`.
@@ -314,6 +314,184 @@ fn an_empty_surface_in_the_handed_bytes_proceeds_whatever_the_file_says() {
   );
 }
 
+// ---- Trusted origin patterns (issue #751) -------------------------------
+
+fn patterns(p: &[&str]) -> Vec<String> {
+  p.iter().map(|s| s.to_string()).collect()
+}
+
+/// The `https`, `ssh` and scp-like spellings of one repo are one repo: the
+/// pattern is compared on the same `host` + `path` the forge gate parses
+/// (#463), so the form a clone happened to use does not matter.
+#[test]
+fn an_origin_pattern_covers_every_spelling_of_the_same_repo() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "https://github.com/kbrdn1/gwm-cli.git",
+    "https://github.com/kbrdn1/gwm-cli",
+    "ssh://git@github.com/kbrdn1/gwm-cli.git",
+    "git@github.com:kbrdn1/gwm-cli.git",
+    // The documented port-443 SSH endpoint is the same instance.
+    "ssh://git@ssh.github.com:443/kbrdn1/gwm-cli.git",
+    // DNS is case-insensitive.
+    "https://GitHub.COM/kbrdn1/gwm-cli",
+  ] {
+    assert_eq!(
+      matching_origin_pattern(&pats, origin),
+      Some("https://github.com/kbrdn1/*"),
+      "{origin} is kbrdn1/gwm-cli on github.com"
+    );
+  }
+}
+
+/// A host that merely contains, ends with or starts with the trusted one is
+/// someone else's server.
+#[test]
+fn an_origin_pattern_does_not_cover_a_lookalike_host() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*", "git@github.com:kbrdn1/*"]);
+  for origin in [
+    "https://github.com.evil.io/kbrdn1/gwm-cli.git",
+    "https://evilgithub.com/kbrdn1/gwm-cli.git",
+    "https://github.co/kbrdn1/gwm-cli.git",
+    // Userinfo is not the host: this one is evil.io.
+    "https://github.com@evil.io/kbrdn1/gwm-cli.git",
+    "git@evil.io:github.com/kbrdn1/gwm-cli.git",
+    // A trailing dot is a different spelling; fail closed.
+    "https://github.com./kbrdn1/gwm-cli.git",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+}
+
+#[test]
+fn an_origin_pattern_does_not_cover_an_origin_a_client_reads_elsewhere() {
+  // gwm takes the host after the last `@`; curl closes the authority at the
+  // first `?` or `#`, so these are fetched from evil.example.
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "https://evil.example#@github.com/kbrdn1/demo.git",
+    "https://evil.example?@github.com/kbrdn1/demo.git",
+    "https://a@evil.example@github.com/kbrdn1/demo.git",
+    "https://evil.example\\@github.com/kbrdn1/demo.git",
+    "https://evil.example @github.com/kbrdn1/demo.git",
+    // git reads scp syntax up to the first `:`: these dial evil.example.
+    "evil.example:x@github.com:kbrdn1/demo",
+    "ssh://evil.example:x@github.com/kbrdn1/demo.git",
+    // A `/` before the first `:` makes it a local path to git.
+    "/tmp/x@github.com:kbrdn1/demo",
+    "./x@github.com:kbrdn1/demo",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+}
+
+#[test]
+fn an_origin_pattern_covers_only_https_ssh_and_scp_origins() {
+  // `http` and `git` are unauthenticated: anyone on the path serves the file.
+  // `file` is a local path, which no rule may cover.
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "http://github.com/kbrdn1/demo.git",
+    "git://github.com/kbrdn1/demo.git",
+    "file://github.com/kbrdn1/demo.git",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+  for origin in [
+    "https://github.com/kbrdn1/demo.git",
+    "https://kbrdn1@github.com/kbrdn1/demo.git",
+    "ssh://git@github.com/kbrdn1/demo.git",
+    "ssh://git@ssh.github.com:443/kbrdn1/demo.git",
+    "git@github.com:kbrdn1/demo.git",
+    "github.com:kbrdn1/demo.git",
+  ] {
+    assert!(matching_origin_pattern(&pats, origin).is_some(), "{origin} must match");
+  }
+}
+
+#[test]
+fn an_origin_pattern_does_not_cover_another_owner_or_a_deeper_path() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in [
+    "https://github.com/kbrdn1-evil/gwm-cli.git",
+    "https://github.com/attacker/kbrdn1.git",
+    // `*` stays inside one path segment.
+    "https://github.com/kbrdn1/group/proj.git",
+    // Dot segments resolve elsewhere once a client normalises the URL.
+    "https://github.com/kbrdn1/..",
+    "https://github.com/kbrdn1/../attacker",
+    // An encoded separator is not a repo name.
+    "https://github.com/kbrdn1/..%2Fattacker",
+  ] {
+    assert_eq!(matching_origin_pattern(&pats, origin), None, "{origin} must not match");
+  }
+}
+
+/// A repo with no `origin` is keyed on its workdir path, and a path is not a
+/// remote any pattern can name.
+#[test]
+fn an_origin_pattern_never_covers_a_local_path_key() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["https://github.com/kbrdn1/*"]);
+  for origin in ["/Users/kbrdn1/Projects/gwm-cli", "C:\\Users\\kbrdn1\\gwm-cli", ""] {
+    assert_eq!(
+      matching_origin_pattern(&pats, origin),
+      None,
+      "{origin:?} must not match"
+    );
+  }
+}
+
+#[test]
+fn an_exact_origin_pattern_covers_that_repo_only() {
+  use gwm::trust::matching_origin_pattern;
+  let pats = patterns(&["git@github.com:kbrdn1/gwm-cli.git"]);
+  assert!(matching_origin_pattern(&pats, "https://github.com/kbrdn1/gwm-cli").is_some());
+  assert!(matching_origin_pattern(&pats, "https://github.com/kbrdn1/gwm-cli2").is_none());
+}
+
+/// A wildcard in the host is how a lookalike would get in, and a wildcard
+/// owner trusts a whole forge, which is `GWM_ALLOW_BOOTSTRAP` by another
+/// name: both are refused at write time and never match at read time.
+#[test]
+fn an_origin_pattern_must_name_its_host_and_owner() {
+  use gwm::trust::{matching_origin_pattern, validate_origin_pattern};
+  for bad in [
+    "https://*.github.com/kbrdn1/*",
+    "https://github.*/kbrdn1/*",
+    "https://github.com/*/*",
+    "https://github.com/kbr*/*",
+    "https://github.com/",
+    // A prefix names no repo: the issue's "prefix" is spelled `owner/*`.
+    "https://github.com/kbrdn1/",
+    "https://github.com/kbrdn1",
+    "git@github.com:kbrdn1",
+    "not a url",
+    "",
+  ] {
+    assert!(validate_origin_pattern(bad).is_err(), "{bad:?} must be refused");
+    let pats = patterns(&[bad]);
+    assert_eq!(
+      matching_origin_pattern(&pats, "https://github.com/kbrdn1/gwm-cli.git"),
+      None,
+      "{bad:?} must never match"
+    );
+  }
+  for good in [
+    "https://github.com/kbrdn1/*",
+    "git@github.com:kbrdn1/*",
+    "https://gitlab.acme.com/team/sub/*",
+    "https://github.com/kbrdn1/gwm-cli",
+  ] {
+    assert!(validate_origin_pattern(good).is_ok(), "{good:?} is a valid pattern");
+  }
+}
+
 /// `None` is "there is no `.gwm.toml`", and it must stay that answer even
 /// when one appeared on disk after the caller looked.
 #[test]
@@ -331,4 +509,306 @@ fn no_handed_bytes_means_no_config_whatever_the_file_says() {
     matches!(outcome, TrustOutcome::Proceed),
     "no config means nothing to execute, got {outcome:?}"
   );
+}
+
+// ---- What origin publishes (issue #751) ---------------------------------
+
+const ONE: &[u8] = b"[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n";
+const TWO: &[u8] =
+  b"[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n\n[[bootstrap.command]]\nname = \"again\"\nrun = \"true\"\n";
+
+/// Run `f` under [`env_lock`] with `vars` set, `None` removing one, and put
+/// them back after, panic or not. `f` gets the guard: calling this takes the
+/// lock, which is how `env_guard_invariant_tests` reads it (`MutexGuard` in
+/// the signature), so the calls `f` makes count as locked.
+fn with_env<T>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: impl FnOnce(&MutexGuard<'_, ()>) -> T) -> T {
+  let guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let set = |k: &str, v: Option<&std::ffi::OsStr>| {
+    // SAFETY: every env access in this file holds `env_lock`.
+    unsafe {
+      match v {
+        Some(v) => std::env::set_var(k, v),
+        None => std::env::remove_var(k),
+      }
+    }
+  };
+  let prior: Vec<_> = vars.iter().map(|(k, _)| (*k, std::env::var_os(k))).collect();
+  for (k, v) in vars {
+    set(k, *v);
+  }
+  let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&guard)));
+  for (k, v) in &prior {
+    set(k, v.as_deref());
+  }
+  out.unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// A parentless commit whose tree holds `.gwm.toml` = `body`, stored at
+/// `refname`.
+fn commit_config(repo: &git2::Repository, body: &[u8], refname: &str) -> git2::Oid {
+  let blob = repo.blob(body).unwrap();
+  let mut tree = repo.treebuilder(None).unwrap();
+  tree.insert(".gwm.toml", blob, 0o100644).unwrap();
+  let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let oid = repo.commit(None, &sig, &sig, "config", &tree, &[]).unwrap();
+  repo.reference(refname, oid, true, "test").unwrap();
+  oid
+}
+
+#[test]
+fn a_file_origin_announces_is_published_up_to_line_endings() {
+  use gwm::trust::publishes;
+  let dir = TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  let main = commit_config(&repo, ONE, "refs/heads/main");
+
+  assert!(publishes(&repo, &[main], ONE));
+  // `core.autocrlf`, the Git for Windows default, checks it out as CRLF.
+  let crlf = String::from_utf8(ONE.to_vec()).unwrap().replace('\n', "\r\n");
+  assert!(publishes(&repo, &[main], crlf.as_bytes()));
+  // A local edit is not what origin published.
+  assert!(!publishes(&repo, &[main], TWO));
+}
+
+#[test]
+fn a_fork_head_fetched_under_an_origin_trunk_name_is_not_published() {
+  // `gh pr checkout` of a fork whose branch is named `remotes/origin/dev`
+  // fetches the PR head into `refs/remotes/origin/dev` (PR #752, pass 4).
+  // Only what origin announces counts, so that ref plays no part.
+  use gwm::trust::publishes;
+  let dir = TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  let main = commit_config(&repo, ONE, "refs/heads/main");
+  commit_config(&repo, TWO, "refs/remotes/origin/dev");
+  commit_config(&repo, TWO, "refs/remotes/origin/main");
+
+  assert!(!publishes(&repo, &[main], TWO));
+}
+
+#[test]
+fn a_commit_origin_announces_that_the_checkout_lacks_publishes_nothing() {
+  // A checkout behind origin's tip: the file it holds was origin's once,
+  // and nothing says it still is.
+  use gwm::trust::publishes;
+  let dir = TempDir::new().unwrap();
+  let repo = git2::Repository::init(dir.path()).unwrap();
+  commit_config(&repo, ONE, "refs/heads/main");
+  let ahead = git2::Oid::from_str("0123456789abcdef0123456789abcdef01234567").unwrap();
+
+  assert!(!publishes(&repo, &[ahead], ONE));
+  assert!(!publishes(&repo, &[], ONE));
+}
+
+#[test]
+fn only_the_refs_asked_about_count_as_announced_and_only_by_full_id() {
+  use gwm::trust::announced_in;
+  let id = |c: char| c.to_string().repeat(40);
+  let answer = [
+    "ref: refs/heads/main\tHEAD".to_string(),
+    format!("{}\tHEAD", id('1')),
+    format!("{}\trefs/heads/dev", id('2')),
+    format!("{}\trefs/heads/main", id('3')),
+    // ls-remote matches its patterns on the tail of a name.
+    format!("{}\trefs/heads/x/refs/heads/dev", id('4')),
+    format!("{}\trefs/heads/feature/HEAD", id('5')),
+    format!("{}\trefs/pull/7/head", id('6')),
+    "abc\trefs/heads/main".to_string(),
+    format!("{}\trefs/heads/main", "g".repeat(40)),
+  ]
+  .join("\n");
+
+  let want: Vec<git2::Oid> = ['1', '2', '3']
+    .iter()
+    .map(|c| git2::Oid::from_str(&id(*c)).unwrap())
+    .collect();
+  assert_eq!(announced_in(&answer), want);
+}
+
+/// What a change notice says, run after run, for one origin.
+#[test]
+fn a_rule_cleared_run_names_what_it_runs_first_then_what_changed() {
+  use gwm::trust::origin_change_notice;
+  let dir = TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  let origin = "git@github.com:kbrdn1/demo.git";
+  let pat = "https://github.com/kbrdn1/*";
+  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], |_| {
+    let say = |body: &[u8]| origin_change_notice(origin, pat, body).unwrap();
+    let first = say(ONE).expect("a first run names what it runs");
+    assert!(
+      first.contains("trusted by origin https://github.com/kbrdn1/*: first run from git@github.com:kbrdn1/demo.git")
+        && first.contains("bootstrap.command[0] added"),
+      "got: {first}"
+    );
+    assert_eq!(say(ONE), None, "seen once, said once");
+
+    let changed = say(TWO).expect("a changed file is named");
+    assert!(
+      changed.contains(
+        ".gwm.toml changed since last run (trusted by origin https://github.com/kbrdn1/*): bootstrap.command[1] added"
+      ),
+      "got: {changed}"
+    );
+    let one = String::from_utf8(ONE.to_vec()).unwrap();
+    let edited = one.replace("\"true\"", "\"true \"");
+    for (body, said) in [
+      (one.clone(), "bootstrap.command[1] removed"),
+      (edited.clone(), "bootstrap.command[0] changed"),
+      (
+        format!("# reviewed\n{edited}"),
+        "no setting changed, comments or formatting only",
+      ),
+    ] {
+      let line = say(body.as_bytes()).expect("each edit is named");
+      assert!(line.contains(said), "want {said:?}, got: {line}");
+    }
+    // Nothing recorded in the ledger: removing the rule takes the trust.
+    assert!(!ledger.exists(), "a notice must not write the ledger");
+  });
+}
+
+#[test]
+fn a_notice_cache_that_cannot_be_read_or_written_still_names_the_run() {
+  // `trust-seen.toml` only decides what the line says.
+  use gwm::trust::origin_change_notice;
+  let dir = TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  std::fs::create_dir_all(dir.path().join("trust-seen.toml")).unwrap();
+  with_env(&[("GWM_TRUST_LEDGER", Some(ledger.as_os_str()))], |_| {
+    for _ in 0..2 {
+      let line = origin_change_notice("git@github.com:kbrdn1/demo.git", "https://github.com/kbrdn1/*", ONE).unwrap();
+      assert!(line.is_some_and(|l| l.contains("trusted by origin https://github.com/kbrdn1/*")));
+    }
+  });
+}
+
+/// origin as a bare repo whose `main` holds `.gwm.toml` = [`ONE`], reached
+/// as `git@github.com:kbrdn1/demo.git` through a stand-in `ssh` that serves
+/// it, the way git's own suite fakes a remote. gwm runs git with the user's
+/// ssh command, so this is the shipped path, no switch in gwm. A clone with
+/// that file checked out, and a user config that trusts `kbrdn1/*`. The
+/// stand-in answers only when gwm told ssh it may not ask anything.
+#[cfg(unix)]
+struct SshOrigin {
+  dir: TempDir,
+  bare: git2::Repository,
+  checkout: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+const SSH_ORIGIN: &str = "git@github.com:kbrdn1/demo.git";
+
+#[cfg(unix)]
+impl SshOrigin {
+  fn new() -> Self {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let bare_path = dir.path().join("origin.git");
+    let bare = git2::Repository::init_bare(&bare_path).unwrap();
+    commit_config(&bare, ONE, "refs/heads/main");
+    bare.set_head("refs/heads/main").unwrap();
+
+    let checkout = dir.path().join("checkout");
+    let clone = git2::Repository::clone(bare_path.to_str().unwrap(), &checkout).unwrap();
+    clone.remote_set_url("origin", SSH_ORIGIN).unwrap();
+
+    let ssh = dir.path().join("bin").join("ssh");
+    std::fs::create_dir_all(ssh.parent().unwrap()).unwrap();
+    std::fs::write(
+      &ssh,
+      format!(
+        "#!/bin/sh\ncase \"$*\" in *BatchMode=yes*) ;; *) exit 1 ;; esac\nexec git upload-pack '{}'\n",
+        bare_path.display()
+      ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config = dir.path().join("xdg").join("gwm").join("config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[trust]\norigins = [\"https://github.com/kbrdn1/*\"]\n").unwrap();
+    std::fs::write(dir.path().join("empty.gitconfig"), "").unwrap();
+    SshOrigin { dir, bare, checkout }
+  }
+
+  /// `f` with git going through the stand-in, none of the user's own git or
+  /// gwm config, and an empty ledger, under [`env_lock`] as [`with_env`] is.
+  fn serve<T>(&self, f: impl FnOnce(&MutexGuard<'_, ()>) -> T) -> T {
+    let p = |rel: &str| self.dir.path().join(rel).into_os_string();
+    let (ssh, gitconfig, xdg, ledger) = (p("bin/ssh"), p("empty.gitconfig"), p("xdg"), p("trust.toml"));
+    with_env(
+      &[
+        ("GIT_SSH_COMMAND", Some(&ssh)),
+        ("GIT_CONFIG_GLOBAL", Some(&gitconfig)),
+        ("GIT_CONFIG_NOSYSTEM", Some(std::ffi::OsStr::new("1"))),
+        ("XDG_CONFIG_HOME", Some(&xdg)),
+        ("GWM_TRUST_LEDGER", Some(&ledger)),
+        ("GWM_NO_GLOBAL_CONFIG", None),
+      ],
+      f,
+    )
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn origin_asked_over_its_own_transport_vouches_for_its_trunks_only() {
+  use gwm::trust::published_on_origin;
+  let o = SshOrigin::new();
+  o.serve(|_| {
+    assert!(
+      published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
+      "the file origin's main holds, fetched, is published"
+    );
+    assert!(!published_on_origin(&o.checkout, SSH_ORIGIN, TWO));
+  });
+
+  // A push on origin the checkout has not fetched yet.
+  commit_config(&o.bare, TWO, "refs/heads/main");
+  o.serve(|_| {
+    assert!(
+      !published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
+      "a checkout behind origin's tip holds what origin no longer publishes"
+    );
+  });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_caller_that_cannot_dial_refuses_a_file_only_an_origin_rule_covers() {
+  // The TUI asks the ledger only: an origin rule needs origin asked, so a
+  // file the ledger has not approved is refused there with the usual hint,
+  // even one origin publishes and the CLI would clear.
+  use gwm::trust::{
+    evaluate_bytes, evaluate_silent_bytes, published_on_origin, TrustMode, TrustOutcome, APPROVE_VIA_BOOTSTRAP,
+  };
+  let o = SshOrigin::new();
+  let cfg = o.checkout.join(".gwm.toml");
+  o.serve(|_| {
+    assert!(
+      published_on_origin(&o.checkout, SSH_ORIGIN, ONE),
+      "the CLI would clear it"
+    );
+    let refusal = evaluate_silent_bytes(&cfg, Some(ONE), SSH_ORIGIN, TrustMode::Prompt, APPROVE_VIA_BOOTSTRAP).unwrap();
+    assert!(
+      refusal.as_deref().is_some_and(|m| m.contains(APPROVE_VIA_BOOTSTRAP)),
+      "got {refusal:?}"
+    );
+    // `gwm bootstrap` clears the CLI run through the rule and writes no ledger
+    // entry, so only `gwm trust add` stops the next TUI refusal: it goes first.
+    let hint = refusal.unwrap();
+    let (add, boot) = (hint.find("`gwm trust add`"), hint.find("`gwm bootstrap`"));
+    assert!(
+      add.is_some() && boot.is_some() && add < boot,
+      "`gwm trust add` named before `gwm bootstrap`, got {hint}"
+    );
+    // The TUI judges the main checkout's file; `gwm trust add` approves the
+    // file of the checkout it runs in.
+    assert!(hint.contains("in the repo's main checkout"), "got {hint}");
+    match evaluate_bytes(&cfg, Some(ONE), SSH_ORIGIN, TrustMode::Prompt).unwrap() {
+      TrustOutcome::Prompt { rule, .. } => assert_eq!(rule.as_deref(), Some("https://github.com/kbrdn1/*")),
+      other => panic!("a ledger miss is a prompt naming the rule, got {other:?}"),
+    }
+  });
 }

@@ -2,7 +2,6 @@
 
 mod common;
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -11,7 +10,7 @@ use common::{init_repo, paths_equal};
 
 #[test]
 fn config_help_lists_git_config_style_actions() {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.arg("config").arg("--help");
   cmd
     .assert()
@@ -44,24 +43,21 @@ color = "d73a4a"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "worktree.base"])
     .assert()
     .success()
     .stdout("/tmp/gwm-worktrees\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "tui.confirm_countdown_secs"])
     .assert()
     .success()
     .stdout("4\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "labels[0].name"])
     .assert()
@@ -84,8 +80,7 @@ base = "/tmp/old"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "set", "tui.confirm_countdown_secs", "5"])
     .assert()
@@ -99,20 +94,14 @@ base = "/tmp/old"
     edited
   );
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "tui.confirm_countdown_secs"])
     .assert()
     .success()
     .stdout("5\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
-    .current_dir(dir.path())
-    .arg("types")
-    .assert()
-    .success();
+  common::gwm().current_dir(dir.path()).arg("types").assert().success();
 }
 
 #[test]
@@ -127,31 +116,27 @@ name = "bug"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "set", "labels[0].color", "d73a4a"])
     .assert()
     .success();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "set", "labels[+].name", "enhancement"])
     .assert()
     .success()
     .stdout(predicate::str::contains("labels[1].name = \"enhancement\""));
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "labels[0].color"])
     .assert()
     .success()
     .stdout("d73a4a\n");
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "labels[1].name"])
     .assert()
@@ -163,16 +148,14 @@ name = "bug"
 fn config_set_accepts_git_config_style_key_value_form() {
   let (dir, _repo) = init_repo();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "set", "labels[+].name=bug"])
     .assert()
     .success()
     .stdout(predicate::str::contains("labels[0].name = \"bug\""));
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "labels[0].name"])
     .assert()
@@ -192,16 +175,14 @@ confirm_countdown_secs = 5
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "unset", "tui.confirm_countdown_secs"])
     .assert()
     .success()
     .stdout(predicate::str::contains("unset tui.confirm_countdown_secs"));
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "get", "tui.confirm_countdown_secs"])
     .assert()
@@ -224,8 +205,7 @@ tool = "lumen"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "list", "--prefix", "worktree"])
     .assert()
@@ -240,8 +220,7 @@ fn config_path_and_validate_report_resolved_config_file() {
   let config_path = fs::canonicalize(dir.path()).unwrap().join(".gwm.toml");
   fs::write(&config_path, "[tui]\nconfirm_countdown_secs = 2\n").unwrap();
 
-  let output = Command::cargo_bin("gwm")
-    .unwrap()
+  let output = common::gwm()
     .current_dir(dir.path())
     .args(["config", "path"])
     .assert()
@@ -257,8 +236,7 @@ fn config_path_and_validate_report_resolved_config_file() {
     config_path.display()
   );
 
-  let output = Command::cargo_bin("gwm")
-    .unwrap()
+  let output = common::gwm()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
@@ -283,8 +261,7 @@ fn config_validate_surfaces_parse_location() {
   let (dir, _repo) = init_repo();
   fs::write(dir.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = [\n").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
@@ -298,8 +275,7 @@ fn config_validate_rejects_unknown_schema_keys_with_hint() {
   let (dir, _repo) = init_repo();
   fs::write(dir.path().join(".gwm.toml"), "[review]\nfullscreem = true\n").unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
@@ -322,8 +298,7 @@ fn config_validate_rejects_malformed_keymap() {
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
@@ -343,8 +318,7 @@ fn config_validate_rejects_semantically_invalid_profiles() {
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
@@ -358,8 +332,7 @@ fn config_edit_opens_editor_on_config_path() {
   fs::write(dir.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
   let editor = write_editor_script(dir.path());
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("EDITOR", &editor)
     .args(["config", "edit"])
@@ -441,8 +414,7 @@ branch_pattern = "{type}/#1-{desc}"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
@@ -463,8 +435,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     // The warning reads the *effective* (repo over global) pattern, so a
     // runner whose own `~/.config/gwm/config.toml` customises it would
@@ -495,8 +466,7 @@ branch_pattern = "{type}/#1-{desc}"
   )
   .unwrap();
   // No repo-level `.gwm.toml` at all: the global layer is the only source.
-  Command::cargo_bin("gwm")
-    .unwrap()
+  common::gwm()
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", xdg.path())
     // CI sets `GWM_NO_GLOBAL_CONFIG=1` workflow-wide (ci.yml) so the suite

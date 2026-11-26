@@ -58,7 +58,8 @@
 //! command's real output verbatim. The help walk covers the ones that reach a
 //! user, which is the whole distinction.
 
-use assert_cmd::Command;
+mod common;
+
 use std::path::{Path, PathBuf};
 
 const EM_DASH: char = '\u{2014}';
@@ -257,7 +258,7 @@ fn closes(src: &[char], at: usize, hashes: usize) -> bool {
 
 /// `gwm <path...> --help`, as the user would read it.
 fn help(path: &[&str]) -> String {
-  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  let mut cmd = common::gwm();
   cmd.args(path).arg("--help");
   let out = cmd.output().unwrap_or_else(|e| panic!("gwm {path:?} --help: {e}"));
   String::from_utf8_lossy(&out.stdout).into_owned()

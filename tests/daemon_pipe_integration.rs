@@ -120,12 +120,11 @@ fn a_second_daemon_on_the_same_pipe_is_refused() {
 fn statusline_render_shape_survives_the_pipe() {
   // End-to-end through the public binary surface: `gwm statusline` against
   // the pipe daemon must print a non-empty segment line for the repo cwd.
-  use std::process::Command;
   let (dir, _repo) = init_repo();
   let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "statusline", Duration::from_millis(50));
 
-  let out = Command::new(env!("CARGO_BIN_EXE_gwm"))
+  let out = common::gwm()
     .args(["statusline", "--socket"])
     .arg(&daemon.pipe)
     .current_dir(&workdir)
@@ -216,8 +215,10 @@ fn an_idle_connection_survives_between_two_requests() {
     .to_ns_name::<GenericNamespaced>()
     .expect("pipe name");
   let stream = Stream::connect(name).expect("connect");
-  let (recv, mut send) = stream.split();
-  let mut reader = BufReader::new(recv);
+  // `&Stream` is both `Read` and `Write`, so one connection serves both
+  // directions without `Stream::split`, deprecated in interprocess 2.4.7.
+  let mut send = &stream;
+  let mut reader = BufReader::new(&stream);
 
   for round in 0..2u8 {
     writeln!(send, "{LIST_REQUEST}").expect("request write");
